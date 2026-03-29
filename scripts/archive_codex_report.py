@@ -14,7 +14,7 @@ OUTBOX_PLACEHOLDER = """# Codex Report Outbox
 
 
 def build_archive_path(cycle: int) -> Path:
-    return HISTORY_DIR / f"cycle_{cycle:04d}_codex_report_{now_stamp()}.md"
+    return HISTORY_DIR / f"codex_report_cycle_{cycle:04d}_{now_stamp()}.md"
 
 
 def run(state: dict[str, object]) -> int:
