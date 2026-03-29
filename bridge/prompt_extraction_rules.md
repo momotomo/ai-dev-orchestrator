@@ -13,7 +13,7 @@ Codex Prompt
 
 ## 抽出ルール
 
-- `===CHATGPT_PROMPT_REPLY===` と `===END_REPLY===` の組を複数見つけた場合は最後の 1 組を使う
+- `===CHATGPT_PROMPT_REPLY===` と `===END_REPLY===` の組を複数見つけた場合でも、直近のユーザー発話以降にある ChatGPT 側の 1 組を優先する
 - マーカー外の文章は無視する
 - ブロック先頭の `Codex Prompt` 見出しは保存時に取り除いてよい
 - 保存先は `bridge/inbox/codex_prompt.md`

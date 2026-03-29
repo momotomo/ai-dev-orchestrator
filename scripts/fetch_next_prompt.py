@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_prompt_reply, guarded_main, log_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
+from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_prompt_reply, guarded_main, log_text, read_latest_prompt_request_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
 
 def run(state: dict[str, object]) -> int:
     args = parse_args()
+    request_text = read_latest_prompt_request_text()
     if args.raw_file:
         raw_text = read_text(Path(args.raw_file)).strip()
         if not raw_text:
@@ -33,7 +34,7 @@ def run(state: dict[str, object]) -> int:
     else:
         raw_text = wait_for_prompt_reply_text(timeout_seconds=args.timeout_seconds or None)
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
-    prompt_body = extract_last_prompt_reply(raw_text)
+    prompt_body = extract_last_prompt_reply(raw_text, after_text=request_text or None)
     prompt_log = log_text("extracted_codex_prompt", prompt_body)
 
     prompt_path = INBOX_DIR / "codex_prompt.md"
