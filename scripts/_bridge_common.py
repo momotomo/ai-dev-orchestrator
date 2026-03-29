@@ -311,7 +311,10 @@ def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -
         if assistant_index > user_index:
             assistant_matches.append(match.group(1))
 
-    matches = assistant_matches or fallback_matches
+    if search_start > 0:
+        matches = assistant_matches
+    else:
+        matches = assistant_matches or fallback_matches
     if not matches:
         if after_text:
             raise BridgeError("直近の prompt request 以降に CHATGPT_PROMPT_REPLY ブロックを抽出できませんでした。")
