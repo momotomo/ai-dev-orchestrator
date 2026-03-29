@@ -7,6 +7,7 @@
 - 対象プロジェクト用のチャットを Safari の front window/current tab に開いておく
 - 自動化開始時は、その対象チャットが Safari の現在タブになっていること
 - Safari の Develop メニューで `Allow JavaScript from Apple Events` を有効にしておく
+- macOS の Automation 許可で、実行元アプリから Safari を操作できる状態にしておく
 
 ## 基本方針
 
@@ -30,3 +31,4 @@
 - 実行中に Safari の current tab が別会話へ切り替わった場合は停止する
 - 会話履歴に古い `CHATGPT_PROMPT_REPLY` が残っていても、抽出は直近のユーザー発話以降を優先する
 - `fetch_next_prompt.py --raw-file <dump>` は DOM 抽出の切り分け用
+- `AppleEvent timeout (-1712)` が出た場合は、Safari が前面の対象チャットで応答しているかと、Automation 許可ダイアログが残っていないかを確認する

@@ -64,6 +64,8 @@ SEND_BUTTON_SELECTORS = [
     "button[aria-label='Send']",
 ]
 
+APPLE_EVENT_TIMEOUT_SECONDS = 15
+
 
 class BridgeError(Exception):
     """Raised when a bridge operation fails and should mark state.error=true."""
@@ -322,29 +324,56 @@ def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -
     return normalize_prompt_body(matches[-1])
 
 
-def _run_osascript(lines: list[str]) -> subprocess.CompletedProcess[str]:
+def _apple_event_timeout_message(target: str) -> str:
+    return (
+        f"{target} が AppleEvent timeout で止まりました。"
+        " Safari の現在タブが応答していないか、macOS の Automation 許可が未確定の可能性があります。"
+        " 初回は許可ダイアログで許可し、Safari の対象チャットを前面表示したまま再実行してください。"
+    )
+
+
+def _run_osascript(
+    lines: list[str],
+    *,
+    timeout_seconds: int = APPLE_EVENT_TIMEOUT_SECONDS,
+    timeout_label: str = "AppleScript 実行",
+) -> subprocess.CompletedProcess[str]:
     command = ["osascript"]
     for line in lines:
         command.extend(["-e", line])
-    return subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BridgeError(_apple_event_timeout_message(timeout_label)) from exc
 
 
-def _run_osascript_script(script_text: str, args: Sequence[str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run_osascript_script(
+    script_text: str,
+    args: Sequence[str] | None = None,
+    *,
+    timeout_seconds: int = APPLE_EVENT_TIMEOUT_SECONDS,
+    timeout_label: str = "AppleScript 実行",
+) -> subprocess.CompletedProcess[str]:
     command = ["osascript", "-"]
     if args:
         command.extend(args)
-    return subprocess.run(
-        command,
-        input=script_text,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command,
+            input=script_text,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BridgeError(_apple_event_timeout_message(timeout_label)) from exc
 
 
 def _chat_domain_matches(url: str, target_prefix: str) -> bool:
@@ -372,6 +401,8 @@ def _same_tab(expected: Mapping[str, str], current: Mapping[str, str]) -> bool:
 
 def _safari_js_error_message(stderr: str) -> str:
     message = stderr.strip()
+    if "-1712" in message or "AppleEventがタイムアウト" in message or "AppleEvent timed out" in message:
+        return _apple_event_timeout_message("Safari JavaScript 実行")
     if "JavaScript from Apple Events" in message or ("JavaScript" in message and "Apple Events" in message):
         return (
             "Safari で Apple Events からの JavaScript 実行が許可されていません。"
@@ -392,7 +423,11 @@ on run argv
     end tell
 end run
 """
-    result = _run_osascript_script(applescript, [script])
+    result = _run_osascript_script(
+        applescript,
+        [script],
+        timeout_label="Safari JavaScript 実行",
+    )
     if result.returncode != 0:
         raise BridgeError(_safari_js_error_message(result.stderr))
     return result.stdout.rstrip("\n")
@@ -409,7 +444,8 @@ def frontmost_safari_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
             "set activeName to name of current tab of front window",
             'return activeUrl & linefeed & activeName',
             "end tell",
-        ]
+        ],
+        timeout_label="Safari の現在タブ情報取得",
     )
     if result.returncode != 0:
         message = result.stderr.strip()
@@ -417,6 +453,8 @@ def frontmost_safari_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
             raise BridgeError("Safari が起動していません。対象チャットを開いてください。")
         if "no browser window" in message:
             raise BridgeError("Safari のウィンドウが見つかりませんでした。対象チャットを開いてください。")
+        if "-1712" in message or "AppleEventがタイムアウト" in message or "AppleEvent timed out" in message:
+            raise BridgeError(_apple_event_timeout_message("Safari の現在タブ情報取得"))
         raise BridgeError(f"Safari の現在タブ情報を取得できませんでした: {message}")
 
     parts = result.stdout.splitlines()
