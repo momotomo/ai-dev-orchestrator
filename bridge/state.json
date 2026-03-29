@@ -1,12 +1,12 @@
 {
-  "mode": "idle",
-  "need_chatgpt_prompt": true,
-  "need_codex_run": false,
+  "mode": "ready_for_codex",
+  "need_chatgpt_prompt": false,
+  "need_codex_run": true,
   "need_chatgpt_next": false,
-  "last_prompt_file": "",
-  "last_report_file": "",
+  "last_prompt_file": "bridge/inbox/codex_prompt.md",
+  "last_report_file": "bridge/history/codex_report_cycle_0001_20260329_231655.md",
   "pause": false,
   "error": false,
   "error_message": "",
-  "cycle": 0
+  "cycle": 1
 }
