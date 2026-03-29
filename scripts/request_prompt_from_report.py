@@ -11,7 +11,7 @@ DEFAULT_OPEN_QUESTIONS = "未解決事項があれば報告を踏まえて安全
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="前面の Chrome ChatGPT チャットへ完了報告ベースの prompt request を送信します。")
+    parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブへ完了報告ベースの prompt request を送信します。")
     parser.add_argument("--next-todo", default=DEFAULT_NEXT_TODO, help="次にやりたいこと")
     parser.add_argument("--open-questions", default=DEFAULT_OPEN_QUESTIONS, help="未解決事項")
     parser.add_argument("--current-status", default="", help="CURRENT_STATUS の上書き")

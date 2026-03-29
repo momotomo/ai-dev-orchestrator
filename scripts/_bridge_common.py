@@ -7,11 +7,10 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
-from urllib.error import URLError
-from urllib.request import urlopen
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BRIDGE_DIR = ROOT_DIR / "bridge"
@@ -40,8 +39,9 @@ DEFAULT_STATE: dict[str, Any] = {
 }
 
 DEFAULT_BROWSER_CONFIG: dict[str, Any] = {
+    "app_name": "Safari",
     "chat_url_prefix": "https://chatgpt.com/",
-    "cdp_endpoint": "http://127.0.0.1:9222",
+    "conversation_url_keywords": ["/c/"],
     "chat_hint": "",
     "require_chat_hint": False,
     "reply_timeout_seconds": 90,
@@ -71,6 +71,37 @@ class BridgeError(Exception):
 
 class BridgeStop(Exception):
     """Raised when the bridge should stop without marking an operational error."""
+
+
+@dataclass
+class SafariChatPage:
+    config: Mapping[str, Any]
+    front_tab: dict[str, str]
+
+    def wait_for_timeout(self, milliseconds: int) -> None:
+        time.sleep(milliseconds / 1000.0)
+
+    def evaluate(self, script: str) -> str:
+        self.assert_same_front_tab()
+        return _run_safari_javascript(script)
+
+    def assert_same_front_tab(self) -> None:
+        current_tab = frontmost_safari_tab_info(self.config)
+        if _same_tab(self.front_tab, current_tab):
+            return
+
+        dump_note = ""
+        target_prefix = str(self.config.get("chat_url_prefix", DEFAULT_BROWSER_CONFIG["chat_url_prefix"]))
+        if _chat_domain_matches(current_tab.get("url", ""), target_prefix):
+            dump_text = _body_text_unchecked()
+            if dump_text:
+                dump_path = log_text("raw_chatgpt_prompt_dump", dump_text, suffix="txt")
+                dump_note = f" raw dump: {repo_relative(dump_path)}"
+
+        raise BridgeError(
+            "Safari の現在タブが切り替わりました。対象チャットを再表示してから再実行してください。"
+            f" 現在: {current_tab.get('title', '')} {current_tab.get('url', '')}{dump_note}"
+        )
 
 
 def ensure_runtime_dirs() -> None:
@@ -175,18 +206,20 @@ def log_text(prefix: str, content: str, suffix: str = "md") -> Path:
     return log_path
 
 
-def log_page_dump(page: Any, prefix: str = "raw_chatgpt_prompt_dump") -> Path | None:
-    text = _body_text(page)
-    if not text:
-        return None
-    return log_text(prefix, text, suffix="txt")
-
-
 def load_browser_config() -> dict[str, Any]:
     config = DEFAULT_BROWSER_CONFIG.copy()
     if BROWSER_CONFIG_PATH.exists():
         loaded = json.loads(BROWSER_CONFIG_PATH.read_text(encoding="utf-8"))
         config.update(loaded)
+
+    keywords = config.get("conversation_url_keywords", DEFAULT_BROWSER_CONFIG["conversation_url_keywords"])
+    if isinstance(keywords, str):
+        config["conversation_url_keywords"] = [keywords]
+    elif isinstance(keywords, list):
+        config["conversation_url_keywords"] = [str(keyword) for keyword in keywords if str(keyword)]
+    else:
+        config["conversation_url_keywords"] = list(DEFAULT_BROWSER_CONFIG["conversation_url_keywords"])
+
     if "chat_url" in config and "chat_url_prefix" not in config:
         config["chat_url_prefix"] = config["chat_url"]
     return config
@@ -257,16 +290,6 @@ def extract_last_prompt_reply(raw_text: str) -> str:
     return normalize_prompt_body(matches[-1])
 
 
-def _import_playwright():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:  # pragma: no cover - dependency guard
-        raise BridgeError(
-            "playwright が見つかりません。requirements.txt をインストールしてください。"
-        ) from exc
-    return sync_playwright
-
-
 def _run_osascript(lines: list[str]) -> subprocess.CompletedProcess[str]:
     command = ["osascript"]
     for line in lines:
@@ -279,45 +302,105 @@ def _run_osascript(lines: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _frontmost_app_name() -> str:
-    result = _run_osascript(
-        ['tell application "System Events" to get name of first application process whose frontmost is true']
+def _run_osascript_script(script_text: str, args: Sequence[str] | None = None) -> subprocess.CompletedProcess[str]:
+    command = ["osascript", "-"]
+    if args:
+        command.extend(args)
+    return subprocess.run(
+        command,
+        input=script_text,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    if result.returncode != 0:
-        raise BridgeError(f"前面アプリを取得できませんでした: {result.stderr.strip()}")
-    return result.stdout.strip()
 
 
 def _chat_domain_matches(url: str, target_prefix: str) -> bool:
     return "chatgpt.com" in url or url.startswith(target_prefix) or "chat.openai.com" in url
 
 
-def frontmost_chrome_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
-    if _frontmost_app_name() != "Google Chrome":
-        raise BridgeError("Google Chrome が前面ではありません。対象チャットを前面表示してください。")
+def _conversation_url_matches(url: str, config: Mapping[str, Any]) -> bool:
+    keywords = list(config.get("conversation_url_keywords", []))
+    if not keywords:
+        return True
+    return any(keyword in url for keyword in keywords)
 
+
+def _normalized_url(url: str) -> str:
+    return url.rstrip("/")
+
+
+def _same_tab(expected: Mapping[str, str], current: Mapping[str, str]) -> bool:
+    expected_url = _normalized_url(str(expected.get("url", "")))
+    current_url = _normalized_url(str(current.get("url", "")))
+    if expected_url and current_url:
+        return expected_url == current_url
+    return str(expected.get("title", "")) == str(current.get("title", ""))
+
+
+def _safari_js_error_message(stderr: str) -> str:
+    message = stderr.strip()
+    if "JavaScript from Apple Events" in message or ("JavaScript" in message and "Apple Events" in message):
+        return (
+            "Safari で Apple Events からの JavaScript 実行が許可されていません。"
+            " Safari の Develop メニューで 'Allow JavaScript from Apple Events' を有効にしてください。"
+        )
+    return f"Safari の JavaScript 実行に失敗しました: {message}"
+
+
+def _run_safari_javascript(script: str) -> str:
+    applescript = """
+on run argv
+    if (count of argv) is 0 then error "missing javascript"
+    set jsCode to item 1 of argv
+    tell application "Safari"
+        if not running then error "safari not running"
+        if (count of windows) is 0 then error "no safari window"
+        return do JavaScript jsCode in current tab of front window
+    end tell
+end run
+"""
+    result = _run_osascript_script(applescript, [script])
+    if result.returncode != 0:
+        raise BridgeError(_safari_js_error_message(result.stderr))
+    return result.stdout.rstrip("\n")
+
+
+def frontmost_safari_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
+    app_name = str(config.get("app_name", DEFAULT_BROWSER_CONFIG["app_name"]))
     result = _run_osascript(
         [
-            'tell application "Google Chrome"',
-            'if (count of windows) is 0 then error "no chrome window"',
-            "set activeUrl to URL of active tab of front window",
-            "set activeTitle to title of active tab of front window",
-            'return activeUrl & linefeed & activeTitle',
+            f'tell application "{app_name}"',
+            'if not running then error "browser not running"',
+            'if (count of windows) is 0 then error "no browser window"',
+            "set activeUrl to URL of current tab of front window",
+            "set activeName to name of current tab of front window",
+            'return activeUrl & linefeed & activeName',
             "end tell",
         ]
     )
     if result.returncode != 0:
-        raise BridgeError(f"前面 Chrome タブ情報を取得できませんでした: {result.stderr.strip()}")
+        message = result.stderr.strip()
+        if "browser not running" in message:
+            raise BridgeError("Safari が起動していません。対象チャットを開いてください。")
+        if "no browser window" in message:
+            raise BridgeError("Safari のウィンドウが見つかりませんでした。対象チャットを開いてください。")
+        raise BridgeError(f"Safari の現在タブ情報を取得できませんでした: {message}")
 
     parts = result.stdout.splitlines()
     url = parts[0].strip() if parts else ""
     title = parts[1].strip() if len(parts) > 1 else ""
     if not url:
-        raise BridgeError("前面 Chrome タブの URL を取得できませんでした。")
+        raise BridgeError("Safari の現在タブ URL を取得できませんでした。")
 
     target_prefix = str(config.get("chat_url_prefix", DEFAULT_BROWSER_CONFIG["chat_url_prefix"]))
     if not _chat_domain_matches(url, target_prefix):
-        raise BridgeError(f"前面 Chrome タブが ChatGPT ではありません: {title or '(no title)'} {url}")
+        raise BridgeError(f"Safari の現在タブが ChatGPT ではありません: {title or '(no title)'} {url}")
+    if not _conversation_url_matches(url, config):
+        raise BridgeError(
+            "Safari の現在タブが ChatGPT の対象会話ではありません。"
+            f" 対象チャットを開いてください: {title or '(no title)'} {url}"
+        )
 
     return {
         "url": url,
@@ -325,91 +408,200 @@ def frontmost_chrome_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _cdp_is_ready(config: Mapping[str, Any]) -> bool:
-    endpoint = str(config.get("cdp_endpoint", DEFAULT_BROWSER_CONFIG["cdp_endpoint"])).rstrip("/") + "/json/version"
+def _build_visible_text_script(selectors: Sequence[str]) -> str:
+    return f"""
+(() => {{
+  const selectors = {json.dumps(list(selectors), ensure_ascii=False)};
+  const isVisible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0;
+  }};
+  for (const selector of selectors) {{
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (const node of nodes) {{
+      if (!isVisible(node)) continue;
+      const text = (node.innerText || node.textContent || "").trim();
+      if (text) return text;
+    }}
+  }}
+  return "";
+}})();
+"""
+
+
+def _build_composer_state_script() -> str:
+    return f"""
+(() => {{
+  const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
+  const isVisible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0;
+  }};
+  let composer = null;
+  for (const selector of selectors) {{
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
+      const node = nodes[index];
+      if (isVisible(node)) {{
+        composer = node;
+        break;
+      }}
+    }}
+    if (composer) break;
+  }}
+  if (!composer) return JSON.stringify({{found: false}});
+  return JSON.stringify({{
+    found: true,
+    tagName: (composer.tagName || "").toLowerCase(),
+    isContentEditable: !!composer.isContentEditable
+  }});
+}})();
+"""
+
+
+def _build_fill_composer_script(text: str) -> str:
+    return f"""
+(() => {{
+  const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
+  const text = {json.dumps(text, ensure_ascii=False)};
+  const isVisible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0;
+  }};
+  let composer = null;
+  for (const selector of selectors) {{
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
+      const node = nodes[index];
+      if (isVisible(node)) {{
+        composer = node;
+        break;
+      }}
+    }}
+    if (composer) break;
+  }}
+  if (!composer) return JSON.stringify({{ok: false, reason: "composer_missing"}});
+  composer.scrollIntoView({{block: "center"}});
+  composer.focus();
+  const tagName = (composer.tagName || "").toLowerCase();
+  if (tagName === "textarea") {{
+    const descriptor = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value");
+    if (descriptor && descriptor.set) {{
+      descriptor.set.call(composer, text);
+    }} else {{
+      composer.value = text;
+    }}
+    composer.dispatchEvent(new Event("input", {{bubbles: true}}));
+    composer.dispatchEvent(new Event("change", {{bubbles: true}}));
+    return JSON.stringify({{ok: true, mode: "textarea"}});
+  }}
+  if (composer.isContentEditable) {{
+    composer.innerHTML = "";
+    const lines = text.split("\\n");
+    lines.forEach((line, index) => {{
+      if (index > 0) composer.appendChild(document.createElement("br"));
+      composer.appendChild(document.createTextNode(line));
+    }});
+    try {{
+      composer.dispatchEvent(new InputEvent("input", {{
+        bubbles: true,
+        cancelable: true,
+        data: text,
+        inputType: "insertText"
+      }}));
+    }} catch (error) {{
+      composer.dispatchEvent(new Event("input", {{bubbles: true}}));
+    }}
+    composer.dispatchEvent(new Event("change", {{bubbles: true}}));
+    return JSON.stringify({{ok: true, mode: "contenteditable"}});
+  }}
+  return JSON.stringify({{ok: false, reason: "composer_unsupported"}});
+}})();
+"""
+
+
+def _build_submit_script() -> str:
+    return f"""
+(() => {{
+  const selectors = {json.dumps(SEND_BUTTON_SELECTORS, ensure_ascii=False)};
+  const isVisible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0;
+  }};
+  for (const selector of selectors) {{
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
+      const button = nodes[index];
+      if (!isVisible(button)) continue;
+      if (button.disabled || button.getAttribute("aria-disabled") === "true") {{
+        return JSON.stringify({{ok: false, reason: "send_disabled"}});
+      }}
+      button.click();
+      return JSON.stringify({{ok: true, method: "button"}});
+    }}
+  }}
+  return JSON.stringify({{ok: false, reason: "send_missing"}});
+}})();
+"""
+
+
+def _evaluate_json(page: SafariChatPage, script: str, failure_label: str) -> dict[str, Any]:
+    raw = page.evaluate(script).strip()
+    if not raw:
+        raise BridgeError(f"{failure_label}: Safari から空の応答が返りました。")
     try:
-        with urlopen(endpoint, timeout=2) as response:
-            return response.status == 200
-    except URLError:
-        return False
-    except Exception:
-        return False
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BridgeError(f"{failure_label}: JSON として読めませんでした。") from exc
 
 
-def _connect_browser(playwright: Any, config: Mapping[str, Any]) -> Any:
-    if not _cdp_is_ready(config):
-        raise BridgeError(
-            "Playwright が接続できる Chrome が見つかりませんでした。"
-            " 事前準備として remote debugging 有効の Chrome を起動し、対象チャットを前面表示してください。"
-        )
-
-    endpoint = str(config.get("cdp_endpoint", DEFAULT_BROWSER_CONFIG["cdp_endpoint"]))
-    browser = playwright.chromium.connect_over_cdp(endpoint)
-    if not browser.contexts:
-        browser.close()
-        raise BridgeError("CDP 接続後に Chrome context を取得できませんでした。")
-    return browser
+def _body_text(page: SafariChatPage) -> str:
+    return page.evaluate(_build_visible_text_script(["body"])).strip()
 
 
-def _normalized_url(url: str) -> str:
-    return url.rstrip("/")
-
-
-def _mark_last_visible_element(page: Any, selectors: list[str], attribute: str) -> bool:
-    script = """
-    ({selectors, attribute}) => {
-      for (const node of document.querySelectorAll(`[${attribute}]`)) {
-        node.removeAttribute(attribute);
-      }
-      const isVisible = (el) => {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        if (!style) return false;
-        const rect = el.getBoundingClientRect();
-        return style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0;
-      };
-      for (const selector of selectors) {
-        const nodes = Array.from(document.querySelectorAll(selector));
-        for (let index = nodes.length - 1; index >= 0; index -= 1) {
-          const node = nodes[index];
-          if (isVisible(node)) {
-            node.setAttribute(attribute, "1");
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-    """
-    return bool(page.evaluate(script, {"selectors": selectors, "attribute": attribute}))
-
-
-def _body_text(page: Any) -> str:
+def _body_text_unchecked() -> str:
     try:
-        return page.locator("body").inner_text(timeout=3000).strip()
+        return _run_safari_javascript(_build_visible_text_script(["body"])).strip()
     except Exception:
         return ""
 
 
-def _page_matches_front_tab(page: Any, front_tab: Mapping[str, str], target_prefix: str) -> bool:
-    if not _chat_domain_matches(page.url, target_prefix):
-        return False
-    if _normalized_url(page.url) == _normalized_url(str(front_tab.get("url", ""))):
-        return True
-    try:
-        title = page.title()
-    except Exception:
-        title = ""
-    return bool(title and title == front_tab.get("title"))
+def log_page_dump(page: SafariChatPage, prefix: str = "raw_chatgpt_prompt_dump") -> Path | None:
+    text = _body_text(page)
+    if not text:
+        return None
+    return log_text(prefix, text, suffix="txt")
 
 
-def _page_hint_matches(page: Any, front_tab: Mapping[str, str], config: Mapping[str, Any]) -> bool:
+def _page_hint_matches(page: SafariChatPage, front_tab: Mapping[str, str], config: Mapping[str, Any]) -> bool:
     hint = str(config.get("chat_hint", "")).strip()
     if not hint:
         return not bool(config.get("require_chat_hint"))
+
     hint_lower = hint.lower()
     title = str(front_tab.get("title", "")).lower()
     url = str(front_tab.get("url", "")).lower()
@@ -418,7 +610,7 @@ def _page_hint_matches(page: Any, front_tab: Mapping[str, str], config: Mapping[
     return hint_lower in _body_text(page).lower()
 
 
-def _ensure_target_chat(page: Any, front_tab: Mapping[str, str], config: Mapping[str, Any]) -> None:
+def _ensure_target_chat(page: SafariChatPage, front_tab: Mapping[str, str], config: Mapping[str, Any]) -> None:
     if _page_hint_matches(page, front_tab, config):
         return
 
@@ -427,54 +619,29 @@ def _ensure_target_chat(page: Any, front_tab: Mapping[str, str], config: Mapping
     hint = str(config.get("chat_hint", "")).strip()
     if hint:
         raise BridgeError(
-            f"前面の ChatGPT タブから chat_hint='{hint}' を確認できませんでした。"
+            f"Safari の現在 ChatGPT タブから chat_hint='{hint}' を確認できませんでした。"
             f" 対象チャットが違う可能性があるため停止しました: {front_tab.get('title', '')} {front_tab.get('url', '')}"
             f"{dump_note}"
         )
     raise BridgeError(
-        "前面の ChatGPT タブを識別できませんでした。"
+        "Safari の現在 ChatGPT タブを識別できませんでした。"
         f" browser_config.json の chat_hint を設定して対象チャットを絞り込んでください。{dump_note}"
     )
 
 
-def _resolve_chatgpt_page(context: Any, config: Mapping[str, Any]) -> tuple[Any, dict[str, str]]:
-    front_tab = frontmost_chrome_tab_info(config)
-    target_prefix = str(config.get("chat_url_prefix", DEFAULT_BROWSER_CONFIG["chat_url_prefix"]))
-    candidates = [page for page in context.pages if _page_matches_front_tab(page, front_tab, target_prefix)]
-    if not candidates:
-        raise BridgeError(
-            f"前面の ChatGPT タブを CDP から特定できませんでした。"
-            f" URL={front_tab.get('url', '')} title={front_tab.get('title', '')}"
-        )
-    if len(candidates) > 1:
-        raise BridgeError(
-            f"前面の ChatGPT タブ候補が複数見つかりました。chat_hint を設定して絞り込んでください。"
-            f" URL={front_tab.get('url', '')}"
-        )
-
-    page = candidates[0]
-    page.bring_to_front()
-    page.wait_for_load_state("domcontentloaded")
-    page.wait_for_timeout(600)
-    _ensure_target_chat(page, front_tab, config)
-    return page, front_tab
+def _find_composer_state(page: SafariChatPage) -> dict[str, Any]:
+    return _evaluate_json(page, _build_composer_state_script(), "ChatGPT 入力欄の確認に失敗しました")
 
 
-def _find_composer(page: Any) -> Any | None:
-    if not _mark_last_visible_element(page, COMPOSER_SELECTORS, "data-bridge-composer"):
-        return None
-    return page.locator("[data-bridge-composer='1']").first
-
-
-def ensure_chatgpt_ready(page: Any, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> Any:
+def ensure_chatgpt_ready(page: SafariChatPage, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> dict[str, Any]:
     deadline = time.time() + 20
-    composer = _find_composer(page)
-    while composer is None and time.time() < deadline:
+    state = _find_composer_state(page)
+    while not state.get("found") and time.time() < deadline:
         page.wait_for_timeout(1000)
-        composer = _find_composer(page)
+        state = _find_composer_state(page)
 
-    if composer is not None:
-        return composer
+    if state.get("found"):
+        return state
 
     body_text = _body_text(page)
     dump_path = log_page_dump(page) if body_text else None
@@ -483,7 +650,7 @@ def ensure_chatgpt_ready(page: Any, config: Mapping[str, Any], *, allow_manual_l
     if login_hint or allow_manual_login:
         raise BridgeError(
             "ChatGPT の入力欄が見つかりませんでした。"
-            " 事前準備として Chrome でログイン済みの対象チャットを前面表示してください。"
+            " 事前準備として Safari でログイン済みの対象チャットを現在タブに表示してください。"
             f"{dump_note}"
         )
     waiting_hint = "しばらくお待ちください" in body_text or "Please stand by" in body_text
@@ -499,50 +666,37 @@ def ensure_chatgpt_ready(page: Any, config: Mapping[str, Any], *, allow_manual_l
 
 
 @contextmanager
-def open_chatgpt_page(*, reset_chat: bool = False) -> Iterator[tuple[Any, Any, dict[str, Any], dict[str, str]]]:
+def open_chatgpt_page(*, reset_chat: bool = False) -> Iterator[tuple[None, SafariChatPage, dict[str, Any], dict[str, str]]]:
     del reset_chat
     config = load_browser_config()
-    sync_playwright = _import_playwright()
-
-    with sync_playwright() as playwright:
-        browser = _connect_browser(playwright, config)
-        try:
-            context = browser.contexts[0]
-            page, front_tab = _resolve_chatgpt_page(context, config)
-            yield context, page, config, front_tab
-        finally:
-            browser.close()
+    front_tab = frontmost_safari_tab_info(config)
+    page = SafariChatPage(config=config, front_tab=front_tab)
+    _ensure_target_chat(page, front_tab, config)
+    yield None, page, config, front_tab
 
 
-def fill_chatgpt_composer(page: Any, text: str, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> None:
-    composer = ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login)
-    composer.scroll_into_view_if_needed()
-    composer.click()
-    composer.focus()
-    page.wait_for_timeout(200)
-    tag_name = composer.evaluate("el => el.tagName.toLowerCase()")
-    is_contenteditable = bool(composer.evaluate("el => !!el.isContentEditable"))
-    if tag_name == "textarea":
-        composer.fill(text)
+def fill_chatgpt_composer(page: SafariChatPage, text: str, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> None:
+    ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login)
+    result = _evaluate_json(page, _build_fill_composer_script(text), "ChatGPT 入力欄への書き込みに失敗しました")
+    if result.get("ok"):
+        page.wait_for_timeout(300)
         return
-    if is_contenteditable:
-        page.keyboard.press("Meta+A")
-        page.keyboard.insert_text(text)
-        return
-    raise BridgeError("ChatGPT の入力欄に文字を設定できませんでした。")
+    raise BridgeError(f"ChatGPT の入力欄に文字を設定できませんでした: {result.get('reason', 'unknown')}")
 
 
-def submit_chatgpt_message(page: Any) -> None:
-    page.wait_for_timeout(300)
-    if _mark_last_visible_element(page, SEND_BUTTON_SELECTORS, "data-bridge-send"):
-        button = page.locator("[data-bridge-send='1']").first
-        try:
-            if button.is_enabled():
-                button.click()
-                return
-        except Exception:
-            pass
-    page.keyboard.press("Enter")
+def submit_chatgpt_message(page: SafariChatPage) -> None:
+    deadline = time.time() + 5
+    last_reason = "send_missing"
+    while time.time() < deadline:
+        result = _evaluate_json(page, _build_submit_script(), "送信ボタン操作に失敗しました")
+        if result.get("ok"):
+            return
+        last_reason = str(result.get("reason", last_reason))
+        page.wait_for_timeout(500)
+
+    dump_path = log_page_dump(page)
+    dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+    raise BridgeError(f"Safari 上の送信ボタンを押せませんでした: {last_reason}{dump_note}")
 
 
 def send_to_chatgpt(text: str) -> None:
@@ -556,19 +710,11 @@ def draft_message_in_chatgpt(text: str) -> None:
         fill_chatgpt_composer(page, text, config, allow_manual_login=True)
 
 
-def read_chatgpt_conversation_dom(page: Any) -> str:
-    selectors = ["main", "article", "body"]
-    for selector in selectors:
-        locator = page.locator(selector)
-        try:
-            if locator.count() == 0:
-                continue
-            text = locator.first.inner_text(timeout=3000).strip()
-        except Exception:
-            continue
-        if text:
-            return text
-    raise BridgeError("Chrome 上の ChatGPT 会話テキストを取得できませんでした。会話領域が見えているか確認してください。")
+def read_chatgpt_conversation_dom(page: SafariChatPage) -> str:
+    text = page.evaluate(_build_visible_text_script(["main", "article", "body"])).strip()
+    if text:
+        return text
+    raise BridgeError("Safari 上の ChatGPT 会話テキストを取得できませんでした。会話領域が見えているか確認してください。")
 
 
 def read_chatgpt_conversation() -> str:

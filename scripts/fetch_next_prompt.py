@@ -9,7 +9,7 @@ from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_prompt_re
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="前面の Chrome ChatGPT チャットから最後の Codex Prompt を抽出します。")
+    parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の Codex Prompt を抽出します。")
     parser.add_argument(
         "--raw-file",
         default="",
@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
         "--timeout-seconds",
         type=int,
         default=0,
-        help="Chrome から返答を待つ最大秒数。0 の場合は browser_config.json を使う",
+        help="Safari から返答を待つ最大秒数。0 の場合は browser_config.json を使う",
     )
     return parser.parse_args()
 

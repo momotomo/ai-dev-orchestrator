@@ -1,6 +1,9 @@
 {
+  "app_name": "Safari",
   "chat_url_prefix": "https://chatgpt.com/",
-  "cdp_endpoint": "http://127.0.0.1:9222",
+  "conversation_url_keywords": [
+    "/c/"
+  ],
   "chat_hint": "",
   "require_chat_hint": false,
   "reply_timeout_seconds": 90,
