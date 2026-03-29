@@ -1,0 +1,12 @@
+{
+  "mode": "idle",
+  "need_chatgpt_prompt": true,
+  "need_codex_run": false,
+  "need_chatgpt_next": false,
+  "last_prompt_file": "",
+  "last_report_file": "",
+  "pause": false,
+  "error": false,
+  "error_message": "",
+  "cycle": 0
+}
