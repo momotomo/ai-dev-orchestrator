@@ -30,7 +30,7 @@ def run(state: dict[str, object]) -> int:
     )
 
     send_to_chatgpt(request_text)
-    request_log = log_text("request_next_prompt", request_text)
+    request_log = log_text("sent_prompt_request", request_text)
 
     mutable_state = clear_error_fields(dict(state))
     mutable_state.update(

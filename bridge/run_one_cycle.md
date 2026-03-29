@@ -24,4 +24,6 @@
 
 - `fetch_next_prompt.py` は画面全文コピー前提です
 - ChatGPT アプリの挙動によっては、会話領域を一度クリックしてから取得したほうが安定します
-- raw dump は `logs/` に保存されます
+- Codex 作業スレッドと通常 ChatGPT 会話が同じデスクトップアプリ内にある環境では、意図した会話を前面化しても別スレッド側をコピーしてしまうことがあります
+- 送信ログは `logs/sent_prompt_request_*.md`、画面コピーの raw dump は `logs/raw_chatgpt_prompt_dump_*.txt` に保存されます
+- UI フォーカス問題の切り分け時だけは `fetch_next_prompt.py --raw-file <dump>` で抽出処理を再試行できます

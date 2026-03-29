@@ -17,7 +17,8 @@ Codex Prompt
 - マーカー外の文章は無視する
 - ブロック先頭の `Codex Prompt` 見出しは保存時に取り除いてよい
 - 保存先は `bridge/inbox/codex_prompt.md`
-- 会話全文の raw dump は必ず `logs/` に保存する
+- 会話全文の raw dump は必ず `logs/raw_chatgpt_prompt_dump_*.txt` に保存する
+- UI フォーカス切り分け時は `python scripts/fetch_next_prompt.py --raw-file <dump>` で同じ抽出処理だけを再実行できる
 
 ## 失敗扱い
 

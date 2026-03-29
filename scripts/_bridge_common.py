@@ -21,6 +21,11 @@ STOP_PATH = BRIDGE_DIR / "STOP"
 CHATGPT_APP_NAME = "ChatGPT"
 PROMPT_REPLY_START = "===CHATGPT_PROMPT_REPLY==="
 PROMPT_REPLY_END = "===END_REPLY==="
+COMMAND_KEY_CODES = {
+    "a": 0,
+    "c": 8,
+    "v": 9,
+}
 
 DEFAULT_STATE: dict[str, Any] = {
     "mode": "idle",
@@ -242,15 +247,55 @@ def _try_log_window_titles() -> None:
         return
 
 
-def activate_chatgpt_app() -> None:
-    _try_log_window_titles()
-    applescript = f'tell application "{CHATGPT_APP_NAME}" to activate'
-    result = subprocess.run(
-        ["osascript", "-e", applescript],
+def _run_osascript(lines: list[str]) -> subprocess.CompletedProcess[str]:
+    command = ["osascript"]
+    for line in lines:
+        command.extend(["-e", line])
+    return subprocess.run(
+        command,
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def _send_command_shortcut(key: str) -> bool:
+    key_code = COMMAND_KEY_CODES.get(key.lower())
+    if key_code is not None:
+        result = _run_osascript(
+            [
+                'tell application "System Events"',
+                f"key code {key_code} using command down",
+                "end tell",
+            ]
+        )
+        if result.returncode == 0:
+            return True
+
+    result = _run_osascript(
+        [
+            'tell application "System Events"',
+            f'keystroke "{key}" using command down',
+            "end tell",
+        ]
+    )
+    return result.returncode == 0
+
+
+def _send_key_code(key_code: int) -> bool:
+    result = _run_osascript(
+        [
+            'tell application "System Events"',
+            f"key code {key_code}",
+            "end tell",
+        ]
+    )
+    return result.returncode == 0
+
+
+def activate_chatgpt_app() -> None:
+    _try_log_window_titles()
+    result = _run_osascript([f'tell application "{CHATGPT_APP_NAME}" to activate'])
     if result.returncode != 0:
         fallback = subprocess.run(
             ["open", "-a", CHATGPT_APP_NAME],
@@ -267,17 +312,20 @@ def activate_chatgpt_app() -> None:
 
 
 def paste_into_chatgpt(text: str, press_enter: bool) -> None:
-    pyautogui = _import_pyautogui()
     pyperclip = _import_pyperclip()
     activate_chatgpt_app()
 
     previous_clipboard = pyperclip.paste()
     pyperclip.copy(text)
     time.sleep(0.2)
-    pyautogui.hotkey("command", "v")
+    if not _send_command_shortcut("v"):
+        pyautogui = _import_pyautogui()
+        pyautogui.hotkey("command", "v")
     time.sleep(0.3)
     if press_enter:
-        pyautogui.press("enter")
+        if not _send_key_code(36):
+            pyautogui = _import_pyautogui()
+            pyautogui.press("enter")
         time.sleep(0.3)
     pyperclip.copy(previous_clipboard)
 
@@ -287,14 +335,17 @@ def send_to_chatgpt(text: str) -> None:
 
 
 def copy_chatgpt_conversation() -> str:
-    pyautogui = _import_pyautogui()
     pyperclip = _import_pyperclip()
     activate_chatgpt_app()
 
     previous_clipboard = pyperclip.paste()
-    pyautogui.hotkey("command", "a")
+    if not _send_command_shortcut("a"):
+        pyautogui = _import_pyautogui()
+        pyautogui.hotkey("command", "a")
     time.sleep(0.3)
-    pyautogui.hotkey("command", "c")
+    if not _send_command_shortcut("c"):
+        pyautogui = _import_pyautogui()
+        pyautogui.hotkey("command", "c")
     time.sleep(0.5)
     copied = pyperclip.paste()
     pyperclip.copy(previous_clipboard)
