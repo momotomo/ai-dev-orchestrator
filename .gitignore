@@ -6,3 +6,4 @@ logs/*
 bridge/history/*
 !bridge/history/.gitkeep
 bridge/STOP
+bridge/.chrome-profile/

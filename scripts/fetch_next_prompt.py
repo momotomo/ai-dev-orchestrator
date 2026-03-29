@@ -5,15 +5,21 @@ import argparse
 import sys
 from pathlib import Path
 
-from _bridge_common import INBOX_DIR, clear_error_fields, copy_chatgpt_conversation, extract_last_prompt_reply, guarded_main, log_text, read_text, repo_relative, save_state, write_text
+from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_prompt_reply, guarded_main, log_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ChatGPT 返答から最後の Codex Prompt を抽出します。")
+    parser = argparse.ArgumentParser(description="前面の Chrome ChatGPT チャットから最後の Codex Prompt を抽出します。")
     parser.add_argument(
         "--raw-file",
         default="",
         help="診断や再現テスト用に、会話全文 dump ファイルを直接読む",
+    )
+    parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=0,
+        help="Chrome から返答を待つ最大秒数。0 の場合は browser_config.json を使う",
     )
     return parser.parse_args()
 
@@ -25,7 +31,7 @@ def run(state: dict[str, object]) -> int:
         if not raw_text:
             raise ValueError(f"raw file を読めませんでした: {args.raw_file}")
     else:
-        raw_text = copy_chatgpt_conversation()
+        raw_text = wait_for_prompt_reply_text(timeout_seconds=args.timeout_seconds or None)
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     prompt_body = extract_last_prompt_reply(raw_text)
     prompt_log = log_text("extracted_codex_prompt", prompt_body)
