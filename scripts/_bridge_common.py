@@ -206,6 +206,14 @@ def log_text(prefix: str, content: str, suffix: str = "md") -> Path:
     return log_path
 
 
+def read_latest_prompt_request_text() -> str:
+    ensure_runtime_dirs()
+    candidates = sorted(LOGS_DIR.glob("*sent_prompt_request*.md"))
+    if not candidates:
+        return ""
+    return read_text(candidates[-1]).strip()
+
+
 def load_browser_config() -> dict[str, Any]:
     config = DEFAULT_BROWSER_CONFIG.copy()
     if BROWSER_CONFIG_PATH.exists():
@@ -279,14 +287,35 @@ def normalize_prompt_body(raw_body: str) -> str:
     return body + "\n"
 
 
-def extract_last_prompt_reply(raw_text: str) -> str:
+def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -> str:
+    search_start = 0
+    if after_text:
+        anchor = raw_text.rfind(after_text)
+        if anchor != -1:
+            search_start = anchor + len(after_text)
+    if search_start == 0:
+        last_user_turn = raw_text.rfind("あなた:")
+        if last_user_turn != -1:
+            search_start = last_user_turn
+
     pattern = re.compile(
         rf"{re.escape(PROMPT_REPLY_START)}(.*?){re.escape(PROMPT_REPLY_END)}",
         re.DOTALL,
     )
-    matches = pattern.findall(raw_text)
+    assistant_matches: list[str] = []
+    fallback_matches: list[str] = []
+    for match in pattern.finditer(raw_text, search_start):
+        fallback_matches.append(match.group(1))
+        assistant_index = raw_text.rfind("ChatGPT:", search_start, match.start())
+        user_index = raw_text.rfind("あなた:", search_start, match.start())
+        if assistant_index > user_index:
+            assistant_matches.append(match.group(1))
+
+    matches = assistant_matches or fallback_matches
     if not matches:
-        raise BridgeError("CHATGPT_PROMPT_REPLY ブロックを抽出できませんでした。")
+        if after_text:
+            raise BridgeError("直近の prompt request 以降に CHATGPT_PROMPT_REPLY ブロックを抽出できませんでした。")
+        raise BridgeError("直近のユーザー発話以降に CHATGPT_PROMPT_REPLY ブロックを抽出できませんでした。")
     return normalize_prompt_body(matches[-1])
 
 
@@ -726,12 +755,16 @@ def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
     with open_chatgpt_page(reset_chat=False) as (_, page, config, front_tab):
         timeout = int(timeout_seconds or config.get("reply_timeout_seconds", 90))
         poll_seconds = float(config.get("poll_interval_seconds", 2))
+        request_text = read_latest_prompt_request_text()
         deadline = time.time() + timeout
         latest_text = ""
         while time.time() < deadline:
             latest_text = read_chatgpt_conversation_dom(page)
-            if PROMPT_REPLY_START in latest_text and PROMPT_REPLY_END in latest_text:
+            try:
+                extract_last_prompt_reply(latest_text, after_text=request_text or None)
                 return latest_text
+            except BridgeError:
+                pass
             page.wait_for_timeout(int(poll_seconds * 1000))
         dump_note = ""
         if latest_text.strip():

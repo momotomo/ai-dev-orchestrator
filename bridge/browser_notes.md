@@ -28,4 +28,5 @@
 
 - Safari の current tab をそのまま使うため、別タブや別チャットへ切り替えた状態で実行しない
 - 実行中に Safari の current tab が別会話へ切り替わった場合は停止する
+- 会話履歴に古い `CHATGPT_PROMPT_REPLY` が残っていても、抽出は直近のユーザー発話以降を優先する
 - `fetch_next_prompt.py --raw-file <dump>` は DOM 抽出の切り分け用
