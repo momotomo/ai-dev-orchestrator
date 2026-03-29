@@ -1,6 +1,6 @@
 # Prompt Extraction Rules
 
-`fetch_next_prompt.py` は ChatGPT の会話全文から、最後に出現した次のブロックだけを採用する。
+`fetch_next_prompt.py` は前面の Chrome ChatGPT 対象チャット DOM から、最後に出現した次のブロックだけを採用する。
 
 ```text
 ===CHATGPT_PROMPT_REPLY===
@@ -18,7 +18,10 @@ Codex Prompt
 - ブロック先頭の `Codex Prompt` 見出しは保存時に取り除いてよい
 - 保存先は `bridge/inbox/codex_prompt.md`
 - 会話全文の raw dump は必ず `logs/raw_chatgpt_prompt_dump_*.txt` に保存する
-- UI フォーカス切り分け時は `python scripts/fetch_next_prompt.py --raw-file <dump>` で同じ抽出処理だけを再実行できる
+- 前面タブが ChatGPT でない場合は停止する
+- `chat_hint` が設定されていて一致しない場合は停止する
+- 停止時に会話本文が取得できている場合も `logs/raw_chatgpt_prompt_dump_*.txt` に raw dump を残す
+- DOM 抽出の切り分け時は `python scripts/fetch_next_prompt.py --raw-file <dump>` で同じ抽出処理だけを再実行できる
 
 ## 失敗扱い
 

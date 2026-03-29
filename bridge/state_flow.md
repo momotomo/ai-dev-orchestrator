@@ -5,7 +5,7 @@
 - `idle`
   待機状態。次に ChatGPT へ prompt request を送るかどうかはフラグで判定する。
 - `waiting_prompt_reply`
-  ChatGPT へ要求を送ったので、返答回収待ちの状態。
+  前面の Chrome ChatGPT 対象チャットへ要求を送ったので、返答回収待ちの状態。
 - `ready_for_codex`
   `bridge/inbox/codex_prompt.md` に次の Codex 用プロンプトが入り、Codex 実行待ちの状態。
 - `codex_running`
@@ -31,7 +31,7 @@
 1. `idle` + `need_chatgpt_prompt=true`
    `request_next_prompt.py` 実行後に `waiting_prompt_reply`
 2. `waiting_prompt_reply`
-   `fetch_next_prompt.py` 実行後に `ready_for_codex`
+   `fetch_next_prompt.py` が前面の対象チャット DOM から返信を回収し、`ready_for_codex`
 3. `ready_for_codex`
    人が Codex を起動し、開始時に `codex_running`
 4. `codex_running`
@@ -40,6 +40,13 @@
    `archive_codex_report.py` 実行後に `idle` + `need_chatgpt_next=true`
 6. `idle` + `need_chatgpt_next=true`
    `request_prompt_from_report.py` 実行後に `waiting_prompt_reply`
+
+## Chrome 運用メモ
+
+- Chrome 起動とログインは事前準備
+- 対象チャット表示も事前準備
+- 自動化は、その後の送信・回収・state 遷移だけを担当する
+- 対象チャットが違う場合は停止する
 
 ## cycle の考え方
 

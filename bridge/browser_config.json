@@ -1,0 +1,8 @@
+{
+  "chat_url_prefix": "https://chatgpt.com/",
+  "cdp_endpoint": "http://127.0.0.1:9222",
+  "chat_hint": "",
+  "require_chat_hint": false,
+  "reply_timeout_seconds": 90,
+  "poll_interval_seconds": 2
+}
