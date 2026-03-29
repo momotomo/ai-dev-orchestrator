@@ -20,7 +20,7 @@ manual bridge test succeeded
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Chrome 上の ChatGPT との手動疎通を確認します。")
+    parser = argparse.ArgumentParser(description="Safari の現在タブ上の ChatGPT との手動疎通を確認します。")
     parser.add_argument(
         "--message",
         default=DEFAULT_TEST_MESSAGE,
@@ -35,8 +35,8 @@ def run(_: dict[str, object]) -> int:
 
     with open_chatgpt_page(reset_chat=False) as (_, page, config, front_tab):
         fill_chatgpt_composer(page, args.message, config, allow_manual_login=False)
-        print(f"前面の対象チャットを使います: {front_tab['title']} {front_tab['url']}")
-        print("Chrome の ChatGPT タブにテストメッセージを下書きしました。")
+        print(f"Safari の現在タブを使います: {front_tab['title']} {front_tab['url']}")
+        print("Safari の現在 ChatGPT タブにテストメッセージを下書きしました。")
         print("内容を確認して手動送信し、返信が表示されたら Enter を押します。")
         input()
 

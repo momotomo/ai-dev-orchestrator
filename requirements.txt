@@ -1,1 +1,2 @@
-playwright
+# Safari automation uses AppleScript and browser-side JavaScript via the Python standard library.
+# No additional Python packages are required for the current bridge workflow.
