@@ -9,6 +9,13 @@
 - Safari の Develop メニューで `Allow JavaScript from Apple Events` を有効にしておく
 - macOS の Automation 許可で、実行元アプリから Safari を操作できる状態にしておく
 
+## 毎回の確認
+
+- 送信前から回収完了まで、Safari の current tab を別会話へ切り替えない
+- `bridge/state.json` が `error=false` であること
+- `bridge/STOP` が無いこと
+- request 送信前に、対象チャットが `/c/` の会話 URL であること
+
 ## 基本方針
 
 - 自動化は、Safari の現在タブにある ChatGPT チャットの送信と回収だけを担当する
@@ -32,3 +39,14 @@
 - 会話履歴に古い `CHATGPT_PROMPT_REPLY` が残っていても、抽出は直近のユーザー発話以降を優先する
 - `fetch_next_prompt.py --raw-file <dump>` は DOM 抽出の切り分け用
 - `AppleEvent timeout (-1712)` が出た場合は、Safari が前面の対象チャットで応答しているかと、Automation 許可ダイアログが残っていないかを確認する
+
+## よくある失敗
+
+- `Safari で Apple Events からの JavaScript 実行が許可されていません`
+  Safari の Develop メニュー設定を確認する
+- `Safari の現在タブが ChatGPT ではありません`
+  Safari の current tab を対象チャットへ戻す
+- `Safari の現在タブが ChatGPT の対象会話ではありません`
+  新規チャットや一覧画面ではなく、対象会話の `/c/` URL を開く
+- `state.error=true`
+  先に原因を解消し、その後で error をクリアして再実行する

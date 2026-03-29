@@ -23,7 +23,7 @@ Codex Prompt
 - Safari の現在タブが対象会話 URL でない場合は停止する
 - `chat_hint` が設定されていて一致しない場合は停止する
 - 停止時に会話本文が取得できている場合も `logs/raw_chatgpt_prompt_dump_*.txt` に raw dump を残す
-- DOM 抽出の切り分け時は `python scripts/fetch_next_prompt.py --raw-file <dump>` で同じ抽出処理だけを再実行できる
+- DOM 抽出の切り分け時は `python3 scripts/fetch_next_prompt.py --raw-file <dump>` で同じ抽出処理だけを再実行できる
 
 ## 失敗扱い
 

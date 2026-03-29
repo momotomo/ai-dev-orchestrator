@@ -48,6 +48,13 @@
 - 自動化は、その後の送信・回収・state 遷移だけを担当する
 - 対象チャットが違う場合は停止する
 - Chrome は自動化対象にしない
+- `ready_for_codex` から `codex_done` までは Codex 実装フェーズで、人手確認を含む
+
+## 失敗時の考え方
+
+- `error=true` は「原因未解消のまま進めない」ための停止状態
+- Safari 送信 / 回収の失敗時は、current tab、Automation 許可、raw dump の順に見る
+- archive 後は `cycle` が 1 増えるため、何周目まで完了したかを追える
 
 ## cycle の考え方
 
