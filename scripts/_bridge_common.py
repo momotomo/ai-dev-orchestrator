@@ -23,6 +23,10 @@ STOP_PATH = BRIDGE_DIR / "STOP"
 BROWSER_CONFIG_PATH = BRIDGE_DIR / "browser_config.json"
 PROMPT_REPLY_START = "===CHATGPT_PROMPT_REPLY==="
 PROMPT_REPLY_END = "===END_REPLY==="
+BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
+BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
+CHATGPT_REQUEST_START = "===CHATGPT_REQUEST==="
+CHATGPT_REQUEST_END = "===END_CHATGPT_REQUEST==="
 PLACEHOLDER_REPORT_HEADER = "# Codex Report Outbox"
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -272,6 +276,25 @@ def read_last_report_text(state: Mapping[str, Any]) -> str:
             return read_text(candidate).strip()
 
     return "（前回の完了報告はまだありません）"
+
+
+def _extract_marked_block(report_text: str, start_marker: str, end_marker: str) -> str | None:
+    start_index = report_text.find(start_marker)
+    if start_index == -1:
+        return None
+    end_index = report_text.find(end_marker, start_index + len(start_marker))
+    if end_index == -1:
+        return None
+    return report_text[start_index : end_index + len(end_marker)].strip()
+
+
+def compact_last_report_text(report_text: str) -> str:
+    summary_block = _extract_marked_block(report_text, BRIDGE_SUMMARY_START, BRIDGE_SUMMARY_END)
+    request_block = _extract_marked_block(report_text, CHATGPT_REQUEST_START, CHATGPT_REQUEST_END)
+    blocks = [block for block in [summary_block, request_block] if block]
+    if blocks:
+        return "\n\n".join(blocks)
+    return report_text.strip()
 
 
 def normalize_prompt_body(raw_body: str) -> str:
@@ -833,7 +856,7 @@ def build_chatgpt_request(
 
     values = {
         "CURRENT_STATUS": current_status or state_snapshot(state),
-        "LAST_REPORT": last_report or read_last_report_text(state),
+        "LAST_REPORT": compact_last_report_text(last_report or read_last_report_text(state)),
         "NEXT_TODO": next_todo,
         "OPEN_QUESTIONS": open_questions,
     }
