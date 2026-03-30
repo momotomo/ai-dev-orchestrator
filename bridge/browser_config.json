@@ -6,6 +6,6 @@
   ],
   "chat_hint": "",
   "require_chat_hint": false,
-  "reply_timeout_seconds": 600,
+  "reply_timeout_seconds": 1800,
   "poll_interval_seconds": 2
 }
