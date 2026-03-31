@@ -18,6 +18,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--codex-model", default="", help="launch_codex_once.py に渡す model 名")
     parser.add_argument("--codex-timeout-seconds", type=int, default=7200, help="Codex 実行の最大秒数")
     parser.add_argument("--dry-run-codex", action="store_true", help="ready_for_codex でも Codex を起動せず内容だけ確認する")
+    parser.add_argument("--next-todo", default="", help="request 系 script に渡す next_todo")
+    parser.add_argument("--open-questions", default="", help="request 系 script に渡す open_questions")
+    parser.add_argument("--current-status", default="", help="request 系 script に渡す CURRENT_STATUS 上書き")
     return parser.parse_args(argv)
 
 
@@ -33,6 +36,17 @@ def build_codex_launch_argv(args: argparse.Namespace) -> list[str]:
     if args.dry_run_codex:
         launch_argv.append("--dry-run")
     return launch_argv
+
+
+def build_request_argv(args: argparse.Namespace) -> list[str]:
+    request_argv: list[str] = []
+    if args.next_todo:
+        request_argv.extend(["--next-todo", args.next_todo])
+    if args.open_questions:
+        request_argv.extend(["--open-questions", args.open_questions])
+    if args.current_status:
+        request_argv.extend(["--current-status", args.current_status])
+    return request_argv
 
 
 def maybe_promote_codex_done(state: dict[str, object]) -> bool:
@@ -57,7 +71,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         print("state=idle / need_chatgpt_prompt=true のため、ChatGPT へ次プロンプト要求を送ります。")
-        return request_next_prompt.run(dict(state), [])
+        return request_next_prompt.run(dict(state), build_request_argv(args))
 
     if mode == "waiting_prompt_reply":
         print("state=waiting_prompt_reply のため、ChatGPT 返答から次の Codex 用プロンプトを回収します。")
@@ -83,7 +97,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         print("state=idle / need_chatgpt_next=true のため、完了報告をもとに次フェーズ要求を送ります。")
-        return request_prompt_from_report.run(dict(state), [])
+        return request_prompt_from_report.run(dict(state), build_request_argv(args))
 
     print("今回の 1 手はありません。state.json を確認してください。")
     return 0

@@ -19,7 +19,8 @@
 live 1 周確認へ寄せる場合は、返答内で次を優先してください。
 
 - live 実行前の最小 checklist
-- この状態なら次に何を実行するか
+- `CURRENT_STATUS` が `idle + need_chatgpt_prompt=true` なら、最初に `python3 scripts/bridge_orchestrator.py` を 1 回実行して prompt request を送ること
+- 返答取得後は fetch して `ready_for_codex` に進み、その後 `python3 scripts/run_until_stop.py --max-steps 6` で数手進める最短導線
 - runtime 実ファイルは原則変更しないこと
 
 返答はこのブロックだけにしてください。
