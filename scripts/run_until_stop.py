@@ -126,6 +126,13 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
             "このあと初回だけ、ChatGPT に送る本文入力を求めます。"
             " 表示される短い例文をもとに入力すると、その本文をそのまま送信します。"
         )
+    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+        decision = str(state.get("chatgpt_decision", "")).strip()
+        if decision == "human_review":
+            return "このあと判断結果や方針の補足入力を求め、次の ChatGPT request に添えて送ります。"
+        if decision == "need_info":
+            return "このあと不足情報の補足入力を求め、次の ChatGPT request に添えて送ります。"
+        return "このあと再開用の補足入力を求め、次の ChatGPT request に添えて送ります。"
     if action == "fetch_next_prompt":
         return (
             f"既存チャットの返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
@@ -198,6 +205,8 @@ def describe_next_action(state: dict[str, Any]) -> str:
         return "request_next_prompt"
     if mode == "waiting_prompt_reply":
         return "fetch_next_prompt"
+    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+        return "request_prompt_from_report"
     if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
         return "launch_codex_once"
     if mode == "codex_running":
@@ -262,10 +271,17 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     action = describe_next_action(final_state)
     if is_no_codex_decision_state(final_state):
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
-        if note:
-            return note
-        if str(final_state.get("chatgpt_decision", "")).strip() == "completed":
+        decision = str(final_state.get("chatgpt_decision", "")).strip()
+        if decision == "completed":
+            if note:
+                return note
             return "ChatGPT が完了判断を返したため、追加の Codex 実行は不要です。"
+        if decision == "human_review":
+            base = note or "ChatGPT が人判断待ちと判断しました。"
+            return f"{base} bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。"
+        if decision == "need_info":
+            base = note or "ChatGPT が情報不足と判断しました。"
+            return f"{base} bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。"
         return "ChatGPT が Codex 不要と判断しました。人が次の判断を行ってください。"
     if action == "request_next_prompt":
         return "Safari の current tab を対象チャットに合わせたまま再実行してください。初回だけ、表示される例文をもとに本文入力を行います。"
@@ -842,7 +858,9 @@ def run(argv: list[str] | None = None) -> int:
 
             before_status = present_bridge_status(before)
             print(f"[step {steps + 1}] status={before_status.label} action={action}")
-            interactive = action == "request_next_prompt"
+            interactive = action == "request_next_prompt" or (
+                action == "request_prompt_from_report" and str(before.get("mode", "")).strip() == "awaiting_user"
+            )
             result, elapsed_seconds = run_command_with_heartbeat(
                 command,
                 cwd=ROOT_DIR,
@@ -891,6 +909,11 @@ def run(argv: list[str] | None = None) -> int:
                     reason = (
                         "Codex report 待ちのため停止しました。"
                         " bridge/outbox/codex_report.md が生成されたら再実行してください。"
+                    )
+                elif action == "request_prompt_from_report" and str(before.get("mode", "")).strip() == "awaiting_user":
+                    reason = (
+                        "再開用の補足入力が空のため送信せず停止しました。"
+                        " 必要な補足を入力して再実行してください。"
                     )
                 else:
                     reason = (

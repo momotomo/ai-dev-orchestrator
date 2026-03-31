@@ -16,6 +16,8 @@
 - next_todo: {NEXT_TODO}
 - open_questions: {OPEN_QUESTIONS}
 
+{RESUME_CONTEXT_SECTION}
+
 live 1 周確認へ寄せる場合は、返答内で次を優先してください。
 
 - live 実行前の最小 checklist
