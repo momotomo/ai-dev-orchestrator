@@ -152,6 +152,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         mark_launch_failure(state, message)
         raise BridgeError(message) from exc
+    except KeyboardInterrupt as exc:
+        message = (
+            "Codex 実行を手動中断しました。"
+            f" prompt: {repo_relative(prompt_log_path)} を確認し、必要なら再実行してください。"
+        )
+        mark_launch_failure(state, message)
+        raise BridgeError(message) from exc
 
     write_text(stdout_log_path, result.stdout or "")
     write_text(stderr_log_path, result.stderr or "")
