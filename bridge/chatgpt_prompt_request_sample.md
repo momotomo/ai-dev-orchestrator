@@ -43,3 +43,40 @@
 completed | human_review | need_info
 [必要なら短い理由]
 ===END_NO_CODEX===
+
+## Prompt Reply Example
+
+===CHATGPT_PROMPT_REPLY===
+対象案件: example-target-project
+今回の 1 フェーズだけを進めてください。
+
+目的:
+export UI のラベルを 1 か所だけ分かりやすく整える。
+
+対象:
+- src/features/export/export-panel.tsx
+
+完了条件:
+- 文言変更だけで済み、既存 export 処理は変えない
+===END_REPLY===
+
+## No Codex Example
+
+===CHATGPT_NO_CODEX===
+completed
+今回は追加の Codex 実行は不要です。
+===END_NO_CODEX===
+
+または
+
+===CHATGPT_NO_CODEX===
+human_review
+候補が 2 つあるため、人がどちらの方針で進めるか決めてください。
+===END_NO_CODEX===
+
+または
+
+===CHATGPT_NO_CODEX===
+need_info
+対象画面と変えない範囲が不足しています。
+===END_NO_CODEX===
