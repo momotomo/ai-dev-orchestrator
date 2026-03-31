@@ -21,6 +21,8 @@
 - 2 回目以降は既存どおり Codex 完了報告ベースで継続する
 - Safari fetch 待機は通常運用で 1800 秒前提
 - `max_execution_count` は上限であり、ChatGPT が `Codex 不要` を返した時は途中で正常停止しうる
+- ChatGPT の通常返答契約は `CHATGPT_PROMPT_REPLY` と `CHATGPT_NO_CODEX` の 2 系統だけと考える
+- `CHATGPT_NO_CODEX` の先頭行は `completed`、`human_review`、`need_info` のいずれかで、完了 / 人確認待ち / 情報待ちを表す
 
 ## stale runtime の最小整理
 
