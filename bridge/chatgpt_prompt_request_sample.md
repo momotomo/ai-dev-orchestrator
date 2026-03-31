@@ -27,7 +27,11 @@
 - next_todo: export 改善、テスト追加、ドキュメント整理のいずれかから、最も小さく安全に進められる 1 フェーズを選んでください
 - open_questions: 技術スタックは固定しない。UI 変更が必要でも最小差分に留める
 
-返答は次のどちらか 1 つのブロックだけにしてください。
+返答は bridge がそのまま読むので、前置きや余計な説明を付けず、次のどちらか 1 つのブロックだけにしてください。
+
+- Codex に渡す 1 フェーズ prompt があるなら `CHATGPT_PROMPT_REPLY`
+- 今回は Codex に渡さないなら `CHATGPT_NO_CODEX`
+- `CHATGPT_NO_CODEX` の先頭行は `completed` / `human_review` / `need_info` のいずれか
 
 ===CHATGPT_PROMPT_REPLY===
 [Codex 用 1 フェーズ prompt 本文]

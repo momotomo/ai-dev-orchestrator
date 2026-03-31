@@ -38,6 +38,19 @@ def build_example_template(project_path: Path) -> str:
             "現在の継続テーマ: [ここを入力]",
             "狙い: [ここを入力]",
             "次の 1 フェーズ分の Codex 用 prompt を返してください。",
+            "",
+            "返答は前置きなしで、次のどちらか 1 つのブロックだけにしてください。",
+            "",
+            "===CHATGPT_PROMPT_REPLY===",
+            "[Codex 用 1 フェーズ prompt 本文]",
+            "===END_REPLY===",
+            "",
+            "または",
+            "",
+            "===CHATGPT_NO_CODEX===",
+            "completed | human_review | need_info",
+            "[必要なら短い理由]",
+            "===END_NO_CODEX===",
         ]
     )
 
@@ -49,6 +62,8 @@ def prompt_initial_request_body(example_text: str) -> str:
     print("", flush=True)
     print(example_text, flush=True)
     print("", flush=True)
+    print("Codex に渡す prompt がある時は CHATGPT_PROMPT_REPLY、今回は渡さない時は CHATGPT_NO_CODEX を返すように書いてください。", flush=True)
+    print("CHATGPT_NO_CODEX の先頭行は completed / human_review / need_info のいずれかです。", flush=True)
     print("入力後は Safari の current tab にそのまま送信し、続けて返答待ちへ進みます。", flush=True)
     print("入力終了は Ctrl-D、または空行を 2 回です。空入力では進みません。", flush=True)
 
