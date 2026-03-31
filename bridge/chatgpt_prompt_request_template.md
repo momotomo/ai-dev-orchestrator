@@ -16,6 +16,12 @@
 - next_todo: {NEXT_TODO}
 - open_questions: {OPEN_QUESTIONS}
 
+live 1 周確認へ寄せる場合は、返答内で次を優先してください。
+
+- live 実行前の最小 checklist
+- この状態なら次に何を実行するか
+- runtime 実ファイルは原則変更しないこと
+
 返答はこのブロックだけにしてください。
 
 ===CHATGPT_PROMPT_REPLY===

@@ -59,6 +59,8 @@ def build_launch_prompt(template_path: Path, prompt_path: Path, report_path: Pat
 def build_codex_command(args: argparse.Namespace, last_message_path: Path) -> list[str]:
     command = [
         args.codex_bin,
+        "--ask-for-approval",
+        "never",
         "exec",
         "-C",
         str(ROOT_DIR),

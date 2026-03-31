@@ -5,6 +5,7 @@
 - changed: [主要ファイル。なければ なし]
 - verify: [確認結果。未実施なら未実施]
 - next_state: codex_done
+- live_ready: [live 1 周確認へ進める状態か。条件付きなら一言]
 - risks: [残課題や注意点。なければ なし]
 ===END_BRIDGE_SUMMARY===
 
@@ -20,9 +21,11 @@
 3. 確認結果
 
 - [実行した確認]
+- [live 前に確認しやすくなった点]
 - [未実施ならその理由]
 
 4. 次状態 / 残課題
 
 - next_state: codex_done
+- live_ready: [live 1 周確認へ進める状態か]
 - [次に引き継ぐ注意点]
