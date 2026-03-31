@@ -119,7 +119,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         status = present_bridge_status(state)
-        print(f"{status.label}です。ChatGPT に送る最初の文面を入力して送信します。")
+        print(f"{status.label}です。ChatGPT に送る最初の文面を入力すると、bridge が固定の返答契約を付けて送信します。")
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
 
     if mode == "waiting_prompt_reply":

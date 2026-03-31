@@ -174,6 +174,29 @@ class ChatGPTReplyDecision:
     raw_block: str
 
 
+def build_chatgpt_reply_contract_section() -> str:
+    return "\n".join(
+        [
+            "## bridge reply contract",
+            "",
+            "bridge が返答を機械処理するため、前置きや補足説明を付けず、次のどちらか 1 つのブロックだけを返してください。",
+            "",
+            "Codex に渡す 1 フェーズ prompt がある場合:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "[Codex 用 1 フェーズ prompt 本文]",
+            "===END_REPLY===",
+            "",
+            "今回は Codex に渡さない場合:",
+            "===CHATGPT_NO_CODEX===",
+            "completed | human_review | need_info",
+            "[必要なら短い理由]",
+            "===END_NO_CODEX===",
+            "",
+            "`CHATGPT_NO_CODEX` の先頭行は completed / human_review / need_info のいずれかにしてください。",
+        ]
+    ).strip()
+
+
 def present_bridge_status(
     state: Mapping[str, Any],
     *,

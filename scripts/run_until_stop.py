@@ -124,7 +124,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "request_next_prompt":
         return (
             "このあと初回だけ、ChatGPT に送る本文入力を求めます。"
-            " 表示される短い例文をもとに入力すると、その本文をそのまま送信します。"
+            " 表示される短い例文をもとに進めたい内容だけ入力すると、bridge が固定の返答契約を付けて送信します。"
         )
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
         decision = str(state.get("chatgpt_decision", "")).strip()
@@ -880,7 +880,7 @@ def run(argv: list[str] | None = None) -> int:
                 f"before={before.get('mode', '')} after={after.get('mode', '')}"
             )
             if interactive:
-                history.append("  interactive: 初回 request 本文は terminal 入力をそのまま ChatGPT へ送信した")
+                history.append("  interactive: 初回 request 本文を terminal で受け取り、bridge が固定の返答契約を追記して送信した")
             if elapsed_seconds >= max(1.0, float(args.heartbeat_seconds)):
                 history.append(
                     f"  waited: action={action} elapsed={format_elapsed(elapsed_seconds)}"
