@@ -1,5 +1,8 @@
 # ChatGPT Prompt Request Sample
 
+これは report ベース継続 request の sample です。
+初回 request ではユーザーが進めたい内容だけを入力し、bridge が同じ返答契約を固定セクションとして自動付与します。
+
 次の Codex 用 1 フェーズ prompt だけを返してください。
 共通ルールは固定 docs 側にあるので、今回差分だけに集中してください。
 

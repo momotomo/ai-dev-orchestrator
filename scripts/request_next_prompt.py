@@ -5,12 +5,24 @@ import argparse
 import sys
 from pathlib import Path
 
-from _bridge_common import BridgeError, clear_error_fields, guarded_main, load_project_config, log_text, send_to_chatgpt, save_state, worker_repo_path
+from _bridge_common import (
+    BridgeError,
+    build_chatgpt_reply_contract_section,
+    clear_error_fields,
+    guarded_main,
+    load_project_config,
+    log_text,
+    send_to_chatgpt,
+    save_state,
+    worker_repo_path,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     project_config = load_project_config()
-    parser = argparse.ArgumentParser(description="初回だけ、ユーザーが入力した本文をそのまま Safari の現在 ChatGPT タブへ送信します。")
+    parser = argparse.ArgumentParser(
+        description="初回だけ、ユーザーが入力した本文を正本として受け取り、bridge が固定の返答契約を付けて Safari の現在 ChatGPT タブへ送信します。"
+    )
     parser.add_argument("--request-body", default="", help="初回に ChatGPT へ送る本文。指定時は対話入力を省略する")
     parser.add_argument(
         "--project-path",
@@ -38,34 +50,21 @@ def build_example_template(project_path: Path) -> str:
             "現在の継続テーマ: [ここを入力]",
             "狙い: [ここを入力]",
             "次の 1 フェーズ分の Codex 用 prompt を返してください。",
-            "",
-            "返答は前置きなしで、次のどちらか 1 つのブロックだけにしてください。",
-            "",
-            "===CHATGPT_PROMPT_REPLY===",
-            "[Codex 用 1 フェーズ prompt 本文]",
-            "===END_REPLY===",
-            "",
-            "または",
-            "",
-            "===CHATGPT_NO_CODEX===",
-            "completed | human_review | need_info",
-            "[必要なら短い理由]",
-            "===END_NO_CODEX===",
         ]
     )
 
 
 def prompt_initial_request_body(example_text: str) -> str:
     print("初回だけ、ChatGPT に送る最初の文面を入力してください。", flush=True)
-    print("この入力本文が初回 request の正本です。bridge は入力した本文をそのまま送ります。", flush=True)
+    print("この入力本文が初回 request の正本です。bridge は本文を改変せず、送信直前に固定の返答契約だけを追記します。", flush=True)
     print("これは初回 request 専用で、human_review / need_info 再開時の補足入力とは別です。", flush=True)
+    print("返答フォーマット指定まで自分で書く必要はありません。進めたい内容だけを書いてください。", flush=True)
     print("以下はそのまま使える短い例文です。必要な行だけ書き換えてください。", flush=True)
     print("", flush=True)
     print(example_text, flush=True)
     print("", flush=True)
-    print("Codex に渡す prompt がある時は CHATGPT_PROMPT_REPLY、今回は渡さない時は CHATGPT_NO_CODEX を返すように書いてください。", flush=True)
-    print("CHATGPT_NO_CODEX の先頭行は completed / human_review / need_info のいずれかです。", flush=True)
-    print("入力後は Safari の current tab にそのまま送信し、続けて返答待ちへ進みます。", flush=True)
+    print("bridge が固定の返答契約を自動で付けて送るので、本文には今回進めたいことだけを含めてください。", flush=True)
+    print("入力後は Safari の current tab へ送信し、続けて返答待ちへ進みます。", flush=True)
     print("入力終了は Ctrl-D、または空行を 2 回です。空入力では進みません。", flush=True)
 
     lines: list[str] = []
@@ -85,7 +84,7 @@ def prompt_initial_request_body(example_text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def resolve_request_text(args: argparse.Namespace) -> str:
+def resolve_request_body(args: argparse.Namespace) -> str:
     if args.request_body.strip():
         return args.request_body.strip() + "\n"
 
@@ -104,9 +103,18 @@ def resolve_request_text(args: argparse.Namespace) -> str:
     return request_text.strip() + "\n"
 
 
+def compose_initial_request_text(user_body: str) -> str:
+    body = user_body.strip()
+    if not body:
+        raise BridgeError("初回 request 本文が空です。")
+    contract_section = build_chatgpt_reply_contract_section()
+    return f"{body}\n\n{contract_section}\n"
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    request_text = resolve_request_text(args)
+    user_body = resolve_request_body(args)
+    request_text = compose_initial_request_text(user_body)
 
     send_to_chatgpt(request_text)
     request_log = log_text("sent_prompt_request", request_text)
