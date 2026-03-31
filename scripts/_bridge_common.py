@@ -160,6 +160,13 @@ class BridgeHandoffView:
 
 
 @dataclass(frozen=True)
+class BridgeResumePromptView:
+    title: str
+    detail: str
+    example: str
+
+
+@dataclass(frozen=True)
 class ChatGPTReplyDecision:
     kind: str
     body: str
@@ -276,6 +283,41 @@ def present_bridge_handoff(
     if status.label == "完了":
         return BridgeHandoffView("完了しました。", detail)
     return BridgeHandoffView(f"{status.label}です。", detail)
+
+
+def present_resume_prompt(state: Mapping[str, Any]) -> BridgeResumePromptView:
+    decision = str(state.get("chatgpt_decision", "")).strip()
+    note = str(state.get("chatgpt_decision_note", "")).strip()
+
+    if decision == "human_review":
+        return BridgeResumePromptView(
+            title="人の判断内容を入力してください。",
+            detail=note or "次の ChatGPT request に添える判断結果や方針だけを短く入力します。",
+            example="\n".join(
+                [
+                    "判断結果: sample browser の軽い UI polish に留める",
+                    "制約: schema / resolver / preview / playback / export は変えない",
+                ]
+            ),
+        )
+
+    if decision == "need_info":
+        return BridgeResumePromptView(
+            title="不足情報を入力してください。",
+            detail=note or "次の ChatGPT request に添える不足情報だけを短く入力します。",
+            example="\n".join(
+                [
+                    "不足情報: 対象画面は sample browser panel",
+                    "補足: shared row は変更しない",
+                ]
+            ),
+        )
+
+    return BridgeResumePromptView(
+        title="再開用の補足を入力してください。",
+        detail=note or "次の ChatGPT request に添える補足だけを短く入力します。",
+        example="補足: 今回の方針や不足情報を 2 行程度で書く",
+    )
 
 
 def ensure_runtime_dirs() -> None:
@@ -1494,15 +1536,37 @@ def build_chatgpt_request(
     open_questions: str,
     current_status: str | None = None,
     last_report: str | None = None,
+    resume_note: str | None = None,
 ) -> str:
     template_text = read_text(template_path).strip()
     if not template_text:
         raise BridgeError(f"テンプレートを読めませんでした: {repo_relative(template_path)}")
+
+    resume_text = (resume_note or "").strip()
+    resume_section = ""
+    if resume_text:
+        decision = str(state.get("chatgpt_decision", "")).strip() or "resume"
+        decision_note = str(state.get("chatgpt_decision_note", "")).strip()
+        lines = [
+            "## handoff",
+            "",
+            f"- reason: {decision}",
+        ]
+        if decision_note:
+            lines.append(f"- previous_note: {decision_note}")
+        lines.extend(
+            [
+                "- user_input:",
+                resume_text,
+            ]
+        )
+        resume_section = "\n".join(lines).strip() + "\n"
 
     values = {
         "CURRENT_STATUS": current_status or state_snapshot(state),
         "LAST_REPORT": compact_last_report_text(last_report or read_last_report_text(state)),
         "NEXT_TODO": next_todo,
         "OPEN_QUESTIONS": open_questions,
+        "RESUME_CONTEXT_SECTION": resume_section,
     }
     return render_template(template_text, values).strip() + "\n"

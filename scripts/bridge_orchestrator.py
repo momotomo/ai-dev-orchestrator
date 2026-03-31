@@ -153,6 +153,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。完了報告を履歴へ退避します。")
         return archive_codex_report.run(dict(state))
 
+    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+        status = present_bridge_status(state)
+        print(f"{status.label}です。次の ChatGPT request に添える補足入力を受けて再開します。")
+        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
+
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         status = present_bridge_status(state)
         print(f"{status.label}です。完了報告をもとに次フェーズ要求を送ります。")
