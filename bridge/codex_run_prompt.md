@@ -1,24 +1,15 @@
 # Codex Run Prompt
 
-以下の運用で Codex を実行する。
+bridge が進行管理者です。あなたは今回 1 回だけ動く worker です。
 
-1. `bridge/inbox/codex_prompt.md` を読む
-2. `bridge/state.json` の `mode` を `codex_running` に更新する
+1. `{RUNNER_RULES_FILE}` を読む
+2. `{PROMPT_FILE}` を読む
 3. 今回の 1 フェーズだけ実装する
 4. 必要なら最小限の確認を行う
-5. `bridge/outbox/codex_report.md` に完了報告を書く
-6. `bridge/state.json` を次の状態に更新する
+5. `{REPORT_TEMPLATE_FILE}` を参考に `{REPORT_FILE}` を書く
+6. ChatGPT へ問い合わせない
+7. bridge script を起動しない
+8. 次フェーズ判断をしない
+9. report を書いたら終了する
 
-```json
-{
-  "mode": "codex_done",
-  "need_codex_run": false
-}
-```
-
-追加原則:
-
-- 既存動作を壊さない
-- 過剰な大改造をしない
-- 1 回で 1 目的だけ進める
-- 未解決事項は完了報告の注意点に残す
+共通説明は固定 docs 側にあります。今回差分は `{PROMPT_FILE}` だけに従ってください。

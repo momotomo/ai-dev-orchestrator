@@ -1,26 +1,23 @@
 # ChatGPT Prompt Request
 
-次の Codex 用 1 フェーズだけを決めてください。必要事項だけを短く返してください。
+次の Codex 用 1 フェーズ prompt だけを返してください。
+共通ルールは固定 docs 側にあるので、今回差分だけに集中してください。
 
-## 状態
+## state
 
 {CURRENT_STATUS}
 
-## 前回報告
+## last_report
 
 {LAST_REPORT}
 
-## 補足
+## request
 
 - next_todo: {NEXT_TODO}
 - open_questions: {OPEN_QUESTIONS}
 
-返答は次のブロックだけにしてください。
+返答はこのブロックだけにしてください。
 
 ===CHATGPT_PROMPT_REPLY===
-
-Codex Prompt
-
-[ここに Codex へそのまま渡せる次フェーズ用プロンプトを書く]
-
+[Codex 用 1 フェーズ prompt 本文]
 ===END_REPLY===

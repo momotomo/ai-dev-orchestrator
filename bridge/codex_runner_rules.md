@@ -1,31 +1,36 @@
 # Codex Runner Rules
 
-## 基本方針
+## 役割
 
-- 毎回 `bridge/inbox/codex_prompt.md` を最初に読む
-- 1 回の実行では 1 フェーズだけ実装する
-- 特定案件依存の大きな前提を勝手に増やさない
-- 過剰な大改造を避け、差分中心で進める
+- bridge が進行管理者
+- Codex は今回 1 回だけ動く worker
+- ChatGPT への問い合わせや次フェーズ判断は bridge が行う
+
+## Codex がやること
+
+- 最初に `bridge/inbox/codex_prompt.md` を読む
+- 今回の 1 フェーズだけ実装する
+- 必要なら最小限の確認だけを行う
+- `bridge/codex_report_template.md` に沿って `bridge/outbox/codex_report.md` を書く
+- report を書いたら終了する
+
+## Codex がやらないこと
+
+- ChatGPT に問い合わせない
+- bridge script を起動しない
+- loop 継続判断をしない
+- 次フェーズを勝手に決めない
+- 過剰な大改造をしない
+
+## 品質原則
+
+- 差分中心で進める
 - 既存動作を壊さないことを優先する
+- 特定案件依存の前提を勝手に増やさない
+- 不明点は危険な推測で埋めず、report の残課題に残す
 
-## state 更新ルール
+## state の考え方
 
-- 実装開始時に `bridge/state.json` の `mode` を `codex_running` にする
-- 実装中は `need_codex_run` を `true` のままにしてよい
-- 完了時に `bridge/outbox/codex_report.md` を書く
-- 完了時に `mode` を `codex_done` にする
-- 完了時に `need_codex_run` を `false` にする
-- 失敗時は `error=true` と `error_message` を記録して無理に継続しない
-
-## 実装ルール
-
-- 目的外の変更を広げない
-- 必要なら最小限のテストや確認だけを追加する
-- 既存コードが読める範囲で自然に沿う
-- 不明点があっても危険な推測は避け、注意点に残す
-
-## 完了報告ルール
-
-- 報告先は `bridge/outbox/codex_report.md`
-- 形式は `bridge/codex_report_template.md` に従う
-- 日本語で簡潔にまとめる
+- `codex_running` への遷移は bridge launcher が行う
+- `codex_done` への遷移も bridge launcher が report 有無を見て行う
+- Codex は原則 `bridge/state.json` を更新しない

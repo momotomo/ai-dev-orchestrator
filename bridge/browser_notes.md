@@ -18,7 +18,8 @@
 
 ## 基本方針
 
-- 自動化は、Safari の現在タブにある ChatGPT チャットの送信と回収だけを担当する
+- bridge 全体は state 管理、ChatGPT 送信 / 回収、Codex 1 回起動、archive を担当する
+- Safari current tab を使う自動化部分は、ChatGPT 送信と回収だけを担当する
 - Safari 起動、ログイン、アカウント切り替え、新規チャット作成は行わない
 - Chrome は自動化対象にしない
 - Safari の現在タブが ChatGPT でない、対象会話 URL でない、または対象チャット識別に失敗した場合は停止する

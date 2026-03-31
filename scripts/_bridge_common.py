@@ -278,6 +278,12 @@ def read_last_report_text(state: Mapping[str, Any]) -> str:
     return "（前回の完了報告はまだありません）"
 
 
+def codex_report_is_ready(report_path: Path | None = None) -> bool:
+    candidate = report_path or (OUTBOX_DIR / "codex_report.md")
+    report_text = read_text(candidate).strip()
+    return bool(report_text and not report_text.startswith(PLACEHOLDER_REPORT_HEADER))
+
+
 def _extract_marked_block(report_text: str, start_marker: str, end_marker: str) -> str | None:
     start_index = report_text.find(start_marker)
     if start_index == -1:
