@@ -162,6 +162,19 @@ def is_completed_state(state: dict[str, Any]) -> bool:
     )
 
 
+def is_no_codex_decision_state(state: dict[str, Any]) -> bool:
+    return str(state.get("chatgpt_decision", "")).strip() in {"completed", "human_review", "need_info"}
+
+
+def no_codex_decision_reason(state: dict[str, Any]) -> str:
+    decision = str(state.get("chatgpt_decision", "")).strip()
+    if decision == "completed":
+        return "ChatGPT が Codex 不要の完了判断を返したため、正常停止しました。"
+    if decision in {"human_review", "need_info"}:
+        return "ChatGPT が Codex 不要の人確認判断を返したため、自動継続せず停止しました。"
+    return "ChatGPT が Codex 不要と判断したため停止しました。"
+
+
 def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
     return (
         state.get("mode"),
@@ -244,6 +257,13 @@ def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]
 
 def suggested_next_note(final_state: dict[str, Any]) -> str:
     action = describe_next_action(final_state)
+    if is_no_codex_decision_state(final_state):
+        note = str(final_state.get("chatgpt_decision_note", "")).strip()
+        if note:
+            return note
+        if str(final_state.get("chatgpt_decision", "")).strip() == "completed":
+            return "ChatGPT が完了判断を返したため、追加の Codex 実行は不要です。"
+        return "ChatGPT が Codex 不要と判断しました。人が次の判断を行ってください。"
     if action == "request_next_prompt":
         return "Safari の current tab を対象チャットに合わせたまま再実行してください。初回だけ、表示される例文をもとに本文入力を行います。"
     if action == "fetch_next_prompt":
@@ -641,9 +661,12 @@ def run(argv: list[str] | None = None) -> int:
         )
 
     if is_completed_state(initial_state):
+        reason = "completed 相当の状態です。追加の 1 手はありません。"
+        if is_no_codex_decision_state(initial_state):
+            reason = no_codex_decision_reason(initial_state)
         return finish(
             args=args,
-            reason="completed 相当の状態です。追加の 1 手はありません。",
+            reason=reason,
             steps=steps,
             warnings=warnings,
             initial_state=initial_state,
@@ -703,9 +726,12 @@ def run(argv: list[str] | None = None) -> int:
                 )
 
             if is_completed_state(before):
+                reason = "completed 相当の状態に到達しました。"
+                if is_no_codex_decision_state(before):
+                    reason = no_codex_decision_reason(before)
                 return finish(
                     args=args,
-                    reason="completed 相当の状態に到達しました。",
+                    reason=reason,
                     steps=steps,
                     warnings=warnings,
                     initial_state=initial_state,
@@ -718,9 +744,12 @@ def run(argv: list[str] | None = None) -> int:
                 history.append(
                     f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"
                 )
+                reason = "bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。"
+                if is_no_codex_decision_state(before):
+                    reason = no_codex_decision_reason(before)
                 return finish(
                     args=args,
-                    reason="bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。",
+                    reason=reason,
                     steps=steps,
                     warnings=warnings,
                     initial_state=initial_state,

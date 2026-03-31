@@ -124,7 +124,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "waiting_prompt_reply":
         status = present_bridge_status(state)
-        print(f"{status.label}です。ChatGPT 返答から次の Codex 用プロンプトを回収します。")
+        print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
     if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
@@ -158,8 +158,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。完了報告をもとに次フェーズ要求を送ります。")
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
 
-    status = present_bridge_status(state, blocked=True)
-    print(f"{status.label}です。今回の 1 手はありません。state.json を確認してください。")
+    status = present_bridge_status(state)
+    print(f"{status.label}です。今回の 1 手はありません。必要なら state.json の詳細を確認してください。")
     return 0
 
 
