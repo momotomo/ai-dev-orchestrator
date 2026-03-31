@@ -25,6 +25,8 @@ BROWSER_CONFIG_PATH = BRIDGE_DIR / "browser_config.json"
 PROJECT_CONFIG_PATH = BRIDGE_DIR / "project_config.json"
 PROMPT_REPLY_START = "===CHATGPT_PROMPT_REPLY==="
 PROMPT_REPLY_END = "===END_REPLY==="
+NO_CODEX_REPLY_START = "===CHATGPT_NO_CODEX==="
+NO_CODEX_REPLY_END = "===END_NO_CODEX==="
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
 BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
 CHATGPT_REQUEST_START = "===CHATGPT_REQUEST==="
@@ -151,6 +153,14 @@ class BridgeStatusView:
     detail: str
 
 
+@dataclass(frozen=True)
+class ChatGPTReplyDecision:
+    kind: str
+    body: str
+    note: str
+    raw_block: str
+
+
 def present_bridge_status(
     state: Mapping[str, Any],
     *,
@@ -161,12 +171,18 @@ def present_bridge_status(
     need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
     need_chatgpt_next = bool(state.get("need_chatgpt_next"))
     need_codex_run = bool(state.get("need_codex_run"))
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
 
     if bool(state.get("error")):
         return BridgeStatusView("異常", "error_message を確認してから再開します。")
 
     if blocked or stale_codex_running or STOP_PATH.exists() or bool(state.get("pause")):
         return BridgeStatusView("人確認待ち", "summary と note を確認してから再開します。")
+
+    if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
+        detail = chatgpt_decision_note or "ChatGPT が Codex 不要と判断しました。人が次の判断を行います。"
+        return BridgeStatusView("人確認待ち", detail)
 
     if mode == "idle" and need_chatgpt_prompt:
         return BridgeStatusView("初回入力待ち", "最初に ChatGPT へ送る本文を入力します。")
@@ -189,7 +205,11 @@ def present_bridge_status(
     if mode == "idle" and need_chatgpt_next:
         return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
 
-    if mode == "completed" or (mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run):
+    if mode == "completed":
+        detail = chatgpt_decision_note or "追加の操作は不要です。"
+        return BridgeStatusView("完了", detail)
+
+    if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
         return BridgeStatusView("完了", "追加の操作は不要です。")
 
     return BridgeStatusView("人確認待ち", "内部状態の詳細を確認してから再開します。")
@@ -702,6 +722,10 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- pause: {state.get('pause', False)}",
         f"- error: {state.get('error', False)}",
     ]
+    if state.get("chatgpt_decision"):
+        fields.append(f"- chatgpt_decision: {state['chatgpt_decision']}")
+    if state.get("chatgpt_decision_note"):
+        fields.append(f"- chatgpt_decision_note: {state['chatgpt_decision_note']}")
     if state.get("error_message"):
         fields.append(f"- error_message: {state['error_message']}")
     return "\n".join(fields)
@@ -769,7 +793,44 @@ def normalize_prompt_body(raw_body: str) -> str:
     return body + "\n"
 
 
-def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -> str:
+def normalize_no_codex_reason(raw_reason: str) -> str:
+    normalized = raw_reason.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized.startswith("status:"):
+        normalized = normalized.split(":", 1)[1].strip()
+    aliases = {
+        "completed": "completed",
+        "complete": "completed",
+        "done": "completed",
+        "完了": "completed",
+        "human_review": "human_review",
+        "manual_review": "human_review",
+        "review": "human_review",
+        "人確認待ち": "human_review",
+        "need_info": "need_info",
+        "need_information": "need_info",
+        "more_info": "need_info",
+        "追加情報待ち": "need_info",
+        "情報待ち": "need_info",
+    }
+    reason = aliases.get(normalized, normalized)
+    if reason not in {"completed", "human_review", "need_info"}:
+        raise BridgeError(
+            "CHATGPT_NO_CODEX ブロックの先頭は completed / human_review / need_info のいずれかにしてください。"
+        )
+    return reason
+
+
+def parse_no_codex_block(raw_body: str) -> tuple[str, str]:
+    lines = [line.strip() for line in raw_body.strip().splitlines()]
+    non_empty = [line for line in lines if line]
+    if not non_empty:
+        raise BridgeError("CHATGPT_NO_CODEX ブロックが空でした。")
+    reason = normalize_no_codex_reason(non_empty[0])
+    note = "\n".join(non_empty[1:]).strip()
+    return reason, note
+
+
+def extract_last_chatgpt_reply(raw_text: str, *, after_text: str | None = None) -> ChatGPTReplyDecision:
     search_start = 0
     if after_text:
         anchor = raw_text.rfind(after_text)
@@ -780,28 +841,46 @@ def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -
         if last_user_turn != -1:
             search_start = last_user_turn
 
-    pattern = re.compile(
-        rf"{re.escape(PROMPT_REPLY_START)}(.*?){re.escape(PROMPT_REPLY_END)}",
-        re.DOTALL,
-    )
-    assistant_matches: list[str] = []
-    fallback_matches: list[str] = []
-    for match in pattern.finditer(raw_text, search_start):
-        fallback_matches.append(match.group(1))
-        assistant_index = raw_text.rfind("ChatGPT:", search_start, match.start())
-        user_index = raw_text.rfind("あなた:", search_start, match.start())
-        if assistant_index > user_index:
-            assistant_matches.append(match.group(1))
+    candidate_specs = [
+        ("codex_prompt", PROMPT_REPLY_START, PROMPT_REPLY_END),
+        ("no_codex", NO_CODEX_REPLY_START, NO_CODEX_REPLY_END),
+    ]
+    assistant_matches: list[tuple[int, str, str]] = []
+    fallback_matches: list[tuple[int, str, str]] = []
 
-    if search_start > 0:
-        matches = assistant_matches
-    else:
-        matches = assistant_matches or fallback_matches
+    for kind, start_marker, end_marker in candidate_specs:
+        pattern = re.compile(
+            rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
+            re.DOTALL,
+        )
+        for match in pattern.finditer(raw_text, search_start):
+            entry = (match.start(), kind, match.group(1))
+            fallback_matches.append(entry)
+            assistant_index = raw_text.rfind("ChatGPT:", search_start, match.start())
+            user_index = raw_text.rfind("あなた:", search_start, match.start())
+            if assistant_index > user_index:
+                assistant_matches.append(entry)
+
+    matches = assistant_matches if search_start > 0 else (assistant_matches or fallback_matches)
     if not matches:
         if after_text:
-            raise BridgeError("直近の prompt request 以降に CHATGPT_PROMPT_REPLY ブロックを抽出できませんでした。")
-        raise BridgeError("直近のユーザー発話以降に CHATGPT_PROMPT_REPLY ブロックを抽出できませんでした。")
-    return normalize_prompt_body(matches[-1])
+            raise BridgeError("直近の prompt request 以降に有効な ChatGPT 返答ブロックを抽出できませんでした。")
+        raise BridgeError("直近のユーザー発話以降に有効な ChatGPT 返答ブロックを抽出できませんでした。")
+
+    _, kind, raw_body = sorted(matches, key=lambda item: item[0])[-1]
+    if kind == "codex_prompt":
+        body = normalize_prompt_body(raw_body)
+        return ChatGPTReplyDecision("codex_prompt", body, "", body)
+
+    reason, note = parse_no_codex_block(raw_body)
+    return ChatGPTReplyDecision(reason, "", note, raw_body.strip() + "\n")
+
+
+def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -> str:
+    decision = extract_last_chatgpt_reply(raw_text, after_text=after_text)
+    if decision.kind != "codex_prompt":
+        raise BridgeError("CHATGPT_PROMPT_REPLY ではなく CHATGPT_NO_CODEX が返りました。")
+    return decision.body
 
 
 def _apple_event_timeout_message(target: str) -> str:
@@ -1322,7 +1401,7 @@ def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
                     ) from exc
                 raise
             try:
-                extract_last_prompt_reply(latest_text, after_text=request_text or None)
+                extract_last_chatgpt_reply(latest_text, after_text=request_text or None)
                 if timeout_attempts > 0:
                     print(
                         f"[retry] fetch_next_prompt は Safari timeout 後の再試行で回復しました。"
@@ -1338,7 +1417,7 @@ def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
             dump_path = log_text("raw_chatgpt_prompt_dump", latest_text, suffix="txt")
             dump_note = f" raw dump: {repo_relative(dump_path)}"
         raise BridgeError(
-            "制限時間内に CHATGPT_PROMPT_REPLY ブロックを確認できませんでした。"
+            "制限時間内に有効な ChatGPT 返答ブロックを確認できませんでした。"
             f" 対象チャットを確認してください: {front_tab.get('title', '')} {front_tab.get('url', '')}"
             f"{dump_note}"
         )

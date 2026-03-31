@@ -19,6 +19,8 @@
   bridge が Codex を 1 回起動し、report 待ちの状態。live 再開前に長く残っている時は stale runtime 候補として扱い、report / blocked 要因 / 実 worker 継続中かを先に確認する。
 - `codex_done`
   report がそろい、archive へ進める状態。
+- `awaiting_user`
+  ChatGPT が `Codex 不要` と判断し、人の確認や追加入力待ちで止まる状態。
 
 ## 停止系の扱い
 
@@ -29,14 +31,14 @@
 - stale `codex_running`
   `mode=codex_running` のまま report が無く、`pause` / `error` / `bridge/STOP` でもない残留 state。blocked ではないが、自動継続前に人が安全な再開点へ戻す。
 - `completed`
-  専用 mode は置かず、`idle` かつ pending フラグなしを完了相当とみなす。
+  ChatGPT が `Codex 不要` の完了判断を返した時に到達する正常完了状態。
 
 ## 代表的な遷移
 
 1. `idle` + `need_chatgpt_prompt=true`
    bridge が `request_next_prompt.py` を実行し、`waiting_prompt_reply`
 2. `waiting_prompt_reply`
-   bridge が `fetch_next_prompt.py` を実行し、`ready_for_codex`
+   bridge が `fetch_next_prompt.py` を実行し、Codex prompt があれば `ready_for_codex`、`Codex 不要` なら `completed` または `awaiting_user`
 3. `ready_for_codex`
    bridge が `launch_codex_once.py` を実行し、起動前に `codex_running`
 4. `codex_running`

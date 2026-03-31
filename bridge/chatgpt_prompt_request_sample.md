@@ -27,8 +27,15 @@
 - next_todo: export 改善、テスト追加、ドキュメント整理のいずれかから、最も小さく安全に進められる 1 フェーズを選んでください
 - open_questions: 技術スタックは固定しない。UI 変更が必要でも最小差分に留める
 
-返答はこのブロックだけにしてください。
+返答は次のどちらか 1 つのブロックだけにしてください。
 
 ===CHATGPT_PROMPT_REPLY===
 [Codex 用 1 フェーズ prompt 本文]
 ===END_REPLY===
+
+または
+
+===CHATGPT_NO_CODEX===
+completed | human_review | need_info
+[必要なら短い理由]
+===END_NO_CODEX===

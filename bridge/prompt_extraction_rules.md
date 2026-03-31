@@ -1,6 +1,6 @@
 # Prompt Extraction Rules
 
-`fetch_next_prompt.py` は Safari の現在 ChatGPT 対象タブ DOM から、最後に出現した次のブロックだけを採用する。
+`fetch_next_prompt.py` は Safari の現在 ChatGPT 対象タブ DOM から、最後に出現した次のいずれかのブロックを採用する。
 
 ```text
 ===CHATGPT_PROMPT_REPLY===
@@ -8,10 +8,20 @@
 ===END_REPLY===
 ```
 
+または
+
+```text
+===CHATGPT_NO_CODEX===
+completed | human_review | need_info
+[必要なら短い理由]
+===END_NO_CODEX===
+```
+
 ## 抽出ルール
 
-- `===CHATGPT_PROMPT_REPLY===` と `===END_REPLY===` の組を複数見つけた場合でも、直近のユーザー発話以降にある ChatGPT 側の 1 組を優先する
+- `CHATGPT_PROMPT_REPLY` または `CHATGPT_NO_CODEX` の組を複数見つけた場合でも、直近のユーザー発話以降にある ChatGPT 側の 1 組を優先する
 - ユーザー request テンプレート内に含まれる `CHATGPT_PROMPT_REPLY` は採用しない
+- `CHATGPT_NO_CODEX` の先頭行は `completed` / `human_review` / `need_info` のいずれかにする
 - マーカー外の文章は無視する
 - ブロック先頭に `Codex Prompt` 見出しがあれば保存時に取り除いてよい
 - 保存先は `bridge/inbox/codex_prompt.md`
@@ -26,6 +36,7 @@
 
 - 開始マーカーが見つからない
 - 終了マーカーが見つからない
-- 抽出後の本文が空
+- `CHATGPT_PROMPT_REPLY` の本文が空
+- `CHATGPT_NO_CODEX` の先頭行が不正
 
 上記のいずれかなら `state.error=true` と `error_message` を記録して停止する

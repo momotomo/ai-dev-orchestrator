@@ -5,11 +5,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_prompt_reply, guarded_main, log_text, read_latest_prompt_request_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
+from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_chatgpt_reply, guarded_main, log_text, read_latest_prompt_request_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の Codex Prompt を抽出します。")
+    parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の ChatGPT 返答ブロックを抽出します。")
     parser.add_argument(
         "--raw-file",
         default="",
@@ -34,26 +34,49 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     else:
         raw_text = wait_for_prompt_reply_text(timeout_seconds=args.timeout_seconds or None)
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
-    prompt_body = extract_last_prompt_reply(raw_text, after_text=request_text or None)
-    prompt_log = log_text("extracted_codex_prompt", prompt_body)
-
-    prompt_path = INBOX_DIR / "codex_prompt.md"
-    write_text(prompt_path, prompt_body)
-
+    decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
     mutable_state = clear_error_fields(dict(state))
+
+    if decision.kind == "codex_prompt":
+        prompt_log = log_text("extracted_codex_prompt", decision.body)
+        prompt_path = INBOX_DIR / "codex_prompt.md"
+        write_text(prompt_path, decision.body)
+        mutable_state.update(
+            {
+                "mode": "ready_for_codex",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": True,
+                "chatgpt_decision": "",
+                "chatgpt_decision_note": "",
+                "last_prompt_file": repo_relative(prompt_path),
+            }
+        )
+        save_state(mutable_state)
+        print(f"raw dump: {raw_log}")
+        print(f"prompt log: {prompt_log}")
+        print(f"saved prompt: {prompt_path}")
+        return 0
+
+    decision_log = log_text("extracted_no_codex_reply", decision.raw_block or decision.note, suffix="md")
     mutable_state.update(
         {
-            "mode": "ready_for_codex",
             "need_chatgpt_prompt": False,
             "need_chatgpt_next": False,
-            "need_codex_run": True,
-            "last_prompt_file": repo_relative(prompt_path),
+            "need_codex_run": False,
+            "chatgpt_decision": decision.kind,
+            "chatgpt_decision_note": decision.note,
+            "last_prompt_file": "",
         }
     )
+    if decision.kind == "completed":
+        mutable_state["mode"] = "completed"
+    else:
+        mutable_state["mode"] = "awaiting_user"
     save_state(mutable_state)
     print(f"raw dump: {raw_log}")
-    print(f"prompt log: {prompt_log}")
-    print(f"saved prompt: {prompt_path}")
+    print(f"decision log: {decision_log}")
+    print(f"ChatGPT は Codex 不要と判断しました: {decision.kind}")
     return 0
 
 
