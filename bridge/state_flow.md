@@ -16,7 +16,7 @@
 - `ready_for_codex`
   `bridge/inbox/codex_prompt.md` がそろい、bridge が Codex worker を起動できる状態。
 - `codex_running`
-  bridge が Codex を 1 回起動し、report 待ちの状態。
+  bridge が Codex を 1 回起動し、report 待ちの状態。live 再開前に長く残っている時は stale runtime 候補として扱い、report / blocked 要因 / 実 worker 継続中かを先に確認する。
 - `codex_done`
   report がそろい、archive へ進める状態。
 
@@ -26,6 +26,8 @@
   運用上の一時停止。bridge は次へ進めない。
 - `error=true`
   原因未解消の停止。`error_message` を確認してから再開する。
+- stale `codex_running`
+  `mode=codex_running` のまま report が無く、`pause` / `error` / `bridge/STOP` でもない残留 state。blocked ではないが、自動継続前に人が安全な再開点へ戻す。
 - `completed`
   専用 mode は置かず、`idle` かつ pending フラグなしを完了相当とみなす。
 
@@ -63,7 +65,7 @@
 
 - `waiting_prompt_reply`: ChatGPT 返答後に bridge を再実行
 - `ready_for_codex`: bridge 再実行で Codex worker を 1 回起動
-- `codex_running`: report が出るまで待つ
+- `codex_running`: 直前に起動した worker なら report が出るまで待つ。長時間放置後に report も blocked 要因も無ければ stale runtime として整理する
 - `codex_done`: bridge 再実行で archive
 - `error=true`: 原因を直して error を解消後に再実行
 

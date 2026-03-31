@@ -1,9 +1,21 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Runtime artifacts
 logs/*
 !logs/.gitkeep
 bridge/history/*
 !bridge/history/.gitkeep
+bridge/inbox/*
+!bridge/inbox/.gitkeep
+bridge/outbox/*
+!bridge/outbox/.gitkeep
+bridge/state.json
+
+# Local project-specific config
+bridge/project_config.json
+
+# Local browser / stop files
 bridge/STOP
 bridge/.chrome-profile/
