@@ -12,6 +12,7 @@
 - 今回の 1 フェーズだけ実装する
 - 必要なら最小限の確認だけを行う
 - `bridge/codex_report_template.md` に沿って `bridge/outbox/codex_report.md` を書く
+- 外部 worker repo 実行で `bridge/outbox/codex_report.md` が書けない時だけ、launch prompt に出ている fallback report path へ同内容を書く
 - report を書いたら終了する
 
 ## Codex がやらないこと

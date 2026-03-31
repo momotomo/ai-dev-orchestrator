@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -21,6 +22,7 @@ LOGS_DIR = ROOT_DIR / "logs"
 STATE_PATH = BRIDGE_DIR / "state.json"
 STOP_PATH = BRIDGE_DIR / "STOP"
 BROWSER_CONFIG_PATH = BRIDGE_DIR / "browser_config.json"
+PROJECT_CONFIG_PATH = BRIDGE_DIR / "project_config.json"
 PROMPT_REPLY_START = "===CHATGPT_PROMPT_REPLY==="
 PROMPT_REPLY_END = "===END_REPLY==="
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
@@ -48,9 +50,37 @@ DEFAULT_BROWSER_CONFIG: dict[str, Any] = {
     "conversation_url_keywords": ["/c/"],
     "chat_hint": "",
     "require_chat_hint": False,
-    "reply_timeout_seconds": 90,
+    "fetch_timeout_seconds": 1800,
+    "reply_timeout_seconds": 1800,
     "poll_interval_seconds": 2,
+    "apple_event_timeout_retry_count": 1,
+    "apple_event_timeout_retry_delay_seconds": 2,
+    "runner_heartbeat_seconds": 10,
 }
+
+DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
+    "project_name": ROOT_DIR.name,
+    "bridge_runtime_root": ".",
+    "worker_repo_path": ".",
+    "worker_repo_marker_mode": "strict",
+    "worker_repo_markers": [],
+    "codex_bin": "codex",
+    "codex_model": "",
+    "codex_timeout_seconds": 7200,
+    "report_request_next_todo": "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。",
+    "report_request_open_questions": "未解決事項があれば安全側で補ってください。",
+}
+
+REPO_LIKE_MARKERS = [
+    ".git",
+    ".github",
+    "package.json",
+    "pyproject.toml",
+    "Cargo.toml",
+]
+
+PROJECT_CONFIG_WARNING_KEY = "_project_config_warnings"
+WORKER_REPO_MARKER_MODES = {"strict", "warning"}
 
 COMPOSER_SELECTORS = [
     "#prompt-textarea",
@@ -69,6 +99,11 @@ SEND_BUTTON_SELECTORS = [
 ]
 
 APPLE_EVENT_TIMEOUT_SECONDS = 15
+APPLE_EVENT_TIMEOUT_MARKERS = (
+    "AppleEvent timeout",
+    "AppleEventがタイムアウト",
+    "AppleEvent timed out",
+)
 
 
 class BridgeError(Exception):
@@ -191,7 +226,11 @@ def now_stamp() -> str:
 
 
 def repo_relative(path: Path) -> str:
-    return path.resolve().relative_to(ROOT_DIR).as_posix()
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(ROOT_DIR).as_posix()
+    except ValueError:
+        return str(resolved)
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -222,6 +261,7 @@ def read_latest_prompt_request_text() -> str:
 
 def load_browser_config() -> dict[str, Any]:
     config = DEFAULT_BROWSER_CONFIG.copy()
+    loaded: dict[str, Any] = {}
     if BROWSER_CONFIG_PATH.exists():
         loaded = json.loads(BROWSER_CONFIG_PATH.read_text(encoding="utf-8"))
         config.update(loaded)
@@ -234,9 +274,370 @@ def load_browser_config() -> dict[str, Any]:
     else:
         config["conversation_url_keywords"] = list(DEFAULT_BROWSER_CONFIG["conversation_url_keywords"])
 
+    if "fetch_timeout_seconds" in loaded and "reply_timeout_seconds" not in loaded:
+        config["reply_timeout_seconds"] = config["fetch_timeout_seconds"]
+    elif "reply_timeout_seconds" in loaded and "fetch_timeout_seconds" not in loaded:
+        config["fetch_timeout_seconds"] = config["reply_timeout_seconds"]
+    elif "fetch_timeout_seconds" not in config and "reply_timeout_seconds" in config:
+        config["fetch_timeout_seconds"] = config["reply_timeout_seconds"]
+    if "reply_timeout_seconds" not in config and "fetch_timeout_seconds" in config:
+        config["reply_timeout_seconds"] = config["fetch_timeout_seconds"]
+
+    config["fetch_timeout_seconds"] = _coerce_browser_int(
+        config.get("fetch_timeout_seconds", DEFAULT_BROWSER_CONFIG["fetch_timeout_seconds"]),
+        default=int(DEFAULT_BROWSER_CONFIG["fetch_timeout_seconds"]),
+        minimum=1,
+    )
+    config["reply_timeout_seconds"] = _coerce_browser_int(
+        config.get("reply_timeout_seconds", config["fetch_timeout_seconds"]),
+        default=int(config["fetch_timeout_seconds"]),
+        minimum=1,
+    )
+    config["poll_interval_seconds"] = _coerce_browser_float(
+        config.get("poll_interval_seconds", DEFAULT_BROWSER_CONFIG["poll_interval_seconds"]),
+        default=float(DEFAULT_BROWSER_CONFIG["poll_interval_seconds"]),
+        minimum=0.1,
+    )
+    config["apple_event_timeout_retry_count"] = _coerce_browser_int(
+        config.get("apple_event_timeout_retry_count", DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_count"]),
+        default=int(DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_count"]),
+        minimum=0,
+    )
+    config["apple_event_timeout_retry_delay_seconds"] = _coerce_browser_float(
+        config.get(
+            "apple_event_timeout_retry_delay_seconds",
+            DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_delay_seconds"],
+        ),
+        default=float(DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_delay_seconds"]),
+        minimum=0.0,
+    )
+    config["runner_heartbeat_seconds"] = _coerce_browser_float(
+        config.get("runner_heartbeat_seconds", DEFAULT_BROWSER_CONFIG["runner_heartbeat_seconds"]),
+        default=float(DEFAULT_BROWSER_CONFIG["runner_heartbeat_seconds"]),
+        minimum=0.1,
+    )
+
     if "chat_url" in config and "chat_url_prefix" not in config:
         config["chat_url_prefix"] = config["chat_url"]
     return config
+
+
+def _coerce_browser_int(raw_value: Any, *, default: int, minimum: int) -> int:
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return default
+    return value
+
+
+def _coerce_browser_float(raw_value: Any, *, default: float, minimum: float) -> float:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if value < minimum:
+        return default
+    return value
+
+
+def browser_fetch_timeout_seconds(config: Mapping[str, Any] | None = None) -> int:
+    loaded = dict(config or load_browser_config())
+    return int(
+        loaded.get(
+            "fetch_timeout_seconds",
+            loaded.get("reply_timeout_seconds", DEFAULT_BROWSER_CONFIG["fetch_timeout_seconds"]),
+        )
+    )
+
+
+def browser_runner_heartbeat_seconds(config: Mapping[str, Any] | None = None) -> float:
+    loaded = dict(config or load_browser_config())
+    return float(loaded.get("runner_heartbeat_seconds", DEFAULT_BROWSER_CONFIG["runner_heartbeat_seconds"]))
+
+
+def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise BridgeError(
+            f"{repo_relative(path)} の JSON を読めませんでした。"
+            f" {label} を正しい JSON オブジェクトへ修正してください: {exc.msg}"
+        ) from exc
+
+    if not isinstance(loaded, dict):
+        raise BridgeError(
+            f"{repo_relative(path)} は JSON オブジェクトである必要があります。"
+            f" {label} のトップレベルを {{...}} 形式に修正してください。"
+        )
+    return loaded
+
+
+def _require_project_config_text(
+    config: dict[str, Any],
+    key: str,
+    *,
+    allow_empty: bool = False,
+) -> None:
+    value = config.get(key, DEFAULT_PROJECT_CONFIG[key])
+    if not isinstance(value, str):
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `{key}` は文字列で指定してください。"
+        )
+
+    normalized = value.strip()
+    if not allow_empty and not normalized:
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `{key}` が空です。"
+            " 対象案件向けの値を入れてください。"
+        )
+    config[key] = normalized
+
+
+def _add_project_config_warning(config: dict[str, Any], message: str) -> None:
+    warnings = config.setdefault(PROJECT_CONFIG_WARNING_KEY, [])
+    if isinstance(warnings, list):
+        warnings.append(message)
+
+
+def project_config_warnings(config: Mapping[str, Any]) -> list[str]:
+    warnings = config.get(PROJECT_CONFIG_WARNING_KEY, [])
+    if not isinstance(warnings, list):
+        return []
+    return [str(message) for message in warnings if str(message).strip()]
+
+
+def print_project_config_warnings(config: Mapping[str, Any]) -> None:
+    if os.environ.get("BRIDGE_SUPPRESS_PROJECT_WARNINGS") == "1":
+        return
+    for message in project_config_warnings(config):
+        print(f"[warning] {message}")
+
+
+def _resolve_project_path(
+    raw_value: Any,
+    *,
+    key_name: str,
+    relative_base: Path,
+    empty_hint: str,
+) -> Path:
+    if not isinstance(raw_value, str):
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `{key_name}` は文字列で指定してください。"
+        )
+
+    normalized = raw_value.strip()
+    if not normalized:
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `{key_name}` が空です。"
+            f" {empty_hint}"
+        )
+
+    repo_path = Path(normalized).expanduser()
+    if not repo_path.is_absolute():
+        repo_path = (relative_base / repo_path).resolve()
+    else:
+        repo_path = repo_path.resolve()
+    return repo_path
+
+
+def _raw_bridge_runtime_root_value(config: Mapping[str, Any]) -> Any:
+    if "bridge_runtime_root" in config:
+        return config["bridge_runtime_root"]
+    if "repo_path" in config:
+        return config["repo_path"]
+    return DEFAULT_PROJECT_CONFIG["bridge_runtime_root"]
+
+
+def _validate_bridge_runtime_root(config: dict[str, Any]) -> None:
+    runtime_root = _resolve_project_path(
+        _raw_bridge_runtime_root_value(config),
+        key_name="bridge_runtime_root",
+        relative_base=ROOT_DIR,
+        empty_hint="現在の bridge runtime を使うなら `.` を指定してください。",
+    )
+
+    if not runtime_root.exists():
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `bridge_runtime_root` が存在しません: {runtime_root}"
+            " 現在の bridge runtime root を指定してください。"
+        )
+    if not runtime_root.is_dir():
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `bridge_runtime_root` はディレクトリである必要があります: {runtime_root}"
+        )
+
+    expected_bridge_dir = (runtime_root / "bridge").resolve()
+    if expected_bridge_dir != BRIDGE_DIR.resolve():
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `bridge_runtime_root`={runtime_root} は現在の bridge 配置と一致しません。"
+            f" 期待値: {ROOT_DIR}"
+            " 現在の実装では bridge runtime はこの workspace に固定です。"
+            " 同居運用なら `bridge_runtime_root` を `.` にし、別 repo を worker にしたい場合は `worker_repo_path` 側だけを変更してください。"
+        )
+
+    config["bridge_runtime_root"] = str(runtime_root)
+    config["repo_path"] = str(runtime_root)
+
+
+def _validate_worker_repo_marker_mode(config: dict[str, Any]) -> None:
+    raw_value = config.get("worker_repo_marker_mode", DEFAULT_PROJECT_CONFIG["worker_repo_marker_mode"])
+    if not isinstance(raw_value, str):
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_marker_mode` は文字列で指定してください。"
+        )
+
+    normalized = raw_value.strip().lower()
+    if normalized not in WORKER_REPO_MARKER_MODES:
+        allowed = ", ".join(sorted(WORKER_REPO_MARKER_MODES))
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_marker_mode` は {allowed} のいずれかで指定してください。"
+        )
+    config["worker_repo_marker_mode"] = normalized
+
+
+def _validate_worker_repo_markers(config: dict[str, Any]) -> None:
+    raw_value = config.get("worker_repo_markers", DEFAULT_PROJECT_CONFIG["worker_repo_markers"])
+    if raw_value is None:
+        config["worker_repo_markers"] = []
+        return
+    if not isinstance(raw_value, list):
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_markers` は配列で指定してください。"
+        )
+
+    normalized_markers: list[str] = []
+    for index, marker in enumerate(raw_value):
+        if not isinstance(marker, str):
+            raise BridgeError(
+                f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_markers[{index}]` は文字列で指定してください。"
+            )
+        normalized = marker.strip()
+        if not normalized:
+            raise BridgeError(
+                f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_markers[{index}]` が空です。"
+                " file / dir 名を 1 つずつ入れてください。"
+            )
+        if normalized not in normalized_markers:
+            normalized_markers.append(normalized)
+
+    config["worker_repo_markers"] = normalized_markers
+
+
+def _configured_worker_repo_markers(config: Mapping[str, Any]) -> list[str]:
+    configured = config.get("worker_repo_markers", [])
+    if not isinstance(configured, list):
+        return list(REPO_LIKE_MARKERS)
+
+    merged_markers = list(REPO_LIKE_MARKERS)
+    for marker in configured:
+        normalized = str(marker).strip()
+        if normalized and normalized not in merged_markers:
+            merged_markers.append(normalized)
+    return merged_markers
+
+
+def _validate_worker_repo_path(config: dict[str, Any]) -> None:
+    runtime_root = Path(str(config["bridge_runtime_root"])).resolve()
+    raw_value = config.get("worker_repo_path", DEFAULT_PROJECT_CONFIG["worker_repo_path"])
+    worker_path = _resolve_project_path(
+        raw_value,
+        key_name="worker_repo_path",
+        relative_base=runtime_root,
+        empty_hint="同居運用なら `.` を、別 repo を指定するならその path を入れてください。",
+    )
+
+    if not worker_path.exists():
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_path` が存在しません: {worker_path}"
+            " Codex が作業する対象 repo root を指定してください。"
+        )
+    if not worker_path.is_dir():
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_path` はディレクトリである必要があります: {worker_path}"
+        )
+
+    if worker_path != runtime_root:
+        visible_entries = [entry for entry in worker_path.iterdir() if entry.name != ".DS_Store"]
+        if not visible_entries:
+            raise BridgeError(
+                f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_path` が空ディレクトリを指しています: {worker_path}"
+                " 実際に Codex が作業する対象 repo root を指定してください。"
+            )
+
+        configured_markers = _configured_worker_repo_markers(config)
+        matched_markers = [marker for marker in configured_markers if (worker_path / marker).exists()]
+        if not matched_markers:
+            marker_text = ", ".join(configured_markers)
+            message = (
+                f"{repo_relative(PROJECT_CONFIG_PATH)} の `worker_repo_path` 直下に repo root らしい印が見つかりません: {worker_path}"
+                f" 確認している印: {marker_text}"
+                " 対象 repo root を指定しているか確認してください。"
+            )
+            if str(config.get("worker_repo_marker_mode", "strict")) == "warning":
+                _add_project_config_warning(
+                    config,
+                    message + " marker が弱い正当な repo の場合だけ `worker_repo_marker_mode=warning` のまま続行してください。",
+                )
+            else:
+                raise BridgeError(
+                    message
+                    + " marker が弱い正当な repo を扱う場合だけ `worker_repo_marker_mode=warning` を検討してください。"
+                )
+
+    config["worker_repo_path"] = str(worker_path)
+
+
+def _validate_project_timeout(config: dict[str, Any]) -> None:
+    raw_value = config.get("codex_timeout_seconds", DEFAULT_PROJECT_CONFIG["codex_timeout_seconds"])
+    try:
+        timeout = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `codex_timeout_seconds` は正の整数で指定してください。"
+        ) from exc
+
+    if timeout <= 0:
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `codex_timeout_seconds` は 1 以上で指定してください。"
+        )
+    config["codex_timeout_seconds"] = timeout
+
+
+def load_project_config() -> dict[str, Any]:
+    config = DEFAULT_PROJECT_CONFIG.copy()
+    if PROJECT_CONFIG_PATH.exists():
+        loaded = _load_json_object(PROJECT_CONFIG_PATH, label="project config")
+        config.update(loaded)
+    config[PROJECT_CONFIG_WARNING_KEY] = []
+
+    _require_project_config_text(config, "project_name")
+    _validate_bridge_runtime_root(config)
+    _validate_worker_repo_marker_mode(config)
+    _validate_worker_repo_markers(config)
+    _validate_worker_repo_path(config)
+    _require_project_config_text(config, "codex_bin")
+    _require_project_config_text(config, "codex_model", allow_empty=True)
+    _validate_project_timeout(config)
+    _require_project_config_text(config, "report_request_next_todo")
+    _require_project_config_text(config, "report_request_open_questions")
+
+    return config
+
+
+def bridge_runtime_root(config: Mapping[str, Any] | None = None) -> Path:
+    loaded = dict(config or load_project_config())
+    return Path(str(loaded.get("bridge_runtime_root", ROOT_DIR))).expanduser().resolve()
+
+
+def worker_repo_path(config: Mapping[str, Any] | None = None) -> Path:
+    loaded = dict(config or load_project_config())
+    return Path(str(loaded.get("worker_repo_path", bridge_runtime_root(loaded)))).expanduser().resolve()
+
+
+def project_repo_path(config: Mapping[str, Any] | None = None) -> Path:
+    return worker_repo_path(config)
 
 
 def state_snapshot(state: Mapping[str, Any]) -> str:
@@ -356,8 +757,21 @@ def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -
 def _apple_event_timeout_message(target: str) -> str:
     return (
         f"{target} が AppleEvent timeout で止まりました。"
-        " Safari の現在タブが応答していないか、macOS の Automation 許可が未確定の可能性があります。"
+        " Safari の現在タブが応答していないか、対象チャットが開かれていないか、"
+        " `Allow JavaScript from Apple Events` が無効か、macOS の Automation 許可が未確定の可能性があります。"
         " 初回は許可ダイアログで許可し、Safari の対象チャットを前面表示したまま再実行してください。"
+    )
+
+
+def is_apple_event_timeout_text(message: str) -> bool:
+    normalized = str(message)
+    return any(marker in normalized for marker in APPLE_EVENT_TIMEOUT_MARKERS)
+
+
+def safari_timeout_checklist_text() -> str:
+    return (
+        "Safari の current tab、対象チャット表示、`Allow JavaScript from Apple Events`、"
+        "macOS Automation を確認してください。"
     )
 
 
@@ -823,15 +1237,48 @@ def read_chatgpt_conversation() -> str:
 
 def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
     with open_chatgpt_page(reset_chat=False) as (_, page, config, front_tab):
-        timeout = int(timeout_seconds or config.get("reply_timeout_seconds", 90))
+        timeout = int(timeout_seconds or browser_fetch_timeout_seconds(config))
         poll_seconds = float(config.get("poll_interval_seconds", 2))
+        retry_count = int(config.get("apple_event_timeout_retry_count", DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_count"]))
+        retry_delay_seconds = float(
+            config.get(
+                "apple_event_timeout_retry_delay_seconds",
+                DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_delay_seconds"],
+            )
+        )
         request_text = read_latest_prompt_request_text()
         deadline = time.time() + timeout
         latest_text = ""
+        timeout_attempts = 0
         while time.time() < deadline:
-            latest_text = read_chatgpt_conversation_dom(page)
+            try:
+                latest_text = read_chatgpt_conversation_dom(page)
+            except BridgeError as exc:
+                if is_apple_event_timeout_text(str(exc)):
+                    timeout_attempts += 1
+                    total_attempts = retry_count + 1
+                    if timeout_attempts <= retry_count:
+                        print(
+                            f"[retry] fetch_next_prompt で Safari timeout を検知しました。"
+                            f" retry {timeout_attempts}/{retry_count} を {retry_delay_seconds:.1f}s 後に行います。",
+                            flush=True,
+                        )
+                        if retry_delay_seconds > 0:
+                            page.wait_for_timeout(int(retry_delay_seconds * 1000))
+                        continue
+                    raise BridgeError(
+                        f"{exc} fetch_next_prompt では Safari timeout を {timeout_attempts}/{total_attempts} 回確認しました。"
+                        f" {safari_timeout_checklist_text()}"
+                    ) from exc
+                raise
             try:
                 extract_last_prompt_reply(latest_text, after_text=request_text or None)
+                if timeout_attempts > 0:
+                    print(
+                        f"[retry] fetch_next_prompt は Safari timeout 後の再試行で回復しました。"
+                        f" timeout={timeout_attempts} 回",
+                        flush=True,
+                    )
                 return latest_text
             except BridgeError:
                 pass

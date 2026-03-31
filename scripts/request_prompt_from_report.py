@@ -4,16 +4,25 @@ from __future__ import annotations
 import argparse
 import sys
 
-from _bridge_common import BRIDGE_DIR, build_chatgpt_request, clear_error_fields, guarded_main, log_text, read_last_report_text, send_to_chatgpt, save_state
+from _bridge_common import BRIDGE_DIR, build_chatgpt_request, clear_error_fields, guarded_main, load_project_config, log_text, read_last_report_text, send_to_chatgpt, save_state
 
 DEFAULT_NEXT_TODO = "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。"
 DEFAULT_OPEN_QUESTIONS = "未解決事項があれば安全側で補ってください。"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    project_config = load_project_config()
     parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブへ完了報告ベースの prompt request を送信します。")
-    parser.add_argument("--next-todo", default=DEFAULT_NEXT_TODO, help="次にやりたいこと")
-    parser.add_argument("--open-questions", default=DEFAULT_OPEN_QUESTIONS, help="未解決事項")
+    parser.add_argument(
+        "--next-todo",
+        default=str(project_config.get("report_request_next_todo", DEFAULT_NEXT_TODO)),
+        help="次にやりたいこと",
+    )
+    parser.add_argument(
+        "--open-questions",
+        default=str(project_config.get("report_request_open_questions", DEFAULT_OPEN_QUESTIONS)),
+        help="未解決事項",
+    )
     parser.add_argument("--current-status", default="", help="CURRENT_STATUS の上書き")
     return parser.parse_args(argv)
 

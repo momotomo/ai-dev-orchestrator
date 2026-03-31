@@ -1,0 +1,14 @@
+{
+  "project_name": "example-target-project",
+  "bridge_runtime_root": ".",
+  "worker_repo_path": "/ABSOLUTE/PATH/TO/target-repo",
+  "worker_repo_marker_mode": "strict",
+  "worker_repo_markers": [
+    "go.mod"
+  ],
+  "codex_bin": "codex",
+  "codex_model": "",
+  "codex_timeout_seconds": 7200,
+  "report_request_next_todo": "前回 report を踏まえて、対象 repo の次の 1 フェーズ分の Codex 用 prompt を作成してください。",
+  "report_request_open_questions": "未解決事項があれば安全側で補ってください。"
+}
