@@ -145,6 +145,56 @@ class SafariChatPage:
         )
 
 
+@dataclass(frozen=True)
+class BridgeStatusView:
+    label: str
+    detail: str
+
+
+def present_bridge_status(
+    state: Mapping[str, Any],
+    *,
+    blocked: bool = False,
+    stale_codex_running: bool = False,
+) -> BridgeStatusView:
+    mode = str(state.get("mode", "idle"))
+    need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
+    need_chatgpt_next = bool(state.get("need_chatgpt_next"))
+    need_codex_run = bool(state.get("need_codex_run"))
+
+    if bool(state.get("error")):
+        return BridgeStatusView("異常", "error_message を確認してから再開します。")
+
+    if blocked or stale_codex_running or STOP_PATH.exists() or bool(state.get("pause")):
+        return BridgeStatusView("人確認待ち", "summary と note を確認してから再開します。")
+
+    if mode == "idle" and need_chatgpt_prompt:
+        return BridgeStatusView("初回入力待ち", "最初に ChatGPT へ送る本文を入力します。")
+
+    if mode == "waiting_prompt_reply":
+        return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
+
+    if mode == "ready_for_codex" and need_codex_run:
+        return BridgeStatusView("Codex実行待ち", "bridge が Codex worker を 1 回起動します。")
+
+    if mode == "ready_for_codex":
+        return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
+
+    if mode == "codex_running":
+        return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
+
+    if mode == "codex_done":
+        return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
+
+    if mode == "idle" and need_chatgpt_next:
+        return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
+
+    if mode == "completed" or (mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run):
+        return BridgeStatusView("完了", "追加の操作は不要です。")
+
+    return BridgeStatusView("人確認待ち", "内部状態の詳細を確認してから再開します。")
+
+
 def ensure_runtime_dirs() -> None:
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     OUTBOX_DIR.mkdir(parents=True, exist_ok=True)

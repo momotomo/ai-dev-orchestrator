@@ -9,7 +9,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import OUTBOX_DIR, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, print_project_config_warnings, save_state, worker_repo_path
+from _bridge_common import OUTBOX_DIR, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, save_state, worker_repo_path
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -106,7 +106,8 @@ def maybe_promote_codex_done(state: dict[str, object]) -> bool:
         }
     )
     save_state(updated)
-    print("bridge/outbox/codex_report.md を検出したため、state を codex_done に進めました。")
+    status = present_bridge_status(updated)
+    print(f"{status.label}です。bridge/outbox/codex_report.md を検出したため、次 request 準備へ進みます。")
     return True
 
 
@@ -117,40 +118,48 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     mode = str(state.get("mode", "idle"))
 
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
-        print("state=idle / need_chatgpt_prompt=true のため、ChatGPT へ次プロンプト要求を送ります。")
+        status = present_bridge_status(state)
+        print(f"{status.label}です。ChatGPT に送る最初の文面を入力して送信します。")
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
 
     if mode == "waiting_prompt_reply":
-        print("state=waiting_prompt_reply のため、ChatGPT 返答から次の Codex 用プロンプトを回収します。")
+        status = present_bridge_status(state)
+        print(f"{status.label}です。ChatGPT 返答から次の Codex 用プロンプトを回収します。")
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
     if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-        print("state=ready_for_codex のため、bridge が Codex worker を 1 回起動します。")
+        status = present_bridge_status(state)
+        print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
         return launch_codex_once.run(dict(state), build_codex_launch_argv(args))
 
     if mode == "ready_for_codex":
-        print("state=ready_for_codex ですが need_codex_run=false のため、状態を確認してください。")
+        status = present_bridge_status(state, blocked=True)
+        print(f"{status.label}です。Codex 用 prompt はありますが、起動条件を確認してください。")
         return 0
 
     if mode == "codex_running":
         if maybe_promote_codex_done(state):
             return 0
+        status = present_bridge_status(state)
         print(
-            "state=codex_running です。Codex worker の完了待ちです。"
+            f"{status.label}です。Codex worker の完了待ちです。"
             " live 再開前に長く残った state なら、report / error / pause / bridge/STOP を確認して"
             " stale runtime でないか先に見てください。"
         )
         return 0
 
     if mode == "codex_done":
-        print("state=codex_done のため、完了報告を履歴へ退避します。")
+        status = present_bridge_status(state)
+        print(f"{status.label}です。完了報告を履歴へ退避します。")
         return archive_codex_report.run(dict(state))
 
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
-        print("state=idle / need_chatgpt_next=true のため、完了報告をもとに次フェーズ要求を送ります。")
+        status = present_bridge_status(state)
+        print(f"{status.label}です。完了報告をもとに次フェーズ要求を送ります。")
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
 
-    print("今回の 1 手はありません。state.json を確認してください。")
+    status = present_bridge_status(state, blocked=True)
+    print(f"{status.label}です。今回の 1 手はありません。state.json を確認してください。")
     return 0
 
 

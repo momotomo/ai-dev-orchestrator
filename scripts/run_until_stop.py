@@ -25,6 +25,7 @@ from _bridge_common import (
     mark_error,
     project_config_warnings,
     print_project_config_warnings,
+    present_bridge_status,
     safari_timeout_checklist_text,
     state_snapshot,
     worker_repo_path,
@@ -364,8 +365,9 @@ def wait_for_codex_report(
 
         now = time.time()
         if next_heartbeat_at is not None and now >= next_heartbeat_at:
+            status = present_bridge_status(current_state)
             print(
-                f"[wait] action=wait_for_codex_report elapsed={format_elapsed(now - started_at)} "
+                f"[wait] status={status.label} action=wait_for_codex_report elapsed={format_elapsed(now - started_at)} "
                 f"{describe_wait_message('wait_for_codex_report')}"
             )
             next_heartbeat_at = now + heartbeat_seconds
@@ -387,6 +389,7 @@ def run_command_with_heartbeat(
     cwd: str | os.PathLike[str],
     env: dict[str, str],
     action: str,
+    status_label: str,
     heartbeat_seconds: float,
     interactive: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], float]:
@@ -435,7 +438,7 @@ def run_command_with_heartbeat(
             now = time.time()
             if next_heartbeat_at is not None and now >= next_heartbeat_at:
                 print(
-                    f"[wait] action={action} elapsed={format_elapsed(now - started_at)} "
+                    f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
                     f"{describe_wait_message(action)}"
                 )
                 next_heartbeat_at = now + heartbeat_seconds
@@ -484,10 +487,19 @@ def summarize_run(
         suggested_command = suggested_next_command(args, final_state)
     if suggested_note is None:
         suggested_note = suggested_next_note(final_state)
+    initial_status = present_bridge_status(initial_state)
+    final_status = present_bridge_status(
+        final_state,
+        blocked=bool(blocked_guidance),
+        stale_codex_running=stale_codex_running,
+    )
     lines = [
         "# Run Until Stop Summary",
         "",
         f"- reason: {reason}",
+        f"- initial_user_status: {initial_status.label}",
+        f"- final_user_status: {final_status.label}",
+        f"- final_user_status_detail: {final_status.detail}",
         f"- steps: {steps}",
         f"- max_steps: {args.max_steps}",
         f"- sleep_seconds: {args.sleep_seconds}",
@@ -662,7 +674,9 @@ def run(argv: list[str] | None = None) -> int:
 
             action = describe_next_action(before)
             if action == "no_action":
-                history.append(f"- step {steps + 1}: no_action / mode={before.get('mode', '')}")
+                history.append(
+                    f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"
+                )
                 return finish(
                     args=args,
                     reason="bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。",
@@ -674,8 +688,9 @@ def run(argv: list[str] | None = None) -> int:
                 )
 
             if action == "wait_for_codex_report":
+                before_status = present_bridge_status(before)
                 print(
-                    f"[step {steps + 1}] action={action} mode={before.get('mode', '')} "
+                    f"[step {steps + 1}] status={before_status.label} action={action} "
                     f"(max_wait={args.codex_running_wait_seconds}s)"
                 )
                 if not wait_for_codex_report(args=args, history=history):
@@ -693,13 +708,15 @@ def run(argv: list[str] | None = None) -> int:
                         history=history,
                     )
 
-            print(f"[step {steps + 1}] action={action} mode={before.get('mode', '')}")
+            before_status = present_bridge_status(before)
+            print(f"[step {steps + 1}] status={before_status.label} action={action}")
             interactive = action == "request_next_prompt"
             result, elapsed_seconds = run_command_with_heartbeat(
                 command,
                 cwd=ROOT_DIR,
                 env=child_env,
                 action=action,
+                status_label=before_status.label,
                 heartbeat_seconds=float(args.heartbeat_seconds),
                 interactive=interactive,
             )
@@ -707,8 +724,9 @@ def run(argv: list[str] | None = None) -> int:
             after = load_state()
             stdout = (result.stdout or "").strip()
             stderr = (result.stderr or "").strip()
+            after_status = present_bridge_status(after)
             history.append(
-                f"- step {steps}: action={action} rc={result.returncode} "
+                f"- step {steps}: status={before_status.label}->{after_status.label} action={action} rc={result.returncode} "
                 f"before={before.get('mode', '')} after={after.get('mode', '')}"
             )
             if interactive:
