@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from _bridge_common import (
@@ -25,7 +26,9 @@ from _bridge_common import (
     mark_error,
     project_config_warnings,
     print_project_config_warnings,
+    present_bridge_handoff,
     present_bridge_status,
+    repo_relative,
     safari_timeout_checklist_text,
     state_snapshot,
     worker_repo_path,
@@ -377,6 +380,25 @@ def describe_wait_message(action: str) -> str:
     return "bridge の処理完了を待っています。"
 
 
+def handoff_report_reference(final_state: dict[str, Any]) -> str:
+    outbox_report = OUTBOX_DIR / "codex_report.md"
+    if codex_report_is_ready(outbox_report):
+        return repo_relative(outbox_report)
+
+    last_report_file = str(final_state.get("last_report_file", "")).strip()
+    if not last_report_file:
+        return ""
+
+    candidate = Path(last_report_file).expanduser()
+    if not candidate.is_absolute():
+        candidate = (ROOT_DIR / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    if candidate.exists():
+        return repo_relative(candidate)
+    return last_report_file
+
+
 def format_elapsed(seconds: float) -> str:
     whole_seconds = max(0, int(seconds))
     minutes, remaining_seconds = divmod(whole_seconds, 60)
@@ -547,12 +569,20 @@ def summarize_run(
         suggested_command = suggested_next_command(args, final_state)
     if suggested_note is None:
         suggested_note = suggested_next_note(final_state)
+    handoff = present_bridge_handoff(
+        final_state,
+        reason=reason,
+        suggested_note=suggested_note,
+        blocked=bool(blocked_guidance),
+        stale_codex_running=stale_codex_running,
+    )
     initial_status = present_bridge_status(initial_state)
     final_status = present_bridge_status(
         final_state,
         blocked=bool(blocked_guidance),
         stale_codex_running=stale_codex_running,
     )
+    report_reference = handoff_report_reference(final_state)
     lines = [
         "# Run Until Stop Summary",
         "",
@@ -560,6 +590,8 @@ def summarize_run(
         f"- initial_user_status: {initial_status.label}",
         f"- final_user_status: {final_status.label}",
         f"- final_user_status_detail: {final_status.detail}",
+        f"- handoff_title: {handoff.title}",
+        f"- handoff_detail: {handoff.detail}",
         f"- steps: {steps}",
         f"- max_steps: {args.max_steps}",
         f"- sleep_seconds: {args.sleep_seconds}",
@@ -577,6 +609,7 @@ def summarize_run(
         f"- next_action: {describe_next_action(final_state)}",
         f"- suggested_next_command: {suggested_command}",
         f"- suggested_next_note: {suggested_note}",
+        f"- report_reference: {report_reference}",
         "",
     ]
     if warnings:
@@ -618,6 +651,21 @@ def finish(
     suggested_next_note_override: str | None = None,
     exit_code: int = 0,
 ) -> int:
+    blocked_guidance = blocked_next_guidance(final_state)
+    stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
+    if suggested_next_command_override is None and blocked_guidance is not None:
+        suggested_next_command_override = blocked_guidance[0]
+    if suggested_next_note_override is None and blocked_guidance is not None:
+        suggested_next_note_override = blocked_guidance[1]
+    if suggested_next_command_override is None and stale_codex_running:
+        suggested_next_command_override = "なし"
+    if suggested_next_note_override is None and stale_codex_running:
+        suggested_next_note_override = stale_codex_running_note()
+    if suggested_next_command_override is None:
+        suggested_next_command_override = suggested_next_command(args, final_state)
+    if suggested_next_note_override is None:
+        suggested_next_note_override = suggested_next_note(final_state)
+
     summary = summarize_run(
         args=args,
         reason=reason,
@@ -630,8 +678,22 @@ def finish(
         suggested_next_note_override=suggested_next_note_override,
     )
     log_path = log_text("run_until_stop_summary", summary)
+    handoff = present_bridge_handoff(
+        final_state,
+        reason=reason,
+        suggested_note=suggested_next_note_override,
+        blocked=bool(blocked_guidance),
+        stale_codex_running=stale_codex_running,
+    )
+    report_reference = handoff_report_reference(final_state)
     print(summary.rstrip())
     print(f"log: {log_path}")
+    print(f"handoff: {handoff.title}")
+    print(f"- note: {handoff.detail}")
+    print(f"- summary: {repo_relative(log_path)}")
+    print(f"- suggested_next_command: {suggested_next_command_override}")
+    if report_reference:
+        print(f"- report: {report_reference}")
     return exit_code
 
 

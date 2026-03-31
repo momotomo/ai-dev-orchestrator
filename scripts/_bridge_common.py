@@ -154,6 +154,12 @@ class BridgeStatusView:
 
 
 @dataclass(frozen=True)
+class BridgeHandoffView:
+    title: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class ChatGPTReplyDecision:
     kind: str
     body: str
@@ -213,6 +219,63 @@ def present_bridge_status(
         return BridgeStatusView("完了", "追加の操作は不要です。")
 
     return BridgeStatusView("人確認待ち", "内部状態の詳細を確認してから再開します。")
+
+
+def present_bridge_handoff(
+    state: Mapping[str, Any],
+    *,
+    reason: str = "",
+    suggested_note: str = "",
+    blocked: bool = False,
+    stale_codex_running: bool = False,
+) -> BridgeHandoffView:
+    mode = str(state.get("mode", "idle"))
+    need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
+    need_chatgpt_next = bool(state.get("need_chatgpt_next"))
+    need_codex_run = bool(state.get("need_codex_run"))
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    error_message = str(state.get("error_message", "")).strip()
+    normalized_reason = reason.strip()
+
+    if bool(state.get("error")):
+        detail = suggested_note or error_message or "summary と error_message を確認してください。"
+        return BridgeHandoffView("異常終了です。詳細ログを確認してください。", detail)
+
+    if chatgpt_decision == "completed" or mode == "completed":
+        detail = suggested_note or "summary を確認し、必要なら report を見れば十分です。"
+        return BridgeHandoffView("完了しました。", detail)
+
+    if chatgpt_decision == "human_review":
+        detail = suggested_note or "summary / note を確認して人が次の判断を行ってください。"
+        return BridgeHandoffView("人の判断が必要です。summary / note を確認してください。", detail)
+
+    if chatgpt_decision == "need_info":
+        detail = suggested_note or "不足している情報を補ってから再開してください。"
+        return BridgeHandoffView("情報が不足しています。入力内容を補って再開してください。", detail)
+
+    if blocked or stale_codex_running or STOP_PATH.exists() or bool(state.get("pause")):
+        detail = suggested_note or "自動継続しません。summary / note を確認してください。"
+        return BridgeHandoffView("自動継続しません。summary / note を確認してください。", detail)
+
+    if normalized_reason.startswith("--max-steps="):
+        detail = suggested_note or "summary を見て、続けるなら suggested_next_command を再実行してください。"
+        return BridgeHandoffView("上限回数に達したため一旦停止しました。", detail)
+
+    if normalized_reason.startswith("ユーザー中断"):
+        detail = suggested_note or "summary を見て、再開するかここで止めるかを決めてください。"
+        return BridgeHandoffView("途中で停止しました。summary / note を確認してください。", detail)
+
+    if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
+        detail = suggested_note or "追加の操作は不要です。"
+        return BridgeHandoffView("完了しました。", detail)
+
+    status = present_bridge_status(state, blocked=blocked, stale_codex_running=stale_codex_running)
+    detail = suggested_note or status.detail
+    if status.label == "人確認待ち":
+        return BridgeHandoffView("人の確認が必要です。summary / note を確認してください。", detail)
+    if status.label == "完了":
+        return BridgeHandoffView("完了しました。", detail)
+    return BridgeHandoffView(f"{status.label}です。", detail)
 
 
 def ensure_runtime_dirs() -> None:
