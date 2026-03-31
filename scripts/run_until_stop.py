@@ -51,7 +51,13 @@ def configure_output_streams() -> None:
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
     project_config = project_config or load_project_config()
     browser_config = load_browser_config()
-    parser = argparse.ArgumentParser(description="bridge_orchestrator.py を止まる条件まで数手まとめて実行します。")
+    parser = argparse.ArgumentParser(
+        description="bridge の通常入口です。--project-path と --max-execution-count を渡して数手まとめて進めます。",
+        epilog=(
+            "通常起動例: python3 scripts/run_until_stop.py "
+            "--project-path /path/to/target-repo --max-execution-count 6"
+        ),
+    )
     parser.add_argument("--max-steps", "--max-execution-count", dest="max_steps", type=int, default=DEFAULT_MAX_STEPS, help="最大何手まで進めるか")
     parser.add_argument("--sleep-seconds", type=float, default=DEFAULT_SLEEP_SECONDS, help="各手のあいだに待つ秒数")
     parser.add_argument(
@@ -101,13 +107,47 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
         "--project-path",
         dest="worker_repo_path",
         default=str(worker_repo_path(project_config)),
-        help="bridge_orchestrator.py に渡す worker 対象 repo root",
+        help="通常起動で指定する worker 対象 repo root",
     )
     parser.add_argument("--dry-run-codex", action="store_true", help="ready_for_codex でも Codex を起動せず内容だけ確認する")
     parser.add_argument("--next-todo", default="", help="report ベース request に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="report ベース request に渡す open_questions")
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
     return parser.parse_args(argv)
+
+
+def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
+    action = describe_next_action(state)
+    if action == "request_next_prompt":
+        return (
+            "このあと初回だけ、ChatGPT に送る本文入力を求めます。"
+            " 表示される短い例文をもとに入力すると、その本文をそのまま送信します。"
+        )
+    if action == "fetch_next_prompt":
+        return (
+            f"既存チャットの返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
+        )
+    if action == "launch_codex_once":
+        return "prompt はそろっています。bridge が Codex worker を 1 回起動します。"
+    if action == "wait_for_codex_report":
+        return "Codex worker の完了報告を待ちます。"
+    if action == "archive_codex_report":
+        return "完了報告を archive して次の依頼へ進めます。"
+    if action == "request_prompt_from_report":
+        return "完了報告をもとに次の依頼を送ります。"
+    if action == "completed":
+        return "追加の操作は不要です。"
+    return "summary と note を見て次の 1 手を判断してください。"
+
+
+def print_entry_banner(state: dict[str, Any], args: argparse.Namespace) -> None:
+    status = present_bridge_status(state)
+    project_path = args.worker_repo_path or "."
+    print("bridge entry: python3 scripts/run_until_stop.py")
+    print(f"- project_path: {project_path}")
+    print(f"- max_execution_count: {args.max_steps}")
+    print(f"- 現在の状況: {status.label}")
+    print(f"- このあと: {entry_guidance(state, args)}")
 
 
 def is_completed_state(state: dict[str, Any]) -> bool:
@@ -582,6 +622,7 @@ def run(argv: list[str] | None = None) -> int:
     warnings = project_config_warnings(project_config)
     print_project_config_warnings(project_config)
     initial_state = load_state()
+    print_entry_banner(initial_state, args)
     history: list[str] = []
     steps = 0
 

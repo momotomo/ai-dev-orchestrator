@@ -12,14 +12,21 @@
 - 前回の完了報告が `bridge/outbox/codex_report.md` に残っている場合、`run_until_stop.py` は request を送る前に停止する。archive 済みか live 前の runtime かを確認する
 - stale `codex_running`、未退避 report、blocked 停止がある時は、再実行より先に下の整理導線を優先する
 
-ここまで問題なければ、`bridge/state.json` を見て実 state に対応する次の 1 手を実行する。初回起動なら `python3 scripts/bridge_orchestrator.py` から始める。
+ここまで問題なければ、通常は `python3 scripts/run_until_stop.py --project-path /path/to/target-repo --max-execution-count 6` から始める。`bridge_orchestrator.py` は 1 手ずつ詳細確認したい時だけ使う。
+
+## 通常入口
+
+- 通常起動は `python3 scripts/run_until_stop.py --project-path /path/to/target-repo --max-execution-count 6` の 1 コマンドでよい
+- 初回だけ、bridge が短い例文を表示して本文入力を求める。この入力本文が初回 request の正本で、そのまま ChatGPT へ送られる
+- 2 回目以降は既存どおり Codex 完了報告ベースで継続する
+- Safari fetch 待機は通常運用で 1800 秒前提
 
 ## stale runtime の最小整理
 
 1. `bridge/outbox/codex_report.md` が ready なら stale ではない。archive 側を優先する
 2. `state.error=true`、`pause=true`、`bridge/STOP` のどれかがあれば blocked 停止。先に原因を解消する
 3. `mode=codex_running` で report も blocked 要因も無い場合は、Codex を起動した terminal がまだ動いているかを確認する
-4. terminal も動いていなければ stale `codex_running` とみなし、同じ prompt をやり直すなら `ready_for_codex + need_codex_run=true` に戻して `python3 scripts/run_until_stop.py --max-steps 6 --fetch-timeout-seconds 1800 --heartbeat-seconds 10`、最初から prompt request をやり直すなら `idle + need_chatgpt_prompt=true` に戻して `python3 scripts/bridge_orchestrator.py` を実行する
+4. terminal も動いていなければ stale `codex_running` とみなし、同じ prompt をやり直すなら `ready_for_codex + need_codex_run=true` に戻して `python3 scripts/run_until_stop.py --max-steps 6 --fetch-timeout-seconds 1800 --heartbeat-seconds 10`、最初から prompt request をやり直すなら通常入口の `python3 scripts/run_until_stop.py --project-path /path/to/target-repo --max-execution-count 6` に戻す
 
 ## `idle + need_chatgpt_prompt=true` からの最短導線
 
