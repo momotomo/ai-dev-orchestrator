@@ -58,6 +58,7 @@ def build_example_template(project_path: Path) -> str:
 def prompt_initial_request_body(example_text: str) -> str:
     print("初回だけ、ChatGPT に送る最初の文面を入力してください。", flush=True)
     print("この入力本文が初回 request の正本です。bridge は入力した本文をそのまま送ります。", flush=True)
+    print("これは初回 request 専用で、human_review / need_info 再開時の補足入力とは別です。", flush=True)
     print("以下はそのまま使える短い例文です。必要な行だけ書き換えてください。", flush=True)
     print("", flush=True)
     print(example_text, flush=True)
