@@ -4,10 +4,7 @@
 
 ```text
 ===CHATGPT_PROMPT_REPLY===
-
-Codex Prompt
-
-...
+[Codex 用 1 フェーズ prompt 本文]
 ===END_REPLY===
 ```
 
@@ -16,7 +13,7 @@ Codex Prompt
 - `===CHATGPT_PROMPT_REPLY===` と `===END_REPLY===` の組を複数見つけた場合でも、直近のユーザー発話以降にある ChatGPT 側の 1 組を優先する
 - ユーザー request テンプレート内に含まれる `CHATGPT_PROMPT_REPLY` は採用しない
 - マーカー外の文章は無視する
-- ブロック先頭の `Codex Prompt` 見出しは保存時に取り除いてよい
+- ブロック先頭に `Codex Prompt` 見出しがあれば保存時に取り除いてよい
 - 保存先は `bridge/inbox/codex_prompt.md`
 - 会話全文の raw dump は必ず `logs/raw_chatgpt_prompt_dump_*.txt` に保存する
 - Safari の現在タブが ChatGPT でない場合は停止する

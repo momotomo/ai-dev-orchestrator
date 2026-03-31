@@ -2,18 +2,25 @@
 
 ## 現段階の方針
 
-- 現段階では Python から Codex を自動起動しない
-- `run_one_cycle.py` は次の 1 手だけを進める司令塔に留める
-- `ready_for_codex` になったら、人が `bridge/inbox/codex_prompt.md` を Codex に渡して実装を開始する
+- bridge が `launch_codex_once.py` で Codex を 1 回だけ起動する
+- `bridge_orchestrator.py` は state を見て次の 1 手だけを進める
+- 常駐監視や完全無人化はまだ行わない
 
-## 理由
+## bridge と Codex の分離
 
-- 最初は 1 周分を確実に回せる準備完了状態を優先する
-- ChatGPT 側は事前準備済みの Safari 前面チャット操作、Codex 側は人手起動に分けるほうが障害点を減らせる
-- 別案件へ流用するときも、人の確認ポイントを残したほうが安全
+- bridge: request、fetch、launch、archive、next request、state 更新
+- Codex: 実装と report 記入だけ
+- Codex は ChatGPT に問い合わせず、bridge も起動せず、1 フェーズで終了する
+
+## 今回の最小 launcher
+
+- 入力は `bridge/inbox/codex_prompt.md`
+- 起動前に bridge が `codex_running` にする
+- 実行後に `bridge/outbox/codex_report.md` を確認し、report があれば `codex_done`
+- report がなければ `error=true` で停止する
 
 ## 将来の拡張候補
 
-- Codex CLI やデスクトップ起動の補助
-- `codex_running` の監視補助
-- 完了報告の自動回収と次プロンプト要求の半自動化
+- Codex 実行コマンドや model の project config 化
+- 停止条件付きの軽い連続実行 runner
+- report 品質の自動検査

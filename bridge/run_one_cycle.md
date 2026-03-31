@@ -1,6 +1,6 @@
 # Run One Cycle
 
-この文書は ChatGPT → Codex → ChatGPT の 1 周を、手順どおりに回すための運用メモです。
+この文書は、bridge が次の 1 手だけ進める運用を前提にした手順メモです。
 
 ## 事前確認
 
@@ -12,35 +12,48 @@
 - 対象プロジェクト用のチャットを Safari の現在タブに表示している
 - Safari の Develop メニューで `Allow JavaScript from Apple Events` を有効にしている
 
-## 手順
+## 基本コマンド
 
-1. 初回または次プロンプト要求時に `python3 scripts/run_one_cycle.py` を実行する
-2. `idle + need_chatgpt_prompt=true` なら `request_next_prompt.py` が走り、Safari の現在タブにある対象チャットへ次の Codex 用プロンプト要求を送る
-3. ChatGPT の返答が出たら、対象チャットが Safari の現在タブのままになっていることを確認し、`python3 scripts/run_one_cycle.py` をもう一度実行する
-4. `waiting_prompt_reply` なら `fetch_next_prompt.py` が走り、Safari の現在タブにある対象チャット DOM から最後の `===CHATGPT_PROMPT_REPLY===` ブロックを `bridge/inbox/codex_prompt.md` に保存する
-5. `ready_for_codex` になったら、人が `bridge/inbox/codex_prompt.md` を Codex に渡して実装する
-6. Codex は実装開始時に `mode=codex_running`、完了時に `bridge/outbox/codex_report.md` を書いて `mode=codex_done` にする
-7. `python3 scripts/run_one_cycle.py` を再実行すると、`codex_done` なら `archive_codex_report.py` が走り、完了報告を `bridge/history/` へ退避する
-8. さらに `python3 scripts/run_one_cycle.py` を実行すると、`idle + need_chatgpt_next=true` なら `request_prompt_from_report.py` が走り、Safari の現在タブにある対象チャットへ次フェーズ用の prompt request を送る
+- 推奨: `python3 scripts/bridge_orchestrator.py`
+- 互換用: `python3 scripts/run_one_cycle.py`
+- worker だけ直接起動したい場合: `python3 scripts/launch_codex_once.py`
 
-## 補足
+## 1 手ごとの進み方
 
-- Safari 起動とログインは事前準備であり、スクリプトは行いません
-- Chrome は自動化対象にしません
-- 送信先も回収元も、Safari の現在タブにある対象 ChatGPT チャットです
-- 現在タブが違う、対象会話 URL でない、入力欄がない、会話領域がない、`chat_hint` が一致しない場合は停止します
-- 送信ログは `logs/sent_prompt_request_*.md`、画面コピーの raw dump は `logs/raw_chatgpt_prompt_dump_*.txt` に保存されます
-- DOM 抽出の切り分け時だけは `fetch_next_prompt.py --raw-file <dump>` で抽出処理を再試行できます
+1. `idle + need_chatgpt_prompt=true`
+   bridge が `request_next_prompt.py` を実行して `waiting_prompt_reply`
+2. `waiting_prompt_reply`
+   bridge が `fetch_next_prompt.py` を実行して `ready_for_codex`
+3. `ready_for_codex`
+   bridge が `launch_codex_once.py` を実行して `codex_running`
+4. `codex_running`
+   Codex worker の report 完了待ち。report が見つかれば `codex_done`
+5. `codex_done`
+   bridge が `archive_codex_report.py` を実行して `idle + need_chatgpt_next=true`
+6. `idle + need_chatgpt_next=true`
+   bridge が `request_prompt_from_report.py` を実行して `waiting_prompt_reply`
 
-## ready_for_codex 以降
+## Codex worker の前提
 
-- `ready_for_codex` は自動処理の終点で、ここから先は人が Codex へ prompt を渡す
+- bridge が `bridge/inbox/codex_prompt.md` を入力として 1 回だけ起動する
 - Codex は 1 フェーズだけ実装する
-- 実装開始時に `codex_running`、完了報告記入後に `codex_done` にする
-- `codex_done` になったら `python3 scripts/run_one_cycle.py` を再実行して archive と次 prompt request 側へ進める
+- Codex は `bridge/outbox/codex_report.md` を書いたら終了する
+- Codex は ChatGPT へ問い合わせない
+- Codex は bridge script を起動しない
+- Codex は loop 継続判断をしない
+
+## 停止条件
+
+- Safari の current tab が違う
+- 対象会話 URL でない
+- 入力欄や会話領域が見つからない
+- `chat_hint` が一致しない
+- `state.error=true`
+- Codex 実行後も report が見つからない
 
 ## 失敗時の切り分け
 
 - `-1712 timeout`: Safari の応答待ち、Automation 許可、current tab 固定を確認する
 - 期待外れの prompt が保存された: 最新の `logs/raw_chatgpt_prompt_dump_*.txt` と `logs/sent_prompt_request*.md` を見比べる
+- Codex 起動失敗: `logs/*codex_launch_prompt*`、`logs/*codex_launch_stdout*`、`logs/*codex_launch_stderr*` を見る
 - `state.error=true`: 原因確認前に先へ進めない

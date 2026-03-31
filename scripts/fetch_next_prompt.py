@@ -8,7 +8,7 @@ from pathlib import Path
 from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_prompt_reply, guarded_main, log_text, read_latest_prompt_request_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の Codex Prompt を抽出します。")
     parser.add_argument(
         "--raw-file",
@@ -21,11 +21,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Safari から返答を待つ最大秒数。0 の場合は browser_config.json を使う",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def run(state: dict[str, object]) -> int:
-    args = parse_args()
+def run(state: dict[str, object], argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     request_text = read_latest_prompt_request_text()
     if args.raw_file:
         raw_text = read_text(Path(args.raw_file)).strip()
@@ -58,4 +58,4 @@ def run(state: dict[str, object]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(guarded_main(run))
+    sys.exit(guarded_main(lambda state: run(state)))
