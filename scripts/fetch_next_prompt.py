@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from _bridge_common import INBOX_DIR, clear_error_fields, extract_last_chatgpt_reply, guarded_main, log_text, read_latest_prompt_request_text, read_text, repo_relative, save_state, wait_for_prompt_reply_text, write_text
+from _bridge_common import clear_error_fields, extract_last_chatgpt_reply, guarded_main, log_text, read_latest_prompt_request_text, read_text, repo_relative, runtime_prompt_path, save_state, wait_for_prompt_reply_text, write_text
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -39,7 +39,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if decision.kind == "codex_prompt":
         prompt_log = log_text("extracted_codex_prompt", decision.body)
-        prompt_path = INBOX_DIR / "codex_prompt.md"
+        prompt_path = runtime_prompt_path()
         write_text(prompt_path, decision.body)
         mutable_state.update(
             {

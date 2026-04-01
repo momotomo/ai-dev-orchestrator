@@ -12,6 +12,7 @@
 - state flow
 - Safari current tab 前提
 - Codex worker の共通ルール
+- Git ルール
 - 停止条件と再開ポイント
 
 ## 毎回の request に書くもの

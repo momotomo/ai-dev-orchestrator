@@ -9,7 +9,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import OUTBOX_DIR, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, save_state, worker_repo_path
+from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_report_ready_state, runtime_prompt_path, save_state, worker_repo_path
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -95,19 +95,24 @@ def build_fetch_argv(args: argparse.Namespace) -> list[str]:
 
 
 def maybe_promote_codex_done(state: dict[str, object]) -> bool:
-    if not codex_report_is_ready(OUTBOX_DIR / "codex_report.md"):
+    updated_state, recovered_report = recover_report_ready_state(state, prompt_path=runtime_prompt_path())
+    if not codex_report_is_ready():
         return False
-
-    updated = clear_error_fields(dict(state))
-    updated.update(
-        {
-            "mode": "codex_done",
-            "need_codex_run": False,
-        }
-    )
-    save_state(updated)
-    status = present_bridge_status(updated)
-    print(f"{status.label}です。bridge/outbox/codex_report.md を検出したため、次 request 準備へ進みます。")
+    if str(updated_state.get("mode", "")).strip() != "codex_done":
+        updated = clear_error_fields(dict(updated_state))
+        updated.update(
+            {
+                "mode": "codex_done",
+                "need_codex_run": False,
+            }
+        )
+        save_state(updated)
+        updated_state = updated
+    status = present_bridge_status(updated_state)
+    if recovered_report is not None:
+        print(f"{status.label}です。fallback report を {recovered_report} から取り込み、次 request 準備へ進みます。")
+    else:
+        print(f"{status.label}です。bridge/outbox/codex_report.md を検出したため、次 request 準備へ進みます。")
     return True
 
 
@@ -169,4 +174,4 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(guarded_main(lambda state: run(state)))
+    sys.exit(guarded_main(lambda state: run(state), recover_state=lambda state: recover_report_ready_state(state, prompt_path=runtime_prompt_path())[0]))

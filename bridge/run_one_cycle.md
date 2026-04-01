@@ -24,6 +24,12 @@
 - ChatGPT の通常返答契約は `CHATGPT_PROMPT_REPLY` と `CHATGPT_NO_CODEX` の 2 系統だけと考える
 - `CHATGPT_NO_CODEX` の先頭行は `completed`、`human_review`、`need_info` のいずれかで、完了 / 人確認待ち / 情報待ちを表す
 
+## Codex worker の docs 読み順
+
+- fixed docs として毎回先に `bridge/codex_runner_rules.md`、`bridge/git_worker_rules.md`、`bridge/prompt_compaction_rules.md` を読む
+- その後で今回差分の prompt を読む
+- prompt に `追加確認 docs` がある時だけ、その path を追加で読む
+
 ## 3 つの通常パターン
 
 - 初回起動: `run_until_stop.py` を起点にし、ユーザーが最初の request 本文を入力する
