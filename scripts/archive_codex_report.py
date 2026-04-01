@@ -4,29 +4,35 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from _bridge_common import HISTORY_DIR, OUTBOX_DIR, PLACEHOLDER_REPORT_HEADER, BridgeError, clear_error_fields, guarded_main, now_stamp, read_text, repo_relative, save_state, write_text
-
-OUTBOX_PLACEHOLDER = """# Codex Report Outbox
-
-このファイルは Codex 実行完了時に上書きします。
-運用時はここに最新の完了報告が入ります。
-"""
+from _bridge_common import (
+    OUTBOX_PLACEHOLDER_TEXT,
+    BridgeError,
+    clear_error_fields,
+    guarded_main,
+    now_stamp,
+    ready_codex_report_text,
+    repo_relative,
+    runtime_history_dir,
+    runtime_report_path,
+    save_state,
+    write_text,
+)
 
 
 def build_archive_path(cycle: int) -> Path:
-    return HISTORY_DIR / f"codex_report_cycle_{cycle:04d}_{now_stamp()}.md"
+    return runtime_history_dir() / f"codex_report_cycle_{cycle:04d}_{now_stamp()}.md"
 
 
 def run(state: dict[str, object]) -> int:
-    outbox_path = OUTBOX_DIR / "codex_report.md"
-    report_text = read_text(outbox_path).strip()
-    if not report_text or report_text.startswith(PLACEHOLDER_REPORT_HEADER):
+    outbox_path = runtime_report_path()
+    report_text = ready_codex_report_text(outbox_path)
+    if not report_text:
         raise BridgeError("退避対象の bridge/outbox/codex_report.md が見つかりませんでした。")
 
     next_cycle = int(state.get("cycle", 0)) + 1
     archive_path = build_archive_path(next_cycle)
     write_text(archive_path, report_text + "\n")
-    write_text(outbox_path, OUTBOX_PLACEHOLDER)
+    write_text(outbox_path, OUTBOX_PLACEHOLDER_TEXT + "\n")
 
     mutable_state = clear_error_fields(dict(state))
     mutable_state.update(

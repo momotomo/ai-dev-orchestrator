@@ -32,6 +32,11 @@ BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
 CHATGPT_REQUEST_START = "===CHATGPT_REQUEST==="
 CHATGPT_REQUEST_END = "===END_CHATGPT_REQUEST==="
 PLACEHOLDER_REPORT_HEADER = "# Codex Report Outbox"
+OUTBOX_PLACEHOLDER_TEXT = """# Codex Report Outbox
+
+このファイルは Codex 実行完了時に上書きします。
+運用時はここに最新の完了報告が入ります。
+""".strip()
 
 DEFAULT_STATE: dict[str, Any] = {
     "mode": "idle",
@@ -174,6 +179,18 @@ class ChatGPTReplyDecision:
     raw_block: str
 
 
+@dataclass(frozen=True)
+class CodexProgressSnapshot:
+    status: str
+    excerpt: str
+    progress_line: str
+    last_message_path: str
+    stdout_log_path: str
+    stderr_log_path: str
+    stdout_tail: str
+    stderr_tail: str
+
+
 def build_chatgpt_reply_contract_section() -> str:
     return "\n".join(
         [
@@ -213,7 +230,7 @@ def present_bridge_status(
     if bool(state.get("error")):
         return BridgeStatusView("異常", "error_message を確認してから再開します。")
 
-    if blocked or stale_codex_running or STOP_PATH.exists() or bool(state.get("pause")):
+    if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
         return BridgeStatusView("人確認待ち", "summary と note を確認してから再開します。")
 
     if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
@@ -283,7 +300,7 @@ def present_bridge_handoff(
         detail = suggested_note or "不足している情報を補ってから再開してください。"
         return BridgeHandoffView("情報が不足しています。入力内容を補って再開してください。", detail)
 
-    if blocked or stale_codex_running or STOP_PATH.exists() or bool(state.get("pause")):
+    if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
         detail = suggested_note or "自動継続しません。summary / note を確認してください。"
         return BridgeHandoffView("自動継続しません。summary / note を確認してください。", detail)
 
@@ -344,19 +361,20 @@ def present_resume_prompt(state: Mapping[str, Any]) -> BridgeResumePromptView:
 
 
 def ensure_runtime_dirs() -> None:
-    INBOX_DIR.mkdir(parents=True, exist_ok=True)
-    OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    runtime_inbox_dir().mkdir(parents=True, exist_ok=True)
+    runtime_outbox_dir().mkdir(parents=True, exist_ok=True)
+    runtime_history_dir().mkdir(parents=True, exist_ok=True)
+    runtime_logs_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_state() -> dict[str, Any]:
     ensure_runtime_dirs()
-    if not STATE_PATH.exists():
+    state_path = runtime_state_path()
+    if not state_path.exists():
         save_state(DEFAULT_STATE.copy())
         return DEFAULT_STATE.copy()
 
-    with STATE_PATH.open("r", encoding="utf-8") as handle:
+    with state_path.open("r", encoding="utf-8") as handle:
         loaded = json.load(handle)
 
     state = DEFAULT_STATE.copy()
@@ -368,7 +386,7 @@ def save_state(state: Mapping[str, Any]) -> None:
     ensure_runtime_dirs()
     normalized = DEFAULT_STATE.copy()
     normalized.update(state)
-    STATE_PATH.write_text(
+    runtime_state_path().write_text(
         json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -396,7 +414,7 @@ def clear_error_fields(state: dict[str, Any]) -> dict[str, Any]:
 
 def check_stop_conditions(state: Mapping[str, Any] | None = None) -> None:
     current_state = dict(state or load_state())
-    if STOP_PATH.exists():
+    if runtime_stop_path().exists():
         raise BridgeStop("bridge/STOP が存在するため停止しました。")
     if current_state.get("pause"):
         raise BridgeStop("state.pause=true のため停止しました。")
@@ -405,9 +423,15 @@ def check_stop_conditions(state: Mapping[str, Any] | None = None) -> None:
         raise BridgeStop(f"state.error=true のため停止しました: {message}")
 
 
-def guarded_main(task: Callable[[dict[str, Any]], int]) -> int:
+def guarded_main(
+    task: Callable[[dict[str, Any]], int],
+    *,
+    recover_state: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> int:
     try:
         state = load_state()
+        if recover_state is not None:
+            state = recover_state(state)
         check_stop_conditions(state)
         return task(state)
     except BridgeStop as exc:
@@ -444,14 +468,14 @@ def write_text(path: Path, content: str) -> None:
 
 def log_text(prefix: str, content: str, suffix: str = "md") -> Path:
     ensure_runtime_dirs()
-    log_path = LOGS_DIR / f"{now_stamp()}_{prefix}.{suffix}"
+    log_path = runtime_logs_dir() / f"{now_stamp()}_{prefix}.{suffix}"
     write_text(log_path, content)
     return log_path
 
 
 def read_latest_prompt_request_text() -> str:
     ensure_runtime_dirs()
-    candidates = sorted(LOGS_DIR.glob("*sent_prompt_request*.md"))
+    candidates = sorted(runtime_logs_dir().glob("*sent_prompt_request*.md"))
     if not candidates:
         return ""
     return read_text(candidates[-1]).strip()
@@ -829,6 +853,42 @@ def bridge_runtime_root(config: Mapping[str, Any] | None = None) -> Path:
     return Path(str(loaded.get("bridge_runtime_root", ROOT_DIR))).expanduser().resolve()
 
 
+def runtime_bridge_dir(config: Mapping[str, Any] | None = None) -> Path:
+    return bridge_runtime_root(config) / "bridge"
+
+
+def runtime_inbox_dir(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_bridge_dir(config) / "inbox"
+
+
+def runtime_outbox_dir(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_bridge_dir(config) / "outbox"
+
+
+def runtime_history_dir(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_bridge_dir(config) / "history"
+
+
+def runtime_logs_dir(config: Mapping[str, Any] | None = None) -> Path:
+    return bridge_runtime_root(config) / "logs"
+
+
+def runtime_state_path(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_bridge_dir(config) / "state.json"
+
+
+def runtime_stop_path(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_bridge_dir(config) / "STOP"
+
+
+def runtime_prompt_path(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_inbox_dir(config) / "codex_prompt.md"
+
+
+def runtime_report_path(config: Mapping[str, Any] | None = None) -> Path:
+    return runtime_outbox_dir(config) / "codex_report.md"
+
+
 def worker_repo_path(config: Mapping[str, Any] | None = None) -> Path:
     loaded = dict(config or load_project_config())
     return Path(str(loaded.get("worker_repo_path", bridge_runtime_root(loaded)))).expanduser().resolve()
@@ -867,24 +927,240 @@ def render_template(template_text: str, values: Mapping[str, str]) -> str:
 
 
 def read_last_report_text(state: Mapping[str, Any]) -> str:
-    outbox_path = OUTBOX_DIR / "codex_report.md"
-    outbox_text = read_text(outbox_path).strip()
-    if outbox_text and not outbox_text.startswith(PLACEHOLDER_REPORT_HEADER):
-        return outbox_text
+    ready_outbox_text = ready_codex_report_text(runtime_report_path())
+    if ready_outbox_text:
+        return ready_outbox_text
 
     last_report_file = str(state.get("last_report_file") or "").strip()
     if last_report_file:
-        candidate = ROOT_DIR / last_report_file
+        candidate = bridge_runtime_root() / last_report_file
         if candidate.exists():
             return read_text(candidate).strip()
 
     return "（前回の完了報告はまだありません）"
 
 
+def normalize_codex_report_text(report_text: str) -> str:
+    text = report_text.strip()
+    if not text:
+        return ""
+    if text == OUTBOX_PLACEHOLDER_TEXT:
+        return ""
+    if text.startswith(OUTBOX_PLACEHOLDER_TEXT):
+        return text[len(OUTBOX_PLACEHOLDER_TEXT) :].strip()
+    if text.startswith(PLACEHOLDER_REPORT_HEADER):
+        placeholder_lines = OUTBOX_PLACEHOLDER_TEXT.splitlines()
+        text_lines = text.splitlines()
+        if text_lines[: len(placeholder_lines)] == placeholder_lines:
+            return "\n".join(text_lines[len(placeholder_lines) :]).strip()
+    return text
+
+
+def ready_codex_report_text(report_path: Path | None = None) -> str:
+    candidate = report_path or runtime_report_path()
+    return normalize_codex_report_text(read_text(candidate))
+
+
 def codex_report_is_ready(report_path: Path | None = None) -> bool:
-    candidate = report_path or (OUTBOX_DIR / "codex_report.md")
-    report_text = read_text(candidate).strip()
-    return bool(report_text and not report_text.startswith(PLACEHOLDER_REPORT_HEADER))
+    return bool(ready_codex_report_text(report_path))
+
+
+def _normalize_recovery_path(path: Path | str) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (ROOT_DIR / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def _candidate_report_paths_from_text(raw_text: str) -> list[Path]:
+    candidates: list[Path] = []
+    for match in re.findall(r"(/[^\s)\]]*codex_report\.md)", raw_text):
+        candidate = _normalize_recovery_path(match.rstrip(".,"))
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _recent_codex_log_paths(limit: int = 12) -> list[Path]:
+    patterns = [
+        "*codex_last_message.txt",
+        "*codex_launch_stdout.txt",
+        "*codex_launch_stderr.txt",
+    ]
+    candidates: list[Path] = []
+    for pattern in patterns:
+        candidates.extend(runtime_logs_dir().glob(pattern))
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)[:limit]
+
+
+def _collapse_single_line(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clip_text(text: str, *, max_chars: int = 160) -> str:
+    normalized = _collapse_single_line(text)
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 1].rstrip() + "…"
+
+
+def _tail_lines_text(path: Path, *, line_count: int = 4, max_chars: int = 240) -> str:
+    text = read_text(path).strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return _clip_text(" / ".join(lines[-line_count:]), max_chars=max_chars)
+
+
+def summarize_codex_progress_text(raw_text: str) -> tuple[str, str]:
+    excerpt = _clip_text(raw_text, max_chars=160)
+    if not excerpt:
+        return "進捗待ち", ""
+
+    lowered = excerpt.lower()
+    if any(token in lowered for token in ("codex_runner_rules", "git_worker_rules", "prompt_compaction_rules", "rules file")):
+        return "rules 読み込み中", excerpt
+    if any(token in lowered for token in ("codex_prompt.md", "prompt file", "phase", "task", "requirements")):
+        return "prompt 確認中", excerpt
+    if any(token in lowered for token in ("pnpm test", "pytest", "vitest", "typecheck", "lint", "build", "test")):
+        return "テスト中", excerpt
+    if any(token in lowered for token in ("codex_report", "report", "outbox", "archive")):
+        return "report 書き込み待ち", excerpt
+    if any(token in lowered for token in ("apply_patch", "update file", "add file", "write file", "edit", "implement", "patch")):
+        return "実装中", excerpt
+    if any(token in lowered for token in ("git diff", "git status", "inspect", "read ", "open ", "review")):
+        return "確認中", excerpt
+    return "実装中", excerpt
+
+
+def latest_codex_progress_snapshot(*, since: float | None = None) -> CodexProgressSnapshot | None:
+    logs_dir = runtime_logs_dir()
+    last_message_candidates = sorted(
+        logs_dir.glob("*_codex_last_message.txt"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for last_message_path in last_message_candidates:
+        if since is not None and last_message_path.stat().st_mtime < since:
+            continue
+        prefix = last_message_path.name[: -len("_codex_last_message.txt")]
+        stdout_log_path = logs_dir / f"{prefix}_codex_launch_stdout.txt"
+        stderr_log_path = logs_dir / f"{prefix}_codex_launch_stderr.txt"
+        raw_text = read_text(last_message_path).strip()
+        status, excerpt = summarize_codex_progress_text(raw_text)
+        if not excerpt:
+            stdout_tail = _tail_lines_text(stdout_log_path)
+            stderr_tail = _tail_lines_text(stderr_log_path)
+            fallback_excerpt = stdout_tail or stderr_tail
+            if not fallback_excerpt:
+                continue
+            excerpt = fallback_excerpt
+            if stderr_tail:
+                status = "異常候補"
+            elif stdout_tail:
+                status = "実装中"
+        progress_line = status if not excerpt else f"{status}: {excerpt}"
+        return CodexProgressSnapshot(
+            status=status,
+            excerpt=excerpt,
+            progress_line=progress_line,
+            last_message_path=repo_relative(last_message_path),
+            stdout_log_path=repo_relative(stdout_log_path),
+            stderr_log_path=repo_relative(stderr_log_path),
+            stdout_tail=_tail_lines_text(stdout_log_path),
+            stderr_tail=_tail_lines_text(stderr_log_path),
+        )
+    return None
+
+
+def recover_codex_report(
+    report_path: Path | None = None,
+    *,
+    candidate_paths: Sequence[Path | str] | None = None,
+    log_paths: Sequence[Path | str] | None = None,
+    search_recent_logs: bool = False,
+    newer_than: float | None = None,
+) -> Path | None:
+    target_path = _normalize_recovery_path(report_path or runtime_report_path())
+    if codex_report_is_ready(target_path):
+        return None
+
+    ordered_candidates: list[Path] = []
+
+    def add_candidate(path: Path | str) -> None:
+        candidate = _normalize_recovery_path(path)
+        if candidate == target_path or candidate in ordered_candidates:
+            return
+        ordered_candidates.append(candidate)
+
+    for candidate in candidate_paths or []:
+        add_candidate(candidate)
+
+    for log_path in log_paths or []:
+        log_candidate = _normalize_recovery_path(log_path)
+        if not log_candidate.exists():
+            continue
+        if newer_than is not None and log_candidate.stat().st_mtime < newer_than:
+            continue
+        for candidate in _candidate_report_paths_from_text(read_text(log_candidate)):
+            add_candidate(candidate)
+
+    if search_recent_logs:
+        for log_candidate in _recent_codex_log_paths():
+            if newer_than is not None and log_candidate.stat().st_mtime < newer_than:
+                continue
+            for candidate in _candidate_report_paths_from_text(read_text(log_candidate)):
+                add_candidate(candidate)
+
+    for candidate in ordered_candidates:
+        if newer_than is not None and candidate.exists() and candidate.stat().st_mtime < newer_than:
+            continue
+        report_text = ready_codex_report_text(candidate)
+        if not report_text:
+            continue
+        write_text(target_path, report_text.rstrip() + "\n")
+        return candidate
+
+    return None
+
+
+def recover_report_ready_state(
+    state: Mapping[str, Any],
+    *,
+    prompt_path: Path | None = None,
+    search_recent_logs: bool = True,
+) -> tuple[dict[str, Any], Path | None]:
+    current_state = dict(state)
+    prompt_candidate = _normalize_recovery_path(prompt_path or runtime_prompt_path())
+    prompt_mtime = prompt_candidate.stat().st_mtime if prompt_candidate.exists() else None
+    recovered_report = recover_codex_report(
+        runtime_report_path(),
+        search_recent_logs=search_recent_logs,
+        newer_than=prompt_mtime,
+    )
+    if not codex_report_is_ready(runtime_report_path()):
+        return current_state, recovered_report
+
+    mode = str(current_state.get("mode", "")).strip()
+    should_promote = bool(current_state.get("error")) or mode in {"ready_for_codex", "codex_running", "codex_done"}
+    if not should_promote:
+        return current_state, recovered_report
+
+    updated = clear_error_fields(dict(current_state))
+    updated.update(
+        {
+            "mode": "codex_done",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+        }
+    )
+    save_state(updated)
+    return updated, recovered_report
 
 
 def _extract_marked_block(report_text: str, start_marker: str, end_marker: str) -> str | None:

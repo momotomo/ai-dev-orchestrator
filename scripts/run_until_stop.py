@@ -11,14 +11,13 @@ from typing import Any
 
 from _bridge_common import (
     BridgeStop,
-    OUTBOX_DIR,
-    ROOT_DIR,
-    STOP_PATH,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
+    bridge_runtime_root,
     check_stop_conditions,
     codex_report_is_ready,
     is_apple_event_timeout_text,
+    latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
     load_project_config,
@@ -28,7 +27,12 @@ from _bridge_common import (
     print_project_config_warnings,
     present_bridge_handoff,
     present_bridge_status,
+    recover_report_ready_state,
+    recover_codex_report,
     repo_relative,
+    runtime_prompt_path,
+    runtime_report_path,
+    runtime_stop_path,
     safari_timeout_checklist_text,
     state_snapshot,
     worker_repo_path,
@@ -307,7 +311,7 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
 
 
 def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None:
-    if STOP_PATH.exists():
+    if runtime_stop_path().exists():
         return (
             "なし",
             "bridge/STOP があるため停止中です。意図した停止か確認し、続けるなら STOP を外してから再実行してください。",
@@ -345,13 +349,13 @@ def is_stale_codex_running_candidate(reason: str, final_state: dict[str, Any]) -
     if describe_next_action(final_state) != "wait_for_codex_report":
         return False
 
-    if STOP_PATH.exists():
+    if runtime_stop_path().exists():
         return False
 
     if bool(final_state.get("pause")) or bool(final_state.get("error")):
         return False
 
-    if codex_report_is_ready(OUTBOX_DIR / "codex_report.md"):
+    if codex_report_is_ready(runtime_report_path()):
         return False
 
     normalized_reason = reason.strip()
@@ -371,7 +375,7 @@ def stale_codex_running_note() -> str:
 
 
 def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
-    if not codex_report_is_ready(OUTBOX_DIR / "codex_report.md"):
+    if not codex_report_is_ready(runtime_report_path()):
         return False
 
     mode = str(state.get("mode", "idle"))
@@ -396,8 +400,15 @@ def describe_wait_message(action: str) -> str:
     return "bridge の処理完了を待っています。"
 
 
+def should_include_codex_progress(final_state: dict[str, Any], history: list[str]) -> bool:
+    mode = str(final_state.get("mode", "")).strip()
+    if mode in {"ready_for_codex", "codex_running", "codex_done"}:
+        return True
+    return any("action=launch_codex_once" in entry or "action=wait_for_codex_report" in entry for entry in history)
+
+
 def handoff_report_reference(final_state: dict[str, Any]) -> str:
-    outbox_report = OUTBOX_DIR / "codex_report.md"
+    outbox_report = runtime_report_path()
     if codex_report_is_ready(outbox_report):
         return repo_relative(outbox_report)
 
@@ -407,12 +418,16 @@ def handoff_report_reference(final_state: dict[str, Any]) -> str:
 
     candidate = Path(last_report_file).expanduser()
     if not candidate.is_absolute():
-        candidate = (ROOT_DIR / candidate).resolve()
+        candidate = (bridge_runtime_root() / candidate).resolve()
     else:
         candidate = candidate.resolve()
     if candidate.exists():
         return repo_relative(candidate)
     return last_report_file
+
+
+def promote_report_ready_state(state: dict[str, Any]) -> dict[str, Any]:
+    return recover_report_ready_state(state, prompt_path=runtime_prompt_path())[0]
 
 
 def format_elapsed(seconds: float) -> str:
@@ -437,7 +452,7 @@ def wait_for_codex_report(
     args: argparse.Namespace,
     history: list[str],
 ) -> bool:
-    report_path = OUTBOX_DIR / "codex_report.md"
+    report_path = runtime_report_path()
     if codex_report_is_ready(report_path):
         history.append("- codex report: すでに生成済みです")
         return True
@@ -449,19 +464,36 @@ def wait_for_codex_report(
 
     poll_seconds = max(0.2, float(args.codex_running_poll_seconds))
     heartbeat_seconds = float(args.heartbeat_seconds)
+    prompt_path = runtime_prompt_path()
+    prompt_mtime = prompt_path.stat().st_mtime if prompt_path.exists() else None
     started_at = time.time()
     deadline = started_at + max_wait_seconds
     next_heartbeat_at = started_at + heartbeat_seconds if heartbeat_seconds > 0 else None
+    last_codex_progress_line = ""
 
     while time.time() < deadline:
-        current_state = load_state()
+        current_state = promote_report_ready_state(load_state())
         check_stop_conditions(current_state)
+        recovered_report = recover_codex_report(
+            report_path,
+            search_recent_logs=True,
+            newer_than=prompt_mtime,
+        )
         if codex_report_is_ready(report_path):
             waited = time.time() - started_at
-            history.append(f"- codex report: {format_elapsed(waited)} 待機して生成を検出しました")
+            if recovered_report is not None:
+                history.append(
+                    f"- codex report: {format_elapsed(waited)} 待機して {repo_relative(recovered_report)} から回収しました"
+                )
+            else:
+                history.append(f"- codex report: {format_elapsed(waited)} 待機して生成を検出しました")
             return True
 
         now = time.time()
+        snapshot = latest_codex_progress_snapshot(since=prompt_mtime)
+        if snapshot is not None and snapshot.progress_line != last_codex_progress_line:
+            print(f"[codex] {snapshot.progress_line}")
+            last_codex_progress_line = snapshot.progress_line
         if next_heartbeat_at is not None and now >= next_heartbeat_at:
             status = present_bridge_status(current_state)
             print(
@@ -492,6 +524,7 @@ def run_command_with_heartbeat(
     interactive: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], float]:
     started_at = time.time()
+    last_codex_progress_line = ""
     if interactive:
         completed = subprocess.run(
             command,
@@ -534,6 +567,11 @@ def run_command_with_heartbeat(
                 return completed, time.time() - started_at
 
             now = time.time()
+            if action == "launch_codex_once":
+                snapshot = latest_codex_progress_snapshot(since=started_at)
+                if snapshot is not None and snapshot.progress_line != last_codex_progress_line:
+                    print(f"[codex] {snapshot.progress_line}")
+                    last_codex_progress_line = snapshot.progress_line
             if next_heartbeat_at is not None and now >= next_heartbeat_at:
                 print(
                     f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
@@ -599,6 +637,7 @@ def summarize_run(
         stale_codex_running=stale_codex_running,
     )
     report_reference = handoff_report_reference(final_state)
+    codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
     lines = [
         "# Run Until Stop Summary",
         "",
@@ -628,6 +667,20 @@ def summarize_run(
         f"- report_reference: {report_reference}",
         "",
     ]
+    if codex_snapshot is not None:
+        lines.extend(
+            [
+                "## codex_progress",
+                f"- status: {codex_snapshot.status}",
+                f"- last_message: {codex_snapshot.excerpt or 'なし'}",
+                f"- last_message_path: {codex_snapshot.last_message_path}",
+                f"- stdout_log_path: {codex_snapshot.stdout_log_path}",
+                f"- stdout_tail: {codex_snapshot.stdout_tail or 'なし'}",
+                f"- stderr_log_path: {codex_snapshot.stderr_log_path}",
+                f"- stderr_tail: {codex_snapshot.stderr_tail or 'なし'}",
+                "",
+            ]
+        )
     if warnings:
         lines.extend(
             [
@@ -702,6 +755,7 @@ def finish(
         stale_codex_running=stale_codex_running,
     )
     report_reference = handoff_report_reference(final_state)
+    codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
     print(summary.rstrip())
     print(f"log: {log_path}")
     print(f"handoff: {handoff.title}")
@@ -710,6 +764,14 @@ def finish(
     print(f"- suggested_next_command: {suggested_next_command_override}")
     if report_reference:
         print(f"- report: {report_reference}")
+    if codex_snapshot is not None:
+        print(f"- codex_last_status: {codex_snapshot.status}")
+        if codex_snapshot.excerpt:
+            print(f"- codex_last_message: {codex_snapshot.excerpt}")
+        if codex_snapshot.stdout_tail:
+            print(f"- codex_stdout_tail: {codex_snapshot.stdout_tail}")
+        if codex_snapshot.stderr_tail:
+            print(f"- codex_stderr_tail: {codex_snapshot.stderr_tail}")
     return exit_code
 
 
@@ -719,10 +781,13 @@ def run(argv: list[str] | None = None) -> int:
     args = parse_args(argv, project_config)
     warnings = project_config_warnings(project_config)
     print_project_config_warnings(project_config)
-    initial_state = load_state()
-    print_entry_banner(initial_state, args)
     history: list[str] = []
     steps = 0
+    prompt_path = runtime_prompt_path()
+    initial_state, recovered_report = recover_report_ready_state(load_state(), prompt_path=prompt_path)
+    if recovered_report is not None:
+        history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
+    print_entry_banner(initial_state, args)
 
     try:
         check_stop_conditions(initial_state)
@@ -785,10 +850,11 @@ def run(argv: list[str] | None = None) -> int:
     command = build_orchestrator_command(args)
     child_env = dict(os.environ)
     child_env["BRIDGE_SUPPRESS_PROJECT_WARNINGS"] = "1"
+    child_env["BRIDGE_SUPPRESS_CODEX_PROGRESS"] = "1"
 
     try:
         while steps < args.max_steps:
-            before = load_state()
+            before = promote_report_ready_state(load_state())
             try:
                 check_stop_conditions(before)
             except BridgeStop as exc:
@@ -863,7 +929,7 @@ def run(argv: list[str] | None = None) -> int:
             )
             result, elapsed_seconds = run_command_with_heartbeat(
                 command,
-                cwd=ROOT_DIR,
+                cwd=bridge_runtime_root(),
                 env=child_env,
                 action=action,
                 status_label=before_status.label,

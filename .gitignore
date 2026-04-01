@@ -19,3 +19,6 @@ bridge/project_config.json
 # Local browser / stop files
 bridge/STOP
 bridge/.chrome-profile/
+
+# Local recovery backups
+reset_backup/
