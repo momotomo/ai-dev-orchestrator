@@ -44,29 +44,51 @@ def resolve_project_path(raw_path: str) -> Path:
     return candidate
 
 
-def build_example_template(project_path: Path) -> str:
+def build_example_templates(project_path: Path) -> list[str]:
     project_name = project_path.name or project_path.as_posix()
-    return "\n".join(
-        [
-            f"対象案件: {project_name}",
-            f"対象 repo: {project_path}",
-            "現在の継続テーマ: [ここを入力]",
-            "狙い: [ここを入力]",
-            "次の 1 フェーズ分の Codex 用 prompt を返してください。",
-        ]
-    )
+    return [
+        "\n".join(
+            [
+                f"対象案件: {project_name}",
+                f"対象 repo: {project_path}",
+                "今進めたいこと: sample browser の軽い UI polish",
+                "制約: schema / resolver / preview / playback / export は変えない",
+                "次の 1 フェーズ分の Codex 用 prompt を返してください。",
+            ]
+        ),
+        "\n".join(
+            [
+                f"対象案件: {project_name}",
+                "今の状況: 前の phase は完了、次は 1 つだけ具体的に進めたい",
+                "今回の狙い: 既存挙動を壊さず最小差分で改善する",
+                "次の Codex 用 1 フェーズ prompt を返してください。",
+            ]
+        ),
+        "\n".join(
+            [
+                f"対象 repo: {project_path}",
+                "現在の継続テーマ: [ここを短く入力]",
+                "今回やってほしいこと: [ここを短く入力]",
+                "触らないこと: [あれば短く入力]",
+                "次の 1 フェーズ分の Codex 用 prompt を返してください。",
+            ]
+        ),
+    ]
 
 
-def prompt_initial_request_body(example_text: str) -> str:
-    print("初回だけ、ChatGPT に送る最初の文面を入力してください。", flush=True)
-    print("この入力本文が初回 request の正本です。bridge は本文を改変せず、送信直前に固定の返答契約だけを追記します。", flush=True)
+def prompt_initial_request_body(example_texts: list[str]) -> str:
+    print("初回だけ、ChatGPT に送る最初の依頼文を入力してください。", flush=True)
+    print("ここで入力した本文がそのまま ChatGPT へ送られます。これが初回 request の正本です。", flush=True)
+    print("bridge は本文を改変せず、送信直前に固定の返答契約だけを追記します。", flush=True)
     print("これは初回 request 専用で、human_review / need_info 再開時の補足入力とは別です。", flush=True)
     print("返答フォーマット指定まで自分で書く必要はありません。進めたい内容だけを書いてください。", flush=True)
-    print("以下はそのまま使える短い例文です。必要な行だけ書き換えてください。", flush=True)
+    print("以下の短い例文を、そのまま少し書き換えて使えます。", flush=True)
     print("", flush=True)
-    print(example_text, flush=True)
-    print("", flush=True)
-    print("bridge が固定の返答契約を自動で付けて送るので、本文には今回進めたいことだけを含めてください。", flush=True)
+    for index, example_text in enumerate(example_texts, start=1):
+        print(f"[例 {index}]", flush=True)
+        print(example_text, flush=True)
+        print("", flush=True)
+    print("bridge が固定の返答契約を自動で付けるので、本文には今回進めたいことだけを入れてください。", flush=True)
     print("入力後は Safari の current tab へ送信し、続けて返答待ちへ進みます。", flush=True)
     print("入力終了は Ctrl-D、または空行を 2 回です。空入力では進みません。", flush=True)
 
@@ -91,12 +113,12 @@ def resolve_request_body(args: argparse.Namespace) -> str:
     if args.request_body.strip():
         return args.request_body.strip() + "\n"
 
-    example_text = build_example_template(resolve_project_path(args.project_path))
+    example_texts = build_example_templates(resolve_project_path(args.project_path))
 
     if sys.stdin is not None and not sys.stdin.isatty():
         request_text = sys.stdin.read().strip()
     else:
-        request_text = prompt_initial_request_body(example_text)
+        request_text = prompt_initial_request_body(example_texts)
 
     if not request_text.strip():
         raise BridgeError(

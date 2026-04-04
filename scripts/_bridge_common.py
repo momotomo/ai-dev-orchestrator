@@ -256,17 +256,17 @@ def present_bridge_status(
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
 
     if bool(state.get("error")):
-        return BridgeStatusView("異常", "error_message を確認してから再開します。")
+        return BridgeStatusView("異常", "handoff と summary を見て、必要なら error_message を確認してから再開します。")
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        return BridgeStatusView("人確認待ち", "summary と note を確認してから再開します。")
+        return BridgeStatusView("人確認待ち", "handoff と summary の note を確認してから再開します。")
 
     if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
         detail = chatgpt_decision_note or "ChatGPT が Codex 不要と判断しました。人が次の判断を行います。"
         return BridgeStatusView("人確認待ち", detail)
 
     if mode == "idle" and need_chatgpt_prompt:
-        return BridgeStatusView("初回入力待ち", "最初に ChatGPT へ送る本文を入力します。")
+        return BridgeStatusView("初回依頼文の入力待ち", "最初に ChatGPT へ送る本文を入力します。")
 
     if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")

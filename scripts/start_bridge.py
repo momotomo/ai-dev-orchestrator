@@ -30,6 +30,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    print("bridge start: このコマンドが通常入口です。", flush=True)
+    print(f"- project_path: {args.project_path}", flush=True)
+    print(f"- max_execution_count: {args.max_execution_count}", flush=True)
+    print("- 初回だけ依頼文を入力します。2 回目以降は同じコマンドで継続できます。", flush=True)
+    print("- 内部 state ではなく、人向け表示と handoff を見ながら進める想定です。", flush=True)
     forwarded_argv = [
         "--project-path",
         args.project_path,
