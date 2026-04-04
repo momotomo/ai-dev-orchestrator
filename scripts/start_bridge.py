@@ -98,14 +98,21 @@ def print_doctor(args: argparse.Namespace) -> None:
     prompt_ready = run_until_stop.runtime_prompt_path().exists()
     stop_exists = run_until_stop.runtime_stop_path().exists()
     backup_count = len(list(run_until_stop.bridge_runtime_root().glob("state.json.bak.*")))
-    pending_request_log = str(state.get("pending_request_log", "")).strip() or "なし"
-    pending_handoff_log = str(state.get("pending_handoff_log", "")).strip() or "なし"
+    pending_request_log_raw = str(state.get("pending_request_log", "")).strip()
+    pending_handoff_log_raw = str(state.get("pending_handoff_log", "")).strip()
+    pending_request_log = pending_request_log_raw or "なし"
+    pending_handoff_log = pending_handoff_log_raw or "なし"
+    error_message = str(state.get("error_message", "")).strip()
     if stop_exists:
         clear_error_status = "不可: bridge/STOP があるため"
     elif bool(state.get("pause")):
         clear_error_status = "不可: pause=true のため"
+    elif pending_handoff_log_raw:
+        clear_error_status = "可能: project ページ確認後に clear-error で同じ handoff 再送へ戻せます"
+    elif run_until_stop.is_apple_event_timeout_text(error_message):
+        clear_error_status = "可能: Safari current tab と Automation を確認後に clear-error で再開候補へ戻せます"
     elif bool(state.get("error")):
-        clear_error_status = "可能: bridge 側の error だけを解除して再開候補へ寄せられます"
+        clear_error_status = "可能: 停止要因を直した後に clear-error で再開候補へ寄せられます"
     else:
         clear_error_status = "不要: error 停止ではありません"
     print("bridge doctor:", flush=True)
