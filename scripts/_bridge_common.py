@@ -1280,21 +1280,9 @@ def recover_report_ready_state(
 
 def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     current_state = dict(state)
-    if not bool(current_state.get("error")):
-        return current_state, False
-    if not bool(current_state.get("need_chatgpt_next")):
+    if not is_retryable_pending_handoff_error(current_state):
         return current_state, False
     if not read_pending_handoff_text(current_state):
-        return current_state, False
-    error_message = str(current_state.get("error_message", "")).strip()
-    retryable_markers = (
-        "project ページ",
-        "新チャット送信後",
-        "新しいチャット",
-        "handoff",
-        "対象チャットを特定",
-    )
-    if error_message and not any(marker in error_message for marker in retryable_markers):
         return current_state, False
 
     updated = clear_error_fields(dict(current_state))
@@ -1308,6 +1296,24 @@ def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, A
     )
     save_state(updated)
     return updated, True
+
+
+def is_retryable_pending_handoff_error(state: Mapping[str, Any]) -> bool:
+    if not bool(state.get("error")):
+        return False
+    if not bool(state.get("need_chatgpt_next")):
+        return False
+    error_message = str(state.get("error_message", "")).strip()
+    retryable_markers = (
+        "project ページ",
+        "新チャット送信後",
+        "新しいチャット",
+        "handoff",
+        "対象チャットを特定",
+    )
+    if error_message and not any(marker in error_message for marker in retryable_markers):
+        return False
+    return True
 
 
 def _extract_marked_block(report_text: str, start_marker: str, end_marker: str) -> str | None:

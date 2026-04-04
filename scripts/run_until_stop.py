@@ -27,6 +27,7 @@ from _bridge_common import (
     print_project_config_warnings,
     present_bridge_handoff,
     present_bridge_status,
+    is_retryable_pending_handoff_error,
     recover_pending_handoff_state,
     recover_report_ready_state,
     recover_codex_report,
@@ -46,6 +47,33 @@ DEFAULT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_FETCH_TIMEOUT_SECONDS = 0
 DEFAULT_CODEX_RUNNING_WAIT_SECONDS = 120.0
 DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
+
+
+def start_bridge_mode(state: dict[str, Any]) -> str:
+    action = describe_next_action(state)
+    if action == "request_next_prompt":
+        return "新規開始"
+    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+        return "人確認待ち"
+    if is_retryable_pending_handoff_error(state):
+        return "続きから再開"
+    blocked_guidance = blocked_next_guidance(state)
+    if blocked_guidance is not None:
+        return "先に確認"
+    return "続きから再開"
+
+
+def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]) -> tuple[str, str, str]:
+    blocked_guidance = blocked_next_guidance(state)
+    stale_codex_running = is_stale_codex_running_candidate("", state)
+    status = present_bridge_status(state, blocked=bool(blocked_guidance), stale_codex_running=stale_codex_running)
+    note = blocked_guidance[1] if blocked_guidance is not None else suggested_next_note(state)
+    if str(state.get("pending_handoff_log", "")).strip():
+        note = (
+            "handoff は回収済みです。同じコマンドを再実行すると project 内の新しいチャット送信を再試行します。"
+        )
+    guidance = entry_guidance(state, args)
+    return status.label, guidance, note
 
 
 def configure_output_streams() -> None:
