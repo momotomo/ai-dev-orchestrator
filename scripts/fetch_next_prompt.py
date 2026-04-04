@@ -6,9 +6,11 @@ import sys
 from pathlib import Path
 
 from _bridge_common import (
+    BridgeError,
     build_human_review_auto_continue_request,
     clear_error_fields,
     clear_pending_request_fields,
+    promote_pending_request,
     extract_last_chatgpt_reply,
     guarded_main,
     load_state,
@@ -19,6 +21,7 @@ from _bridge_common import (
     runtime_prompt_path,
     save_state,
     send_to_chatgpt,
+    stage_prepared_request,
     stable_text_hash,
     wait_for_prompt_reply_text,
     write_text,
@@ -43,7 +46,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    pending_request_hash = str(state.get("pending_request_hash", "")).strip()
+    pending_request_source = str(state.get("pending_request_source", "")).strip()
     request_text = read_pending_request_text(state)
+    if not (pending_request_hash and pending_request_source and request_text):
+        raise BridgeError(
+            "送信済みの ChatGPT request を確認できないため fetch できませんでした。"
+            " request 送信から再開してください。"
+        )
 
     def handle_wait_event(event: object) -> None:
         event_name = str(getattr(event, "name", "")).strip()
@@ -69,7 +79,6 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
-    pending_request_hash = str(state.get("pending_request_hash", "")).strip()
     reply_body = decision.body if decision.kind == "codex_prompt" else (decision.raw_block or decision.note)
     reply_hash = stable_text_hash(f"{decision.kind}\n{reply_body.strip()}")
     already_processed = (
@@ -113,27 +122,73 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     auto_continue_count = int(state.get("human_review_auto_continue_count", 0) or 0)
     if decision.kind == "human_review" and auto_continue_count < 1:
         continue_text = build_human_review_auto_continue_request()
-        continue_log = log_text("human_review_auto_continue", continue_text)
         request_hash = stable_text_hash(continue_text)
         request_source = (
             f"human_review_continue:{pending_request_hash or stable_text_hash(request_text or '')}:{auto_continue_count + 1}"
         )
-        mutable_state.update(
+        prepared_log = log_text("prepared_human_review_auto_continue", continue_text)
+        prepared_log_rel = repo_relative(prepared_log)
+        prepared_state = clear_error_fields(dict(mutable_state))
+        stage_prepared_request(
+            prepared_state,
+            request_hash=request_hash,
+            request_source=request_source,
+            request_log=prepared_log_rel,
+        )
+        prepared_state.update(
             {
-                "mode": "waiting_prompt_reply",
+                "mode": "awaiting_user",
                 "need_chatgpt_prompt": False,
                 "need_chatgpt_next": False,
                 "need_codex_run": False,
                 "human_review_auto_continue_count": auto_continue_count + 1,
-                "chatgpt_decision": "",
-                "chatgpt_decision_note": "",
-                "pending_request_hash": request_hash,
-                "pending_request_source": request_source,
-                "pending_request_log": repo_relative(continue_log),
+                "chatgpt_decision": "human_review",
+                "chatgpt_decision_note": decision.note,
+                "last_prompt_file": "",
             }
         )
-        save_state(mutable_state)
-        send_to_chatgpt(continue_text)
+        save_state(prepared_state)
+        try:
+            send_to_chatgpt(continue_text)
+        except Exception:
+            retry_state = clear_error_fields(dict(mutable_state))
+            stage_prepared_request(
+                retry_state,
+                request_hash=request_hash,
+                request_source=request_source,
+                request_log=prepared_log_rel,
+                status="retry_send",
+            )
+            retry_state.update(
+                {
+                    "mode": "awaiting_user",
+                    "need_chatgpt_prompt": False,
+                    "need_chatgpt_next": False,
+                    "need_codex_run": False,
+                    "human_review_auto_continue_count": auto_continue_count,
+                    "chatgpt_decision": "human_review",
+                    "chatgpt_decision_note": decision.note,
+                    "last_prompt_file": "",
+                }
+            )
+            save_state(retry_state)
+            raise
+        continue_log = log_text("human_review_auto_continue", continue_text)
+        waiting_state = clear_error_fields(dict(mutable_state))
+        promote_pending_request(
+            waiting_state,
+            request_hash=request_hash,
+            request_source=request_source,
+            request_log=repo_relative(continue_log),
+        )
+        waiting_state.update(
+            {
+                "human_review_auto_continue_count": auto_continue_count + 1,
+                "chatgpt_decision": "",
+                "chatgpt_decision_note": "",
+            }
+        )
+        save_state(waiting_state)
         print(f"raw dump: {raw_log}")
         print(f"auto-continue: {continue_log}")
         print("ChatGPT の human_review は 1 回だけ自動継続しました。")

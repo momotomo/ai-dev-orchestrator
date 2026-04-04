@@ -10,12 +10,16 @@ from _bridge_common import (
     build_chatgpt_reply_contract_section,
     clear_error_fields,
     clear_pending_request_fields,
+    clear_prepared_request_fields,
     guarded_main,
     load_project_config,
     log_text,
+    promote_pending_request,
+    read_prepared_request_text,
     repo_relative,
     send_to_chatgpt,
     save_state,
+    stage_prepared_request,
     stable_text_hash,
     worker_repo_path,
 )
@@ -140,12 +144,31 @@ def build_initial_request_source(user_body: str) -> str:
     return f"initial:{stable_text_hash(user_body.strip())}"
 
 
+def load_retryable_initial_request(state: dict[str, object]) -> tuple[str, str, str] | None:
+    if str(state.get("pending_request_source", "")).strip():
+        return None
+    prepared_status = str(state.get("prepared_request_status", "")).strip()
+    prepared_source = str(state.get("prepared_request_source", "")).strip()
+    prepared_hash = str(state.get("prepared_request_hash", "")).strip()
+    if prepared_status != "retry_send" or not prepared_source.startswith("initial:"):
+        return None
+    prepared_text = read_prepared_request_text(state)
+    if not prepared_text:
+        return None
+    return prepared_text, prepared_hash or stable_text_hash(prepared_text), prepared_source
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    user_body = resolve_request_body(args)
-    request_text = compose_initial_request_text(user_body)
-    request_hash = stable_text_hash(request_text)
-    request_source = build_initial_request_source(user_body)
+    retryable_request = None if args.request_body.strip() else load_retryable_initial_request(state)
+    if retryable_request is not None:
+        request_text, request_hash, request_source = retryable_request
+        print("request: 前回未送信の初回 request を再送します。")
+    else:
+        user_body = resolve_request_body(args)
+        request_text = compose_initial_request_text(user_body)
+        request_hash = stable_text_hash(request_text)
+        request_source = build_initial_request_source(user_body)
 
     if (
         str(state.get("mode", "")).strip() == "waiting_prompt_reply"
@@ -156,24 +179,42 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             print(f"pending: {state.get('pending_request_log', '')}")
         return 0
 
-    request_log = log_text("sent_prompt_request", request_text)
+    prepared_log = log_text("prepared_prompt_request", request_text)
+    prepared_state = clear_error_fields(dict(state))
+    stage_prepared_request(
+        prepared_state,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=repo_relative(prepared_log),
+    )
+    save_state(prepared_state)
 
+    try:
+        send_to_chatgpt(request_text)
+    except Exception:
+        retry_state = clear_error_fields(dict(state))
+        stage_prepared_request(
+            retry_state,
+            request_hash=request_hash,
+            request_source=request_source,
+            request_log=repo_relative(prepared_log),
+            status="retry_send",
+        )
+        save_state(retry_state)
+        raise
+
+    request_log = log_text("sent_prompt_request", request_text)
     mutable_state = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable_state)
-    mutable_state.update(
-        {
-            "mode": "waiting_prompt_reply",
-            "need_chatgpt_prompt": False,
-            "need_chatgpt_next": False,
-            "need_codex_run": False,
-            "pending_request_hash": request_hash,
-            "pending_request_source": request_source,
-            "pending_request_log": repo_relative(request_log),
-        }
+    clear_prepared_request_fields(mutable_state)
+    promote_pending_request(
+        mutable_state,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=repo_relative(request_log),
     )
     save_state(mutable_state)
 
-    send_to_chatgpt(request_text)
     print(f"sent: {request_log}")
     return 0
 

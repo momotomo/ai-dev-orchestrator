@@ -48,6 +48,10 @@ DEFAULT_STATE: dict[str, Any] = {
     "need_chatgpt_next": False,
     "last_prompt_file": "",
     "last_report_file": "",
+    "prepared_request_hash": "",
+    "prepared_request_source": "",
+    "prepared_request_log": "",
+    "prepared_request_status": "",
     "pending_request_hash": "",
     "pending_request_source": "",
     "pending_request_log": "",
@@ -537,7 +541,26 @@ def read_pending_request_text(state: Mapping[str, Any]) -> str:
     log_path = pending_request_log_path(state)
     if log_path and log_path.exists():
         return read_text(log_path).strip()
-    return read_latest_prompt_request_text()
+    return ""
+
+
+def prepared_request_log_path(state: Mapping[str, Any]) -> Path | None:
+    raw_path = str(state.get("prepared_request_log", "")).strip()
+    if not raw_path:
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (bridge_runtime_root() / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def read_prepared_request_text(state: Mapping[str, Any]) -> str:
+    log_path = prepared_request_log_path(state)
+    if log_path and log_path.exists():
+        return read_text(log_path).strip()
+    return ""
 
 
 def pending_handoff_log_path(state: Mapping[str, Any]) -> Path | None:
@@ -563,6 +586,54 @@ def clear_pending_request_fields(state: dict[str, Any]) -> dict[str, Any]:
     state["pending_request_hash"] = ""
     state["pending_request_source"] = ""
     state["pending_request_log"] = ""
+    return state
+
+
+def clear_prepared_request_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["prepared_request_hash"] = ""
+    state["prepared_request_source"] = ""
+    state["prepared_request_log"] = ""
+    state["prepared_request_status"] = ""
+    return state
+
+
+def stage_prepared_request(
+    state: dict[str, Any],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log: str,
+    status: str = "prepared",
+) -> dict[str, Any]:
+    clear_pending_request_fields(state)
+    clear_prepared_request_fields(state)
+    state["prepared_request_hash"] = request_hash
+    state["prepared_request_source"] = request_source
+    state["prepared_request_log"] = request_log
+    state["prepared_request_status"] = status
+    return state
+
+
+def promote_pending_request(
+    state: dict[str, Any],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log: str,
+) -> dict[str, Any]:
+    clear_pending_request_fields(state)
+    clear_prepared_request_fields(state)
+    state.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": request_log,
+        }
+    )
     return state
 
 
@@ -1012,6 +1083,10 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- need_chatgpt_next: {state.get('need_chatgpt_next', False)}",
         f"- last_prompt_file: {state.get('last_prompt_file', '')}",
         f"- last_report_file: {state.get('last_report_file', '')}",
+        f"- prepared_request_hash: {state.get('prepared_request_hash', '')}",
+        f"- prepared_request_source: {state.get('prepared_request_source', '')}",
+        f"- prepared_request_log: {state.get('prepared_request_log', '')}",
+        f"- prepared_request_status: {state.get('prepared_request_status', '')}",
         f"- pending_request_hash: {state.get('pending_request_hash', '')}",
         f"- pending_request_source: {state.get('pending_request_source', '')}",
         f"- pending_request_log: {state.get('pending_request_log', '')}",
@@ -1260,8 +1335,7 @@ def recover_report_ready_state(
     if not codex_report_is_ready(runtime_report_path()):
         return current_state, recovered_report
 
-    mode = str(current_state.get("mode", "")).strip()
-    should_promote = bool(current_state.get("error")) or mode in {"ready_for_codex", "codex_running", "codex_done"}
+    should_promote = should_prioritize_unarchived_report(current_state)
     if not should_promote:
         return current_state, recovered_report
 
@@ -1280,6 +1354,8 @@ def recover_report_ready_state(
 
 def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     current_state = dict(state)
+    if should_prioritize_unarchived_report(current_state):
+        return current_state, False
     if not is_retryable_pending_handoff_error(current_state):
         return current_state, False
     if not read_pending_handoff_text(current_state):
@@ -1294,6 +1370,58 @@ def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, A
             "need_codex_run": False,
         }
     )
+    save_state(updated)
+    return updated, True
+
+
+def should_prioritize_unarchived_report(state: Mapping[str, Any]) -> bool:
+    if not codex_report_is_ready(runtime_report_path()):
+        return False
+
+    mode = str(state.get("mode", "")).strip()
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+        return False
+
+    if bool(state.get("error")):
+        return True
+    if mode in {"ready_for_codex", "codex_running", "codex_done"}:
+        return True
+    if mode == "idle":
+        return True
+    if mode == "awaiting_user":
+        return True
+    return False
+
+
+def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    current_state = dict(state)
+    pending_source = str(current_state.get("pending_request_source", "")).strip()
+    prepared_hash = str(current_state.get("prepared_request_hash", "")).strip()
+    prepared_source = str(current_state.get("prepared_request_source", "")).strip()
+    prepared_log = str(current_state.get("prepared_request_log", "")).strip()
+    prepared_status = str(current_state.get("prepared_request_status", "")).strip()
+
+    if pending_source:
+        return current_state, False
+    if not (prepared_hash and prepared_source and prepared_log):
+        return current_state, False
+    if prepared_status != "prepared":
+        return current_state, False
+
+    updated = clear_error_fields(dict(current_state))
+    clear_pending_request_fields(updated)
+    updated.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "pending_request_hash": prepared_hash,
+            "pending_request_source": prepared_source,
+            "pending_request_log": prepared_log,
+        }
+    )
+    clear_prepared_request_fields(updated)
     save_state(updated)
     return updated, True
 

@@ -29,6 +29,7 @@ from _bridge_common import (
     present_bridge_status,
     is_retryable_pending_handoff_error,
     recover_pending_handoff_state,
+    recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
     repo_relative,
@@ -36,6 +37,7 @@ from _bridge_common import (
     runtime_report_path,
     runtime_stop_path,
     safari_timeout_checklist_text,
+    should_prioritize_unarchived_report,
     state_snapshot,
     worker_repo_path,
 )
@@ -68,7 +70,9 @@ def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]
     stale_codex_running = is_stale_codex_running_candidate("", state)
     status = present_bridge_status(state, blocked=bool(blocked_guidance), stale_codex_running=stale_codex_running)
     note = blocked_guidance[1] if blocked_guidance is not None else suggested_next_note(state)
-    if str(state.get("pending_handoff_log", "")).strip():
+    if should_prioritize_unarchived_report(state):
+        note = "未退避 report が残っているため、handoff より先に archive と次の ChatGPT 返送導線へ戻します。"
+    elif str(state.get("pending_handoff_log", "")).strip():
         note = (
             "handoff は回収済みです。同じコマンドを再実行すると project 内の新しいチャット送信を再試行します。"
         )
@@ -243,6 +247,8 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 
 def describe_next_action(state: dict[str, Any]) -> str:
     mode = str(state.get("mode", "idle"))
+    if should_prioritize_unarchived_report(state):
+        return "archive_codex_report"
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         return "request_next_prompt"
     if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
@@ -407,7 +413,12 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
     if bool(final_state.get("error")):
         error_message = str(final_state.get("error_message", "")).strip()
         pending_handoff_log = str(final_state.get("pending_handoff_log", "")).strip()
-        if is_apple_event_timeout_text(error_message):
+        if should_prioritize_unarchived_report(final_state):
+            note = (
+                "bridge/outbox/codex_report.md に未退避 report が残っています。"
+                " handoff 再送より先に、その report を archive して ChatGPT 返送導線へ戻してください。"
+            )
+        elif is_apple_event_timeout_text(error_message):
             note = (
                 "Safari timeout が起きています。"
                 f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
@@ -465,6 +476,8 @@ def stale_codex_running_note() -> str:
 def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
     if not codex_report_is_ready(runtime_report_path()):
         return False
+    if should_prioritize_unarchived_report(state):
+        return False
 
     mode = str(state.get("mode", "idle"))
     if mode in {"codex_done", "codex_running"}:
@@ -515,7 +528,9 @@ def handoff_report_reference(final_state: dict[str, Any]) -> str:
 
 
 def promote_report_ready_state(state: dict[str, Any]) -> dict[str, Any]:
-    return recover_report_ready_state(state, prompt_path=runtime_prompt_path())[0]
+    state, _ = recover_report_ready_state(state, prompt_path=runtime_prompt_path())
+    state, _ = recover_prepared_request_state(state)
+    return state
 
 
 def format_elapsed(seconds: float) -> str:
@@ -901,10 +916,13 @@ def run(argv: list[str] | None = None) -> int:
     steps = 0
     prompt_path = runtime_prompt_path()
     initial_state, recovered_report = recover_report_ready_state(load_state(), prompt_path=prompt_path)
+    initial_state, recovered_prepared = recover_prepared_request_state(initial_state)
     initial_state, recovered_handoff = recover_pending_handoff_state(initial_state)
     start_cycle = int(initial_state.get("cycle", 0))
     if recovered_report is not None:
         history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
+    if recovered_prepared:
+        history.append("- preflight: 送信済み request を waiting 状態へ復旧しました")
     if recovered_handoff:
         history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
     print_entry_banner(initial_state, args)

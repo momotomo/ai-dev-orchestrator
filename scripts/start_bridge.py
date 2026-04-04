@@ -107,6 +107,8 @@ def print_doctor(args: argparse.Namespace) -> None:
         clear_error_status = "不可: bridge/STOP があるため"
     elif bool(state.get("pause")):
         clear_error_status = "不可: pause=true のため"
+    elif report_ready and run_until_stop.should_prioritize_unarchived_report(state):
+        clear_error_status = "不要: 未退避 report を優先して archive 側へ戻してください"
     elif pending_handoff_log_raw:
         clear_error_status = "可能: project ページ確認後に clear-error で同じ handoff 再送へ戻せます"
     elif run_until_stop.is_apple_event_timeout_text(error_message):

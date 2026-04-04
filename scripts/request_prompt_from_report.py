@@ -6,23 +6,29 @@ import sys
 
 from _bridge_common import (
     BRIDGE_DIR,
+    BridgeStop,
     build_chatgpt_handoff_request,
     build_chatgpt_request,
     clear_error_fields,
     clear_pending_handoff_fields,
     clear_pending_request_fields,
+    clear_prepared_request_fields,
     extract_last_chatgpt_handoff,
     guarded_main,
     load_project_config,
     log_text,
     present_resume_prompt,
+    promote_pending_request,
     read_pending_handoff_text,
+    read_prepared_request_text,
     read_last_report_text,
     repo_relative,
     rotate_chat_with_handoff,
     send_to_chatgpt,
     save_state,
+    stage_prepared_request,
     stable_text_hash,
+    should_prioritize_unarchived_report,
     wait_for_handoff_reply_text,
 )
 
@@ -98,6 +104,22 @@ def build_report_request_source(state: dict[str, object], resume_note: str) -> s
     return f"report:{last_report_file}"
 
 
+def load_retryable_prepared_request(state: dict[str, object]) -> tuple[str, str, str] | None:
+    if str(state.get("pending_request_source", "")).strip():
+        return None
+    prepared_status = str(state.get("prepared_request_status", "")).strip()
+    prepared_source = str(state.get("prepared_request_source", "")).strip()
+    prepared_hash = str(state.get("prepared_request_hash", "")).strip()
+    if prepared_status != "retry_send":
+        return None
+    if not prepared_source.startswith(("report:", "handoff:", "human_review_continue:")):
+        return None
+    prepared_text = read_prepared_request_text(state)
+    if not prepared_text:
+        return None
+    return prepared_text, prepared_hash or stable_text_hash(prepared_text), prepared_source
+
+
 def log_wait_event(event: object) -> None:
     event_name = str(getattr(event, "name", "")).strip()
     latest_text = str(getattr(event, "latest_text", "") or "")
@@ -107,24 +129,83 @@ def log_wait_event(event: object) -> None:
     print(f"{event_name}: {stage_log}")
 
 
+def dispatch_request(
+    state: dict[str, object],
+    *,
+    request_text: str,
+    request_hash: str,
+    request_source: str,
+    prepared_prefix: str,
+    sent_prefix: str,
+    success_updates: dict[str, object] | None = None,
+) -> int:
+    prepared_log = log_text(prepared_prefix, request_text)
+    prepared_log_rel = repo_relative(prepared_log)
+
+    prepared_state = clear_error_fields(dict(state))
+    clear_pending_request_fields(prepared_state)
+    stage_prepared_request(
+        prepared_state,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=prepared_log_rel,
+    )
+    save_state(prepared_state)
+
+    try:
+        send_to_chatgpt(request_text)
+    except Exception:
+        retry_state = clear_error_fields(dict(state))
+        clear_pending_request_fields(retry_state)
+        stage_prepared_request(
+            retry_state,
+            request_hash=request_hash,
+            request_source=request_source,
+            request_log=prepared_log_rel,
+            status="retry_send",
+        )
+        save_state(retry_state)
+        raise
+
+    request_log = log_text(sent_prefix, request_text)
+    mutable_state = clear_error_fields(dict(state))
+    clear_pending_handoff_fields(mutable_state)
+    promote_pending_request(
+        mutable_state,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=repo_relative(request_log),
+    )
+    if success_updates:
+        mutable_state.update(success_updates)
+    save_state(mutable_state)
+    print(f"sent: {request_log}")
+    return 0
+
+
 def run_resume_request(
     state: dict[str, object],
     args: argparse.Namespace,
     last_report: str,
     resume_note: str,
+    retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
-    request_text = build_chatgpt_request(
-        state=state,
-        template_path=template_path,
-        next_todo=args.next_todo,
-        open_questions=args.open_questions,
-        current_status=args.current_status or None,
-        last_report=last_report,
-        resume_note=resume_note or None,
-    )
-    request_hash = stable_text_hash(request_text)
-    request_source = build_report_request_source(state, resume_note)
+    if retryable_request is not None:
+        request_text, request_hash, request_source = retryable_request
+        print("request: 前回未送信の ChatGPT request を再送します。")
+    else:
+        template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
+        request_text = build_chatgpt_request(
+            state=state,
+            template_path=template_path,
+            next_todo=args.next_todo,
+            open_questions=args.open_questions,
+            current_status=args.current_status or None,
+            last_report=last_report,
+            resume_note=resume_note or None,
+        )
+        request_hash = stable_text_hash(request_text)
+        request_source = build_report_request_source(state, resume_note)
 
     if (
         str(state.get("mode", "")).strip() == "waiting_prompt_reply"
@@ -135,30 +216,19 @@ def run_resume_request(
             print(f"pending: {state.get('pending_request_log', '')}")
         return 0
 
-    request_log = log_text("sent_prompt_request_from_report", request_text)
-
-    mutable_state = clear_error_fields(dict(state))
-    clear_pending_handoff_fields(mutable_state)
-    clear_pending_request_fields(mutable_state)
-    mutable_state.update(
-        {
-            "mode": "waiting_prompt_reply",
-            "need_chatgpt_prompt": False,
-            "need_chatgpt_next": False,
-            "need_codex_run": False,
+    return dispatch_request(
+        state,
+        request_text=request_text,
+        request_hash=request_hash,
+        request_source=request_source,
+        prepared_prefix="prepared_prompt_request_from_report",
+        sent_prefix="sent_prompt_request_from_report",
+        success_updates={
             "chatgpt_decision": "",
             "chatgpt_decision_note": "",
             "human_review_auto_continue_count": 0,
-            "pending_request_hash": request_hash,
-            "pending_request_source": request_source,
-            "pending_request_log": repo_relative(request_log),
-        }
+        },
     )
-    save_state(mutable_state)
-
-    send_to_chatgpt(request_text)
-    print(f"sent: {request_log}")
-    return 0
 
 
 def run_rotated_report_request(
@@ -250,7 +320,15 @@ def run_rotated_report_request(
 
 
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
+    if should_prioritize_unarchived_report(state):
+        raise BridgeStop(
+            "bridge/outbox/codex_report.md に未退避 report が残っているため、"
+            "handoff / 新チャット送信へは進みません。先に report archive から再開してください。"
+        )
     args = parse_args(argv)
+    retryable_request = load_retryable_prepared_request(state)
+    if retryable_request is not None:
+        return run_resume_request(state, args, read_last_report_text(state), "", retryable_request)
     resume_note = resolve_resume_note(state, args)
     if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
         print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")

@@ -9,7 +9,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_report_ready_state, runtime_prompt_path, save_state, worker_repo_path
+from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, runtime_prompt_path, save_state, worker_repo_path
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -181,7 +181,9 @@ if __name__ == "__main__":
         guarded_main(
             lambda state: run(state),
             recover_state=lambda state: recover_pending_handoff_state(
-                recover_report_ready_state(state, prompt_path=runtime_prompt_path())[0]
+                recover_prepared_request_state(
+                    recover_report_ready_state(state, prompt_path=runtime_prompt_path())[0]
+                )[0]
             )[0],
         )
     )
