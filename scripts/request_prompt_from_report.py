@@ -9,12 +9,14 @@ from _bridge_common import (
     build_chatgpt_handoff_request,
     build_chatgpt_request,
     clear_error_fields,
+    clear_pending_handoff_fields,
     clear_pending_request_fields,
     extract_last_chatgpt_handoff,
     guarded_main,
     load_project_config,
     log_text,
     present_resume_prompt,
+    read_pending_handoff_text,
     read_last_report_text,
     repo_relative,
     rotate_chat_with_handoff,
@@ -136,6 +138,7 @@ def run_resume_request(
     request_log = log_text("sent_prompt_request_from_report", request_text)
 
     mutable_state = clear_error_fields(dict(state))
+    clear_pending_handoff_fields(mutable_state)
     clear_pending_request_fields(mutable_state)
     mutable_state.update(
         {
@@ -163,23 +166,49 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    handoff_request_text = build_chatgpt_handoff_request(
-        state=state,
-        last_report=last_report,
-        next_todo=args.next_todo,
-        open_questions=args.open_questions,
-        current_status=args.current_status or None,
-    )
-    handoff_request_log = log_text("handoff_requested", handoff_request_text)
-    send_to_chatgpt(handoff_request_text)
-    print(f"handoff requested: {handoff_request_log}")
+    request_source = build_report_request_source(state, "")
+    pending_handoff_text = ""
+    pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
+    if pending_handoff_source == request_source:
+        pending_handoff_text = read_pending_handoff_text(state)
 
-    raw_text = wait_for_handoff_reply_text(
-        request_text=handoff_request_text,
-        stage_callback=log_wait_event,
-    )
-    handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
-    handoff_received_log = log_text("handoff_received", handoff_text)
+    if pending_handoff_text:
+        handoff_text = pending_handoff_text
+        handoff_received_log = state.get("pending_handoff_log", "") or ""
+        print("handoff: 回収済み handoff を再利用して新チャット送信を再試行します。")
+    else:
+        handoff_request_text = build_chatgpt_handoff_request(
+            state=state,
+            last_report=last_report,
+            next_todo=args.next_todo,
+            open_questions=args.open_questions,
+            current_status=args.current_status or None,
+        )
+        handoff_request_log = log_text("handoff_requested", handoff_request_text)
+        send_to_chatgpt(handoff_request_text)
+        print(f"handoff requested: {handoff_request_log}")
+
+        raw_text = wait_for_handoff_reply_text(
+            request_text=handoff_request_text,
+            stage_callback=log_wait_event,
+        )
+        handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
+        handoff_received_log = log_text("handoff_received", handoff_text)
+        handoff_state = clear_error_fields(dict(state))
+        clear_pending_request_fields(handoff_state)
+        handoff_state.update(
+            {
+                "mode": "idle",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "pending_handoff_hash": stable_text_hash(handoff_text),
+                "pending_handoff_source": request_source,
+                "pending_handoff_log": repo_relative(handoff_received_log),
+            }
+        )
+        save_state(handoff_state)
+
     rotated_chat = rotate_chat_with_handoff(handoff_text)
     chat_rotated_log = log_text(
         "chat_rotated",
@@ -191,11 +220,11 @@ def run_rotated_report_request(
         ),
     )
     request_log = log_text("sent_prompt_request_from_report", handoff_text)
-    request_source = build_report_request_source(state, "")
     request_hash = stable_text_hash(handoff_text)
 
     mutable_state = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable_state)
+    clear_pending_handoff_fields(mutable_state)
     mutable_state.update(
         {
             "mode": "waiting_prompt_reply",
@@ -213,7 +242,8 @@ def run_rotated_report_request(
     )
     save_state(mutable_state)
 
-    print(f"handoff received: {handoff_received_log}")
+    if handoff_received_log:
+        print(f"handoff received: {handoff_received_log}")
     print(f"chat rotated: {chat_rotated_log}")
     print(f"sent: {request_log}")
     return 0

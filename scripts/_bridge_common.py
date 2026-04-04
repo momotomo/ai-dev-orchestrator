@@ -51,6 +51,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "pending_request_hash": "",
     "pending_request_source": "",
     "pending_request_log": "",
+    "pending_handoff_hash": "",
+    "pending_handoff_source": "",
+    "pending_handoff_log": "",
     "last_processed_request_hash": "",
     "last_processed_reply_hash": "",
     "current_chat_session": "",
@@ -110,6 +113,11 @@ COMPOSER_SELECTORS = [
     "[contenteditable='true'][translate='no']",
     "[contenteditable='true']",
 ]
+PROJECT_CHAT_COMPOSER_HINTS = (
+    "このプロジェクト内の新しいチャット",
+    "このプロジェクト内で新しいチャット",
+    "プロジェクト内の新しいチャット",
+)
 
 SEND_BUTTON_SELECTORS = [
     "button[data-testid='send-button']",
@@ -243,6 +251,7 @@ def present_bridge_status(
     need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
     need_chatgpt_next = bool(state.get("need_chatgpt_next"))
     need_codex_run = bool(state.get("need_codex_run"))
+    pending_handoff_log = str(state.get("pending_handoff_log", "")).strip()
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
 
@@ -273,6 +282,9 @@ def present_bridge_status(
 
     if mode == "codex_done":
         return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
+
+    if mode == "idle" and need_chatgpt_next and pending_handoff_log:
+        return BridgeStatusView("ChatGPTへ依頼中", "handoff は回収済みです。project 内の新しいチャット送信を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
         return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
@@ -528,10 +540,36 @@ def read_pending_request_text(state: Mapping[str, Any]) -> str:
     return read_latest_prompt_request_text()
 
 
+def pending_handoff_log_path(state: Mapping[str, Any]) -> Path | None:
+    raw_path = str(state.get("pending_handoff_log", "")).strip()
+    if not raw_path:
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (bridge_runtime_root() / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def read_pending_handoff_text(state: Mapping[str, Any]) -> str:
+    log_path = pending_handoff_log_path(state)
+    if log_path and log_path.exists():
+        return read_text(log_path).strip()
+    return ""
+
+
 def clear_pending_request_fields(state: dict[str, Any]) -> dict[str, Any]:
     state["pending_request_hash"] = ""
     state["pending_request_source"] = ""
     state["pending_request_log"] = ""
+    return state
+
+
+def clear_pending_handoff_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["pending_handoff_hash"] = ""
+    state["pending_handoff_source"] = ""
+    state["pending_handoff_log"] = ""
     return state
 
 
@@ -977,6 +1015,9 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- pending_request_hash: {state.get('pending_request_hash', '')}",
         f"- pending_request_source: {state.get('pending_request_source', '')}",
         f"- pending_request_log: {state.get('pending_request_log', '')}",
+        f"- pending_handoff_hash: {state.get('pending_handoff_hash', '')}",
+        f"- pending_handoff_source: {state.get('pending_handoff_source', '')}",
+        f"- pending_handoff_log: {state.get('pending_handoff_log', '')}",
         f"- last_processed_request_hash: {state.get('last_processed_request_hash', '')}",
         f"- last_processed_reply_hash: {state.get('last_processed_reply_hash', '')}",
         f"- current_chat_session: {state.get('current_chat_session', '')}",
@@ -1235,6 +1276,38 @@ def recover_report_ready_state(
     )
     save_state(updated)
     return updated, recovered_report
+
+
+def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    current_state = dict(state)
+    if not bool(current_state.get("error")):
+        return current_state, False
+    if not bool(current_state.get("need_chatgpt_next")):
+        return current_state, False
+    if not read_pending_handoff_text(current_state):
+        return current_state, False
+    error_message = str(current_state.get("error_message", "")).strip()
+    retryable_markers = (
+        "project ページ",
+        "新チャット送信後",
+        "新しいチャット",
+        "handoff",
+        "対象チャットを特定",
+    )
+    if error_message and not any(marker in error_message for marker in retryable_markers):
+        return current_state, False
+
+    updated = clear_error_fields(dict(current_state))
+    updated.update(
+        {
+            "mode": "idle",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": True,
+            "need_codex_run": False,
+        }
+    )
+    save_state(updated)
+    return updated, True
 
 
 def _extract_marked_block(report_text: str, start_marker: str, end_marker: str) -> str | None:
@@ -1591,10 +1664,11 @@ def _build_visible_text_script(selectors: Sequence[str]) -> str:
 """
 
 
-def _build_composer_state_script() -> str:
+def _build_composer_state_script(preferred_hint: str | None = None) -> str:
     return f"""
 (() => {{
   const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
+  const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
   const isVisible = (el) => {{
     if (!el) return false;
     const style = window.getComputedStyle(el);
@@ -1605,18 +1679,33 @@ def _build_composer_state_script() -> str:
       rect.width > 0 &&
       rect.height > 0;
   }};
+  const matchesHint = (node) => {{
+    if (!preferredHint) return false;
+    const values = [
+      node.getAttribute?.("placeholder") || "",
+      node.getAttribute?.("aria-label") || "",
+      node.getAttribute?.("data-placeholder") || "",
+      node.closest?.("form, section, main, div")?.innerText || "",
+    ];
+    return values.some((value) => value && value.includes(preferredHint));
+  }};
   let composer = null;
+  let fallbackComposer = null;
   for (const selector of selectors) {{
     const nodes = Array.from(document.querySelectorAll(selector));
     for (let index = nodes.length - 1; index >= 0; index -= 1) {{
       const node = nodes[index];
       if (isVisible(node)) {{
-        composer = node;
-        break;
+        if (!fallbackComposer) fallbackComposer = node;
+        if (matchesHint(node)) {{
+          composer = node;
+          break;
+        }}
       }}
     }}
     if (composer) break;
   }}
+  if (!composer) composer = fallbackComposer;
   if (!composer) return JSON.stringify({{found: false}});
   return JSON.stringify({{
     found: true,
@@ -1627,11 +1716,12 @@ def _build_composer_state_script() -> str:
 """
 
 
-def _build_fill_composer_script(text: str) -> str:
+def _build_fill_composer_script(text: str, preferred_hint: str | None = None) -> str:
     return f"""
 (() => {{
   const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
   const text = {json.dumps(text, ensure_ascii=False)};
+  const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
   const isVisible = (el) => {{
     if (!el) return false;
     const style = window.getComputedStyle(el);
@@ -1642,18 +1732,33 @@ def _build_fill_composer_script(text: str) -> str:
       rect.width > 0 &&
       rect.height > 0;
   }};
+  const matchesHint = (node) => {{
+    if (!preferredHint) return false;
+    const values = [
+      node.getAttribute?.("placeholder") || "",
+      node.getAttribute?.("aria-label") || "",
+      node.getAttribute?.("data-placeholder") || "",
+      node.closest?.("form, section, main, div")?.innerText || "",
+    ];
+    return values.some((value) => value && value.includes(preferredHint));
+  }};
   let composer = null;
+  let fallbackComposer = null;
   for (const selector of selectors) {{
     const nodes = Array.from(document.querySelectorAll(selector));
     for (let index = nodes.length - 1; index >= 0; index -= 1) {{
       const node = nodes[index];
       if (isVisible(node)) {{
-        composer = node;
-        break;
+        if (!fallbackComposer) fallbackComposer = node;
+        if (matchesHint(node)) {{
+          composer = node;
+          break;
+        }}
       }}
     }}
     if (composer) break;
   }}
+  if (!composer) composer = fallbackComposer;
   if (!composer) return JSON.stringify({{ok: false, reason: "composer_missing"}});
   composer.scrollIntoView({{block: "center"}});
   composer.focus();
@@ -1785,16 +1890,26 @@ def _ensure_target_chat(page: SafariChatPage, front_tab: Mapping[str, str], conf
     )
 
 
-def _find_composer_state(page: SafariChatPage) -> dict[str, Any]:
-    return _evaluate_json(page, _build_composer_state_script(), "ChatGPT 入力欄の確認に失敗しました")
+def _find_composer_state(page: SafariChatPage, *, preferred_hint: str | None = None) -> dict[str, Any]:
+    return _evaluate_json(
+        page,
+        _build_composer_state_script(preferred_hint=preferred_hint),
+        "ChatGPT 入力欄の確認に失敗しました",
+    )
 
 
-def ensure_chatgpt_ready(page: SafariChatPage, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> dict[str, Any]:
+def ensure_chatgpt_ready(
+    page: SafariChatPage,
+    config: Mapping[str, Any],
+    *,
+    allow_manual_login: bool = False,
+    preferred_hint: str | None = None,
+) -> dict[str, Any]:
     deadline = time.time() + 20
-    state = _find_composer_state(page)
+    state = _find_composer_state(page, preferred_hint=preferred_hint)
     while not state.get("found") and time.time() < deadline:
         page.wait_for_timeout(1000)
-        state = _find_composer_state(page)
+        state = _find_composer_state(page, preferred_hint=preferred_hint)
 
     if state.get("found"):
         return state
@@ -1837,9 +1952,20 @@ def open_chatgpt_page(
     yield None, page, config, front_tab
 
 
-def fill_chatgpt_composer(page: SafariChatPage, text: str, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> None:
-    ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login)
-    result = _evaluate_json(page, _build_fill_composer_script(text), "ChatGPT 入力欄への書き込みに失敗しました")
+def fill_chatgpt_composer(
+    page: SafariChatPage,
+    text: str,
+    config: Mapping[str, Any],
+    *,
+    allow_manual_login: bool = False,
+    preferred_hint: str | None = None,
+) -> None:
+    ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login, preferred_hint=preferred_hint)
+    result = _evaluate_json(
+        page,
+        _build_fill_composer_script(text, preferred_hint=preferred_hint),
+        "ChatGPT 入力欄への書き込みに失敗しました",
+    )
     if result.get("ok"):
         page.wait_for_timeout(300)
         return
@@ -1872,13 +1998,14 @@ def send_to_chatgpt_in_current_surface(
     *,
     require_conversation: bool = False,
     require_target_chat: bool = False,
+    preferred_hint: str | None = None,
 ) -> dict[str, str]:
     with open_chatgpt_page(
         reset_chat=False,
         require_conversation=require_conversation,
         require_target_chat=require_target_chat,
     ) as (_, page, config, _):
-        fill_chatgpt_composer(page, text, config)
+        fill_chatgpt_composer(page, text, config, preferred_hint=preferred_hint)
         submit_chatgpt_message(page)
         page.wait_for_timeout(500)
         return frontmost_safari_tab_info(config, require_conversation=require_conversation)
@@ -1941,23 +2068,65 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
     config = load_browser_config()
     current_tab = frontmost_safari_tab_info(config)
     project_page_url = derive_chatgpt_project_page_url(current_tab.get("url", ""), config)
-    navigate_current_chatgpt_tab(project_page_url)
-    send_to_chatgpt_in_current_surface(
-        handoff_text,
-        require_conversation=False,
-        require_target_chat=False,
-    )
-    deadline = time.time() + 30
+    last_error = ""
     last_info: dict[str, str] | None = None
-    while time.time() < deadline:
-        info = frontmost_safari_tab_info(config, require_conversation=True)
-        last_info = info
-        if _conversation_url_matches(info.get("url", ""), config):
-            return info
-        time.sleep(0.5)
+    for attempt in range(1, 3):
+        navigate_current_chatgpt_tab(project_page_url)
+        try:
+            sent = False
+            for hint in PROJECT_CHAT_COMPOSER_HINTS + ("",):
+                try:
+                    send_to_chatgpt_in_current_surface(
+                        handoff_text,
+                        require_conversation=False,
+                        require_target_chat=False,
+                        preferred_hint=hint or None,
+                    )
+                    sent = True
+                    break
+                except BridgeError as exc:
+                    last_error = str(exc)
+            if not sent:
+                if attempt < 2:
+                    time.sleep(1.0)
+                    continue
+                raise BridgeError(
+                    "project ページの『このプロジェクト内の新しいチャット』入力欄へ handoff を送れませんでした。"
+                    f" {last_error}"
+                )
+        except BridgeError as exc:
+            last_error = str(exc)
+            if attempt < 2:
+                time.sleep(1.0)
+                continue
+            raise
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                info = frontmost_safari_tab_info(config, require_conversation=True)
+            except BridgeError as exc:
+                last_error = str(exc)
+                time.sleep(0.5)
+                continue
+            last_info = info
+            if _conversation_url_matches(info.get("url", ""), config):
+                return info
+            time.sleep(0.5)
+
+        if attempt < 2:
+            time.sleep(1.0)
+
+    dump_note = ""
+    dump_text = _body_text_unchecked()
+    if dump_text:
+        dump_path = log_text("chat_rotation_failure_dump", dump_text, suffix="txt")
+        dump_note = f" raw dump: {repo_relative(dump_path)}"
     raise BridgeError(
         "新チャット送信後に対象チャットを特定できませんでした。"
-        f" 現在: {last_info.get('url', '') if last_info else ''}"
+        f" 現在: {last_info.get('url', '') if last_info else project_page_url}"
+        f" {last_error}".rstrip()
+        + dump_note
     )
 
 

@@ -27,6 +27,7 @@ from _bridge_common import (
     print_project_config_warnings,
     present_bridge_handoff,
     present_bridge_status,
+    recover_pending_handoff_state,
     recover_report_ready_state,
     recover_codex_report,
     repo_relative,
@@ -143,6 +144,8 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
         if decision == "need_info":
             return "このあと不足情報の補足入力を求め、次の ChatGPT request に添えて送ります。"
         return "このあと再開用の補足入力を求め、次の ChatGPT request に添えて送ります。"
+    if action == "request_prompt_from_report" and str(state.get("pending_handoff_log", "")).strip():
+        return "回収済み handoff を再利用して、project 内の新しいチャット送信を再試行します。"
     if action == "fetch_next_prompt":
         return (
             f"既存チャットの返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
@@ -333,10 +336,17 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
 
     if bool(final_state.get("error")):
         error_message = str(final_state.get("error_message", "")).strip()
+        pending_handoff_log = str(final_state.get("pending_handoff_log", "")).strip()
         if is_apple_event_timeout_text(error_message):
             note = (
                 "Safari timeout が起きています。"
                 f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
+            )
+        elif pending_handoff_log:
+            note = (
+                "handoff は回収済みです。project ページと『このプロジェクト内の新しいチャット』入力欄を確認し、"
+                "error を clear して再実行すると同じ handoff で再試行します。"
+                f" handoff_log: {pending_handoff_log}"
             )
         else:
             note = "state.error=true の原因を解消し、error を clear してから再実行してください。"
@@ -581,9 +591,16 @@ def run_command_with_heartbeat(
                     print(f"[codex] {snapshot.progress_line}")
                     last_codex_progress_line = snapshot.progress_line
             if next_heartbeat_at is not None and now >= next_heartbeat_at:
+                wait_suffix = ""
+                if action == "fetch_next_prompt":
+                    current_mode = str(load_state().get("mode", "")).strip()
+                    if current_mode == "extended_wait":
+                        wait_suffix = " stage=extended_wait"
+                    elif current_mode == "await_late_completion":
+                        wait_suffix = " stage=late_completion_mode"
                 print(
                     f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
-                    f"{describe_wait_message(action)}"
+                    f"{describe_wait_message(action)}{wait_suffix}"
                 )
                 next_heartbeat_at = now + heartbeat_seconds
 
@@ -799,9 +816,12 @@ def run(argv: list[str] | None = None) -> int:
     steps = 0
     prompt_path = runtime_prompt_path()
     initial_state, recovered_report = recover_report_ready_state(load_state(), prompt_path=prompt_path)
+    initial_state, recovered_handoff = recover_pending_handoff_state(initial_state)
     start_cycle = int(initial_state.get("cycle", 0))
     if recovered_report is not None:
         history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
+    if recovered_handoff:
+        history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
     print_entry_banner(initial_state, args)
 
     try:
@@ -870,6 +890,9 @@ def run(argv: list[str] | None = None) -> int:
     try:
         while steps < args.max_steps:
             before = promote_report_ready_state(load_state())
+            before, recovered_handoff = recover_pending_handoff_state(before)
+            if recovered_handoff:
+                history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
             try:
                 check_stop_conditions(before)
             except BridgeStop as exc:
