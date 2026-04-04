@@ -99,7 +99,8 @@ def print_doctor(args: argparse.Namespace) -> None:
     stop_exists = run_until_stop.runtime_stop_path().exists()
     backup_count = len(list(run_until_stop.bridge_runtime_root().glob("state.json.bak.*")))
     pending_request_log_raw = str(state.get("pending_request_log", "")).strip()
-    pending_handoff_log_raw = str(state.get("pending_handoff_log", "")).strip()
+    rotation_requested = run_until_stop.should_request_chat_rotation(state)
+    pending_handoff_log_raw = str(state.get("pending_handoff_log", "")).strip() if rotation_requested else ""
     pending_request_log = pending_request_log_raw or "なし"
     pending_handoff_log = pending_handoff_log_raw or "なし"
     error_message = str(state.get("error_message", "")).strip()

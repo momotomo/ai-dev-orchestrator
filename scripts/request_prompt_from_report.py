@@ -9,6 +9,7 @@ from _bridge_common import (
     BridgeStop,
     build_chatgpt_handoff_request,
     build_chatgpt_request,
+    clear_chat_rotation_fields,
     clear_error_fields,
     clear_pending_handoff_fields,
     clear_pending_request_fields,
@@ -29,6 +30,7 @@ from _bridge_common import (
     stage_prepared_request,
     stable_text_hash,
     should_prioritize_unarchived_report,
+    should_request_chat_rotation,
     wait_for_handoff_reply_text,
 )
 
@@ -295,6 +297,7 @@ def run_rotated_report_request(
     mutable_state = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable_state)
     clear_pending_handoff_fields(mutable_state)
+    clear_chat_rotation_fields(mutable_state)
     mutable_state.update(
         {
             "mode": "waiting_prompt_reply",
@@ -334,9 +337,16 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
         return 0
     last_report = read_last_report_text(state)
+    if not should_request_chat_rotation(state) and str(state.get("pending_handoff_log", "")).strip():
+        cleaned_state = dict(state)
+        clear_pending_handoff_fields(cleaned_state)
+        save_state(cleaned_state)
+        state = cleaned_state
     if str(state.get("mode", "")).strip() == "awaiting_user":
         return run_resume_request(state, args, last_report, resume_note)
-    return run_rotated_report_request(state, args, last_report)
+    if should_request_chat_rotation(state):
+        return run_rotated_report_request(state, args, last_report)
+    return run_resume_request(state, args, last_report, "")
 
 
 if __name__ == "__main__":

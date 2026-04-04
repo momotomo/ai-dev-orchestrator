@@ -22,7 +22,9 @@
 - Safari fetch 待機は通常運用で 1800 秒前提。未完了なら追加 600 秒待機し、それでも未完了なら late completion mode で書き切りまで監視する
 - `max_execution_count` は上限であり、ChatGPT が `Codex 不要` を返した時は途中で正常停止しうる
 - `run_until_stop.py` は既定で継続実行する。archive 後の次 request / fetch へ進んでも、同じ report / same request は idempotency guard で再送しない
-- report ベース継続では、現在チャットで handoff を作ってから project ページの「このプロジェクト内の新しいチャット」へ送ってローテーションする
+- report ベース継続は通常、同じチャットで続ける
+- handoff / chat rotation は、1800 秒 + 600 秒を超えて late completion mode に入った reply を最後まで回収し、その reply を Codex に渡した current cycle を完了した後にだけ走る
+- handoff request は、次チャットへそのまま貼る完成済みの最初のメッセージだけを返させる。要約メモは求めない
 - `human_review` は 1 回だけ自動継続し、2 回連続した時だけ `人確認待ち` に倒す
 - ChatGPT の通常返答契約は `CHATGPT_PROMPT_REPLY` と `CHATGPT_NO_CODEX` の 2 系統だけと考える
 - `CHATGPT_NO_CODEX` の先頭行は `completed`、`human_review`、`need_info` のいずれかで、完了 / 人確認待ち / 情報待ちを表す

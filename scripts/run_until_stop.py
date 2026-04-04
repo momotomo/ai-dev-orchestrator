@@ -38,6 +38,7 @@ from _bridge_common import (
     runtime_stop_path,
     safari_timeout_checklist_text,
     should_prioritize_unarchived_report,
+    should_request_chat_rotation,
     state_snapshot,
     worker_repo_path,
 )
@@ -72,7 +73,7 @@ def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]
     note = blocked_guidance[1] if blocked_guidance is not None else suggested_next_note(state)
     if should_prioritize_unarchived_report(state):
         note = "未退避 report が残っているため、handoff より先に archive と次の ChatGPT 返送導線へ戻します。"
-    elif str(state.get("pending_handoff_log", "")).strip():
+    elif str(state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(state):
         note = (
             "handoff は回収済みです。同じコマンドを再実行すると project 内の新しいチャット送信を再試行します。"
         )
@@ -177,7 +178,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
         if decision == "need_info":
             return "このあと不足情報の補足入力を求め、次の ChatGPT request に添えて送ります。"
         return "このあと再開用の補足入力を求め、次の ChatGPT request に添えて送ります。"
-    if action == "request_prompt_from_report" and str(state.get("pending_handoff_log", "")).strip():
+    if action == "request_prompt_from_report" and str(state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(state):
         return "回収済み handoff を再利用して、project 内の新しいチャット送信を再試行します。"
     if action == "fetch_next_prompt":
         return (
@@ -190,7 +191,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "archive_codex_report":
         return "完了報告を archive して次の依頼へ進めます。"
     if action == "request_prompt_from_report":
-        return "完了報告をもとに handoff を作り、project 内の新しいチャットへ次の依頼を送ります。"
+        return "完了報告をもとに、同じチャットへ次の依頼を送ります。"
     if action == "completed":
         return "追加の操作は不要です。"
     return "summary と note を見て次の 1 手を判断してください。"
@@ -349,7 +350,7 @@ def recommended_operator_step(
         return ("新規開始", format_start_bridge_command(args, mode="run"))
     if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
         return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
-    if str(final_state.get("pending_handoff_log", "")).strip():
+    if str(final_state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(final_state):
         return ("handoff 再送を再開", format_start_bridge_command(args, mode="resume"))
     return ("続きから再開", format_start_bridge_command(args, mode="resume"))
 
@@ -412,7 +413,9 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
 
     if bool(final_state.get("error")):
         error_message = str(final_state.get("error_message", "")).strip()
-        pending_handoff_log = str(final_state.get("pending_handoff_log", "")).strip()
+        pending_handoff_log = (
+            str(final_state.get("pending_handoff_log", "")).strip() if should_request_chat_rotation(final_state) else ""
+        )
         if should_prioritize_unarchived_report(final_state):
             note = (
                 "bridge/outbox/codex_report.md に未退避 report が残っています。"

@@ -8,6 +8,7 @@ from pathlib import Path
 from _bridge_common import (
     BridgeError,
     build_human_review_auto_continue_request,
+    clear_chat_rotation_fields,
     clear_error_fields,
     clear_pending_request_fields,
     promote_pending_request,
@@ -55,7 +56,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             " request 送信から再開してください。"
         )
 
+    rotation_requested = bool(state.get("rotate_after_cycle"))
+    rotation_reason = str(state.get("rotate_after_cycle_reason", "")).strip()
+    if str(state.get("mode", "")).strip() == "await_late_completion":
+        rotation_requested = True
+        rotation_reason = rotation_reason or "late_completion"
+
     def handle_wait_event(event: object) -> None:
+        nonlocal rotation_requested, rotation_reason
         event_name = str(getattr(event, "name", "")).strip()
         latest_text = str(getattr(event, "latest_text", "") or "")
         mutable_state = clear_error_fields(dict(load_state()))
@@ -63,6 +71,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             mutable_state["mode"] = "extended_wait"
         elif event_name == "late_completion_mode":
             mutable_state["mode"] = "await_late_completion"
+            rotation_requested = True
+            rotation_reason = "late_completion"
+            mutable_state["rotate_after_cycle"] = True
+            mutable_state["rotate_after_cycle_reason"] = rotation_reason
         save_state(mutable_state)
         stage_log = log_text(event_name, latest_text, suffix="txt")
         print(f"{event_name}: {stage_log}")
@@ -108,6 +120,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "chatgpt_decision": "",
                 "chatgpt_decision_note": "",
                 "last_prompt_file": repo_relative(prompt_path),
+                "rotate_after_cycle": rotation_requested,
+                "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
             }
         )
         save_state(mutable_state)
@@ -145,6 +159,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "chatgpt_decision": "human_review",
                 "chatgpt_decision_note": decision.note,
                 "last_prompt_file": "",
+                "rotate_after_cycle": rotation_requested,
+                "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
             }
         )
         save_state(prepared_state)
@@ -169,6 +185,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "chatgpt_decision": "human_review",
                     "chatgpt_decision_note": decision.note,
                     "last_prompt_file": "",
+                    "rotate_after_cycle": rotation_requested,
+                    "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
                 }
             )
             save_state(retry_state)
@@ -186,6 +204,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "human_review_auto_continue_count": auto_continue_count + 1,
                 "chatgpt_decision": "",
                 "chatgpt_decision_note": "",
+                "rotate_after_cycle": rotation_requested,
+                "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
             }
         )
         save_state(waiting_state)
@@ -212,6 +232,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             "last_prompt_file": "",
         }
     )
+    clear_chat_rotation_fields(mutable_state)
     if decision.kind == "completed":
         mutable_state["mode"] = "completed"
     else:

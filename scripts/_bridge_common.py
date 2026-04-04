@@ -58,6 +58,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "pending_handoff_hash": "",
     "pending_handoff_source": "",
     "pending_handoff_log": "",
+    "rotate_after_cycle": False,
+    "rotate_after_cycle_reason": "",
     "last_processed_request_hash": "",
     "last_processed_reply_hash": "",
     "current_chat_session": "",
@@ -287,7 +289,7 @@ def present_bridge_status(
     if mode == "codex_done":
         return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
 
-    if mode == "idle" and need_chatgpt_next and pending_handoff_log:
+    if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_request_chat_rotation(state):
         return BridgeStatusView("ChatGPTへ依頼中", "handoff は回収済みです。project 内の新しいチャット送信を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
@@ -642,6 +644,16 @@ def clear_pending_handoff_fields(state: dict[str, Any]) -> dict[str, Any]:
     state["pending_handoff_source"] = ""
     state["pending_handoff_log"] = ""
     return state
+
+
+def clear_chat_rotation_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["rotate_after_cycle"] = False
+    state["rotate_after_cycle_reason"] = ""
+    return state
+
+
+def should_request_chat_rotation(state: Mapping[str, Any]) -> bool:
+    return bool(state.get("rotate_after_cycle"))
 
 
 def load_browser_config() -> dict[str, Any]:
@@ -1093,6 +1105,8 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- pending_handoff_hash: {state.get('pending_handoff_hash', '')}",
         f"- pending_handoff_source: {state.get('pending_handoff_source', '')}",
         f"- pending_handoff_log: {state.get('pending_handoff_log', '')}",
+        f"- rotate_after_cycle: {state.get('rotate_after_cycle', False)}",
+        f"- rotate_after_cycle_reason: {state.get('rotate_after_cycle_reason', '')}",
         f"- last_processed_request_hash: {state.get('last_processed_request_hash', '')}",
         f"- last_processed_reply_hash: {state.get('last_processed_reply_hash', '')}",
         f"- current_chat_session: {state.get('current_chat_session', '')}",
@@ -1356,6 +1370,8 @@ def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, A
     current_state = dict(state)
     if should_prioritize_unarchived_report(current_state):
         return current_state, False
+    if not should_request_chat_rotation(current_state):
+        return current_state, False
     if not is_retryable_pending_handoff_error(current_state):
         return current_state, False
     if not read_pending_handoff_text(current_state):
@@ -1427,6 +1443,8 @@ def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, 
 
 
 def is_retryable_pending_handoff_error(state: Mapping[str, Any]) -> bool:
+    if not should_request_chat_rotation(state):
+        return False
     if not bool(state.get("error")):
         return False
     if not bool(state.get("need_chatgpt_next")):
@@ -2384,20 +2402,17 @@ def build_chatgpt_handoff_request(
 ) -> str:
     summary = compact_last_report_text(last_report)
     contract = build_chatgpt_reply_contract_section()
-    status_text = current_status or state_snapshot(state)
+    status_view = present_bridge_status(state)
+    status_text = current_status or f"{status_view.label}: {status_view.detail}"
     return (
-        "次チャット用の引き継ぎを書いてください。\n"
-        "この文章はそのまま新しいチャットの最初のメッセージとして使います。\n\n"
-        "要件:\n"
-        "- 冗長な説明をしない\n"
-        "- 現在のプロジェクト前提を入れる\n"
-        "- 現在の進捗を短く入れる\n"
-        "- 直前の完了内容を短く入れる\n"
-        "- 次の Codex 用 prompt request を入れる\n"
-        "- bridge reply contract を含める\n\n"
+        "次チャットへそのまま貼る完成済みの最初のメッセージだけを書いてください。\n"
+        "これは要約メモではありません。新しいチャットの最初の 1 通として、そのまま送れる本文だけを返してください。\n"
+        "前置き、見出し、箇条書き、補足説明、冗長な要約は禁止です。\n"
+        "今回必要な差分だけを短く含めてください。\n"
+        "本文の流れは project 前提 / 現在進捗 / 直前完了 / next request / bridge reply contract の順に固定してください。\n\n"
         "返答は前置きなしで次のブロックだけにしてください。\n\n"
         f"{HANDOFF_REPLY_START}\n"
-        "[新しいチャットの最初のメッセージ本文]\n"
+        "[新しいチャットの最初のメッセージ本文だけ]\n"
         f"{HANDOFF_REPLY_END}\n\n"
         "## current_status\n"
         f"{status_text}\n\n"
