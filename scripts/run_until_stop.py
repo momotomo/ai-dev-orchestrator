@@ -60,9 +60,9 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     project_config = project_config or load_project_config()
     browser_config = load_browser_config()
     parser = argparse.ArgumentParser(
-        description="bridge の通常入口です。--project-path と --max-execution-count を渡して数手まとめて進めます。",
+        description="bridge の実行エンジンです。通常入口は scripts/start_bridge.py を使います。",
         epilog=(
-            "通常起動例: python3 scripts/run_until_stop.py "
+            "通常起動例: python3 scripts/start_bridge.py "
             "--project-path /path/to/target-repo --max-execution-count 6"
         ),
     )
@@ -127,6 +127,7 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--next-todo", default="", help="report ベース request に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="report ベース request に渡す open_questions")
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
+    parser.add_argument("--entry-script", default="scripts/run_until_stop.py", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -166,7 +167,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
 def print_entry_banner(state: dict[str, Any], args: argparse.Namespace) -> None:
     status = present_bridge_status(state)
     project_path = args.worker_repo_path or "."
-    print("bridge entry: python3 scripts/run_until_stop.py")
+    print(f"bridge entry: python3 {args.entry_script}")
     print(f"- project_path: {project_path}")
     print(f"- max_execution_count: {args.max_steps}")
     print(f"- 現在の状況: {status.label}")
@@ -255,7 +256,7 @@ def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
 
 
 def format_runner_command(args: argparse.Namespace) -> str:
-    command = ["python3", "scripts/run_until_stop.py", "--max-execution-count", str(args.max_steps)]
+    command = ["python3", args.entry_script, "--max-execution-count", str(args.max_steps)]
     if args.worker_repo_path:
         command.extend(["--project-path", str(args.worker_repo_path)])
     if args.stop_at_cycle_boundary:
