@@ -29,24 +29,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--status",
         action="store_true",
-        help="実行せず、今どこで止まっているかと次に何をすればよいかだけ表示する",
+        help="実行せず、今どこで止まっているかとおすすめ 1 コマンドだけ表示する",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="通常実行と同じ。続きから再開することを明示したい時に使う",
+        help="そのまま続きから再開したい時に明示する。通常実行と同じ",
     )
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="runtime の軽い診断だけを行い、再開前に見るべき点を短く表示する",
+        help="先に人が見るべき点と、おすすめ 1 コマンドを短く診断する",
     )
     parser.add_argument(
         "--clear-error",
         "--reset",
         action="store_true",
         dest="clear_error",
-        help="bridge 側の error / error_message だけを最小解除し、再開可能ならその状態へ寄せる",
+        help="bridge 側の停止要因だけを最小解除する。doctor で clear-error 推奨の時に使う",
     )
     return parser.parse_args(argv)
 
@@ -74,9 +74,12 @@ def print_resume_overview(args: argparse.Namespace) -> None:
     derived_args = build_derived_args(args)
     mode_label = run_until_stop.start_bridge_mode(state)
     status_label, guidance, note = run_until_stop.start_bridge_resume_guidance(derived_args, state)
+    recommendation_label, recommended_command = run_until_stop.recommended_operator_step(derived_args, state)
     print("bridge status:", flush=True)
     print(f"- 入口判断: {mode_label}", flush=True)
     print(f"- 現在の状況: {status_label}", flush=True)
+    print(f"- おすすめの動き: {recommendation_label}", flush=True)
+    print(f"- おすすめ 1 コマンド: {recommended_command}", flush=True)
     print(f"- 次に起きること: {guidance}", flush=True)
     print(f"- 次に見るもの: {note}", flush=True)
     if mode_label == "先に確認":
@@ -90,6 +93,7 @@ def print_doctor(args: argparse.Namespace) -> None:
     derived_args = build_derived_args(args)
     mode_label = run_until_stop.start_bridge_mode(state)
     status_label, guidance, note = run_until_stop.start_bridge_resume_guidance(derived_args, state)
+    recommendation_label, recommended_command = run_until_stop.recommended_operator_step(derived_args, state)
     report_ready = run_until_stop.codex_report_is_ready(run_until_stop.runtime_report_path())
     prompt_ready = run_until_stop.runtime_prompt_path().exists()
     stop_exists = run_until_stop.runtime_stop_path().exists()
@@ -105,10 +109,12 @@ def print_doctor(args: argparse.Namespace) -> None:
     else:
         clear_error_status = "不要: error 停止ではありません"
     print("bridge doctor:", flush=True)
-    print(f"- 入口判断: {mode_label}", flush=True)
+    print(f"- 判定: {recommendation_label}", flush=True)
+    print(f"- おすすめ 1 コマンド: {recommended_command}", flush=True)
     print(f"- 現在の状況: {status_label}", flush=True)
     print(f"- 次に起きること: {guidance}", flush=True)
     print(f"- 次に見るもの: {note}", flush=True)
+    print(f"- 詳細(入口判断): {mode_label}", flush=True)
     print(f"- prompt_ready: {'yes' if prompt_ready else 'no'}", flush=True)
     print(f"- report_ready: {'yes' if report_ready else 'no'}", flush=True)
     print(f"- pending_request_log: {pending_request_log}", flush=True)

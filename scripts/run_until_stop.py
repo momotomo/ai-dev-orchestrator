@@ -304,11 +304,52 @@ def format_runner_command(args: argparse.Namespace) -> str:
     return " ".join(command)
 
 
-def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]) -> str:
+def format_start_bridge_command(args: argparse.Namespace, mode: str = "run") -> str:
+    command = ["python3", "scripts/start_bridge.py"]
+    if args.worker_repo_path:
+        command.extend(["--project-path", str(args.worker_repo_path)])
+    command.extend(["--max-execution-count", str(args.max_steps)])
+    if mode == "status":
+        command.append("--status")
+    elif mode == "resume":
+        command.append("--resume")
+    elif mode == "doctor":
+        command.append("--doctor")
+    elif mode == "clear-error":
+        command.append("--clear-error")
+    return " ".join(command)
+
+
+def recommended_operator_step(
+    args: argparse.Namespace,
+    final_state: dict[str, Any],
+    *,
+    reason: str = "",
+) -> tuple[str, str]:
     action = describe_next_action(final_state)
+    stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
+
+    if runtime_stop_path().exists():
+        return ("先に状況確認", format_start_bridge_command(args, mode="doctor"))
+    if bool(final_state.get("pause")):
+        return ("先に状況確認", format_start_bridge_command(args, mode="doctor"))
+    if bool(final_state.get("error")):
+        return ("停止要因を整理", format_start_bridge_command(args, mode="clear-error"))
+    if has_unarchived_report_conflict(final_state) or stale_codex_running:
+        return ("先に状況確認", format_start_bridge_command(args, mode="doctor"))
     if action in {"completed", "no_action"}:
-        return "なし"
-    return format_runner_command(args)
+        return ("追加操作なし", "なし")
+    if action == "request_next_prompt":
+        return ("新規開始", format_start_bridge_command(args, mode="run"))
+    if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
+        return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
+    if str(final_state.get("pending_handoff_log", "")).strip():
+        return ("handoff 再送を再開", format_start_bridge_command(args, mode="resume"))
+    return ("続きから再開", format_start_bridge_command(args, mode="resume"))
+
+
+def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]) -> str:
+    return recommended_operator_step(args, final_state)[1]
 
 
 def suggested_next_note(final_state: dict[str, Any]) -> str:
@@ -678,6 +719,9 @@ def summarize_run(
         suggested_command = suggested_next_command(args, final_state)
     if suggested_note is None:
         suggested_note = suggested_next_note(final_state)
+    recommendation_label, recommended_command = recommended_operator_step(args, final_state, reason=reason)
+    if suggested_command == "なし" and recommended_command != "なし":
+        suggested_command = recommended_command
     handoff = present_bridge_handoff(
         final_state,
         reason=reason,
@@ -700,6 +744,8 @@ def summarize_run(
         "## handoff",
         f"- 現在の状況: {final_status.label}",
         f"- 停止時の案内: {handoff.title}",
+        f"- おすすめの動き: {recommendation_label}",
+        f"- おすすめ 1 コマンド: {recommended_command}",
         f"- 次に見るもの: {handoff.detail}",
         f"- 次の操作: {suggested_command}",
         f"- 補足: {suggested_note}",
@@ -797,6 +843,9 @@ def finish(
         suggested_next_command_override = suggested_next_command(args, final_state)
     if suggested_next_note_override is None:
         suggested_next_note_override = suggested_next_note(final_state)
+    recommendation_label, recommended_command = recommended_operator_step(args, final_state, reason=reason)
+    if suggested_next_command_override == "なし" and recommended_command != "なし":
+        suggested_next_command_override = recommended_command
 
     summary = summarize_run(
         args=args,
@@ -824,6 +873,8 @@ def finish(
     print(summary.rstrip())
     print(f"log: {log_path}")
     print(f"handoff: {handoff.title}")
+    print(f"- recommended_action: {recommendation_label}")
+    print(f"- recommended_command: {recommended_command}")
     print(f"- note: {handoff.detail}")
     print(f"- summary: {repo_relative(log_path)}")
     print(f"- suggested_next_command: {suggested_next_command_override}")
