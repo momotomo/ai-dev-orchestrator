@@ -66,6 +66,12 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
         ),
     )
     parser.add_argument("--max-steps", "--max-execution-count", dest="max_steps", type=int, default=DEFAULT_MAX_STEPS, help="最大何手まで進めるか")
+    parser.add_argument(
+        "--stop-at-cycle-boundary",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="archive で cycle が 1 つ進んだらその run を自然停止し、次 cycle の request は次回実行へ回す",
+    )
     parser.add_argument("--sleep-seconds", type=float, default=DEFAULT_SLEEP_SECONDS, help="各手のあいだに待つ秒数")
     parser.add_argument(
         "--heartbeat-seconds",
@@ -148,7 +154,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "archive_codex_report":
         return "完了報告を archive して次の依頼へ進めます。"
     if action == "request_prompt_from_report":
-        return "完了報告をもとに次の依頼を送ります。"
+        return "完了報告をもとに handoff を作り、project 内の新しいチャットへ次の依頼を送ります。"
     if action == "completed":
         return "追加の操作は不要です。"
     return "summary と note を見て次の 1 手を判断してください。"
@@ -207,7 +213,7 @@ def describe_next_action(state: dict[str, Any]) -> str:
     mode = str(state.get("mode", "idle"))
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         return "request_next_prompt"
-    if mode == "waiting_prompt_reply":
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
         return "fetch_next_prompt"
     if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
         return "request_prompt_from_report"
@@ -249,6 +255,8 @@ def format_runner_command(args: argparse.Namespace) -> str:
     command = ["python3", "scripts/run_until_stop.py", "--max-execution-count", str(args.max_steps)]
     if args.worker_repo_path:
         command.extend(["--project-path", str(args.worker_repo_path)])
+    if args.stop_at_cycle_boundary:
+        command.append("--stop-at-cycle-boundary")
     if args.sleep_seconds != DEFAULT_SLEEP_SECONDS:
         command.extend(["--sleep-seconds", str(args.sleep_seconds)])
     if args.heartbeat_seconds != DEFAULT_HEARTBEAT_SECONDS:
@@ -396,7 +404,7 @@ def describe_wait_message(action: str) -> str:
     if action == "request_next_prompt":
         return "ChatGPT request の送信完了を待っています。"
     if action == "request_prompt_from_report":
-        return "次フェーズ request の送信完了を待っています。"
+        return "handoff 生成と次チャット request の送信完了を待っています。"
     return "bridge の処理完了を待っています。"
 
 
@@ -601,6 +609,7 @@ def summarize_run(
     history: list[str],
     suggested_next_command_override: str | None = None,
     suggested_next_note_override: str | None = None,
+    cycle_boundary_stop: bool = False,
 ) -> str:
     blocked_guidance = blocked_next_guidance(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
@@ -629,6 +638,7 @@ def summarize_run(
         suggested_note=suggested_note,
         blocked=bool(blocked_guidance),
         stale_codex_running=stale_codex_running,
+        cycle_boundary_stop=cycle_boundary_stop,
     )
     initial_status = present_bridge_status(initial_state)
     final_status = present_bridge_status(
@@ -657,6 +667,7 @@ def summarize_run(
         f"- codex_running_poll_seconds: {args.codex_running_poll_seconds}",
         f"- warnings: {len(warnings)}",
         f"- blocked: {bool(blocked_guidance)}",
+        f"- cycle_boundary_stop: {cycle_boundary_stop}",
         f"- stale_codex_running_candidate: {stale_codex_running}",
         f"- fetch_retry_timeouts: {fetch_retry_timeouts}",
         f"- fetch_retry_recoveries: {fetch_retry_recoveries}",
@@ -718,6 +729,7 @@ def finish(
     history: list[str],
     suggested_next_command_override: str | None = None,
     suggested_next_note_override: str | None = None,
+    cycle_boundary_stop: bool = False,
     exit_code: int = 0,
 ) -> int:
     blocked_guidance = blocked_next_guidance(final_state)
@@ -745,6 +757,7 @@ def finish(
         history=history,
         suggested_next_command_override=suggested_next_command_override,
         suggested_next_note_override=suggested_next_note_override,
+        cycle_boundary_stop=cycle_boundary_stop,
     )
     log_path = log_text("run_until_stop_summary", summary)
     handoff = present_bridge_handoff(
@@ -753,6 +766,7 @@ def finish(
         suggested_note=suggested_next_note_override,
         blocked=bool(blocked_guidance),
         stale_codex_running=stale_codex_running,
+        cycle_boundary_stop=cycle_boundary_stop,
     )
     report_reference = handoff_report_reference(final_state)
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
@@ -785,6 +799,7 @@ def run(argv: list[str] | None = None) -> int:
     steps = 0
     prompt_path = runtime_prompt_path()
     initial_state, recovered_report = recover_report_ready_state(load_state(), prompt_path=prompt_path)
+    start_cycle = int(initial_state.get("cycle", 0))
     if recovered_report is not None:
         history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
     print_entry_banner(initial_state, args)
@@ -968,6 +983,26 @@ def run(argv: list[str] | None = None) -> int:
                     final_state=after,
                     history=history,
                     exit_code=result.returncode,
+                )
+
+            if args.stop_at_cycle_boundary and int(after.get("cycle", 0)) > start_cycle:
+                completed_cycle = int(after.get("cycle", 0))
+                history.append(
+                    f"- cycle boundary: cycle {completed_cycle} の archive 完了で停止し、次 cycle request は次回実行へ回しました"
+                )
+                return finish(
+                    args=args,
+                    reason=f"cycle {completed_cycle} の完了まで進めたため停止しました。",
+                    steps=steps,
+                    warnings=warnings,
+                    initial_state=initial_state,
+                    final_state=after,
+                    history=history,
+                    suggested_next_note_override=(
+                        f"この run は cycle {completed_cycle} の完了までで止めました。"
+                        " 次 cycle の ChatGPT request は次回実行で進みます。"
+                    ),
+                    cycle_boundary_stop=True,
                 )
 
             if state_signature(before) == state_signature(after):

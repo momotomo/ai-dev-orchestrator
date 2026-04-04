@@ -4,7 +4,25 @@ from __future__ import annotations
 import argparse
 import sys
 
-from _bridge_common import BRIDGE_DIR, build_chatgpt_request, clear_error_fields, guarded_main, load_project_config, log_text, present_resume_prompt, read_last_report_text, send_to_chatgpt, save_state
+from _bridge_common import (
+    BRIDGE_DIR,
+    build_chatgpt_handoff_request,
+    build_chatgpt_request,
+    clear_error_fields,
+    clear_pending_request_fields,
+    extract_last_chatgpt_handoff,
+    guarded_main,
+    load_project_config,
+    log_text,
+    present_resume_prompt,
+    read_last_report_text,
+    repo_relative,
+    rotate_chat_with_handoff,
+    send_to_chatgpt,
+    save_state,
+    stable_text_hash,
+    wait_for_handoff_reply_text,
+)
 
 DEFAULT_NEXT_TODO = "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。"
 DEFAULT_OPEN_QUESTIONS = "未解決事項があれば安全側で補ってください。"
@@ -69,14 +87,31 @@ def resolve_resume_note(state: dict[str, object], args: argparse.Namespace) -> s
     return prompt_resume_note(state)
 
 
-def run(state: dict[str, object], argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    resume_note = resolve_resume_note(state, args)
-    if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
-        print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
-        return 0
+def build_report_request_source(state: dict[str, object], resume_note: str) -> str:
+    last_report_file = str(state.get("last_report_file", "")).strip() or "unknown-report"
+    if str(state.get("mode", "")).strip() == "awaiting_user":
+        decision = str(state.get("chatgpt_decision", "")).strip() or "resume"
+        resume_hash = stable_text_hash(resume_note.strip() or "no-note")
+        return f"handoff:{decision}:{last_report_file}:{resume_hash}"
+    return f"report:{last_report_file}"
+
+
+def log_wait_event(event: object) -> None:
+    event_name = str(getattr(event, "name", "")).strip()
+    latest_text = str(getattr(event, "latest_text", "") or "")
+    if not event_name:
+        return
+    stage_log = log_text(event_name, latest_text, suffix="txt")
+    print(f"{event_name}: {stage_log}")
+
+
+def run_resume_request(
+    state: dict[str, object],
+    args: argparse.Namespace,
+    last_report: str,
+    resume_note: str,
+) -> int:
     template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
-    last_report = read_last_report_text(state)
     request_text = build_chatgpt_request(
         state=state,
         template_path=template_path,
@@ -86,11 +121,22 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         last_report=last_report,
         resume_note=resume_note or None,
     )
+    request_hash = stable_text_hash(request_text)
+    request_source = build_report_request_source(state, resume_note)
 
-    send_to_chatgpt(request_text)
+    if (
+        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
+        and str(state.get("pending_request_source", "")).strip() == request_source
+    ):
+        print("request: 同じ report からの request は送信済みのため再送しませんでした。")
+        if str(state.get("pending_request_log", "")).strip():
+            print(f"pending: {state.get('pending_request_log', '')}")
+        return 0
+
     request_log = log_text("sent_prompt_request_from_report", request_text)
 
     mutable_state = clear_error_fields(dict(state))
+    clear_pending_request_fields(mutable_state)
     mutable_state.update(
         {
             "mode": "waiting_prompt_reply",
@@ -99,11 +145,90 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             "need_codex_run": False,
             "chatgpt_decision": "",
             "chatgpt_decision_note": "",
+            "human_review_auto_continue_count": 0,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": repo_relative(request_log),
         }
     )
     save_state(mutable_state)
+
+    send_to_chatgpt(request_text)
     print(f"sent: {request_log}")
     return 0
+
+
+def run_rotated_report_request(
+    state: dict[str, object],
+    args: argparse.Namespace,
+    last_report: str,
+) -> int:
+    handoff_request_text = build_chatgpt_handoff_request(
+        state=state,
+        last_report=last_report,
+        next_todo=args.next_todo,
+        open_questions=args.open_questions,
+        current_status=args.current_status or None,
+    )
+    handoff_request_log = log_text("handoff_requested", handoff_request_text)
+    send_to_chatgpt(handoff_request_text)
+    print(f"handoff requested: {handoff_request_log}")
+
+    raw_text = wait_for_handoff_reply_text(
+        request_text=handoff_request_text,
+        stage_callback=log_wait_event,
+    )
+    handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
+    handoff_received_log = log_text("handoff_received", handoff_text)
+    rotated_chat = rotate_chat_with_handoff(handoff_text)
+    chat_rotated_log = log_text(
+        "chat_rotated",
+        "\n".join(
+            [
+                f"url: {rotated_chat.get('url', '')}",
+                f"title: {rotated_chat.get('title', '')}",
+            ]
+        ),
+    )
+    request_log = log_text("sent_prompt_request_from_report", handoff_text)
+    request_source = build_report_request_source(state, "")
+    request_hash = stable_text_hash(handoff_text)
+
+    mutable_state = clear_error_fields(dict(state))
+    clear_pending_request_fields(mutable_state)
+    mutable_state.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "",
+            "chatgpt_decision_note": "",
+            "human_review_auto_continue_count": 0,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": repo_relative(request_log),
+            "current_chat_session": rotated_chat.get("url", ""),
+        }
+    )
+    save_state(mutable_state)
+
+    print(f"handoff received: {handoff_received_log}")
+    print(f"chat rotated: {chat_rotated_log}")
+    print(f"sent: {request_log}")
+    return 0
+
+
+def run(state: dict[str, object], argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    resume_note = resolve_resume_note(state, args)
+    if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
+        print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
+        return 0
+    last_report = read_last_report_text(state)
+    if str(state.get("mode", "")).strip() == "awaiting_user":
+        return run_resume_request(state, args, last_report, resume_note)
+    return run_rotated_report_request(state, args, last_report)
 
 
 if __name__ == "__main__":

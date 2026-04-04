@@ -44,6 +44,11 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--codex-bin", default=str(project_config.get("codex_bin", DEFAULT_CODEX_BIN)), help="Codex CLI コマンド")
     parser.add_argument("--model", default=str(project_config.get("codex_model", "")), help="Codex CLI に渡す model 名")
     parser.add_argument(
+        "--sandbox",
+        default=str(project_config.get("codex_sandbox", "")),
+        help="Codex CLI に渡す sandbox 設定。未指定なら Codex 標準の config 解決に委ねる",
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=int(project_config.get("codex_timeout_seconds", DEFAULT_TIMEOUT_SECONDS)),
@@ -82,21 +87,24 @@ def build_launch_prompt(template_path: Path, prompt_path: Path, report_path: Pat
 
 
 def build_codex_command(args: argparse.Namespace, last_message_path: Path, worker_path: Path) -> list[str]:
-    command = [
-        args.codex_bin,
-        "--ask-for-approval",
-        "never",
-        "exec",
-        "-C",
-        str(worker_path),
-        "--sandbox",
-        "workspace-write",
-        "-o",
-        str(last_message_path),
-        "-",
-    ]
+    command = [args.codex_bin]
     if args.model:
-        command[2:2] = ["--model", args.model]
+        command.extend(["--model", args.model])
+    sandbox = str(getattr(args, "sandbox", "")).strip()
+    if sandbox:
+        command.extend(["--sandbox", sandbox])
+    command.extend(
+        [
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "-C",
+            str(worker_path),
+            "-o",
+            str(last_message_path),
+            "-",
+        ]
+    )
     return command
 
 

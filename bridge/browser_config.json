@@ -7,8 +7,10 @@
   "chat_hint": "",
   "require_chat_hint": false,
   "fetch_timeout_seconds": 1800,
+  "extended_fetch_timeout_seconds": 600,
   "poll_interval_seconds": 2,
   "apple_event_timeout_retry_count": 1,
   "apple_event_timeout_retry_delay_seconds": 1,
-  "runner_heartbeat_seconds": 12
+  "runner_heartbeat_seconds": 12,
+  "project_page_url": ""
 }

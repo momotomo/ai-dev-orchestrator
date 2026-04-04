@@ -9,11 +9,14 @@ from _bridge_common import (
     BridgeError,
     build_chatgpt_reply_contract_section,
     clear_error_fields,
+    clear_pending_request_fields,
     guarded_main,
     load_project_config,
     log_text,
+    repo_relative,
     send_to_chatgpt,
     save_state,
+    stable_text_hash,
     worker_repo_path,
 )
 
@@ -111,24 +114,44 @@ def compose_initial_request_text(user_body: str) -> str:
     return f"{body}\n\n{contract_section}\n"
 
 
+def build_initial_request_source(user_body: str) -> str:
+    return f"initial:{stable_text_hash(user_body.strip())}"
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     user_body = resolve_request_body(args)
     request_text = compose_initial_request_text(user_body)
+    request_hash = stable_text_hash(request_text)
+    request_source = build_initial_request_source(user_body)
 
-    send_to_chatgpt(request_text)
+    if (
+        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
+        and str(state.get("pending_request_source", "")).strip() == request_source
+    ):
+        print("request: 同じ初回 request は送信済みのため再送しませんでした。")
+        if str(state.get("pending_request_log", "")).strip():
+            print(f"pending: {state.get('pending_request_log', '')}")
+        return 0
+
     request_log = log_text("sent_prompt_request", request_text)
 
     mutable_state = clear_error_fields(dict(state))
+    clear_pending_request_fields(mutable_state)
     mutable_state.update(
         {
             "mode": "waiting_prompt_reply",
             "need_chatgpt_prompt": False,
             "need_chatgpt_next": False,
             "need_codex_run": False,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": repo_relative(request_log),
         }
     )
     save_state(mutable_state)
+
+    send_to_chatgpt(request_text)
     print(f"sent: {request_log}")
     return 0
 

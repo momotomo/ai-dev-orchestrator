@@ -127,7 +127,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。ChatGPT に送る最初の文面を入力すると、bridge が固定の返答契約を付けて送信します。")
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
 
-    if mode == "waiting_prompt_reply":
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
         status = present_bridge_status(state)
         print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
@@ -165,7 +165,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         status = present_bridge_status(state)
-        print(f"{status.label}です。完了報告をもとに次フェーズ要求を送ります。")
+        print(f"{status.label}です。完了報告をもとに handoff を作り、project 内の新しいチャットへ次フェーズ要求を送ります。")
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
 
     status = present_bridge_status(state)
