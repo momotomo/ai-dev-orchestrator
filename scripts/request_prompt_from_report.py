@@ -288,6 +288,7 @@ def run_rotated_report_request(
             [
                 f"url: {rotated_chat.get('url', '')}",
                 f"title: {rotated_chat.get('title', '')}",
+                f"signal: {rotated_chat.get('signal', '')}",
             ]
         ),
     )
@@ -318,6 +319,8 @@ def run_rotated_report_request(
     if handoff_received_log:
         print(f"handoff received: {handoff_received_log}")
     print(f"chat rotated: {chat_rotated_log}")
+    if rotated_chat.get("signal"):
+        print(f"chat rotated signal: {rotated_chat.get('signal', '')}")
     print(f"sent: {request_log}")
     return 0
 

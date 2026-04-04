@@ -75,7 +75,8 @@ def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]
         note = "未退避 report が残っているため、handoff より先に archive と次の ChatGPT 返送導線へ戻します。"
     elif str(state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(state):
         note = (
-            "handoff は回収済みです。同じコマンドを再実行すると project 内の新しいチャット送信を再試行します。"
+            "handoff は回収済みですが、まだ新チャットへ送れていません。"
+            " 同じコマンドを再実行すると composer 確認と送信確認を再試行します。"
         )
     guidance = entry_guidance(state, args)
     return status.label, guidance, note
@@ -179,7 +180,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
             return "このあと不足情報の補足入力を求め、次の ChatGPT request に添えて送ります。"
         return "このあと再開用の補足入力を求め、次の ChatGPT request に添えて送ります。"
     if action == "request_prompt_from_report" and str(state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(state):
-        return "回収済み handoff を再利用して、project 内の新しいチャット送信を再試行します。"
+        return "回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。"
     if action == "fetch_next_prompt":
         return (
             f"既存チャットの返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
@@ -390,6 +391,11 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "archive_codex_report":
         return "report はそろっているので、archive と次 request へ進めるため再実行してください。"
     if action == "request_prompt_from_report":
+        if str(final_state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(final_state):
+            return (
+                "handoff は回収済みですが、まだ新チャットへ送れていません。"
+                " project ページの composer と送信可否を確認したまま再実行してください。"
+            )
         return "Safari の current tab を対象チャットに合わせたまま再実行してください。"
     if action == "completed":
         return "追加の操作は不要です。"
@@ -428,8 +434,9 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
             )
         elif pending_handoff_log:
             note = (
-                "handoff は回収済みです。project ページと『このプロジェクト内の新しいチャット』入力欄を確認し、"
-                "error を clear して再実行すると同じ handoff で再試行します。"
+                "handoff は回収済みですが、まだ新チャットへ送れていません。"
+                " project ページと『このプロジェクト内の新しいチャット』入力欄を確認し、"
+                " error を clear して再実行すると同じ handoff で入力確認と送信確認を再試行します。"
                 f" handoff_log: {pending_handoff_log}"
             )
         else:
@@ -500,7 +507,7 @@ def describe_wait_message(action: str) -> str:
     if action == "request_next_prompt":
         return "ChatGPT request の送信完了を待っています。"
     if action == "request_prompt_from_report":
-        return "handoff 生成と次チャット request の送信完了を待っています。"
+        return "次の ChatGPT request の送信処理を進めています。"
     return "bridge の処理完了を待っています。"
 
 

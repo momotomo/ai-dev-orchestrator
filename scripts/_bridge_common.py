@@ -290,7 +290,7 @@ def present_bridge_status(
         return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
 
     if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_request_chat_rotation(state):
-        return BridgeStatusView("ChatGPTへ依頼中", "handoff は回収済みです。project 内の新しいチャット送信を再試行します。")
+        return BridgeStatusView("人確認待ち", "handoff は回収済みですが、まだ新チャットへ送れていません。再実行で入力確認と送信確認を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
         return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
@@ -1843,6 +1843,7 @@ def _build_composer_state_script(preferred_hint: str | None = None) -> str:
   }};
   let composer = null;
   let fallbackComposer = null;
+  let matchedPreferredHint = false;
   for (const selector of selectors) {{
     const nodes = Array.from(document.querySelectorAll(selector));
     for (let index = nodes.length - 1; index >= 0; index -= 1) {{
@@ -1851,6 +1852,7 @@ def _build_composer_state_script(preferred_hint: str | None = None) -> str:
         if (!fallbackComposer) fallbackComposer = node;
         if (matchesHint(node)) {{
           composer = node;
+          matchedPreferredHint = true;
           break;
         }}
       }}
@@ -1859,10 +1861,19 @@ def _build_composer_state_script(preferred_hint: str | None = None) -> str:
   }}
   if (!composer) composer = fallbackComposer;
   if (!composer) return JSON.stringify({{found: false}});
+  const tagName = (composer.tagName || "").toLowerCase();
+  let currentText = "";
+  if (tagName === "textarea") {{
+    currentText = (composer.value || "").trim();
+  }} else if (composer.isContentEditable) {{
+    currentText = (composer.innerText || composer.textContent || "").trim();
+  }}
   return JSON.stringify({{
     found: true,
-    tagName: (composer.tagName || "").toLowerCase(),
-    isContentEditable: !!composer.isContentEditable
+    tagName,
+    isContentEditable: !!composer.isContentEditable,
+    currentText,
+    matchedPreferredHint
   }});
 }})();
 """
@@ -1982,6 +1993,76 @@ def _build_submit_script() -> str:
 """
 
 
+def _build_post_send_state_script(expected_excerpt: str, preferred_hint: str | None = None) -> str:
+    return f"""
+(() => {{
+  const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
+  const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
+  const expectedExcerpt = {json.dumps(expected_excerpt, ensure_ascii=False)};
+  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+  const isVisible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0;
+  }};
+  const matchesHint = (node) => {{
+    if (!preferredHint) return false;
+    const values = [
+      node.getAttribute?.("placeholder") || "",
+      node.getAttribute?.("aria-label") || "",
+      node.getAttribute?.("data-placeholder") || "",
+      node.closest?.("form, section, main, div")?.innerText || "",
+    ];
+    return values.some((value) => value && value.includes(preferredHint));
+  }};
+  const readComposerText = (composer) => {{
+    if (!composer) return "";
+    const tagName = (composer.tagName || "").toLowerCase();
+    if (tagName === "textarea") return (composer.value || "").trim();
+    if (composer.isContentEditable) return (composer.innerText || composer.textContent || "").trim();
+    return "";
+  }};
+  let composer = null;
+  let fallbackComposer = null;
+  for (const selector of selectors) {{
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
+      const node = nodes[index];
+      if (isVisible(node)) {{
+        if (!fallbackComposer) fallbackComposer = node;
+        if (matchesHint(node)) {{
+          composer = node;
+          break;
+        }}
+      }}
+    }}
+    if (composer) break;
+  }}
+  if (!composer) composer = fallbackComposer;
+  const composerText = readComposerText(composer);
+  const bodyText = normalize(
+    document.querySelector("main")?.innerText ||
+    document.querySelector("article")?.innerText ||
+    document.body?.innerText ||
+    ""
+  );
+  const normalizedExcerpt = normalize(expectedExcerpt);
+  return JSON.stringify({{
+    composerFound: !!composer,
+    composerText,
+    composerEmpty: normalize(composerText) === "",
+    bodyContainsExpected: normalizedExcerpt ? bodyText.includes(normalizedExcerpt) : false,
+    url: window.location.href
+  }});
+}})();
+"""
+
+
 def _evaluate_json(page: SafariChatPage, script: str, failure_label: str) -> dict[str, Any]:
     raw = page.evaluate(script).strip()
     if not raw:
@@ -2050,6 +2131,39 @@ def _find_composer_state(page: SafariChatPage, *, preferred_hint: str | None = N
     )
 
 
+def _normalize_dom_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _expected_excerpt(text: str, *, max_chars: int = 160) -> str:
+    return _normalize_dom_text(text)[:max_chars]
+
+
+def _composer_text_matches(actual_text: str, expected_text: str) -> bool:
+    actual = _normalize_dom_text(actual_text)
+    expected = _normalize_dom_text(expected_text)
+    if not expected:
+        return True
+    if actual == expected:
+        return True
+    excerpt = expected[: min(len(expected), 160)]
+    return bool(excerpt) and excerpt in actual
+
+
+def _read_post_send_state(config: Mapping[str, Any], *, expected_text: str, preferred_hint: str | None = None) -> tuple[dict[str, str], dict[str, Any]]:
+    tab_info = frontmost_safari_tab_info(config, require_conversation=False)
+    raw = _run_safari_javascript(
+        _build_post_send_state_script(_expected_excerpt(expected_text), preferred_hint=preferred_hint)
+    ).strip()
+    if not raw:
+        raise BridgeError("新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BridgeError("新チャット送信後の状態確認に失敗しました: JSON として読めませんでした。") from exc
+    return tab_info, payload
+
+
 def ensure_chatgpt_ready(
     page: SafariChatPage,
     config: Mapping[str, Any],
@@ -2112,7 +2226,14 @@ def fill_chatgpt_composer(
     allow_manual_login: bool = False,
     preferred_hint: str | None = None,
 ) -> None:
-    ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login, preferred_hint=preferred_hint)
+    initial_state = ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login, preferred_hint=preferred_hint)
+    if preferred_hint and not bool(initial_state.get("matchedPreferredHint")):
+        dump_path = log_page_dump(page)
+        dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+        raise BridgeError(
+            "指定した project composer を特定できませんでした。"
+            f" hint='{preferred_hint}' に一致する入力欄が見つかっていません。{dump_note}"
+        )
     result = _evaluate_json(
         page,
         _build_fill_composer_script(text, preferred_hint=preferred_hint),
@@ -2120,6 +2241,16 @@ def fill_chatgpt_composer(
     )
     if result.get("ok"):
         page.wait_for_timeout(300)
+        state = _find_composer_state(page, preferred_hint=preferred_hint)
+        actual_text = str(state.get("currentText", "") or "")
+        if not _composer_text_matches(actual_text, text):
+            dump_path = log_page_dump(page)
+            dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+            raise BridgeError(
+                "ChatGPT 入力欄へ本文を書き込んだ後の確認に失敗しました。"
+                " composer に期待した handoff 本文が入っていません。"
+                f"{dump_note}"
+            )
         return
     raise BridgeError(f"ChatGPT の入力欄に文字を設定できませんでした: {result.get('reason', 'unknown')}")
 
@@ -2159,8 +2290,46 @@ def send_to_chatgpt_in_current_surface(
     ) as (_, page, config, _):
         fill_chatgpt_composer(page, text, config, preferred_hint=preferred_hint)
         submit_chatgpt_message(page)
-        page.wait_for_timeout(500)
-        return frontmost_safari_tab_info(config, require_conversation=require_conversation)
+        deadline = time.time() + 15
+        last_tab: dict[str, str] | None = None
+        last_payload: dict[str, Any] | None = None
+        while time.time() < deadline:
+            tab_info, payload = _read_post_send_state(config, expected_text=text, preferred_hint=preferred_hint)
+            last_tab = tab_info
+            last_payload = payload
+            if _conversation_url_matches(tab_info.get("url", ""), config):
+                return {
+                    "url": tab_info.get("url", ""),
+                    "title": tab_info.get("title", ""),
+                    "signal": "conversation_url",
+                }
+            if bool(payload.get("bodyContainsExpected")):
+                return {
+                    "url": tab_info.get("url", ""),
+                    "title": tab_info.get("title", ""),
+                    "signal": "message_visible",
+                }
+            if bool(payload.get("composerEmpty")):
+                return {
+                    "url": tab_info.get("url", ""),
+                    "title": tab_info.get("title", ""),
+                    "signal": "composer_cleared",
+                }
+            time.sleep(0.5)
+
+        dump_text = _body_text_unchecked()
+        dump_note = ""
+        if dump_text:
+            dump_path = log_text("chat_rotation_failure_dump", dump_text, suffix="txt")
+            dump_note = f" raw dump: {repo_relative(dump_path)}"
+        raise BridgeError(
+            "project ページへ handoff を送った後の確認に失敗しました。"
+            " composer が空に戻る、本文が会話へ現れる、会話 URL へ切り替わる、のいずれも確認できませんでした。"
+            f" last_url: {last_tab.get('url', '') if last_tab else ''}"
+            f" composer_empty: {bool(last_payload.get('composerEmpty')) if last_payload else False}"
+            f" body_contains_expected: {bool(last_payload.get('bodyContainsExpected')) if last_payload else False}"
+            f"{dump_note}"
+        )
 
 
 def draft_message_in_chatgpt(text: str) -> None:
@@ -2222,18 +2391,20 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
     project_page_url = derive_chatgpt_project_page_url(current_tab.get("url", ""), config)
     last_error = ""
     last_info: dict[str, str] | None = None
+    last_signal = ""
     for attempt in range(1, 3):
         navigate_current_chatgpt_tab(project_page_url)
         try:
             sent = False
             for hint in PROJECT_CHAT_COMPOSER_HINTS + ("",):
                 try:
-                    send_to_chatgpt_in_current_surface(
+                    send_result = send_to_chatgpt_in_current_surface(
                         handoff_text,
                         require_conversation=False,
                         require_target_chat=False,
                         preferred_hint=hint or None,
                     )
+                    last_signal = str(send_result.get("signal", "")).strip()
                     sent = True
                     break
                 except BridgeError as exc:
@@ -2263,6 +2434,9 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                 continue
             last_info = info
             if _conversation_url_matches(info.get("url", ""), config):
+                info = dict(info)
+                if last_signal:
+                    info["signal"] = last_signal
                 return info
             time.sleep(0.5)
 
@@ -2277,7 +2451,7 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
     raise BridgeError(
         "新チャット送信後に対象チャットを特定できませんでした。"
         f" 現在: {last_info.get('url', '') if last_info else project_page_url}"
-        f" {last_error}".rstrip()
+        f" signal: {last_signal or 'unknown'} {last_error}".rstrip()
         + dump_note
     )
 

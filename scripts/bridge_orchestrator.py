@@ -166,7 +166,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         status = present_bridge_status(state)
         if str(state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(state):
-            print(f"{status.label}です。回収済み handoff を再利用して、project 内の新しいチャット送信を再試行します。")
+            print(f"{status.label}です。回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
         else:
             print(f"{status.label}です。完了報告をもとに、同じチャットへ次フェーズ要求を送ります。")
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))

@@ -111,7 +111,7 @@ def print_doctor(args: argparse.Namespace) -> None:
     elif report_ready and run_until_stop.should_prioritize_unarchived_report(state):
         clear_error_status = "不要: 未退避 report を優先して archive 側へ戻してください"
     elif pending_handoff_log_raw:
-        clear_error_status = "可能: project ページ確認後に clear-error で同じ handoff 再送へ戻せます"
+        clear_error_status = "可能: project ページ確認後に clear-error で同じ handoff の入力確認と送信確認へ戻せます"
     elif run_until_stop.is_apple_event_timeout_text(error_message):
         clear_error_status = "可能: Safari current tab と Automation を確認後に clear-error で再開候補へ戻せます"
     elif bool(state.get("error")):
