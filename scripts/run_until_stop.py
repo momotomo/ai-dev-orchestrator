@@ -360,7 +360,7 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
     if bool(final_state.get("pause")):
         return (
             "なし",
-            "state.pause=true のため停止中です。pause を解除してから再実行してください。",
+            "手動 pause 中です。pause を解除してから再実行してください。",
         )
 
     if bool(final_state.get("error")):
@@ -378,7 +378,7 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 f" handoff_log: {pending_handoff_log}"
             )
         else:
-            note = "state.error=true の原因を解消し、error を clear してから再実行してください。"
+            note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"
         if error_message:
             note += f" error_message: {error_message}"
         return ("なし", note)
