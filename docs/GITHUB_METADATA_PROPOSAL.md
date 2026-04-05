@@ -77,7 +77,7 @@ These remain human-owned even if Codex helps draft wording:
 - branch protection and rulesets
 - repository permissions
 - default issue / PR settings
-- LICENSE choice
+- license changes beyond the current MIT `LICENSE`
 
 See [docs/OSS_PUBLISHING_CHECKLIST.md](OSS_PUBLISHING_CHECKLIST.md)
 for the broader publishing checklist.
