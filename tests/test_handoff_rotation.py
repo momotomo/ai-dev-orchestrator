@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import _bridge_common  # noqa: E402
 import fetch_next_prompt  # noqa: E402
+import request_prompt_from_report  # noqa: E402
 from _bridge_common import BridgeError  # noqa: E402
 
 
@@ -134,6 +135,56 @@ class HandoffWaitTransitionTests(unittest.TestCase):
         saved_state = save_mock.call_args.args[0]
         self.assertEqual(saved_state["mode"], "ready_for_codex")
         self.assertEqual(saved_state["pending_request_signal"], "")
+
+    def test_soft_wait_uses_distinct_request_log_prefix(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "pending_handoff_source": "report-source",
+            "pending_handoff_log": "logs/handoff_received.md",
+        }
+
+        logged_prefixes: list[str] = []
+
+        def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+            del text, suffix
+            logged_prefixes.append(prefix)
+            return REPO_ROOT / "logs" / f"{prefix}.md"
+
+        args = request_prompt_from_report.parse_args([])
+        args.next_todo = ""
+        args.open_questions = ""
+        args.current_status = ""
+
+        with (
+            patch.object(request_prompt_from_report, "build_report_request_source", return_value="report-source"),
+            patch.object(request_prompt_from_report, "read_pending_handoff_text", return_value="handoff body"),
+            patch.object(
+                request_prompt_from_report,
+                "rotate_chat_with_handoff",
+                return_value={
+                    "url": "https://chatgpt.com/g/g-p-demo/project",
+                    "title": "ChatGPT",
+                    "signal": "submitted_unconfirmed",
+                    "warning": "新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。",
+                    "match_kind": "preferred_hint",
+                    "matched_hint": "作曲アプリ開発 内の新しいチャット",
+                    "project_name": "作曲アプリ開発",
+                },
+            ),
+            patch.object(request_prompt_from_report, "log_text", side_effect=fake_log_text),
+            patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda path: str(path)),
+            patch.object(request_prompt_from_report, "save_state", return_value=None) as save_mock,
+            patch("builtins.print"),
+        ):
+            rc = request_prompt_from_report.run_rotated_report_request(state, args, "last report")
+
+        self.assertEqual(rc, 0)
+        self.assertIn("chat_rotated", logged_prefixes)
+        self.assertIn("sent_prompt_request_from_report_soft_wait", logged_prefixes)
+        self.assertNotIn("sent_prompt_request_from_report", logged_prefixes)
+        saved_state = save_mock.call_args.args[0]
+        self.assertEqual(saved_state["pending_request_signal"], "submitted_unconfirmed")
 
 
 if __name__ == "__main__":

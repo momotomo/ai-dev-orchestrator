@@ -25,6 +25,8 @@
 - report ベース継続は通常、同じチャットで続ける
 - handoff / chat rotation は、1800 秒 + 600 秒を超えて late completion mode に入った reply を最後まで回収し、その reply を Codex に渡して使い切ったあと、次の ChatGPT request を送る前にだけ走る
 - handoff request は、次チャットへそのまま貼る完成済みの最初のメッセージだけを返させる。要約メモは求めない
+- late completion 後の handoff/new-chat 前処理は `handoff_requested` → `handoff_received` → `chat_rotated` → `sent_prompt_request_from_report*` の順で見れば追いやすい
+- `sent_prompt_request_from_report_soft_wait` は、handoff 本文を新チャットへ送った可能性が高いため再送せず wait に入ったケースを表す
 - `human_review` は 1 回だけ自動継続し、2 回連続した時だけ `人確認待ち` に倒す
 - ChatGPT の通常返答契約は `CHATGPT_PROMPT_REPLY` と `CHATGPT_NO_CODEX` の 2 系統だけと考える
 - `CHATGPT_NO_CODEX` の先頭行は `completed`、`human_review`、`need_info` のいずれかで、完了 / 人確認待ち / 情報待ちを表す
