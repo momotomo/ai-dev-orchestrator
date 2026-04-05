@@ -2313,6 +2313,14 @@ def _read_post_send_state(
     return tab_info, payload
 
 
+def _is_transient_post_send_probe_error(message: str) -> bool:
+    markers = (
+        "新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。",
+        "新チャット送信後の状態確認に失敗しました: JSON として読めませんでした。",
+    )
+    return any(marker in message for marker in markers)
+
+
 def ensure_chatgpt_ready(
     page: SafariChatPage,
     config: Mapping[str, Any],
@@ -2497,13 +2505,21 @@ def send_to_chatgpt_in_current_surface(
         deadline = time.time() + 15
         last_tab: dict[str, str] | None = None
         last_payload: dict[str, Any] | None = None
+        last_probe_error = ""
         while time.time() < deadline:
-            tab_info, payload = _read_post_send_state(
-                config,
-                expected_text=text,
-                preferred_hint=preferred_hint,
-                project_page_mode=project_page_mode,
-            )
+            try:
+                tab_info, payload = _read_post_send_state(
+                    config,
+                    expected_text=text,
+                    preferred_hint=preferred_hint,
+                    project_page_mode=project_page_mode,
+                )
+            except BridgeError as exc:
+                if project_page_mode and _is_transient_post_send_probe_error(str(exc)):
+                    last_probe_error = str(exc)
+                    time.sleep(0.5)
+                    continue
+                raise
             last_tab = tab_info
             last_payload = payload
             if _conversation_url_matches(tab_info.get("url", ""), config):
@@ -2534,6 +2550,18 @@ def send_to_chatgpt_in_current_surface(
                     "project_name": str(composer_state.get("projectName", "")),
                 }
             time.sleep(0.5)
+
+        if project_page_mode and last_probe_error:
+            fallback_tab = last_tab or dict(page.front_tab)
+            return {
+                "url": fallback_tab.get("url", ""),
+                "title": fallback_tab.get("title", ""),
+                "signal": "submitted_unconfirmed",
+                "match_kind": str(composer_state.get("matchKind", "")),
+                "matched_hint": str(composer_state.get("matchedHint", "")),
+                "project_name": str(composer_state.get("projectName", "")),
+                "warning": last_probe_error,
+            }
 
         dump_text = _body_text_unchecked()
         dump_note = ""
@@ -2613,6 +2641,7 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
     last_error = ""
     last_info: dict[str, str] | None = None
     last_signal = ""
+    last_warning = ""
     for attempt in range(1, 3):
         navigate_current_chatgpt_tab(project_page_url)
         try:
@@ -2627,6 +2656,7 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                         project_page_mode=True,
                     )
                     last_signal = str(send_result.get("signal", "")).strip()
+                    last_warning = str(send_result.get("warning", "")).strip()
                     sent = True
                     break
                 except BridgeError as exc:
@@ -2659,8 +2689,21 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                 info = dict(info)
                 if last_signal:
                     info["signal"] = last_signal
+                if last_warning:
+                    info["warning"] = last_warning
                 return info
             time.sleep(0.5)
+
+        if last_signal == "submitted_unconfirmed":
+            try:
+                info = frontmost_safari_tab_info(config, require_conversation=False)
+            except BridgeError:
+                info = {"url": project_page_url, "title": ""}
+            info = dict(info)
+            info["signal"] = last_signal
+            if last_warning:
+                info["warning"] = last_warning
+            return info
 
         if attempt < 2:
             time.sleep(1.0)

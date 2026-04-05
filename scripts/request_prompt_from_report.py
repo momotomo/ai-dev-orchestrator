@@ -324,6 +324,8 @@ def run_rotated_report_request(
     print(f"chat rotated: {chat_rotated_log}")
     if rotated_chat.get("signal"):
         print(f"chat rotated signal: {rotated_chat.get('signal', '')}")
+    if str(rotated_chat.get("signal", "")).strip() == "submitted_unconfirmed":
+        print("next step: handoff の送信成立を優先し、再送せず ChatGPT 返答待ちへ進みます。")
     if rotated_chat.get("match_kind"):
         print(
             "chat rotated composer:"
