@@ -30,7 +30,7 @@ from _bridge_common import (
     stage_prepared_request,
     stable_text_hash,
     should_prioritize_unarchived_report,
-    should_request_chat_rotation,
+    should_rotate_before_next_chat_request,
     wait_for_handoff_reply_text,
 )
 
@@ -247,7 +247,7 @@ def run_rotated_report_request(
     if pending_handoff_text:
         handoff_text = pending_handoff_text
         handoff_received_log = state.get("pending_handoff_log", "") or ""
-        print("handoff: 回収済み handoff を再利用して新チャット送信を再試行します。")
+        print("handoff: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
     else:
         handoff_request_text = build_chatgpt_handoff_request(
             state=state,
@@ -350,14 +350,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
         return 0
     last_report = read_last_report_text(state)
-    if not should_request_chat_rotation(state) and str(state.get("pending_handoff_log", "")).strip():
+    if not should_rotate_before_next_chat_request(state) and str(state.get("pending_handoff_log", "")).strip():
         cleaned_state = dict(state)
         clear_pending_handoff_fields(cleaned_state)
         save_state(cleaned_state)
         state = cleaned_state
     if str(state.get("mode", "")).strip() == "awaiting_user":
         return run_resume_request(state, args, last_report, resume_note)
-    if should_request_chat_rotation(state):
+    if should_rotate_before_next_chat_request(state):
         return run_rotated_report_request(state, args, last_report)
     return run_resume_request(state, args, last_report, "")
 

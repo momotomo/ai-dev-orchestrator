@@ -58,6 +58,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "pending_handoff_hash": "",
     "pending_handoff_source": "",
     "pending_handoff_log": "",
+    "next_request_requires_rotation": False,
+    "next_request_rotation_reason": "",
     "rotate_after_cycle": False,
     "rotate_after_cycle_reason": "",
     "last_processed_request_hash": "",
@@ -301,8 +303,8 @@ def present_bridge_status(
     if mode == "codex_done":
         return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
 
-    if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_request_chat_rotation(state):
-        return BridgeStatusView("人確認待ち", "handoff は回収済みですが、まだ新チャットへ送れていません。再実行で入力確認と送信確認を再試行します。")
+    if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_rotate_before_next_chat_request(state):
+        return BridgeStatusView("人確認待ち", "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。再実行で入力確認と送信確認を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
         return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
@@ -659,13 +661,37 @@ def clear_pending_handoff_fields(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def clear_chat_rotation_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["next_request_requires_rotation"] = False
+    state["next_request_rotation_reason"] = ""
     state["rotate_after_cycle"] = False
     state["rotate_after_cycle_reason"] = ""
     return state
 
 
-def should_request_chat_rotation(state: Mapping[str, Any]) -> bool:
+def mark_next_request_requires_rotation(state: dict[str, Any], reason: str) -> dict[str, Any]:
+    normalized_reason = reason.strip()
+    state["next_request_requires_rotation"] = True
+    state["next_request_rotation_reason"] = normalized_reason
+    state["rotate_after_cycle"] = True
+    state["rotate_after_cycle_reason"] = normalized_reason
+    return state
+
+
+def next_request_rotation_reason(state: Mapping[str, Any]) -> str:
+    reason = str(state.get("next_request_rotation_reason", "")).strip()
+    if reason:
+        return reason
+    return str(state.get("rotate_after_cycle_reason", "")).strip()
+
+
+def should_rotate_before_next_chat_request(state: Mapping[str, Any]) -> bool:
+    if "next_request_requires_rotation" in state:
+        return bool(state.get("next_request_requires_rotation"))
     return bool(state.get("rotate_after_cycle"))
+
+
+def should_request_chat_rotation(state: Mapping[str, Any]) -> bool:
+    return should_rotate_before_next_chat_request(state)
 
 
 def load_browser_config() -> dict[str, Any]:
@@ -1117,8 +1143,8 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- pending_handoff_hash: {state.get('pending_handoff_hash', '')}",
         f"- pending_handoff_source: {state.get('pending_handoff_source', '')}",
         f"- pending_handoff_log: {state.get('pending_handoff_log', '')}",
-        f"- rotate_after_cycle: {state.get('rotate_after_cycle', False)}",
-        f"- rotate_after_cycle_reason: {state.get('rotate_after_cycle_reason', '')}",
+        f"- next_request_requires_rotation: {should_rotate_before_next_chat_request(state)}",
+        f"- next_request_rotation_reason: {next_request_rotation_reason(state)}",
         f"- last_processed_request_hash: {state.get('last_processed_request_hash', '')}",
         f"- last_processed_reply_hash: {state.get('last_processed_reply_hash', '')}",
         f"- current_chat_session: {state.get('current_chat_session', '')}",
@@ -1382,7 +1408,7 @@ def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, A
     current_state = dict(state)
     if should_prioritize_unarchived_report(current_state):
         return current_state, False
-    if not should_request_chat_rotation(current_state):
+    if not should_rotate_before_next_chat_request(current_state):
         return current_state, False
     if not is_retryable_pending_handoff_error(current_state):
         return current_state, False
@@ -1455,7 +1481,7 @@ def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, 
 
 
 def is_retryable_pending_handoff_error(state: Mapping[str, Any]) -> bool:
-    if not should_request_chat_rotation(state):
+    if not should_rotate_before_next_chat_request(state):
         return False
     if not bool(state.get("error")):
         return False

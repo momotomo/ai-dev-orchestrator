@@ -9,7 +9,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, runtime_prompt_path, save_state, should_request_chat_rotation, worker_repo_path
+from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, runtime_prompt_path, save_state, should_rotate_before_next_chat_request, worker_repo_path
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -165,8 +165,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         status = present_bridge_status(state)
-        if str(state.get("pending_handoff_log", "")).strip() and should_request_chat_rotation(state):
-            print(f"{status.label}です。回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
+        if str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
+            print(f"{status.label}です。次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
         else:
             print(f"{status.label}です。完了報告をもとに、同じチャットへ次フェーズ要求を送ります。")
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))

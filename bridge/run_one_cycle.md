@@ -23,7 +23,7 @@
 - `max_execution_count` は上限であり、ChatGPT が `Codex 不要` を返した時は途中で正常停止しうる
 - `run_until_stop.py` は既定で継続実行する。archive 後の次 request / fetch へ進んでも、同じ report / same request は idempotency guard で再送しない
 - report ベース継続は通常、同じチャットで続ける
-- handoff / chat rotation は、1800 秒 + 600 秒を超えて late completion mode に入った reply を最後まで回収し、その reply を Codex に渡した current cycle を完了した後にだけ走る
+- handoff / chat rotation は、1800 秒 + 600 秒を超えて late completion mode に入った reply を最後まで回収し、その reply を Codex に渡して使い切ったあと、次の ChatGPT request を送る前にだけ走る
 - handoff request は、次チャットへそのまま貼る完成済みの最初のメッセージだけを返させる。要約メモは求めない
 - `human_review` は 1 回だけ自動継続し、2 回連続した時だけ `人確認待ち` に倒す
 - ChatGPT の通常返答契約は `CHATGPT_PROMPT_REPLY` と `CHATGPT_NO_CODEX` の 2 系統だけと考える

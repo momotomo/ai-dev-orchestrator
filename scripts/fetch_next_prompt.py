@@ -16,6 +16,8 @@ from _bridge_common import (
     guarded_main,
     load_state,
     log_text,
+    mark_next_request_requires_rotation,
+    next_request_rotation_reason,
     read_pending_request_text,
     read_text,
     repo_relative,
@@ -24,6 +26,7 @@ from _bridge_common import (
     send_to_chatgpt,
     stage_prepared_request,
     stable_text_hash,
+    should_rotate_before_next_chat_request,
     wait_for_prompt_reply_text,
     write_text,
 )
@@ -56,8 +59,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             " request 送信から再開してください。"
         )
 
-    rotation_requested = bool(state.get("rotate_after_cycle"))
-    rotation_reason = str(state.get("rotate_after_cycle_reason", "")).strip()
+    rotation_requested = should_rotate_before_next_chat_request(state)
+    rotation_reason = next_request_rotation_reason(state)
     if str(state.get("mode", "")).strip() == "await_late_completion":
         rotation_requested = True
         rotation_reason = rotation_reason or "late_completion"
@@ -73,8 +76,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             mutable_state["mode"] = "await_late_completion"
             rotation_requested = True
             rotation_reason = "late_completion"
-            mutable_state["rotate_after_cycle"] = True
-            mutable_state["rotate_after_cycle_reason"] = rotation_reason
+            mark_next_request_requires_rotation(mutable_state, rotation_reason)
         save_state(mutable_state)
         stage_log = log_text(event_name, latest_text, suffix="txt")
         print(f"{event_name}: {stage_log}")
@@ -120,10 +122,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "chatgpt_decision": "",
                 "chatgpt_decision_note": "",
                 "last_prompt_file": repo_relative(prompt_path),
-                "rotate_after_cycle": rotation_requested,
-                "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
             }
         )
+        if rotation_requested:
+            mark_next_request_requires_rotation(mutable_state, rotation_reason or "late_completion")
+        else:
+            clear_chat_rotation_fields(mutable_state)
         save_state(mutable_state)
         print(f"raw dump: {raw_log}")
         if prompt_log is not None:
@@ -151,18 +155,20 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         prepared_state.update(
             {
-                "mode": "awaiting_user",
-                "need_chatgpt_prompt": False,
-                "need_chatgpt_next": False,
-                "need_codex_run": False,
-                "human_review_auto_continue_count": auto_continue_count + 1,
-                "chatgpt_decision": "human_review",
-                "chatgpt_decision_note": decision.note,
-                "last_prompt_file": "",
-                "rotate_after_cycle": rotation_requested,
-                "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
-            }
-        )
+                    "mode": "awaiting_user",
+                    "need_chatgpt_prompt": False,
+                    "need_chatgpt_next": False,
+                    "need_codex_run": False,
+                    "human_review_auto_continue_count": auto_continue_count + 1,
+                    "chatgpt_decision": "human_review",
+                    "chatgpt_decision_note": decision.note,
+                    "last_prompt_file": "",
+                }
+            )
+        if rotation_requested:
+            mark_next_request_requires_rotation(prepared_state, rotation_reason or "late_completion")
+        else:
+            clear_chat_rotation_fields(prepared_state)
         save_state(prepared_state)
         try:
             send_to_chatgpt(continue_text)
@@ -185,10 +191,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "chatgpt_decision": "human_review",
                     "chatgpt_decision_note": decision.note,
                     "last_prompt_file": "",
-                    "rotate_after_cycle": rotation_requested,
-                    "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
                 }
             )
+            if rotation_requested:
+                mark_next_request_requires_rotation(retry_state, rotation_reason or "late_completion")
+            else:
+                clear_chat_rotation_fields(retry_state)
             save_state(retry_state)
             raise
         continue_log = log_text("human_review_auto_continue", continue_text)
@@ -204,10 +212,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "human_review_auto_continue_count": auto_continue_count + 1,
                 "chatgpt_decision": "",
                 "chatgpt_decision_note": "",
-                "rotate_after_cycle": rotation_requested,
-                "rotate_after_cycle_reason": rotation_reason if rotation_requested else "",
             }
         )
+        if rotation_requested:
+            mark_next_request_requires_rotation(waiting_state, rotation_reason or "late_completion")
+        else:
+            clear_chat_rotation_fields(waiting_state)
         save_state(waiting_state)
         print(f"raw dump: {raw_log}")
         print(f"auto-continue: {continue_log}")
