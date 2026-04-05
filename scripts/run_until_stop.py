@@ -361,6 +361,7 @@ def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]
 
 def suggested_next_note(final_state: dict[str, Any]) -> str:
     action = describe_next_action(final_state)
+    pending_request_signal = str(final_state.get("pending_request_signal", "")).strip()
     if is_no_codex_decision_state(final_state):
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
         decision = str(final_state.get("chatgpt_decision", "")).strip()
@@ -378,6 +379,11 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "request_next_prompt":
         return "Safari の current tab を対象チャットに合わせたまま再実行してください。初回だけ、表示される例文をもとに本文入力を行います。"
     if action == "fetch_next_prompt":
+        if pending_request_signal == "submitted_unconfirmed":
+            return (
+                "新しいチャットへの送信は通った可能性が高いため、"
+                "同じ handoff は再送せず reply を待ってから再実行してください。"
+            )
         return "CHATGPT_PROMPT_REPLY が同じ current tab に出たら再実行してください。"
     if action == "launch_codex_once":
         return (
@@ -437,6 +443,11 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 " project ページと『＜project名＞ 内の新しいチャット』入力欄を確認し、"
                 " error を clear して再実行すると同じ handoff で入力確認と送信確認を再試行します。"
                 f" handoff_log: {pending_handoff_log}"
+            )
+        elif str(final_state.get("pending_request_signal", "")).strip() == "submitted_unconfirmed":
+            note = (
+                "新しいチャットへの送信は通った可能性が高いため、"
+                " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
             )
         else:
             note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"

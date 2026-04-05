@@ -52,6 +52,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     pending_request_hash = str(state.get("pending_request_hash", "")).strip()
     pending_request_source = str(state.get("pending_request_source", "")).strip()
+    pending_request_signal = str(state.get("pending_request_signal", "")).strip()
     request_text = read_pending_request_text(state)
     if not (pending_request_hash and pending_request_source and request_text):
         raise BridgeError(
@@ -90,6 +91,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds or None,
             request_text=request_text or None,
             stage_callback=handle_wait_event,
+            allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
         )
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)

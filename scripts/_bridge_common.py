@@ -55,6 +55,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "pending_request_hash": "",
     "pending_request_source": "",
     "pending_request_log": "",
+    "pending_request_signal": "",
     "pending_handoff_hash": "",
     "pending_handoff_source": "",
     "pending_handoff_log": "",
@@ -165,6 +166,7 @@ class SafariChatPage:
     front_tab: dict[str, str]
     require_conversation: bool = True
     surface_label: str = "対象チャット"
+    allow_conversation_transition: bool = False
 
     def wait_for_timeout(self, milliseconds: int) -> None:
         time.sleep(milliseconds / 1000.0)
@@ -174,12 +176,23 @@ class SafariChatPage:
         return _run_safari_javascript(script)
 
     def assert_same_front_tab(self) -> None:
-        current_tab = frontmost_safari_tab_info(self.config, require_conversation=self.require_conversation)
+        current_tab = frontmost_safari_tab_info(
+            self.config,
+            require_conversation=self.require_conversation and not self.allow_conversation_transition,
+        )
         if _same_tab(self.front_tab, current_tab):
             return
 
-        dump_note = ""
         target_prefix = str(self.config.get("chat_url_prefix", DEFAULT_BROWSER_CONFIG["chat_url_prefix"]))
+        if (
+            self.allow_conversation_transition
+            and _chat_domain_matches(current_tab.get("url", ""), target_prefix)
+            and _conversation_url_matches(current_tab.get("url", ""), self.config)
+        ):
+            self.front_tab = dict(current_tab)
+            return
+
+        dump_note = ""
         if _chat_domain_matches(current_tab.get("url", ""), target_prefix):
             dump_text = _body_text_unchecked()
             if dump_text:
@@ -272,6 +285,7 @@ def present_bridge_status(
     need_chatgpt_next = bool(state.get("need_chatgpt_next"))
     need_codex_run = bool(state.get("need_codex_run"))
     pending_handoff_log = str(state.get("pending_handoff_log", "")).strip()
+    pending_request_signal = str(state.get("pending_request_signal", "")).strip()
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
 
@@ -289,6 +303,11 @@ def present_bridge_status(
         return BridgeStatusView("初回依頼文の入力待ち", "最初の依頼文はあなたが入力します。bridge は reply contract だけを足します。")
 
     if mode == "waiting_prompt_reply":
+        if pending_request_signal == "submitted_unconfirmed":
+            return BridgeStatusView(
+                "ChatGPT返答待ち",
+                "新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+            )
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
     if mode == "extended_wait":
         return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
@@ -618,6 +637,7 @@ def clear_pending_request_fields(state: dict[str, Any]) -> dict[str, Any]:
     state["pending_request_hash"] = ""
     state["pending_request_source"] = ""
     state["pending_request_log"] = ""
+    state["pending_request_signal"] = ""
     return state
 
 
@@ -652,6 +672,7 @@ def promote_pending_request(
     request_hash: str,
     request_source: str,
     request_log: str,
+    request_signal: str = "",
 ) -> dict[str, Any]:
     clear_pending_request_fields(state)
     clear_prepared_request_fields(state)
@@ -664,6 +685,7 @@ def promote_pending_request(
             "pending_request_hash": request_hash,
             "pending_request_source": request_source,
             "pending_request_log": request_log,
+            "pending_request_signal": request_signal,
         }
     )
     return state
@@ -1156,6 +1178,7 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- pending_request_hash: {state.get('pending_request_hash', '')}",
         f"- pending_request_source: {state.get('pending_request_source', '')}",
         f"- pending_request_log: {state.get('pending_request_log', '')}",
+        f"- pending_request_signal: {state.get('pending_request_signal', '')}",
         f"- pending_handoff_hash: {state.get('pending_handoff_hash', '')}",
         f"- pending_handoff_source: {state.get('pending_handoff_source', '')}",
         f"- pending_handoff_log: {state.get('pending_handoff_log', '')}",
@@ -2385,6 +2408,7 @@ def open_chatgpt_page(
     require_conversation: bool = True,
     require_target_chat: bool = True,
     surface_label: str | None = None,
+    allow_conversation_transition: bool = False,
 ) -> Iterator[tuple[None, SafariChatPage, dict[str, Any], dict[str, str]]]:
     del reset_chat
     config = load_browser_config()
@@ -2394,6 +2418,7 @@ def open_chatgpt_page(
         front_tab=front_tab,
         require_conversation=require_conversation,
         surface_label=surface_label or ("対象チャット" if require_conversation else "project ページ"),
+        allow_conversation_transition=allow_conversation_transition,
     )
     if require_target_chat:
         _ensure_target_chat(page, front_tab, config)
@@ -2739,8 +2764,15 @@ def _wait_for_chatgpt_reply_text(
     request_text: str | None = None,
     extractor: Callable[[str, str | None], Any],
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
+    allow_project_page_wait: bool = False,
 ) -> str:
-    with open_chatgpt_page(reset_chat=False) as (_, page, config, front_tab):
+    with open_chatgpt_page(
+        reset_chat=False,
+        require_conversation=not allow_project_page_wait,
+        require_target_chat=not allow_project_page_wait,
+        surface_label="project ページ / 新チャット待機" if allow_project_page_wait else None,
+        allow_conversation_transition=allow_project_page_wait,
+    ) as (_, page, config, front_tab):
         timeout = int(timeout_seconds or browser_fetch_timeout_seconds(config))
         extended_timeout = int(browser_extended_fetch_timeout_seconds(config))
         poll_seconds = float(config.get("poll_interval_seconds", 2))
@@ -2808,12 +2840,14 @@ def wait_for_prompt_reply_text(
     timeout_seconds: int | None = None,
     request_text: str | None = None,
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
+    allow_project_page_wait: bool = False,
 ) -> str:
     return _wait_for_chatgpt_reply_text(
         timeout_seconds=timeout_seconds,
         request_text=request_text,
         extractor=lambda raw_text, after_text: extract_last_chatgpt_reply(raw_text, after_text=after_text),
         stage_callback=stage_callback,
+        allow_project_page_wait=allow_project_page_wait,
     )
 
 

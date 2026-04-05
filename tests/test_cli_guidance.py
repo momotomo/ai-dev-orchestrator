@@ -75,6 +75,16 @@ class HumanFacingStatusTests(unittest.TestCase):
         self.assertEqual(view.label, "ChatGPT返答待ち")
         self.assertIn("追加待機", view.detail)
 
+    def test_submitted_unconfirmed_wait_prefers_wait_over_resend(self) -> None:
+        view = present_bridge_status(
+            {
+                "mode": "waiting_prompt_reply",
+                "pending_request_signal": "submitted_unconfirmed",
+            }
+        )
+        self.assertEqual(view.label, "ChatGPT返答待ち")
+        self.assertIn("再送せず", view.detail)
+
     def test_handoff_view_uses_next_step_style_for_running_codex(self) -> None:
         handoff = present_bridge_handoff({"mode": "codex_running", "need_codex_run": True})
         self.assertEqual(handoff.title, "Codex の完了を待っています。")
@@ -194,6 +204,44 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("おすすめ 1 コマンド", summary)
         self.assertIn("ChatGPTへ依頼準備中", summary)
         self.assertNotIn("## handoff", summary)
+
+    def test_submitted_unconfirmed_note_prefers_wait(self) -> None:
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "waiting_prompt_reply",
+                "pending_request_hash": "abc",
+                "pending_request_source": "source",
+                "pending_request_log": "logs/request.md",
+                "pending_request_signal": "submitted_unconfirmed",
+            }
+        )
+        self.assertIn("再送せず", note)
+        self.assertIn("reply", note)
+
+    def test_submitted_unconfirmed_recommends_resume_not_clear_error(self) -> None:
+        args = run_until_stop.parse_args(
+            [
+                "--project-path",
+                "/tmp/repo",
+                "--max-execution-count",
+                "6",
+                "--entry-script",
+                "scripts/start_bridge.py",
+            ],
+            {},
+        )
+        label, command = run_until_stop.recommended_operator_step(
+            args,
+            {
+                "mode": "waiting_prompt_reply",
+                "pending_request_hash": "abc",
+                "pending_request_source": "source",
+                "pending_request_log": "logs/request.md",
+                "pending_request_signal": "submitted_unconfirmed",
+            },
+        )
+        self.assertEqual(label, "そのまま再開")
+        self.assertIn("--resume", command)
 
 
 if __name__ == "__main__":

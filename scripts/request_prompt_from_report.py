@@ -314,6 +314,7 @@ def run_rotated_report_request(
             "pending_request_hash": request_hash,
             "pending_request_source": request_source,
             "pending_request_log": repo_relative(request_log),
+            "pending_request_signal": str(rotated_chat.get("signal", "")).strip(),
             "current_chat_session": rotated_chat.get("url", ""),
         }
     )
