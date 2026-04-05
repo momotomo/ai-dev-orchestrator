@@ -470,6 +470,7 @@ If you need the deeper runtime behavior, see:
 - [bridge/run_one_cycle.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/run_one_cycle.md)
 - [bridge/browser_notes.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/browser_notes.md)
 - [docs/OSS_PUBLISHING_CHECKLIST.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
+- [docs/GITHUB_METADATA_PROPOSAL.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/GITHUB_METADATA_PROPOSAL.md) for GitHub description / website / topics candidate wording
 - [CONTRIBUTING.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/CONTRIBUTING.md) for contribution and bug-report expectations
 - [SECURITY.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/SECURITY.md) for sensitive-report handling and security limitations
 

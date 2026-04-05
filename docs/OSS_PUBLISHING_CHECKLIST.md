@@ -95,6 +95,9 @@ Manual hosting-side checklist:
 
 Codex can suggest wording, but these are still hosting-side actions.
 
+See [docs/GITHUB_METADATA_PROPOSAL.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/GITHUB_METADATA_PROPOSAL.md)
+for candidate description / website / topic wording.
+
 ## 7. Local File Hygiene Before Publishing
 
 Before publishing, verify that runtime and local-only files are not being accidentally committed.
