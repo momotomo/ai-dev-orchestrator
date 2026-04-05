@@ -205,6 +205,11 @@ python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --m
 
 That is the intended day-to-day command.
 
+For repository health, GitHub Actions also runs the current lightweight Python checks on `push` and `pull_request`:
+
+- `python3 -m py_compile scripts/*.py tests/*.py`
+- `python3 -m unittest discover -s tests -p 'test_*.py'`
+
 ### What `max_execution_count` Means
 
 It is an upper bound, not a promise that the bridge will always take exactly that many steps.
