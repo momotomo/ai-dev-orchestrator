@@ -13,6 +13,16 @@ bridge/outbox/*
 !bridge/outbox/.gitkeep
 bridge/state.json
 bridge/state.json.bak.*
+bridge/*.bak
+bridge/*.bak.*
+bridge/*.tmp
+bridge/*~
+bridge/inbox/*.bak
+bridge/inbox/*.bak.*
+bridge/inbox/*.tmp
+bridge/outbox/*.bak
+bridge/outbox/*.bak.*
+bridge/outbox/*.tmp
 
 # Local project-specific config
 bridge/project_config.json

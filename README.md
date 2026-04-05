@@ -190,6 +190,11 @@ This repository currently treats Safari fetch waiting as:
 - then 600 seconds extended wait
 - then late-completion monitoring if needed
 
+Runtime state, prompt / report artifacts, and live logs are intended to stay
+local. The repository keeps templates, docs, and `.gitkeep` placeholders, but
+active files such as `bridge/state.json`, `bridge/project_config.json`,
+`bridge/inbox/*`, `bridge/outbox/*`, and `logs/*` should not be committed.
+
 ## The Normal Entry Point
 
 The normal entry point is:

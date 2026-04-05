@@ -113,6 +113,10 @@ Check especially:
 
 The repo should ship templates and docs, not your active runtime state.
 
+Tracked placeholders such as `.gitkeep` files are fine. Live state, live
+prompt/report files, local backups, and operator-specific config should stay
+local.
+
 ## 8. Practical “Ready To Publish?” Gate
 
 You are probably ready to publish when all of these are true:
