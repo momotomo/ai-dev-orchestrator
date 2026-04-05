@@ -469,6 +469,7 @@ If you need the deeper runtime behavior, see:
 - [bridge/README_BRIDGE_FLOW.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/README_BRIDGE_FLOW.md)
 - [bridge/run_one_cycle.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/run_one_cycle.md)
 - [bridge/browser_notes.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/browser_notes.md)
+- [docs/OSS_PUBLISHING_CHECKLIST.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
 
 Those docs are more implementation-oriented.
 
