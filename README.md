@@ -1,0 +1,358 @@
+# chatgpt-codex-bridge
+
+`chatgpt-codex-bridge` is a macOS + Safari automation bridge between ChatGPT and Codex.
+
+Its job is simple in principle:
+
+1. ask ChatGPT for the next one-phase Codex prompt
+2. run Codex once against your target repository
+3. take the Codex report and send it back to ChatGPT
+4. continue to the next request when it is safe to do so
+
+This repository is optimized for a very specific workflow, not for generic browser automation.
+
+## What This Tool Is For
+
+This bridge is for people who want to keep a long-running implementation loop going between:
+
+- ChatGPT, which decides the next one-phase task for Codex
+- Codex, which performs exactly one implementation phase and writes a report
+
+The normal loop is:
+
+1. you start the bridge
+2. on the first request only, you write the initial ChatGPT instruction yourself
+3. ChatGPT returns the next Codex prompt
+4. Codex runs once and writes a report
+5. the bridge sends that report back to ChatGPT
+6. ChatGPT returns the next prompt
+
+The bridge is intentionally conservative in many places, but it is not a safety guarantee.
+
+## Important Assumptions
+
+This repository assumes all of the following:
+
+- macOS
+- Safari
+- ChatGPT in Safari
+- the ChatGPT **Project** feature
+- Codex CLI installed locally
+- Apple Events / Safari automation enabled
+
+This is not designed around:
+
+- Chrome
+- headless browser automation
+- API-only ChatGPT usage
+- automatic project creation
+- automatically creating a brand-new ChatGPT project for you
+
+The current bridge expects that you already have a ChatGPT Project and are operating inside it.
+
+## Strong Warnings
+
+Use this tool at your own risk.
+
+- It automates real browser actions.
+- It depends heavily on ChatGPT UI structure, Safari behavior, macOS Automation permissions, and Codex CLI behavior.
+- ChatGPT UI changes, Safari behavior changes, or Codex CLI changes can break it without warning.
+- It can consume Codex usage aggressively if you let it keep running.
+- It is safety-biased, but not foolproof.
+- You are still responsible for reviewing prompts, changes, reports, Git actions, and repository state.
+
+If you need strong guarantees, this repository is not enough on its own.
+
+## Before You Use It
+
+It is often better to spend a little time talking to ChatGPT manually first.
+
+For example, before starting the bridge, you may want to:
+
+- narrow the scope of the current task
+- decide what Codex should and should not touch
+- align on how small a “one phase” should be
+- clarify any domain-specific constraints
+
+That usually produces better one-phase prompts and smoother bridge runs.
+
+## Environment Requirements
+
+At minimum, you need:
+
+- Python 3
+- Safari
+- ChatGPT logged in inside Safari
+- Codex CLI available as `codex` or configured in `bridge/project_config.json`
+
+No extra Python packages are currently required.
+
+See [requirements.txt](/Users/kasuyatomohiro/chatgpt-codex-bridge/requirements.txt).
+
+## Required Safari / ChatGPT Setup
+
+Before live use:
+
+- open the target ChatGPT conversation or project page in Safari
+- keep Safari on the intended current tab while the bridge is running
+- enable `Develop > Allow JavaScript from Apple Events`
+- allow macOS Automation access for the app/process that runs the bridge
+- ensure ChatGPT Project pages are usable in your current account and UI
+
+The bridge assumes Safari current tab is the active operating surface.
+
+## Configuration
+
+The main project-level config is:
+
+- [bridge/project_config.example.json](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/project_config.example.json)
+
+Typical local setup is:
+
+1. copy it to `bridge/project_config.json`
+2. fill in your target repository path
+3. optionally set Codex binary / model / sandbox overrides
+
+Browser timing and Safari-specific behavior live in:
+
+- [bridge/browser_config.json](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/browser_config.json)
+
+This repository currently treats Safari fetch waiting as:
+
+- 1800 seconds normal timeout
+- then 600 seconds extended wait
+- then late-completion monitoring if needed
+
+## The Normal Entry Point
+
+The normal entry point is:
+
+```bash
+python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
+```
+
+That is the intended day-to-day command.
+
+### What `max_execution_count` Means
+
+It is an upper bound, not a promise that the bridge will always take exactly that many steps.
+
+The bridge may stop earlier when:
+
+- ChatGPT returns `completed`
+- ChatGPT returns `human_review`
+- ChatGPT returns `need_info`
+- a blocked / error condition needs human attention
+
+## First Request: User-Authored Source of Truth
+
+The first ChatGPT request is special.
+
+- The bridge does **not** auto-generate it from stale internal state.
+- The text you type is the source of truth.
+- The bridge keeps your body as-is.
+- The bridge only appends the fixed reply contract needed for parsing.
+
+In other words:
+
+- you write the actual intent
+- the bridge adds only the machine-readable reply contract
+
+This is important because it keeps the origin of the first request explicit and reviewable.
+
+## After the First Request
+
+After the first request, the normal continuation is report-based.
+
+That means:
+
+- Codex writes a report to the bridge outbox
+- the bridge sends that report back to ChatGPT
+- ChatGPT returns the next one-phase prompt
+
+So the flow becomes increasingly automatic after the first user-authored request.
+
+## Same-Chat by Default
+
+Normal continuation stays in the same ChatGPT conversation by default.
+
+That is the expected behavior for ordinary report-based continuation.
+
+The bridge should not rotate to a new chat during normal same-chat continuation unless the chat has shown signs of becoming too heavy.
+
+## When Handoff / New Chat Rotation Happens
+
+Handoff / new-chat rotation is not the default.
+
+It is only intended for heavy-chat recovery cases, especially when a reply had to go through:
+
+- 1800-second timeout
+- then 600-second extended wait
+- then late-completion monitoring
+
+When that happens, the bridge may decide that the **next** ChatGPT request should be sent only after creating a fresh chat inside the same ChatGPT Project.
+
+The key idea is:
+
+- handoff is **not** ordinary continuation
+- handoff is **preprocessing before the next ChatGPT request**
+
+So the order is:
+
+1. the heavy reply is fully recovered
+2. that reply is used for the Codex phase
+3. only before the next ChatGPT request, the bridge may rotate into a fresh project chat
+
+## ChatGPT Project Requirement
+
+This repository assumes you are using ChatGPT Projects.
+
+That matters because the bridge depends on:
+
+- project pages
+- project-specific “new chat” composer behavior
+- project-scoped handoff flow
+
+The bridge may fail or behave unexpectedly if you try to use it as if ordinary non-project chats were the primary model.
+
+## ChatGPT Reply Contract
+
+The bridge expects ChatGPT to return one of these two formats:
+
+- `===CHATGPT_PROMPT_REPLY=== ... ===END_REPLY===`
+- `===CHATGPT_NO_CODEX=== ... ===END_NO_CODEX===`
+
+`CHATGPT_NO_CODEX` must begin with one of:
+
+- `completed`
+- `human_review`
+- `need_info`
+
+The bridge handles those as:
+
+- `completed`: no more Codex work needed right now
+- `human_review`: a human decision is needed
+- `need_info`: additional user input is needed
+
+## Human Review Behavior
+
+`human_review` does not always stop immediately.
+
+The bridge may auto-continue once to avoid unnecessary stops.
+
+If `human_review` keeps coming back, the bridge eventually stops and asks for human input.
+
+## Operational Commands
+
+The main operational commands are:
+
+```bash
+python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
+python3 scripts/start_bridge.py --status --project-path /ABSOLUTE/PATH/TO/target-repo
+python3 scripts/start_bridge.py --resume --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
+python3 scripts/start_bridge.py --doctor --project-path /ABSOLUTE/PATH/TO/target-repo
+python3 scripts/start_bridge.py --clear-error --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
+```
+
+Use them like this:
+
+- `start_bridge.py`: normal entry point
+- `--status`: lightweight state check
+- `--resume`: explicit “continue from here”
+- `--doctor`: inspect what kind of stop you are in
+- `--clear-error`: clear only bridge-side stop causes when that is actually appropriate
+
+## What `clear-error` Is For
+
+`clear-error` is intentionally narrow.
+
+It is not a full reset.
+
+It should be used only when the bridge guidance or doctor output tells you that the stop is recoverable and you should clear the bridge-side error condition.
+
+It is meant to preserve:
+
+- prompt files
+- report files
+- handoff artifacts
+- logs
+
+It is not meant to erase runtime history blindly.
+
+## What Often Breaks
+
+Common failure classes include:
+
+- Safari current tab is not what the bridge expects
+- Apple Events / Automation is not allowed
+- ChatGPT UI changed
+- ChatGPT Project page layout changed
+- Project-page composer detection changed
+- ChatGPT reply took too long
+- Codex CLI auth expired
+- a handoff was recovered but not actually sent
+- a report exists but recovery / archive order was interrupted
+
+This repository tries to surface these conditions via:
+
+- `--status`
+- `--doctor`
+- stop summaries
+- runtime logs
+
+## What This Tool Depends On
+
+This tool depends strongly on:
+
+- Safari DOM shape
+- ChatGPT Project UI
+- project page composer behavior
+- macOS Automation permissions
+- Codex CLI behavior and configuration
+- local filesystem layout in this repository
+
+If any of those change, behavior may drift or break.
+
+## What This Tool Does Not Guarantee
+
+It does not guarantee:
+
+- that ChatGPT will always produce the ideal next prompt
+- that Safari automation will always reach the intended tab
+- that UI-driven handoff / rotation will always succeed
+- that Git operations in the worker repo are always safe
+- that long-running automation will stay stable over time
+
+It also does not fully own every hosting-side or account-side operation.
+
+For example, some changes are outside Codex’s scope and may still require manual user actions, such as:
+
+- changing repository names on the hosting service
+- changing ChatGPT Project settings
+- adjusting account permissions or browser-level settings
+
+## Practical Safety Guidance
+
+Treat the bridge as an automation assistant, not as an authority.
+
+You should still review:
+
+- the first request you type
+- the prompts coming back from ChatGPT
+- Codex output and report contents
+- Git state in the target repository
+- any repeated retries or unusual stops
+
+If something feels inconsistent, stop and inspect before letting it continue.
+
+## More Detailed Operational Docs
+
+If you need the deeper runtime behavior, see:
+
+- [bridge/README_BRIDGE_FLOW.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/README_BRIDGE_FLOW.md)
+- [bridge/run_one_cycle.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/run_one_cycle.md)
+- [bridge/browser_notes.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/browser_notes.md)
+
+Those docs are more implementation-oriented.
+
+This README is intentionally the top-level OSS-facing explanation.
