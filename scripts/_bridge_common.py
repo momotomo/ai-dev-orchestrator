@@ -161,6 +161,8 @@ class BridgeStop(Exception):
 class SafariChatPage:
     config: Mapping[str, Any]
     front_tab: dict[str, str]
+    require_conversation: bool = True
+    surface_label: str = "対象チャット"
 
     def wait_for_timeout(self, milliseconds: int) -> None:
         time.sleep(milliseconds / 1000.0)
@@ -170,7 +172,7 @@ class SafariChatPage:
         return _run_safari_javascript(script)
 
     def assert_same_front_tab(self) -> None:
-        current_tab = frontmost_safari_tab_info(self.config)
+        current_tab = frontmost_safari_tab_info(self.config, require_conversation=self.require_conversation)
         if _same_tab(self.front_tab, current_tab):
             return
 
@@ -183,7 +185,8 @@ class SafariChatPage:
                 dump_note = f" raw dump: {repo_relative(dump_path)}"
 
         raise BridgeError(
-            "Safari の現在タブが切り替わりました。対象チャットを再表示してから再実行してください。"
+            "Safari の現在タブが切り替わりました。"
+            f"{self.surface_label} を再表示してから再実行してください。"
             f" 現在: {current_tab.get('title', '')} {current_tab.get('url', '')}{dump_note}"
         )
 
@@ -2331,11 +2334,17 @@ def open_chatgpt_page(
     reset_chat: bool = False,
     require_conversation: bool = True,
     require_target_chat: bool = True,
+    surface_label: str | None = None,
 ) -> Iterator[tuple[None, SafariChatPage, dict[str, Any], dict[str, str]]]:
     del reset_chat
     config = load_browser_config()
     front_tab = frontmost_safari_tab_info(config, require_conversation=require_conversation)
-    page = SafariChatPage(config=config, front_tab=front_tab)
+    page = SafariChatPage(
+        config=config,
+        front_tab=front_tab,
+        require_conversation=require_conversation,
+        surface_label=surface_label or ("対象チャット" if require_conversation else "project ページ"),
+    )
     if require_target_chat:
         _ensure_target_chat(page, front_tab, config)
     yield None, page, config, front_tab
@@ -2428,10 +2437,12 @@ def send_to_chatgpt_in_current_surface(
     preferred_hint: str | None = None,
     project_page_mode: bool = False,
 ) -> dict[str, str]:
+    surface_label = "project ページ" if project_page_mode else ("対象チャット" if require_conversation else "ChatGPT ページ")
     with open_chatgpt_page(
         reset_chat=False,
         require_conversation=require_conversation,
         require_target_chat=require_target_chat,
+        surface_label=surface_label,
     ) as (_, page, config, _):
         composer_state = fill_chatgpt_composer(
             page,
@@ -2501,7 +2512,7 @@ def send_to_chatgpt_in_current_surface(
 
 
 def draft_message_in_chatgpt(text: str) -> None:
-    with open_chatgpt_page(reset_chat=False) as (_, page, config, _):
+    with open_chatgpt_page(reset_chat=False, surface_label="対象チャット") as (_, page, config, _):
         fill_chatgpt_composer(page, text, config, allow_manual_login=True)
 
 
