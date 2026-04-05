@@ -120,10 +120,19 @@ COMPOSER_SELECTORS = [
     "[contenteditable='true']",
 ]
 PROJECT_CHAT_COMPOSER_HINTS = (
+    "内の新しいチャット",
     "このプロジェクト内の新しいチャット",
     "このプロジェクト内で新しいチャット",
     "プロジェクト内の新しいチャット",
 )
+PROJECT_NAME_HEADING_SELECTORS = [
+    "main h1",
+    "main h2",
+    "header h1",
+    "header h2",
+    "[role='heading'][aria-level='1']",
+    "[role='heading'][aria-level='2']",
+]
 
 SEND_BUTTON_SELECTORS = [
     "button[data-testid='send-button']",
@@ -1816,11 +1825,15 @@ def _build_visible_text_script(selectors: Sequence[str]) -> str:
 """
 
 
-def _build_composer_state_script(preferred_hint: str | None = None) -> str:
+def _build_composer_lookup_script(*, preferred_hint: str | None = None, project_page_mode: bool = False) -> str:
     return f"""
-(() => {{
+  const composerLookup = (() => {{
   const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
   const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
+  const projectPageMode = {json.dumps(project_page_mode)};
+  const projectComposerHints = {json.dumps(PROJECT_CHAT_COMPOSER_HINTS, ensure_ascii=False)};
+  const projectNameSelectors = {json.dumps(PROJECT_NAME_HEADING_SELECTORS, ensure_ascii=False)};
+  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
   const isVisible = (el) => {{
     if (!el) return false;
     const style = window.getComputedStyle(el);
@@ -1831,98 +1844,187 @@ def _build_composer_state_script(preferred_hint: str | None = None) -> str:
       rect.width > 0 &&
       rect.height > 0;
   }};
-  const matchesHint = (node) => {{
-    if (!preferredHint) return false;
+  const collectProjectNames = () => {{
+    const results = [];
+    const seen = new Set();
+    const push = (value, source) => {{
+      const text = normalize(value);
+      if (!text || seen.has(text)) return;
+      seen.add(text);
+      results.push({{text, source}});
+    }};
+    push((document.title || "").replace(/^ChatGPT\\s*[-:|｜]\\s*/, ""), "document.title");
+    for (const selector of projectNameSelectors) {{
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {{
+        if (!isVisible(node)) continue;
+        const text = normalize(node.innerText || node.textContent || "");
+        if (text) push(text, selector);
+      }}
+    }}
+    return results;
+  }};
+  const projectNames = collectProjectNames();
+  const buildCandidate = (node) => {{
+    const container = node.closest?.("form, section, main, div") || null;
     const values = [
-      node.getAttribute?.("placeholder") || "",
-      node.getAttribute?.("aria-label") || "",
-      node.getAttribute?.("data-placeholder") || "",
-      node.closest?.("form, section, main, div")?.innerText || "",
-    ];
-    return values.some((value) => value && value.includes(preferredHint));
+      {{label: "placeholder", text: normalize(node.getAttribute?.("placeholder") || "")}},
+      {{label: "aria-label", text: normalize(node.getAttribute?.("aria-label") || "")}},
+      {{label: "data-placeholder", text: normalize(node.getAttribute?.("data-placeholder") || "")}},
+      {{label: "container", text: normalize((container?.innerText || "").slice(0, 240))}},
+    ].filter((entry) => entry.text);
+    let matchKind = "";
+    let matchedHint = "";
+    let matchedPreferredHint = false;
+    let projectHintDetected = false;
+    let matchedProjectName = "";
+    const includesText = (needle) => values.some((entry) => entry.text.includes(needle));
+    const normalizedPreferredHint = normalize(preferredHint);
+    if (normalizedPreferredHint && includesText(normalizedPreferredHint)) {{
+      matchKind = "preferred_hint";
+      matchedHint = normalizedPreferredHint;
+      matchedPreferredHint = true;
+    }}
+    if (!matchKind && projectPageMode) {{
+      for (const projectName of projectNames) {{
+        const specificHint = normalize(`${{projectName.text}} 内の新しいチャット`);
+        if (specificHint && includesText(specificHint)) {{
+          matchKind = "project_title";
+          matchedHint = specificHint;
+          matchedProjectName = projectName.text;
+          break;
+        }}
+      }}
+      for (const hint of projectComposerHints) {{
+        const normalizedHint = normalize(hint);
+        if (normalizedHint && includesText(normalizedHint)) {{
+          projectHintDetected = true;
+          if (!matchKind) {{
+            matchKind = "project_hint";
+            matchedHint = normalizedHint;
+          }}
+          break;
+        }}
+      }}
+      if (!matchKind && container && container.closest?.("main")) {{
+        matchKind = "project_structure";
+        matchedHint = "main_structure";
+      }}
+    }}
+    return {{
+      values,
+      matchKind,
+      matchedHint,
+      matchedPreferredHint,
+      matchedProjectName,
+      projectHintDetected,
+      rectTop: Math.round(node.getBoundingClientRect().top),
+      tagName: (node.tagName || "").toLowerCase(),
+      inMain: !!container?.closest?.("main"),
+    }};
   }};
   let composer = null;
+  let composerMeta = null;
   let fallbackComposer = null;
-  let matchedPreferredHint = false;
+  let fallbackMeta = null;
+  const candidateHints = [];
+  const scoreFor = (meta) => {{
+    if (meta.matchKind === "preferred_hint") return 500;
+    if (meta.matchKind === "project_title") return 400;
+    if (meta.matchKind === "project_hint") return 300;
+    if (meta.matchKind === "project_structure") return 200;
+    return 0;
+  }};
+  let bestScore = -1;
   for (const selector of selectors) {{
     const nodes = Array.from(document.querySelectorAll(selector));
     for (let index = nodes.length - 1; index >= 0; index -= 1) {{
       const node = nodes[index];
       if (isVisible(node)) {{
-        if (!fallbackComposer) fallbackComposer = node;
-        if (matchesHint(node)) {{
-          composer = node;
-          matchedPreferredHint = true;
-          break;
+        const meta = buildCandidate(node);
+        const summary = meta.values.map((entry) => `${{entry.label}}=${{entry.text}}`).join(" | ");
+        candidateHints.push(summary);
+        if (!fallbackComposer) {{
+          fallbackComposer = node;
+          fallbackMeta = meta;
+        }}
+        const score = scoreFor(meta);
+        if (score > bestScore || (score === bestScore && meta.rectTop < (composerMeta?.rectTop ?? 999999))) {{
+          if (score > 0) {{
+            composer = node;
+            composerMeta = meta;
+            bestScore = score;
+          }}
         }}
       }}
     }}
-    if (composer) break;
   }}
-  if (!composer) composer = fallbackComposer;
-  if (!composer) return JSON.stringify({{found: false}});
-  const tagName = (composer.tagName || "").toLowerCase();
+  if (!composer && !projectPageMode && fallbackComposer) {{
+    composer = fallbackComposer;
+    composerMeta = fallbackMeta;
+  }}
+  if (!composer && projectPageMode && fallbackComposer && candidateHints.length === 1) {{
+    composer = fallbackComposer;
+    composerMeta = {{
+      ...fallbackMeta,
+      matchKind: fallbackMeta?.matchKind || "single_visible_composer",
+      matchedHint: fallbackMeta?.matchedHint || "single_visible_composer",
+    }};
+  }}
+  const tagName = (composer?.tagName || "").toLowerCase();
   let currentText = "";
-  if (tagName === "textarea") {{
+  if (tagName === "textarea" && composer) {{
     currentText = (composer.value || "").trim();
-  }} else if (composer.isContentEditable) {{
+  }} else if (composer && composer.isContentEditable) {{
     currentText = (composer.innerText || composer.textContent || "").trim();
   }}
-  return JSON.stringify({{
-    found: true,
+  const payload = {{
+    found: !!composer,
+    matchedPreferredHint: !!composerMeta?.matchedPreferredHint,
+    matchKind: composerMeta?.matchKind || "",
+    matchedHint: composerMeta?.matchedHint || "",
+    matchedProjectName: composerMeta?.matchedProjectName || "",
+    projectHintDetected: !!composerMeta?.projectHintDetected || candidateHints.some((text) => text.includes("内の新しいチャット")),
+    projectName: projectNames[0]?.text || "",
+    projectNameSource: projectNames[0]?.source || "",
+    candidateHints: candidateHints.slice(0, 5),
+    visibleComposerCount: candidateHints.length,
     tagName,
-    isContentEditable: !!composer.isContentEditable,
+    inMain: !!composerMeta?.inMain,
+    isContentEditable: !!composer?.isContentEditable,
     currentText,
-    matchedPreferredHint
-  }});
+  }};
+  return {{composer, payload}};
+  }})();
+  const composer = composerLookup.composer;
+  const payload = composerLookup.payload;
+"""
+
+
+def _build_composer_state_script(preferred_hint: str | None = None, *, project_page_mode: bool = False) -> str:
+    return f"""
+(() => {{
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode)}
+  return JSON.stringify(payload);
 }})();
 """
 
 
-def _build_fill_composer_script(text: str, preferred_hint: str | None = None) -> str:
+def _build_fill_composer_script(text: str, preferred_hint: str | None = None, *, project_page_mode: bool = False) -> str:
     return f"""
 (() => {{
-  const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
   const text = {json.dumps(text, ensure_ascii=False)};
-  const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
-  const isVisible = (el) => {{
-    if (!el) return false;
-    const style = window.getComputedStyle(el);
-    if (!style) return false;
-    const rect = el.getBoundingClientRect();
-    return style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      rect.width > 0 &&
-      rect.height > 0;
-  }};
-  const matchesHint = (node) => {{
-    if (!preferredHint) return false;
-    const values = [
-      node.getAttribute?.("placeholder") || "",
-      node.getAttribute?.("aria-label") || "",
-      node.getAttribute?.("data-placeholder") || "",
-      node.closest?.("form, section, main, div")?.innerText || "",
-    ];
-    return values.some((value) => value && value.includes(preferredHint));
-  }};
-  let composer = null;
-  let fallbackComposer = null;
-  for (const selector of selectors) {{
-    const nodes = Array.from(document.querySelectorAll(selector));
-    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
-      const node = nodes[index];
-      if (isVisible(node)) {{
-        if (!fallbackComposer) fallbackComposer = node;
-        if (matchesHint(node)) {{
-          composer = node;
-          break;
-        }}
-      }}
-    }}
-    if (composer) break;
-  }}
-  if (!composer) composer = fallbackComposer;
-  if (!composer) return JSON.stringify({{ok: false, reason: "composer_missing"}});
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode)}
+  if (!composer) return JSON.stringify({{
+    ok: false,
+    reason: "composer_missing",
+    projectName: payload.projectName || "",
+    projectNameSource: payload.projectNameSource || "",
+    matchKind: payload.matchKind || "",
+    matchedHint: payload.matchedHint || "",
+    projectHintDetected: !!payload.projectHintDetected,
+    candidateHints: payload.candidateHints || [],
+  }});
   composer.scrollIntoView({{block: "center"}});
   composer.focus();
   const tagName = (composer.tagName || "").toLowerCase();
@@ -1993,33 +2095,11 @@ def _build_submit_script() -> str:
 """
 
 
-def _build_post_send_state_script(expected_excerpt: str, preferred_hint: str | None = None) -> str:
+def _build_post_send_state_script(expected_excerpt: str, preferred_hint: str | None = None, *, project_page_mode: bool = False) -> str:
     return f"""
 (() => {{
-  const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
-  const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
   const expectedExcerpt = {json.dumps(expected_excerpt, ensure_ascii=False)};
-  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
-  const isVisible = (el) => {{
-    if (!el) return false;
-    const style = window.getComputedStyle(el);
-    if (!style) return false;
-    const rect = el.getBoundingClientRect();
-    return style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      rect.width > 0 &&
-      rect.height > 0;
-  }};
-  const matchesHint = (node) => {{
-    if (!preferredHint) return false;
-    const values = [
-      node.getAttribute?.("placeholder") || "",
-      node.getAttribute?.("aria-label") || "",
-      node.getAttribute?.("data-placeholder") || "",
-      node.closest?.("form, section, main, div")?.innerText || "",
-    ];
-    return values.some((value) => value && value.includes(preferredHint));
-  }};
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode)}
   const readComposerText = (composer) => {{
     if (!composer) return "";
     const tagName = (composer.tagName || "").toLowerCase();
@@ -2027,23 +2107,6 @@ def _build_post_send_state_script(expected_excerpt: str, preferred_hint: str | N
     if (composer.isContentEditable) return (composer.innerText || composer.textContent || "").trim();
     return "";
   }};
-  let composer = null;
-  let fallbackComposer = null;
-  for (const selector of selectors) {{
-    const nodes = Array.from(document.querySelectorAll(selector));
-    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
-      const node = nodes[index];
-      if (isVisible(node)) {{
-        if (!fallbackComposer) fallbackComposer = node;
-        if (matchesHint(node)) {{
-          composer = node;
-          break;
-        }}
-      }}
-    }}
-    if (composer) break;
-  }}
-  if (!composer) composer = fallbackComposer;
   const composerText = readComposerText(composer);
   const bodyText = normalize(
     document.querySelector("main")?.innerText ||
@@ -2057,7 +2120,11 @@ def _build_post_send_state_script(expected_excerpt: str, preferred_hint: str | N
     composerText,
     composerEmpty: normalize(composerText) === "",
     bodyContainsExpected: normalizedExcerpt ? bodyText.includes(normalizedExcerpt) : false,
-    url: window.location.href
+    url: window.location.href,
+    matchKind: payload.matchKind || "",
+    matchedHint: payload.matchedHint || "",
+    projectName: payload.projectName || "",
+    candidateHints: payload.candidateHints || [],
   }});
 }})();
 """
@@ -2123,10 +2190,15 @@ def _ensure_target_chat(page: SafariChatPage, front_tab: Mapping[str, str], conf
     )
 
 
-def _find_composer_state(page: SafariChatPage, *, preferred_hint: str | None = None) -> dict[str, Any]:
+def _find_composer_state(
+    page: SafariChatPage,
+    *,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> dict[str, Any]:
     return _evaluate_json(
         page,
-        _build_composer_state_script(preferred_hint=preferred_hint),
+        _build_composer_state_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode),
         "ChatGPT 入力欄の確認に失敗しました",
     )
 
@@ -2150,10 +2222,42 @@ def _composer_text_matches(actual_text: str, expected_text: str) -> bool:
     return bool(excerpt) and excerpt in actual
 
 
-def _read_post_send_state(config: Mapping[str, Any], *, expected_text: str, preferred_hint: str | None = None) -> tuple[dict[str, str], dict[str, Any]]:
+def _composer_candidate_summary(payload: Mapping[str, Any]) -> str:
+    candidates = [str(item).strip() for item in payload.get("candidateHints", []) if str(item).strip()]
+    if not candidates:
+        return "candidate_hints=none"
+    return "candidate_hints=" + " || ".join(candidates[:3])
+
+
+def _log_composer_probe(prefix: str, payload: Mapping[str, Any]) -> Path:
+    snapshot = {
+        "found": bool(payload.get("found")),
+        "projectName": str(payload.get("projectName", "")),
+        "projectNameSource": str(payload.get("projectNameSource", "")),
+        "matchKind": str(payload.get("matchKind", "")),
+        "matchedHint": str(payload.get("matchedHint", "")),
+        "matchedPreferredHint": bool(payload.get("matchedPreferredHint")),
+        "projectHintDetected": bool(payload.get("projectHintDetected")),
+        "visibleComposerCount": int(payload.get("visibleComposerCount", 0) or 0),
+        "candidateHints": list(payload.get("candidateHints", [])),
+    }
+    return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
+
+
+def _read_post_send_state(
+    config: Mapping[str, Any],
+    *,
+    expected_text: str,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> tuple[dict[str, str], dict[str, Any]]:
     tab_info = frontmost_safari_tab_info(config, require_conversation=False)
     raw = _run_safari_javascript(
-        _build_post_send_state_script(_expected_excerpt(expected_text), preferred_hint=preferred_hint)
+        _build_post_send_state_script(
+            _expected_excerpt(expected_text),
+            preferred_hint=preferred_hint,
+            project_page_mode=project_page_mode,
+        )
     ).strip()
     if not raw:
         raise BridgeError("新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。")
@@ -2170,12 +2274,13 @@ def ensure_chatgpt_ready(
     *,
     allow_manual_login: bool = False,
     preferred_hint: str | None = None,
+    project_page_mode: bool = False,
 ) -> dict[str, Any]:
     deadline = time.time() + 20
-    state = _find_composer_state(page, preferred_hint=preferred_hint)
+    state = _find_composer_state(page, preferred_hint=preferred_hint, project_page_mode=project_page_mode)
     while not state.get("found") and time.time() < deadline:
         page.wait_for_timeout(1000)
-        state = _find_composer_state(page, preferred_hint=preferred_hint)
+        state = _find_composer_state(page, preferred_hint=preferred_hint, project_page_mode=project_page_mode)
 
     if state.get("found"):
         return state
@@ -2195,6 +2300,24 @@ def ensure_chatgpt_ready(
         raise BridgeError(
             "ChatGPT ページの読み込みが完了していません。対象チャットが表示されてから再実行してください。"
             f"{dump_note}"
+        )
+    if project_page_mode:
+        probe_path = _log_composer_probe("project_chat_composer_probe", state)
+        probe_note = f" composer probe: {repo_relative(probe_path)}"
+        candidate_note = f" {_composer_candidate_summary(state)}"
+        if not str(state.get("projectName", "")).strip():
+            raise BridgeError(
+                "project ページは見えていますが、ChatGPT project 名を取得できませんでした。"
+                f"{candidate_note}{dump_note}{probe_note}"
+            )
+        if not bool(state.get("projectHintDetected")):
+            raise BridgeError(
+                "project ページは見えていますが、『＜project名＞ 内の新しいチャット』系の hint を確認できませんでした。"
+                f" project_name={state.get('projectName', '')}{candidate_note}{dump_note}{probe_note}"
+            )
+        raise BridgeError(
+            "project ページ上の新規 composer 構造を特定できませんでした。"
+            f" project_name={state.get('projectName', '')}{candidate_note}{dump_note}{probe_note}"
         )
     raise BridgeError(
         "ChatGPT の入力欄が見つかりませんでした。対象チャットが前面表示されているか確認してください。"
@@ -2225,34 +2348,55 @@ def fill_chatgpt_composer(
     *,
     allow_manual_login: bool = False,
     preferred_hint: str | None = None,
-) -> None:
-    initial_state = ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login, preferred_hint=preferred_hint)
-    if preferred_hint and not bool(initial_state.get("matchedPreferredHint")):
+    project_page_mode: bool = False,
+) -> dict[str, Any]:
+    initial_state = ensure_chatgpt_ready(
+        page,
+        config,
+        allow_manual_login=allow_manual_login,
+        preferred_hint=preferred_hint,
+        project_page_mode=project_page_mode,
+    )
+    if preferred_hint and not bool(initial_state.get("matchKind")):
         dump_path = log_page_dump(page)
         dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+        probe_path = _log_composer_probe("project_chat_composer_probe", initial_state)
+        probe_note = f" composer probe: {repo_relative(probe_path)}"
         raise BridgeError(
-            "指定した project composer を特定できませんでした。"
-            f" hint='{preferred_hint}' に一致する入力欄が見つかっていません。{dump_note}"
+            "指定した project page composer を特定できませんでした。"
+            f" hint='{preferred_hint}' match_kind='{initial_state.get('matchKind', '')}'"
+            f" matched_hint='{initial_state.get('matchedHint', '')}'"
+            f" {_composer_candidate_summary(initial_state)}{dump_note}{probe_note}"
         )
     result = _evaluate_json(
         page,
-        _build_fill_composer_script(text, preferred_hint=preferred_hint),
+        _build_fill_composer_script(text, preferred_hint=preferred_hint, project_page_mode=project_page_mode),
         "ChatGPT 入力欄への書き込みに失敗しました",
     )
     if result.get("ok"):
         page.wait_for_timeout(300)
-        state = _find_composer_state(page, preferred_hint=preferred_hint)
+        state = _find_composer_state(page, preferred_hint=preferred_hint, project_page_mode=project_page_mode)
         actual_text = str(state.get("currentText", "") or "")
         if not _composer_text_matches(actual_text, text):
             dump_path = log_page_dump(page)
             dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+            probe_path = _log_composer_probe("project_chat_composer_probe", state)
+            probe_note = f" composer probe: {repo_relative(probe_path)}"
             raise BridgeError(
                 "ChatGPT 入力欄へ本文を書き込んだ後の確認に失敗しました。"
                 " composer に期待した handoff 本文が入っていません。"
-                f"{dump_note}"
+                f" {_composer_candidate_summary(state)}{dump_note}{probe_note}"
             )
-        return
-    raise BridgeError(f"ChatGPT の入力欄に文字を設定できませんでした: {result.get('reason', 'unknown')}")
+        return state
+    probe_path = _log_composer_probe("project_chat_composer_probe", result)
+    probe_note = f" composer probe: {repo_relative(probe_path)}"
+    raise BridgeError(
+        "ChatGPT の入力欄に文字を設定できませんでした:"
+        f" {result.get('reason', 'unknown')}"
+        f" project_name={result.get('projectName', '')}"
+        f" matched_hint={result.get('matchedHint', '')}"
+        f" {_composer_candidate_summary(result)}{probe_note}"
+    )
 
 
 def submit_chatgpt_message(page: SafariChatPage) -> None:
@@ -2282,19 +2426,31 @@ def send_to_chatgpt_in_current_surface(
     require_conversation: bool = False,
     require_target_chat: bool = False,
     preferred_hint: str | None = None,
+    project_page_mode: bool = False,
 ) -> dict[str, str]:
     with open_chatgpt_page(
         reset_chat=False,
         require_conversation=require_conversation,
         require_target_chat=require_target_chat,
     ) as (_, page, config, _):
-        fill_chatgpt_composer(page, text, config, preferred_hint=preferred_hint)
+        composer_state = fill_chatgpt_composer(
+            page,
+            text,
+            config,
+            preferred_hint=preferred_hint,
+            project_page_mode=project_page_mode,
+        )
         submit_chatgpt_message(page)
         deadline = time.time() + 15
         last_tab: dict[str, str] | None = None
         last_payload: dict[str, Any] | None = None
         while time.time() < deadline:
-            tab_info, payload = _read_post_send_state(config, expected_text=text, preferred_hint=preferred_hint)
+            tab_info, payload = _read_post_send_state(
+                config,
+                expected_text=text,
+                preferred_hint=preferred_hint,
+                project_page_mode=project_page_mode,
+            )
             last_tab = tab_info
             last_payload = payload
             if _conversation_url_matches(tab_info.get("url", ""), config):
@@ -2302,18 +2458,27 @@ def send_to_chatgpt_in_current_surface(
                     "url": tab_info.get("url", ""),
                     "title": tab_info.get("title", ""),
                     "signal": "conversation_url",
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
                 }
             if bool(payload.get("bodyContainsExpected")):
                 return {
                     "url": tab_info.get("url", ""),
                     "title": tab_info.get("title", ""),
                     "signal": "message_visible",
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
                 }
             if bool(payload.get("composerEmpty")):
                 return {
                     "url": tab_info.get("url", ""),
                     "title": tab_info.get("title", ""),
                     "signal": "composer_cleared",
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
                 }
             time.sleep(0.5)
 
@@ -2328,6 +2493,9 @@ def send_to_chatgpt_in_current_surface(
             f" last_url: {last_tab.get('url', '') if last_tab else ''}"
             f" composer_empty: {bool(last_payload.get('composerEmpty')) if last_payload else False}"
             f" body_contains_expected: {bool(last_payload.get('bodyContainsExpected')) if last_payload else False}"
+            f" match_kind: {composer_state.get('matchKind', '')}"
+            f" matched_hint: {composer_state.get('matchedHint', '')}"
+            f" project_name: {composer_state.get('projectName', '')}"
             f"{dump_note}"
         )
 
@@ -2403,6 +2571,7 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                         require_conversation=False,
                         require_target_chat=False,
                         preferred_hint=hint or None,
+                        project_page_mode=True,
                     )
                     last_signal = str(send_result.get("signal", "")).strip()
                     sent = True
@@ -2414,7 +2583,7 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                     time.sleep(1.0)
                     continue
                 raise BridgeError(
-                    "project ページの『このプロジェクト内の新しいチャット』入力欄へ handoff を送れませんでした。"
+                    "project ページの『＜project名＞ 内の新しいチャット』入力欄へ handoff を送れませんでした。"
                     f" {last_error}"
                 )
         except BridgeError as exc:

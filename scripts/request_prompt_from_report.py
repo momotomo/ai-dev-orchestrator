@@ -289,6 +289,9 @@ def run_rotated_report_request(
                 f"url: {rotated_chat.get('url', '')}",
                 f"title: {rotated_chat.get('title', '')}",
                 f"signal: {rotated_chat.get('signal', '')}",
+                f"match_kind: {rotated_chat.get('match_kind', '')}",
+                f"matched_hint: {rotated_chat.get('matched_hint', '')}",
+                f"project_name: {rotated_chat.get('project_name', '')}",
             ]
         ),
     )
@@ -321,6 +324,13 @@ def run_rotated_report_request(
     print(f"chat rotated: {chat_rotated_log}")
     if rotated_chat.get("signal"):
         print(f"chat rotated signal: {rotated_chat.get('signal', '')}")
+    if rotated_chat.get("match_kind"):
+        print(
+            "chat rotated composer:"
+            f" match_kind={rotated_chat.get('match_kind', '')}"
+            f" matched_hint={rotated_chat.get('matched_hint', '')}"
+            f" project_name={rotated_chat.get('project_name', '')}"
+        )
     print(f"sent: {request_log}")
     return 0
 

@@ -435,7 +435,7 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
         elif pending_handoff_log:
             note = (
                 "handoff は回収済みですが、まだ新チャットへ送れていません。"
-                " project ページと『このプロジェクト内の新しいチャット』入力欄を確認し、"
+                " project ページと『＜project名＞ 内の新しいチャット』入力欄を確認し、"
                 " error を clear して再実行すると同じ handoff で入力確認と送信確認を再試行します。"
                 f" handoff_log: {pending_handoff_log}"
             )
