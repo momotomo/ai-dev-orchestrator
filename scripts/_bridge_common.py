@@ -276,23 +276,27 @@ def present_bridge_status(
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
 
     if bool(state.get("error")):
-        return BridgeStatusView("異常", "handoff と summary を見て、必要なら error_message を確認してから再開します。")
+        return BridgeStatusView("異常", "まず stop summary と doctor を見て、必要なら詳しい error を確認してから再開します。")
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        return BridgeStatusView("人確認待ち", "handoff と summary の note を確認してから再開します。")
+        return BridgeStatusView("人確認待ち", "まず stop summary の next step と note を確認してから再開します。")
 
     if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
-        detail = chatgpt_decision_note or "ChatGPT が Codex 不要と判断しました。人が次の判断を行います。"
+        detail = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
         return BridgeStatusView("人確認待ち", detail)
 
     if mode == "idle" and need_chatgpt_prompt:
-        return BridgeStatusView("初回依頼文の入力待ち", "最初に ChatGPT へ送る本文を入力します。")
+        return BridgeStatusView("初回依頼文の入力待ち", "最初の依頼文はあなたが入力します。bridge は reply contract だけを足します。")
 
-    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+    if mode == "waiting_prompt_reply":
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
+    if mode == "extended_wait":
+        return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
+    if mode == "await_late_completion":
+        return BridgeStatusView("ChatGPT返答待ち", "返答が書き切られるまで監視し、その後で回収します。")
 
     if mode == "ready_for_codex" and need_codex_run:
-        return BridgeStatusView("Codex実行待ち", "bridge が Codex worker を 1 回起動します。")
+        return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
 
     if mode == "ready_for_codex":
         return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
@@ -301,13 +305,13 @@ def present_bridge_status(
         return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
 
     if mode == "codex_done":
-        return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
+        return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
 
     if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_rotate_before_next_chat_request(state):
-        return BridgeStatusView("人確認待ち", "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。再実行で入力確認と送信確認を再試行します。")
+        return BridgeStatusView("ChatGPTへ依頼準備中", "次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
-        return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
+        return BridgeStatusView("ChatGPTへ依頼準備中", "完了報告をもとに、次の依頼を送る準備ができています。")
 
     if mode == "completed":
         detail = chatgpt_decision_note or "追加の操作は不要です。"
@@ -316,7 +320,7 @@ def present_bridge_status(
     if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
         return BridgeStatusView("完了", "追加の操作は不要です。")
 
-    return BridgeStatusView("人確認待ち", "内部状態の詳細を確認してから再開します。")
+    return BridgeStatusView("人確認待ち", "まず stop summary と doctor を確認してから再開します。")
 
 
 def present_bridge_handoff(
@@ -337,8 +341,8 @@ def present_bridge_handoff(
     normalized_reason = reason.strip()
 
     if bool(state.get("error")):
-        detail = suggested_note or error_message or "summary と error_message を確認してください。"
-        return BridgeHandoffView("異常終了です。詳細ログを確認してください。", detail)
+        detail = suggested_note or error_message or "stop summary と doctor を確認してください。"
+        return BridgeHandoffView("異常で止まりました。まず doctor と summary を確認してください。", detail)
 
     if cycle_boundary_stop:
         detail = suggested_note or "この run は現在の cycle 完了までで止めました。次 cycle は次回実行で進めます。"
@@ -349,23 +353,23 @@ def present_bridge_handoff(
         return BridgeHandoffView("完了しました。", detail)
 
     if chatgpt_decision == "human_review":
-        detail = suggested_note or "summary / note を確認して人が次の判断を行ってください。"
-        return BridgeHandoffView("人の判断が必要です。summary / note を確認してください。", detail)
+        detail = suggested_note or "stop summary の案内に沿って、次の判断や補足を入れてください。"
+        return BridgeHandoffView("人の判断が必要です。次の方針を決めてから再開してください。", detail)
 
     if chatgpt_decision == "need_info":
         detail = suggested_note or "不足している情報を補ってから再開してください。"
         return BridgeHandoffView("情報が不足しています。入力内容を補って再開してください。", detail)
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        detail = suggested_note or "自動継続しません。summary / note を確認してください。"
-        return BridgeHandoffView("自動継続しません。summary / note を確認してください。", detail)
+        detail = suggested_note or "自動では進めません。stop summary の案内に沿って確認してください。"
+        return BridgeHandoffView("自動では進めません。まず summary と doctor を確認してください。", detail)
 
     if normalized_reason.startswith("--max-steps="):
-        detail = suggested_note or "summary を見て、続けるなら suggested_next_command を再実行してください。"
-        return BridgeHandoffView("上限回数に達したため一旦停止しました。", detail)
+        detail = suggested_note or "続けるなら summary のおすすめ 1 コマンドをそのまま使ってください。"
+        return BridgeHandoffView("上限回数に達したため、ここで一旦止めました。", detail)
 
     if normalized_reason.startswith("ユーザー中断"):
-        detail = suggested_note or "summary を見て、再開するかここで止めるかを決めてください。"
+        detail = suggested_note or "再開するか、このまま止めるかを summary を見て決めてください。"
         return BridgeHandoffView("途中で停止しました。summary / note を確認してください。", detail)
 
     if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
@@ -375,9 +379,21 @@ def present_bridge_handoff(
     status = present_bridge_status(state, blocked=blocked, stale_codex_running=stale_codex_running)
     detail = suggested_note or status.detail
     if status.label == "人確認待ち":
-        return BridgeHandoffView("人の確認が必要です。summary / note を確認してください。", detail)
+        return BridgeHandoffView("人の確認が必要です。summary と doctor を確認してください。", detail)
     if status.label == "完了":
         return BridgeHandoffView("完了しました。", detail)
+    if status.label == "初回依頼文の入力待ち":
+        return BridgeHandoffView("最初の依頼文を入力してください。", detail)
+    if status.label == "ChatGPTへ依頼準備中":
+        return BridgeHandoffView("ChatGPT への次の依頼を送る準備ができています。", detail)
+    if status.label == "ChatGPT返答待ち":
+        return BridgeHandoffView("ChatGPT の返答を待っています。", detail)
+    if status.label == "Codex実行待ち":
+        return BridgeHandoffView("Codex を起動する準備ができています。", detail)
+    if status.label == "Codex実行中":
+        return BridgeHandoffView("Codex の完了を待っています。", detail)
+    if status.label == "完了報告整理中":
+        return BridgeHandoffView("完了報告を整理して次へ進めます。", detail)
     return BridgeHandoffView(f"{status.label}です。", detail)
 
 

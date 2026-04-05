@@ -55,15 +55,15 @@ DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
 def start_bridge_mode(state: dict[str, Any]) -> str:
     action = describe_next_action(state)
     if action == "request_next_prompt":
-        return "新規開始"
+        return "初回入力から始められます"
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
-        return "人確認待ち"
+        return "補足を入れて再開できます"
     if is_retryable_pending_handoff_error(state):
-        return "続きから再開"
+        return "同じコマンドで再試行できます"
     blocked_guidance = blocked_next_guidance(state)
     if blocked_guidance is not None:
-        return "先に確認"
-    return "続きから再開"
+        return "先に確認が必要です"
+    return "このまま再開できます"
 
 
 def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]) -> tuple[str, str, str]:
@@ -171,7 +171,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "request_next_prompt":
         return (
             "このあと初回だけ、ChatGPT に送る本文入力を求めます。"
-            " 表示される短い例文をもとに進めたい内容だけ入力すると、bridge が固定の返答契約を付けて送信します。"
+            " 入力した本文がそのまま最初の依頼になり、bridge は固定の返答契約だけを足します。"
         )
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
         decision = str(state.get("chatgpt_decision", "")).strip()
@@ -183,9 +183,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "request_prompt_from_report" and str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
         return "次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。"
     if action == "fetch_next_prompt":
-        return (
-            f"既存チャットの返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
-        )
+        return f"ChatGPT の返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
     if action == "launch_codex_once":
         return "prompt はそろっています。bridge が Codex worker を 1 回起動します。"
     if action == "wait_for_codex_report":
@@ -196,7 +194,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
         return "完了報告をもとに、同じチャットへ次の依頼を送ります。"
     if action == "completed":
         return "追加の操作は不要です。"
-    return "summary と note を見て次の 1 手を判断してください。"
+    return "summary と doctor を見て次の 1 手を判断してください。"
 
 
 def print_entry_banner(state: dict[str, Any], args: argparse.Namespace) -> None:
@@ -339,22 +337,22 @@ def recommended_operator_step(
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
 
     if runtime_stop_path().exists():
-        return ("先に状況確認", format_start_bridge_command(args, mode="doctor"))
+        return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
     if bool(final_state.get("pause")):
-        return ("先に状況確認", format_start_bridge_command(args, mode="doctor"))
+        return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
     if bool(final_state.get("error")):
-        return ("停止要因を整理", format_start_bridge_command(args, mode="clear-error"))
+        return ("停止要因を整理して再開", format_start_bridge_command(args, mode="clear-error"))
     if has_unarchived_report_conflict(final_state) or stale_codex_running:
-        return ("先に状況確認", format_start_bridge_command(args, mode="doctor"))
+        return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
     if action in {"completed", "no_action"}:
         return ("追加操作なし", "なし")
     if action == "request_next_prompt":
-        return ("新規開始", format_start_bridge_command(args, mode="run"))
+        return ("初回入力から開始", format_start_bridge_command(args, mode="run"))
     if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
         return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
     if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
-        return ("handoff 再送を再開", format_start_bridge_command(args, mode="resume"))
-    return ("続きから再開", format_start_bridge_command(args, mode="resume"))
+        return ("handoff 再送を再試行", format_start_bridge_command(args, mode="resume"))
+    return ("そのまま再開", format_start_bridge_command(args, mode="resume"))
 
 
 def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]) -> str:
@@ -401,8 +399,8 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "completed":
         return "追加の操作は不要です。"
     if action == "no_action":
-        return "state.json と logs を確認し、必要なら原因を解消してから再開してください。"
-    return "state.json を確認してから再実行してください。"
+        return "summary と doctor を確認し、必要なら原因を解消してから再開してください。"
+    return "summary と doctor を確認してから再実行してください。"
 
 
 def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None:
@@ -443,7 +441,7 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
         else:
             note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"
         if error_message:
-            note += f" error_message: {error_message}"
+            note += f" 技術メモ: {error_message}"
         return ("なし", note)
 
     if has_unarchived_report_conflict(final_state):
@@ -767,7 +765,7 @@ def summarize_run(
     lines = [
         "# Run Until Stop Summary",
         "",
-        "## handoff",
+        "## next_step",
         f"- 現在の状況: {final_status.label}",
         f"- 停止時の案内: {handoff.title}",
         f"- おすすめの動き: {recommendation_label}",
@@ -898,7 +896,7 @@ def finish(
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
     print(summary.rstrip())
     print(f"log: {log_path}")
-    print(f"handoff: {handoff.title}")
+    print(f"next step: {handoff.title}")
     print(f"- recommended_action: {recommendation_label}")
     print(f"- recommended_command: {recommended_command}")
     print(f"- note: {handoff.detail}")

@@ -247,7 +247,7 @@ def run_rotated_report_request(
     if pending_handoff_text:
         handoff_text = pending_handoff_text
         handoff_received_log = state.get("pending_handoff_log", "") or ""
-        print("handoff: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
+        print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
     else:
         handoff_request_text = build_chatgpt_handoff_request(
             state=state,

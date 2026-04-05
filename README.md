@@ -363,6 +363,9 @@ As a rule of thumb:
 - use `--doctor` when something feels wrong
 - use `--clear-error` only after `--doctor` or the stop summary points you there
 
+When a run stops, read the printed `next step:` line first. It is intended to
+be the shortest human-facing answer to “what should I do now?”
+
 ## What `clear-error` Is For
 
 `clear-error` is intentionally narrow.

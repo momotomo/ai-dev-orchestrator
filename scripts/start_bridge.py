@@ -10,43 +10,50 @@ from _bridge_common import clear_error_fields, save_state
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
         description=(
-            "bridge の通常入口です。project path と max execution count を渡して起動します。"
-            " 初回だけ最初の ChatGPT request 本文を入力し、その後は必要時だけ再実行します。"
-            " --status / --resume / --doctor / --clear-error で軽い運用保守もできます。"
-        )
+            "bridge の通常入口です。\n"
+            "初回だけ ChatGPT への最初の依頼文をあなたが入力し、その後は report ベースで継続します。"
+        ),
+        epilog=(
+            "よく使う例:\n"
+            "  python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/repo --max-execution-count 6\n"
+            "  python3 scripts/start_bridge.py --status --project-path /ABSOLUTE/PATH/TO/repo\n"
+            "  python3 scripts/start_bridge.py --doctor --project-path /ABSOLUTE/PATH/TO/repo\n\n"
+            "初回 request の本文は自分で書きます。bridge は本文を自動生成せず、reply contract だけを追加します。"
+        ),
     )
     parser.add_argument(
         "--project-path",
-        help="worker 対象 repo root",
+        help="Codex worker を動かす target repo の絶対パス",
     )
     parser.add_argument(
         "--max-execution-count",
         type=int,
         default=run_until_stop.DEFAULT_MAX_STEPS,
-        help="1 回の run で最大何手まで進めるか",
+        help="この実行で進める最大手数の上限",
     )
     parser.add_argument(
         "--status",
         action="store_true",
-        help="実行せず、今どこで止まっているかとおすすめ 1 コマンドだけ表示する",
+        help="実行せず、今の状況と次の 1 手だけを短く確認する",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="そのまま続きから再開したい時に明示する。通常実行と同じ",
+        help="bridge が再開可能と言っている時に、そのまま続きから進める",
     )
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="先に人が見るべき点と、おすすめ 1 コマンドを短く診断する",
+        help="止まった理由と、resume / clear-error / 待機のどれがよいかを確認する",
     )
     parser.add_argument(
         "--clear-error",
         "--reset",
         action="store_true",
         dest="clear_error",
-        help="bridge 側の停止要因だけを最小解除する。doctor で clear-error 推奨の時に使う",
+        help="bridge 側の recoverable error だけを解除する。doctor や stop summary が勧めた時だけ使う",
     )
     return parser.parse_args(argv)
 
@@ -76,14 +83,14 @@ def print_resume_overview(args: argparse.Namespace) -> None:
     status_label, guidance, note = run_until_stop.start_bridge_resume_guidance(derived_args, state)
     recommendation_label, recommended_command = run_until_stop.recommended_operator_step(derived_args, state)
     print("bridge status:", flush=True)
-    print(f"- 入口判断: {mode_label}", flush=True)
     print(f"- 現在の状況: {status_label}", flush=True)
-    print(f"- おすすめの動き: {recommendation_label}", flush=True)
-    print(f"- おすすめ 1 コマンド: {recommended_command}", flush=True)
+    print(f"- 再開のしかた: {mode_label}", flush=True)
     print(f"- 次に起きること: {guidance}", flush=True)
-    print(f"- 次に見るもの: {note}", flush=True)
-    if mode_label == "先に確認":
-        print("- このまま再実行する前に、handoff と summary の案内を確認してください。", flush=True)
+    print(f"- まずやること: {recommendation_label}", flush=True)
+    print(f"- おすすめ 1 コマンド: {recommended_command}", flush=True)
+    print(f"- 先に見るもの: {note}", flush=True)
+    if mode_label == "先に確認が必要です":
+        print("- このまま再実行する前に、stop summary と doctor の案内を確認してください。", flush=True)
     else:
         print("- 同じコマンドでそのまま再開して大丈夫です。", flush=True)
 
@@ -119,20 +126,21 @@ def print_doctor(args: argparse.Namespace) -> None:
     else:
         clear_error_status = "不要: error 停止ではありません"
     print("bridge doctor:", flush=True)
+    print(f"- 現在の状況: {status_label}", flush=True)
     print(f"- 判定: {recommendation_label}", flush=True)
     print(f"- おすすめ 1 コマンド: {recommended_command}", flush=True)
-    print(f"- 現在の状況: {status_label}", flush=True)
     print(f"- 次に起きること: {guidance}", flush=True)
-    print(f"- 次に見るもの: {note}", flush=True)
-    print(f"- 詳細(入口判断): {mode_label}", flush=True)
-    print(f"- prompt_ready: {'yes' if prompt_ready else 'no'}", flush=True)
-    print(f"- report_ready: {'yes' if report_ready else 'no'}", flush=True)
-    print(f"- pending_request_log: {pending_request_log}", flush=True)
-    print(f"- pending_handoff_log: {pending_handoff_log}", flush=True)
-    print(f"- stop_file: {'present' if stop_exists else 'absent'}", flush=True)
-    print(f"- pause: {'あり' if bool(state.get('pause')) else 'なし'}", flush=True)
-    print(f"- bridge_error: {'あり' if bool(state.get('error')) else 'なし'}", flush=True)
-    print(f"- state_backups: {backup_count} (削除不要)", flush=True)
+    print(f"- まず見るもの: {note}", flush=True)
+    print("- 詳細診断:", flush=True)
+    print(f"  - 再開のしかた: {mode_label}", flush=True)
+    print(f"  - prompt保存: {'あり' if prompt_ready else 'なし'}", flush=True)
+    print(f"  - report保存: {'あり' if report_ready else 'なし'}", flush=True)
+    print(f"  - pending_request_log: {pending_request_log}", flush=True)
+    print(f"  - pending_handoff_log: {pending_handoff_log}", flush=True)
+    print(f"  - stop_file: {'present' if stop_exists else 'absent'}", flush=True)
+    print(f"  - pause: {'あり' if bool(state.get('pause')) else 'なし'}", flush=True)
+    print(f"  - bridge_error: {'あり' if bool(state.get('error')) else 'なし'}", flush=True)
+    print(f"  - state_backups: {backup_count} (削除不要)", flush=True)
     print(f"- clear_error: {clear_error_status}", flush=True)
     print("- logs / history / prompt / report は doctor では変更しません。", flush=True)
 
@@ -169,21 +177,21 @@ def main(argv: list[str] | None = None) -> int:
     project_config = run_until_stop.load_project_config()
     effective_project_path = args.project_path or str(run_until_stop.worker_repo_path(project_config))
     project_path_display = args.project_path or f"(引数未指定; 既定値 {effective_project_path})"
-    print("bridge start: このコマンドが通常入口です。", flush=True)
-    print(f"- project_path: {project_path_display}", flush=True)
-    print(f"- max_execution_count: {args.max_execution_count}", flush=True)
-    print("- 初回だけ依頼文を入力します。2 回目以降は同じコマンドで継続できます。", flush=True)
-    print("- 内部 state ではなく、人向け表示と handoff を見ながら進める想定です。", flush=True)
     if args.status:
         print_resume_overview(args)
         return 0
-    if args.resume:
-        print("- resume: 同じコマンドで続きから再開します。", flush=True)
     if args.doctor:
         print_doctor(args)
         return 0
     if args.clear_error:
         return clear_error_for_resume(args)
+    print("bridge start: このコマンドが通常入口です。", flush=True)
+    print(f"- project_path: {project_path_display}", flush=True)
+    print(f"- max_execution_count: {args.max_execution_count}", flush=True)
+    print("- 初回だけ、あなたが最初の ChatGPT 依頼文を入力します。", flush=True)
+    print("- 2 回目以降は report ベースで継続し、通常は同じチャットを使います。", flush=True)
+    if args.resume:
+        print("- resume: ここから続きとして進めます。", flush=True)
     print_resume_overview(args)
     forwarded_argv = [
         "--project-path",
