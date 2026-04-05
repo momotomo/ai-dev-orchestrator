@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,8 @@ PROMPT_REPLY_START = "===CHATGPT_PROMPT_REPLY==="
 PROMPT_REPLY_END = "===END_REPLY==="
 NO_CODEX_REPLY_START = "===CHATGPT_NO_CODEX==="
 NO_CODEX_REPLY_END = "===END_NO_CODEX==="
+HANDOFF_REPLY_START = "===CHATGPT_CHAT_HANDOFF==="
+HANDOFF_REPLY_END = "===END_CHAT_HANDOFF==="
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
 BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
 CHATGPT_REQUEST_START = "===CHATGPT_REQUEST==="
@@ -45,6 +48,25 @@ DEFAULT_STATE: dict[str, Any] = {
     "need_chatgpt_next": False,
     "last_prompt_file": "",
     "last_report_file": "",
+    "prepared_request_hash": "",
+    "prepared_request_source": "",
+    "prepared_request_log": "",
+    "prepared_request_status": "",
+    "pending_request_hash": "",
+    "pending_request_source": "",
+    "pending_request_log": "",
+    "pending_request_signal": "",
+    "pending_handoff_hash": "",
+    "pending_handoff_source": "",
+    "pending_handoff_log": "",
+    "next_request_requires_rotation": False,
+    "next_request_rotation_reason": "",
+    "rotate_after_cycle": False,
+    "rotate_after_cycle_reason": "",
+    "last_processed_request_hash": "",
+    "last_processed_reply_hash": "",
+    "current_chat_session": "",
+    "human_review_auto_continue_count": 0,
     "pause": False,
     "error": False,
     "error_message": "",
@@ -63,6 +85,8 @@ DEFAULT_BROWSER_CONFIG: dict[str, Any] = {
     "apple_event_timeout_retry_count": 1,
     "apple_event_timeout_retry_delay_seconds": 2,
     "runner_heartbeat_seconds": 10,
+    "extended_fetch_timeout_seconds": 600,
+    "project_page_url": "",
 }
 
 DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
@@ -73,6 +97,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "worker_repo_markers": [],
     "codex_bin": "codex",
     "codex_model": "",
+    "codex_sandbox": "",
     "codex_timeout_seconds": 7200,
     "report_request_next_todo": "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。",
     "report_request_open_questions": "未解決事項があれば安全側で補ってください。",
@@ -96,6 +121,20 @@ COMPOSER_SELECTORS = [
     "[contenteditable='true'][data-lexical-editor='true']",
     "[contenteditable='true'][translate='no']",
     "[contenteditable='true']",
+]
+PROJECT_CHAT_COMPOSER_HINTS = (
+    "内の新しいチャット",
+    "このプロジェクト内の新しいチャット",
+    "このプロジェクト内で新しいチャット",
+    "プロジェクト内の新しいチャット",
+)
+PROJECT_NAME_HEADING_SELECTORS = [
+    "main h1",
+    "main h2",
+    "header h1",
+    "header h2",
+    "[role='heading'][aria-level='1']",
+    "[role='heading'][aria-level='2']",
 ]
 
 SEND_BUTTON_SELECTORS = [
@@ -125,6 +164,9 @@ class BridgeStop(Exception):
 class SafariChatPage:
     config: Mapping[str, Any]
     front_tab: dict[str, str]
+    require_conversation: bool = True
+    surface_label: str = "対象チャット"
+    allow_conversation_transition: bool = False
 
     def wait_for_timeout(self, milliseconds: int) -> None:
         time.sleep(milliseconds / 1000.0)
@@ -134,12 +176,23 @@ class SafariChatPage:
         return _run_safari_javascript(script)
 
     def assert_same_front_tab(self) -> None:
-        current_tab = frontmost_safari_tab_info(self.config)
+        current_tab = frontmost_safari_tab_info(
+            self.config,
+            require_conversation=self.require_conversation and not self.allow_conversation_transition,
+        )
         if _same_tab(self.front_tab, current_tab):
             return
 
-        dump_note = ""
         target_prefix = str(self.config.get("chat_url_prefix", DEFAULT_BROWSER_CONFIG["chat_url_prefix"]))
+        if (
+            self.allow_conversation_transition
+            and _chat_domain_matches(current_tab.get("url", ""), target_prefix)
+            and _conversation_url_matches(current_tab.get("url", ""), self.config)
+        ):
+            self.front_tab = dict(current_tab)
+            return
+
+        dump_note = ""
         if _chat_domain_matches(current_tab.get("url", ""), target_prefix):
             dump_text = _body_text_unchecked()
             if dump_text:
@@ -147,7 +200,8 @@ class SafariChatPage:
                 dump_note = f" raw dump: {repo_relative(dump_path)}"
 
         raise BridgeError(
-            "Safari の現在タブが切り替わりました。対象チャットを再表示してから再実行してください。"
+            "Safari の現在タブが切り替わりました。"
+            f"{self.surface_label} を再表示してから再実行してください。"
             f" 現在: {current_tab.get('title', '')} {current_tab.get('url', '')}{dump_note}"
         )
 
@@ -191,6 +245,12 @@ class CodexProgressSnapshot:
     stderr_tail: str
 
 
+@dataclass(frozen=True)
+class ChatGPTWaitEvent:
+    name: str
+    latest_text: str
+
+
 def build_chatgpt_reply_contract_section() -> str:
     return "\n".join(
         [
@@ -224,27 +284,38 @@ def present_bridge_status(
     need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
     need_chatgpt_next = bool(state.get("need_chatgpt_next"))
     need_codex_run = bool(state.get("need_codex_run"))
+    pending_handoff_log = str(state.get("pending_handoff_log", "")).strip()
+    pending_request_signal = str(state.get("pending_request_signal", "")).strip()
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
 
     if bool(state.get("error")):
-        return BridgeStatusView("異常", "error_message を確認してから再開します。")
+        return BridgeStatusView("異常", "まず stop summary と doctor を見て、必要なら詳しい error を確認してから再開します。")
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        return BridgeStatusView("人確認待ち", "summary と note を確認してから再開します。")
+        return BridgeStatusView("人確認待ち", "まず stop summary の next step と note を確認してから再開します。")
 
     if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
-        detail = chatgpt_decision_note or "ChatGPT が Codex 不要と判断しました。人が次の判断を行います。"
+        detail = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
         return BridgeStatusView("人確認待ち", detail)
 
     if mode == "idle" and need_chatgpt_prompt:
-        return BridgeStatusView("初回入力待ち", "最初に ChatGPT へ送る本文を入力します。")
+        return BridgeStatusView("初回依頼文の入力待ち", "最初の依頼文はあなたが入力します。bridge は reply contract だけを足します。")
 
     if mode == "waiting_prompt_reply":
+        if pending_request_signal == "submitted_unconfirmed":
+            return BridgeStatusView(
+                "ChatGPT返答待ち",
+                "新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+            )
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
+    if mode == "extended_wait":
+        return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
+    if mode == "await_late_completion":
+        return BridgeStatusView("ChatGPT返答待ち", "返答が書き切られるまで監視し、その後で回収します。")
 
     if mode == "ready_for_codex" and need_codex_run:
-        return BridgeStatusView("Codex実行待ち", "bridge が Codex worker を 1 回起動します。")
+        return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
 
     if mode == "ready_for_codex":
         return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
@@ -253,10 +324,13 @@ def present_bridge_status(
         return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
 
     if mode == "codex_done":
-        return BridgeStatusView("完了報告整理中", "完了報告を archive して次 request へ進めます。")
+        return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
+
+    if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_rotate_before_next_chat_request(state):
+        return BridgeStatusView("ChatGPTへ依頼準備中", "次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
-        return BridgeStatusView("ChatGPTへ依頼中", "完了報告をもとに次の依頼を送ります。")
+        return BridgeStatusView("ChatGPTへ依頼準備中", "完了報告をもとに、次の依頼を送る準備ができています。")
 
     if mode == "completed":
         detail = chatgpt_decision_note or "追加の操作は不要です。"
@@ -265,7 +339,7 @@ def present_bridge_status(
     if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
         return BridgeStatusView("完了", "追加の操作は不要です。")
 
-    return BridgeStatusView("人確認待ち", "内部状態の詳細を確認してから再開します。")
+    return BridgeStatusView("人確認待ち", "まず stop summary と doctor を確認してから再開します。")
 
 
 def present_bridge_handoff(
@@ -275,6 +349,7 @@ def present_bridge_handoff(
     suggested_note: str = "",
     blocked: bool = False,
     stale_codex_running: bool = False,
+    cycle_boundary_stop: bool = False,
 ) -> BridgeHandoffView:
     mode = str(state.get("mode", "idle"))
     need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
@@ -285,31 +360,35 @@ def present_bridge_handoff(
     normalized_reason = reason.strip()
 
     if bool(state.get("error")):
-        detail = suggested_note or error_message or "summary と error_message を確認してください。"
-        return BridgeHandoffView("異常終了です。詳細ログを確認してください。", detail)
+        detail = suggested_note or error_message or "stop summary と doctor を確認してください。"
+        return BridgeHandoffView("異常で止まりました。まず doctor と summary を確認してください。", detail)
+
+    if cycle_boundary_stop:
+        detail = suggested_note or "この run は現在の cycle 完了までで止めました。次 cycle は次回実行で進めます。"
+        return BridgeHandoffView("この run は cycle 完了で停止しました。", detail)
 
     if chatgpt_decision == "completed" or mode == "completed":
         detail = suggested_note or "summary を確認し、必要なら report を見れば十分です。"
         return BridgeHandoffView("完了しました。", detail)
 
     if chatgpt_decision == "human_review":
-        detail = suggested_note or "summary / note を確認して人が次の判断を行ってください。"
-        return BridgeHandoffView("人の判断が必要です。summary / note を確認してください。", detail)
+        detail = suggested_note or "stop summary の案内に沿って、次の判断や補足を入れてください。"
+        return BridgeHandoffView("人の判断が必要です。次の方針を決めてから再開してください。", detail)
 
     if chatgpt_decision == "need_info":
         detail = suggested_note or "不足している情報を補ってから再開してください。"
         return BridgeHandoffView("情報が不足しています。入力内容を補って再開してください。", detail)
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        detail = suggested_note or "自動継続しません。summary / note を確認してください。"
-        return BridgeHandoffView("自動継続しません。summary / note を確認してください。", detail)
+        detail = suggested_note or "自動では進めません。stop summary の案内に沿って確認してください。"
+        return BridgeHandoffView("自動では進めません。まず summary と doctor を確認してください。", detail)
 
     if normalized_reason.startswith("--max-steps="):
-        detail = suggested_note or "summary を見て、続けるなら suggested_next_command を再実行してください。"
-        return BridgeHandoffView("上限回数に達したため一旦停止しました。", detail)
+        detail = suggested_note or "続けるなら summary のおすすめ 1 コマンドをそのまま使ってください。"
+        return BridgeHandoffView("上限回数に達したため、ここで一旦止めました。", detail)
 
     if normalized_reason.startswith("ユーザー中断"):
-        detail = suggested_note or "summary を見て、再開するかここで止めるかを決めてください。"
+        detail = suggested_note or "再開するか、このまま止めるかを summary を見て決めてください。"
         return BridgeHandoffView("途中で停止しました。summary / note を確認してください。", detail)
 
     if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
@@ -319,9 +398,21 @@ def present_bridge_handoff(
     status = present_bridge_status(state, blocked=blocked, stale_codex_running=stale_codex_running)
     detail = suggested_note or status.detail
     if status.label == "人確認待ち":
-        return BridgeHandoffView("人の確認が必要です。summary / note を確認してください。", detail)
+        return BridgeHandoffView("人の確認が必要です。summary と doctor を確認してください。", detail)
     if status.label == "完了":
         return BridgeHandoffView("完了しました。", detail)
+    if status.label == "初回依頼文の入力待ち":
+        return BridgeHandoffView("最初の依頼文を入力してください。", detail)
+    if status.label == "ChatGPTへ依頼準備中":
+        return BridgeHandoffView("ChatGPT への次の依頼を送る準備ができています。", detail)
+    if status.label == "ChatGPT返答待ち":
+        return BridgeHandoffView("ChatGPT の返答を待っています。", detail)
+    if status.label == "Codex実行待ち":
+        return BridgeHandoffView("Codex を起動する準備ができています。", detail)
+    if status.label == "Codex実行中":
+        return BridgeHandoffView("Codex の完了を待っています。", detail)
+    if status.label == "完了報告整理中":
+        return BridgeHandoffView("完了報告を整理して次へ進めます。", detail)
     return BridgeHandoffView(f"{status.label}です。", detail)
 
 
@@ -481,6 +572,166 @@ def read_latest_prompt_request_text() -> str:
     return read_text(candidates[-1]).strip()
 
 
+def stable_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def pending_request_log_path(state: Mapping[str, Any]) -> Path | None:
+    raw_path = str(state.get("pending_request_log", "")).strip()
+    if not raw_path:
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (bridge_runtime_root() / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def read_pending_request_text(state: Mapping[str, Any]) -> str:
+    log_path = pending_request_log_path(state)
+    if log_path and log_path.exists():
+        return read_text(log_path).strip()
+    return ""
+
+
+def prepared_request_log_path(state: Mapping[str, Any]) -> Path | None:
+    raw_path = str(state.get("prepared_request_log", "")).strip()
+    if not raw_path:
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (bridge_runtime_root() / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def read_prepared_request_text(state: Mapping[str, Any]) -> str:
+    log_path = prepared_request_log_path(state)
+    if log_path and log_path.exists():
+        return read_text(log_path).strip()
+    return ""
+
+
+def pending_handoff_log_path(state: Mapping[str, Any]) -> Path | None:
+    raw_path = str(state.get("pending_handoff_log", "")).strip()
+    if not raw_path:
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (bridge_runtime_root() / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    return candidate
+
+
+def read_pending_handoff_text(state: Mapping[str, Any]) -> str:
+    log_path = pending_handoff_log_path(state)
+    if log_path and log_path.exists():
+        return read_text(log_path).strip()
+    return ""
+
+
+def clear_pending_request_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["pending_request_hash"] = ""
+    state["pending_request_source"] = ""
+    state["pending_request_log"] = ""
+    state["pending_request_signal"] = ""
+    return state
+
+
+def clear_prepared_request_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["prepared_request_hash"] = ""
+    state["prepared_request_source"] = ""
+    state["prepared_request_log"] = ""
+    state["prepared_request_status"] = ""
+    return state
+
+
+def stage_prepared_request(
+    state: dict[str, Any],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log: str,
+    status: str = "prepared",
+) -> dict[str, Any]:
+    clear_pending_request_fields(state)
+    clear_prepared_request_fields(state)
+    state["prepared_request_hash"] = request_hash
+    state["prepared_request_source"] = request_source
+    state["prepared_request_log"] = request_log
+    state["prepared_request_status"] = status
+    return state
+
+
+def promote_pending_request(
+    state: dict[str, Any],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log: str,
+    request_signal: str = "",
+) -> dict[str, Any]:
+    clear_pending_request_fields(state)
+    clear_prepared_request_fields(state)
+    state.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": request_log,
+            "pending_request_signal": request_signal,
+        }
+    )
+    return state
+
+
+def clear_pending_handoff_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["pending_handoff_hash"] = ""
+    state["pending_handoff_source"] = ""
+    state["pending_handoff_log"] = ""
+    return state
+
+
+def clear_chat_rotation_fields(state: dict[str, Any]) -> dict[str, Any]:
+    state["next_request_requires_rotation"] = False
+    state["next_request_rotation_reason"] = ""
+    state["rotate_after_cycle"] = False
+    state["rotate_after_cycle_reason"] = ""
+    return state
+
+
+def mark_next_request_requires_rotation(state: dict[str, Any], reason: str) -> dict[str, Any]:
+    normalized_reason = reason.strip()
+    state["next_request_requires_rotation"] = True
+    state["next_request_rotation_reason"] = normalized_reason
+    state["rotate_after_cycle"] = True
+    state["rotate_after_cycle_reason"] = normalized_reason
+    return state
+
+
+def next_request_rotation_reason(state: Mapping[str, Any]) -> str:
+    reason = str(state.get("next_request_rotation_reason", "")).strip()
+    if reason:
+        return reason
+    return str(state.get("rotate_after_cycle_reason", "")).strip()
+
+
+def should_rotate_before_next_chat_request(state: Mapping[str, Any]) -> bool:
+    if "next_request_requires_rotation" in state:
+        return bool(state.get("next_request_requires_rotation"))
+    return bool(state.get("rotate_after_cycle"))
+
+
+def should_request_chat_rotation(state: Mapping[str, Any]) -> bool:
+    return should_rotate_before_next_chat_request(state)
+
+
 def load_browser_config() -> dict[str, Any]:
     config = DEFAULT_BROWSER_CONFIG.copy()
     loaded: dict[str, Any] = {}
@@ -538,6 +789,13 @@ def load_browser_config() -> dict[str, Any]:
         default=float(DEFAULT_BROWSER_CONFIG["runner_heartbeat_seconds"]),
         minimum=0.1,
     )
+    config["extended_fetch_timeout_seconds"] = _coerce_browser_int(
+        config.get("extended_fetch_timeout_seconds", DEFAULT_BROWSER_CONFIG["extended_fetch_timeout_seconds"]),
+        default=int(DEFAULT_BROWSER_CONFIG["extended_fetch_timeout_seconds"]),
+        minimum=0,
+    )
+    project_page_url = str(config.get("project_page_url", DEFAULT_BROWSER_CONFIG["project_page_url"])).strip()
+    config["project_page_url"] = project_page_url
 
     if "chat_url" in config and "chat_url_prefix" not in config:
         config["chat_url_prefix"] = config["chat_url"]
@@ -577,6 +835,11 @@ def browser_fetch_timeout_seconds(config: Mapping[str, Any] | None = None) -> in
 def browser_runner_heartbeat_seconds(config: Mapping[str, Any] | None = None) -> float:
     loaded = dict(config or load_browser_config())
     return float(loaded.get("runner_heartbeat_seconds", DEFAULT_BROWSER_CONFIG["runner_heartbeat_seconds"]))
+
+
+def browser_extended_fetch_timeout_seconds(config: Mapping[str, Any] | None = None) -> int:
+    loaded = dict(config or load_browser_config())
+    return int(loaded.get("extended_fetch_timeout_seconds", DEFAULT_BROWSER_CONFIG["extended_fetch_timeout_seconds"]))
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, Any]:
@@ -841,6 +1104,7 @@ def load_project_config() -> dict[str, Any]:
     _validate_worker_repo_path(config)
     _require_project_config_text(config, "codex_bin")
     _require_project_config_text(config, "codex_model", allow_empty=True)
+    _require_project_config_text(config, "codex_sandbox", allow_empty=True)
     _validate_project_timeout(config)
     _require_project_config_text(config, "report_request_next_todo")
     _require_project_config_text(config, "report_request_open_questions")
@@ -907,6 +1171,23 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         f"- need_chatgpt_next: {state.get('need_chatgpt_next', False)}",
         f"- last_prompt_file: {state.get('last_prompt_file', '')}",
         f"- last_report_file: {state.get('last_report_file', '')}",
+        f"- prepared_request_hash: {state.get('prepared_request_hash', '')}",
+        f"- prepared_request_source: {state.get('prepared_request_source', '')}",
+        f"- prepared_request_log: {state.get('prepared_request_log', '')}",
+        f"- prepared_request_status: {state.get('prepared_request_status', '')}",
+        f"- pending_request_hash: {state.get('pending_request_hash', '')}",
+        f"- pending_request_source: {state.get('pending_request_source', '')}",
+        f"- pending_request_log: {state.get('pending_request_log', '')}",
+        f"- pending_request_signal: {state.get('pending_request_signal', '')}",
+        f"- pending_handoff_hash: {state.get('pending_handoff_hash', '')}",
+        f"- pending_handoff_source: {state.get('pending_handoff_source', '')}",
+        f"- pending_handoff_log: {state.get('pending_handoff_log', '')}",
+        f"- next_request_requires_rotation: {should_rotate_before_next_chat_request(state)}",
+        f"- next_request_rotation_reason: {next_request_rotation_reason(state)}",
+        f"- last_processed_request_hash: {state.get('last_processed_request_hash', '')}",
+        f"- last_processed_reply_hash: {state.get('last_processed_reply_hash', '')}",
+        f"- current_chat_session: {state.get('current_chat_session', '')}",
+        f"- human_review_auto_continue_count: {state.get('human_review_auto_continue_count', 0)}",
         f"- pause: {state.get('pause', False)}",
         f"- error: {state.get('error', False)}",
     ]
@@ -1145,8 +1426,7 @@ def recover_report_ready_state(
     if not codex_report_is_ready(runtime_report_path()):
         return current_state, recovered_report
 
-    mode = str(current_state.get("mode", "")).strip()
-    should_promote = bool(current_state.get("error")) or mode in {"ready_for_codex", "codex_running", "codex_done"}
+    should_promote = should_prioritize_unarchived_report(current_state)
     if not should_promote:
         return current_state, recovered_report
 
@@ -1161,6 +1441,102 @@ def recover_report_ready_state(
     )
     save_state(updated)
     return updated, recovered_report
+
+
+def recover_pending_handoff_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    current_state = dict(state)
+    if should_prioritize_unarchived_report(current_state):
+        return current_state, False
+    if not should_rotate_before_next_chat_request(current_state):
+        return current_state, False
+    if not is_retryable_pending_handoff_error(current_state):
+        return current_state, False
+    if not read_pending_handoff_text(current_state):
+        return current_state, False
+
+    updated = clear_error_fields(dict(current_state))
+    updated.update(
+        {
+            "mode": "idle",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": True,
+            "need_codex_run": False,
+        }
+    )
+    save_state(updated)
+    return updated, True
+
+
+def should_prioritize_unarchived_report(state: Mapping[str, Any]) -> bool:
+    if not codex_report_is_ready(runtime_report_path()):
+        return False
+
+    mode = str(state.get("mode", "")).strip()
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+        return False
+
+    if bool(state.get("error")):
+        return True
+    if mode in {"ready_for_codex", "codex_running", "codex_done"}:
+        return True
+    if mode == "idle":
+        return True
+    if mode == "awaiting_user":
+        return True
+    return False
+
+
+def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+    current_state = dict(state)
+    pending_source = str(current_state.get("pending_request_source", "")).strip()
+    prepared_hash = str(current_state.get("prepared_request_hash", "")).strip()
+    prepared_source = str(current_state.get("prepared_request_source", "")).strip()
+    prepared_log = str(current_state.get("prepared_request_log", "")).strip()
+    prepared_status = str(current_state.get("prepared_request_status", "")).strip()
+
+    if pending_source:
+        return current_state, False
+    if not (prepared_hash and prepared_source and prepared_log):
+        return current_state, False
+    if prepared_status != "prepared":
+        return current_state, False
+
+    updated = clear_error_fields(dict(current_state))
+    clear_pending_request_fields(updated)
+    updated.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "pending_request_hash": prepared_hash,
+            "pending_request_source": prepared_source,
+            "pending_request_log": prepared_log,
+        }
+    )
+    clear_prepared_request_fields(updated)
+    save_state(updated)
+    return updated, True
+
+
+def is_retryable_pending_handoff_error(state: Mapping[str, Any]) -> bool:
+    if not should_rotate_before_next_chat_request(state):
+        return False
+    if not bool(state.get("error")):
+        return False
+    if not bool(state.get("need_chatgpt_next")):
+        return False
+    error_message = str(state.get("error_message", "")).strip()
+    retryable_markers = (
+        "project ページ",
+        "新チャット送信後",
+        "新しいチャット",
+        "handoff",
+        "対象チャットを特定",
+    )
+    if error_message and not any(marker in error_message for marker in retryable_markers):
+        return False
+    return True
 
 
 def _extract_marked_block(report_text: str, start_marker: str, end_marker: str) -> str | None:
@@ -1234,7 +1610,7 @@ def parse_no_codex_block(raw_body: str) -> tuple[str, str]:
     return reason, note
 
 
-def extract_last_chatgpt_reply(raw_text: str, *, after_text: str | None = None) -> ChatGPTReplyDecision:
+def _search_start_index(raw_text: str, after_text: str | None = None) -> int:
     search_start = 0
     if after_text:
         anchor = raw_text.rfind(after_text)
@@ -1244,6 +1620,38 @@ def extract_last_chatgpt_reply(raw_text: str, *, after_text: str | None = None) 
         last_user_turn = raw_text.rfind("あなた:")
         if last_user_turn != -1:
             search_start = last_user_turn
+    return search_start
+
+
+def extract_last_chatgpt_handoff(raw_text: str, *, after_text: str | None = None) -> str:
+    search_start = _search_start_index(raw_text, after_text)
+    pattern = re.compile(
+        rf"{re.escape(HANDOFF_REPLY_START)}(.*?){re.escape(HANDOFF_REPLY_END)}",
+        re.DOTALL,
+    )
+    matches: list[tuple[int, str]] = []
+    assistant_matches: list[tuple[int, str]] = []
+    for match in pattern.finditer(raw_text, search_start):
+        body = match.group(1).strip()
+        entry = (match.start(), body)
+        matches.append(entry)
+        assistant_index = raw_text.rfind("ChatGPT:", search_start, match.start())
+        user_index = raw_text.rfind("あなた:", search_start, match.start())
+        if assistant_index > user_index:
+            assistant_matches.append(entry)
+
+    selected = assistant_matches if search_start > 0 else (assistant_matches or matches)
+    if not selected:
+        raise BridgeError("直近の request 以降に有効な CHATGPT_CHAT_HANDOFF ブロックを抽出できませんでした。")
+
+    handoff = sorted(selected, key=lambda item: item[0])[-1][1].strip()
+    if not handoff:
+        raise BridgeError("CHATGPT_CHAT_HANDOFF ブロックが空でした。")
+    return handoff + "\n"
+
+
+def extract_last_chatgpt_reply(raw_text: str, *, after_text: str | None = None) -> ChatGPTReplyDecision:
+    search_start = _search_start_index(raw_text, after_text)
 
     candidate_specs = [
         ("codex_prompt", PROMPT_REPLY_START, PROMPT_REPLY_END),
@@ -1409,7 +1817,11 @@ end run
     return result.stdout.rstrip("\n")
 
 
-def frontmost_safari_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
+def frontmost_safari_tab_info(
+    config: Mapping[str, Any],
+    *,
+    require_conversation: bool = True,
+) -> dict[str, str]:
     app_name = str(config.get("app_name", DEFAULT_BROWSER_CONFIG["app_name"]))
     result = _run_osascript(
         [
@@ -1442,7 +1854,7 @@ def frontmost_safari_tab_info(config: Mapping[str, Any]) -> dict[str, str]:
     target_prefix = str(config.get("chat_url_prefix", DEFAULT_BROWSER_CONFIG["chat_url_prefix"]))
     if not _chat_domain_matches(url, target_prefix):
         raise BridgeError(f"Safari の現在タブが ChatGPT ではありません: {title or '(no title)'} {url}")
-    if not _conversation_url_matches(url, config):
+    if require_conversation and not _conversation_url_matches(url, config):
         raise BridgeError(
             "Safari の現在タブが ChatGPT の対象会話ではありません。"
             f" 対象チャットを開いてください: {title or '(no title)'} {url}"
@@ -1481,10 +1893,15 @@ def _build_visible_text_script(selectors: Sequence[str]) -> str:
 """
 
 
-def _build_composer_state_script() -> str:
+def _build_composer_lookup_script(*, preferred_hint: str | None = None, project_page_mode: bool = False) -> str:
     return f"""
-(() => {{
+  const composerLookup = (() => {{
   const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
+  const preferredHint = {json.dumps((preferred_hint or "").strip(), ensure_ascii=False)};
+  const projectPageMode = {json.dumps(project_page_mode)};
+  const projectComposerHints = {json.dumps(PROJECT_CHAT_COMPOSER_HINTS, ensure_ascii=False)};
+  const projectNameSelectors = {json.dumps(PROJECT_NAME_HEADING_SELECTORS, ensure_ascii=False)};
+  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
   const isVisible = (el) => {{
     if (!el) return false;
     const style = window.getComputedStyle(el);
@@ -1495,56 +1912,187 @@ def _build_composer_state_script() -> str:
       rect.width > 0 &&
       rect.height > 0;
   }};
+  const collectProjectNames = () => {{
+    const results = [];
+    const seen = new Set();
+    const push = (value, source) => {{
+      const text = normalize(value);
+      if (!text || seen.has(text)) return;
+      seen.add(text);
+      results.push({{text, source}});
+    }};
+    push((document.title || "").replace(/^ChatGPT\\s*[-:|｜]\\s*/, ""), "document.title");
+    for (const selector of projectNameSelectors) {{
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {{
+        if (!isVisible(node)) continue;
+        const text = normalize(node.innerText || node.textContent || "");
+        if (text) push(text, selector);
+      }}
+    }}
+    return results;
+  }};
+  const projectNames = collectProjectNames();
+  const buildCandidate = (node) => {{
+    const container = node.closest?.("form, section, main, div") || null;
+    const values = [
+      {{label: "placeholder", text: normalize(node.getAttribute?.("placeholder") || "")}},
+      {{label: "aria-label", text: normalize(node.getAttribute?.("aria-label") || "")}},
+      {{label: "data-placeholder", text: normalize(node.getAttribute?.("data-placeholder") || "")}},
+      {{label: "container", text: normalize((container?.innerText || "").slice(0, 240))}},
+    ].filter((entry) => entry.text);
+    let matchKind = "";
+    let matchedHint = "";
+    let matchedPreferredHint = false;
+    let projectHintDetected = false;
+    let matchedProjectName = "";
+    const includesText = (needle) => values.some((entry) => entry.text.includes(needle));
+    const normalizedPreferredHint = normalize(preferredHint);
+    if (normalizedPreferredHint && includesText(normalizedPreferredHint)) {{
+      matchKind = "preferred_hint";
+      matchedHint = normalizedPreferredHint;
+      matchedPreferredHint = true;
+    }}
+    if (!matchKind && projectPageMode) {{
+      for (const projectName of projectNames) {{
+        const specificHint = normalize(`${{projectName.text}} 内の新しいチャット`);
+        if (specificHint && includesText(specificHint)) {{
+          matchKind = "project_title";
+          matchedHint = specificHint;
+          matchedProjectName = projectName.text;
+          break;
+        }}
+      }}
+      for (const hint of projectComposerHints) {{
+        const normalizedHint = normalize(hint);
+        if (normalizedHint && includesText(normalizedHint)) {{
+          projectHintDetected = true;
+          if (!matchKind) {{
+            matchKind = "project_hint";
+            matchedHint = normalizedHint;
+          }}
+          break;
+        }}
+      }}
+      if (!matchKind && container && container.closest?.("main")) {{
+        matchKind = "project_structure";
+        matchedHint = "main_structure";
+      }}
+    }}
+    return {{
+      values,
+      matchKind,
+      matchedHint,
+      matchedPreferredHint,
+      matchedProjectName,
+      projectHintDetected,
+      rectTop: Math.round(node.getBoundingClientRect().top),
+      tagName: (node.tagName || "").toLowerCase(),
+      inMain: !!container?.closest?.("main"),
+    }};
+  }};
   let composer = null;
+  let composerMeta = null;
+  let fallbackComposer = null;
+  let fallbackMeta = null;
+  const candidateHints = [];
+  const scoreFor = (meta) => {{
+    if (meta.matchKind === "preferred_hint") return 500;
+    if (meta.matchKind === "project_title") return 400;
+    if (meta.matchKind === "project_hint") return 300;
+    if (meta.matchKind === "project_structure") return 200;
+    return 0;
+  }};
+  let bestScore = -1;
   for (const selector of selectors) {{
     const nodes = Array.from(document.querySelectorAll(selector));
     for (let index = nodes.length - 1; index >= 0; index -= 1) {{
       const node = nodes[index];
       if (isVisible(node)) {{
-        composer = node;
-        break;
+        const meta = buildCandidate(node);
+        const summary = meta.values.map((entry) => `${{entry.label}}=${{entry.text}}`).join(" | ");
+        candidateHints.push(summary);
+        if (!fallbackComposer) {{
+          fallbackComposer = node;
+          fallbackMeta = meta;
+        }}
+        const score = scoreFor(meta);
+        if (score > bestScore || (score === bestScore && meta.rectTop < (composerMeta?.rectTop ?? 999999))) {{
+          if (score > 0) {{
+            composer = node;
+            composerMeta = meta;
+            bestScore = score;
+          }}
+        }}
       }}
     }}
-    if (composer) break;
   }}
-  if (!composer) return JSON.stringify({{found: false}});
-  return JSON.stringify({{
-    found: true,
-    tagName: (composer.tagName || "").toLowerCase(),
-    isContentEditable: !!composer.isContentEditable
-  }});
+  if (!composer && !projectPageMode && fallbackComposer) {{
+    composer = fallbackComposer;
+    composerMeta = fallbackMeta;
+  }}
+  if (!composer && projectPageMode && fallbackComposer && candidateHints.length === 1) {{
+    composer = fallbackComposer;
+    composerMeta = {{
+      ...fallbackMeta,
+      matchKind: fallbackMeta?.matchKind || "single_visible_composer",
+      matchedHint: fallbackMeta?.matchedHint || "single_visible_composer",
+    }};
+  }}
+  const tagName = (composer?.tagName || "").toLowerCase();
+  let currentText = "";
+  if (tagName === "textarea" && composer) {{
+    currentText = (composer.value || "").trim();
+  }} else if (composer && composer.isContentEditable) {{
+    currentText = (composer.innerText || composer.textContent || "").trim();
+  }}
+  const payload = {{
+    found: !!composer,
+    matchedPreferredHint: !!composerMeta?.matchedPreferredHint,
+    matchKind: composerMeta?.matchKind || "",
+    matchedHint: composerMeta?.matchedHint || "",
+    matchedProjectName: composerMeta?.matchedProjectName || "",
+    projectHintDetected: !!composerMeta?.projectHintDetected || candidateHints.some((text) => text.includes("内の新しいチャット")),
+    projectName: projectNames[0]?.text || "",
+    projectNameSource: projectNames[0]?.source || "",
+    candidateHints: candidateHints.slice(0, 5),
+    visibleComposerCount: candidateHints.length,
+    tagName,
+    inMain: !!composerMeta?.inMain,
+    isContentEditable: !!composer?.isContentEditable,
+    currentText,
+  }};
+  return {{composer, payload}};
+  }})();
+  const composer = composerLookup.composer;
+  const payload = composerLookup.payload;
+"""
+
+
+def _build_composer_state_script(preferred_hint: str | None = None, *, project_page_mode: bool = False) -> str:
+    return f"""
+(() => {{
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode)}
+  return JSON.stringify(payload);
 }})();
 """
 
 
-def _build_fill_composer_script(text: str) -> str:
+def _build_fill_composer_script(text: str, preferred_hint: str | None = None, *, project_page_mode: bool = False) -> str:
     return f"""
 (() => {{
-  const selectors = {json.dumps(COMPOSER_SELECTORS, ensure_ascii=False)};
   const text = {json.dumps(text, ensure_ascii=False)};
-  const isVisible = (el) => {{
-    if (!el) return false;
-    const style = window.getComputedStyle(el);
-    if (!style) return false;
-    const rect = el.getBoundingClientRect();
-    return style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      rect.width > 0 &&
-      rect.height > 0;
-  }};
-  let composer = null;
-  for (const selector of selectors) {{
-    const nodes = Array.from(document.querySelectorAll(selector));
-    for (let index = nodes.length - 1; index >= 0; index -= 1) {{
-      const node = nodes[index];
-      if (isVisible(node)) {{
-        composer = node;
-        break;
-      }}
-    }}
-    if (composer) break;
-  }}
-  if (!composer) return JSON.stringify({{ok: false, reason: "composer_missing"}});
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode)}
+  if (!composer) return JSON.stringify({{
+    ok: false,
+    reason: "composer_missing",
+    projectName: payload.projectName || "",
+    projectNameSource: payload.projectNameSource || "",
+    matchKind: payload.matchKind || "",
+    matchedHint: payload.matchedHint || "",
+    projectHintDetected: !!payload.projectHintDetected,
+    candidateHints: payload.candidateHints || [],
+  }});
   composer.scrollIntoView({{block: "center"}});
   composer.focus();
   const tagName = (composer.tagName || "").toLowerCase();
@@ -1615,6 +2163,41 @@ def _build_submit_script() -> str:
 """
 
 
+def _build_post_send_state_script(expected_excerpt: str, preferred_hint: str | None = None, *, project_page_mode: bool = False) -> str:
+    return f"""
+(() => {{
+  const expectedExcerpt = {json.dumps(expected_excerpt, ensure_ascii=False)};
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode)}
+  const readComposerText = (composer) => {{
+    if (!composer) return "";
+    const tagName = (composer.tagName || "").toLowerCase();
+    if (tagName === "textarea") return (composer.value || "").trim();
+    if (composer.isContentEditable) return (composer.innerText || composer.textContent || "").trim();
+    return "";
+  }};
+  const composerText = readComposerText(composer);
+  const bodyText = normalize(
+    document.querySelector("main")?.innerText ||
+    document.querySelector("article")?.innerText ||
+    document.body?.innerText ||
+    ""
+  );
+  const normalizedExcerpt = normalize(expectedExcerpt);
+  return JSON.stringify({{
+    composerFound: !!composer,
+    composerText,
+    composerEmpty: normalize(composerText) === "",
+    bodyContainsExpected: normalizedExcerpt ? bodyText.includes(normalizedExcerpt) : false,
+    url: window.location.href,
+    matchKind: payload.matchKind || "",
+    matchedHint: payload.matchedHint || "",
+    projectName: payload.projectName || "",
+    candidateHints: payload.candidateHints || [],
+  }});
+}})();
+"""
+
+
 def _evaluate_json(page: SafariChatPage, script: str, failure_label: str) -> dict[str, Any]:
     raw = page.evaluate(script).strip()
     if not raw:
@@ -1675,16 +2258,105 @@ def _ensure_target_chat(page: SafariChatPage, front_tab: Mapping[str, str], conf
     )
 
 
-def _find_composer_state(page: SafariChatPage) -> dict[str, Any]:
-    return _evaluate_json(page, _build_composer_state_script(), "ChatGPT 入力欄の確認に失敗しました")
+def _find_composer_state(
+    page: SafariChatPage,
+    *,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> dict[str, Any]:
+    return _evaluate_json(
+        page,
+        _build_composer_state_script(preferred_hint=preferred_hint, project_page_mode=project_page_mode),
+        "ChatGPT 入力欄の確認に失敗しました",
+    )
 
 
-def ensure_chatgpt_ready(page: SafariChatPage, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> dict[str, Any]:
+def _normalize_dom_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _expected_excerpt(text: str, *, max_chars: int = 160) -> str:
+    return _normalize_dom_text(text)[:max_chars]
+
+
+def _composer_text_matches(actual_text: str, expected_text: str) -> bool:
+    actual = _normalize_dom_text(actual_text)
+    expected = _normalize_dom_text(expected_text)
+    if not expected:
+        return True
+    if actual == expected:
+        return True
+    excerpt = expected[: min(len(expected), 160)]
+    return bool(excerpt) and excerpt in actual
+
+
+def _composer_candidate_summary(payload: Mapping[str, Any]) -> str:
+    candidates = [str(item).strip() for item in payload.get("candidateHints", []) if str(item).strip()]
+    if not candidates:
+        return "candidate_hints=none"
+    return "candidate_hints=" + " || ".join(candidates[:3])
+
+
+def _log_composer_probe(prefix: str, payload: Mapping[str, Any]) -> Path:
+    snapshot = {
+        "found": bool(payload.get("found")),
+        "projectName": str(payload.get("projectName", "")),
+        "projectNameSource": str(payload.get("projectNameSource", "")),
+        "matchKind": str(payload.get("matchKind", "")),
+        "matchedHint": str(payload.get("matchedHint", "")),
+        "matchedPreferredHint": bool(payload.get("matchedPreferredHint")),
+        "projectHintDetected": bool(payload.get("projectHintDetected")),
+        "visibleComposerCount": int(payload.get("visibleComposerCount", 0) or 0),
+        "candidateHints": list(payload.get("candidateHints", [])),
+    }
+    return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
+
+
+def _read_post_send_state(
+    config: Mapping[str, Any],
+    *,
+    expected_text: str,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    tab_info = frontmost_safari_tab_info(config, require_conversation=False)
+    raw = _run_safari_javascript(
+        _build_post_send_state_script(
+            _expected_excerpt(expected_text),
+            preferred_hint=preferred_hint,
+            project_page_mode=project_page_mode,
+        )
+    ).strip()
+    if not raw:
+        raise BridgeError("新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BridgeError("新チャット送信後の状態確認に失敗しました: JSON として読めませんでした。") from exc
+    return tab_info, payload
+
+
+def _is_transient_post_send_probe_error(message: str) -> bool:
+    markers = (
+        "新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。",
+        "新チャット送信後の状態確認に失敗しました: JSON として読めませんでした。",
+    )
+    return any(marker in message for marker in markers)
+
+
+def ensure_chatgpt_ready(
+    page: SafariChatPage,
+    config: Mapping[str, Any],
+    *,
+    allow_manual_login: bool = False,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> dict[str, Any]:
     deadline = time.time() + 20
-    state = _find_composer_state(page)
+    state = _find_composer_state(page, preferred_hint=preferred_hint, project_page_mode=project_page_mode)
     while not state.get("found") and time.time() < deadline:
         page.wait_for_timeout(1000)
-        state = _find_composer_state(page)
+        state = _find_composer_state(page, preferred_hint=preferred_hint, project_page_mode=project_page_mode)
 
     if state.get("found"):
         return state
@@ -1705,6 +2377,24 @@ def ensure_chatgpt_ready(page: SafariChatPage, config: Mapping[str, Any], *, all
             "ChatGPT ページの読み込みが完了していません。対象チャットが表示されてから再実行してください。"
             f"{dump_note}"
         )
+    if project_page_mode:
+        probe_path = _log_composer_probe("project_chat_composer_probe", state)
+        probe_note = f" composer probe: {repo_relative(probe_path)}"
+        candidate_note = f" {_composer_candidate_summary(state)}"
+        if not str(state.get("projectName", "")).strip():
+            raise BridgeError(
+                "project ページは見えていますが、ChatGPT project 名を取得できませんでした。"
+                f"{candidate_note}{dump_note}{probe_note}"
+            )
+        if not bool(state.get("projectHintDetected")):
+            raise BridgeError(
+                "project ページは見えていますが、『＜project名＞ 内の新しいチャット』系の hint を確認できませんでした。"
+                f" project_name={state.get('projectName', '')}{candidate_note}{dump_note}{probe_note}"
+            )
+        raise BridgeError(
+            "project ページ上の新規 composer 構造を特定できませんでした。"
+            f" project_name={state.get('projectName', '')}{candidate_note}{dump_note}{probe_note}"
+        )
     raise BridgeError(
         "ChatGPT の入力欄が見つかりませんでした。対象チャットが前面表示されているか確認してください。"
         f"{dump_note}"
@@ -1712,22 +2402,85 @@ def ensure_chatgpt_ready(page: SafariChatPage, config: Mapping[str, Any], *, all
 
 
 @contextmanager
-def open_chatgpt_page(*, reset_chat: bool = False) -> Iterator[tuple[None, SafariChatPage, dict[str, Any], dict[str, str]]]:
+def open_chatgpt_page(
+    *,
+    reset_chat: bool = False,
+    require_conversation: bool = True,
+    require_target_chat: bool = True,
+    surface_label: str | None = None,
+    allow_conversation_transition: bool = False,
+) -> Iterator[tuple[None, SafariChatPage, dict[str, Any], dict[str, str]]]:
     del reset_chat
     config = load_browser_config()
-    front_tab = frontmost_safari_tab_info(config)
-    page = SafariChatPage(config=config, front_tab=front_tab)
-    _ensure_target_chat(page, front_tab, config)
+    front_tab = frontmost_safari_tab_info(config, require_conversation=require_conversation)
+    page = SafariChatPage(
+        config=config,
+        front_tab=front_tab,
+        require_conversation=require_conversation,
+        surface_label=surface_label or ("対象チャット" if require_conversation else "project ページ"),
+        allow_conversation_transition=allow_conversation_transition,
+    )
+    if require_target_chat:
+        _ensure_target_chat(page, front_tab, config)
     yield None, page, config, front_tab
 
 
-def fill_chatgpt_composer(page: SafariChatPage, text: str, config: Mapping[str, Any], *, allow_manual_login: bool = False) -> None:
-    ensure_chatgpt_ready(page, config, allow_manual_login=allow_manual_login)
-    result = _evaluate_json(page, _build_fill_composer_script(text), "ChatGPT 入力欄への書き込みに失敗しました")
+def fill_chatgpt_composer(
+    page: SafariChatPage,
+    text: str,
+    config: Mapping[str, Any],
+    *,
+    allow_manual_login: bool = False,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> dict[str, Any]:
+    initial_state = ensure_chatgpt_ready(
+        page,
+        config,
+        allow_manual_login=allow_manual_login,
+        preferred_hint=preferred_hint,
+        project_page_mode=project_page_mode,
+    )
+    if preferred_hint and not bool(initial_state.get("matchKind")):
+        dump_path = log_page_dump(page)
+        dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+        probe_path = _log_composer_probe("project_chat_composer_probe", initial_state)
+        probe_note = f" composer probe: {repo_relative(probe_path)}"
+        raise BridgeError(
+            "指定した project page composer を特定できませんでした。"
+            f" hint='{preferred_hint}' match_kind='{initial_state.get('matchKind', '')}'"
+            f" matched_hint='{initial_state.get('matchedHint', '')}'"
+            f" {_composer_candidate_summary(initial_state)}{dump_note}{probe_note}"
+        )
+    result = _evaluate_json(
+        page,
+        _build_fill_composer_script(text, preferred_hint=preferred_hint, project_page_mode=project_page_mode),
+        "ChatGPT 入力欄への書き込みに失敗しました",
+    )
     if result.get("ok"):
         page.wait_for_timeout(300)
-        return
-    raise BridgeError(f"ChatGPT の入力欄に文字を設定できませんでした: {result.get('reason', 'unknown')}")
+        state = _find_composer_state(page, preferred_hint=preferred_hint, project_page_mode=project_page_mode)
+        actual_text = str(state.get("currentText", "") or "")
+        if not _composer_text_matches(actual_text, text):
+            dump_path = log_page_dump(page)
+            dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+            probe_path = _log_composer_probe("project_chat_composer_probe", state)
+            probe_note = f" composer probe: {repo_relative(probe_path)}"
+            raise BridgeError(
+                "ChatGPT 入力欄へ本文を書き込んだ後の確認に失敗しました。"
+                " composer に期待した handoff 本文が入っていません。"
+                f" {_composer_candidate_summary(state)}{dump_note}{probe_note}"
+            )
+        return state
+    probe_path = _log_composer_probe("project_chat_composer_probe", result)
+    probe_note = f" composer probe: {repo_relative(probe_path)}"
+    raise BridgeError(
+        "ChatGPT の入力欄に文字を設定できませんでした:"
+        f" {result.get('reason', 'unknown')}"
+        f" project_name={result.get('projectName', '')}"
+        f" matched_hint={result.get('matchedHint', '')}"
+        f" {_composer_candidate_summary(result)}{probe_note}"
+    )
 
 
 def submit_chatgpt_message(page: SafariChatPage) -> None:
@@ -1751,9 +2504,246 @@ def send_to_chatgpt(text: str) -> None:
         submit_chatgpt_message(page)
 
 
+def send_to_chatgpt_in_current_surface(
+    text: str,
+    *,
+    require_conversation: bool = False,
+    require_target_chat: bool = False,
+    preferred_hint: str | None = None,
+    project_page_mode: bool = False,
+) -> dict[str, str]:
+    surface_label = "project ページ" if project_page_mode else ("対象チャット" if require_conversation else "ChatGPT ページ")
+    with open_chatgpt_page(
+        reset_chat=False,
+        require_conversation=require_conversation,
+        require_target_chat=require_target_chat,
+        surface_label=surface_label,
+    ) as (_, page, config, _):
+        composer_state = fill_chatgpt_composer(
+            page,
+            text,
+            config,
+            preferred_hint=preferred_hint,
+            project_page_mode=project_page_mode,
+        )
+        submit_chatgpt_message(page)
+        deadline = time.time() + 15
+        last_tab: dict[str, str] | None = None
+        last_payload: dict[str, Any] | None = None
+        last_probe_error = ""
+        while time.time() < deadline:
+            try:
+                tab_info, payload = _read_post_send_state(
+                    config,
+                    expected_text=text,
+                    preferred_hint=preferred_hint,
+                    project_page_mode=project_page_mode,
+                )
+            except BridgeError as exc:
+                if project_page_mode and _is_transient_post_send_probe_error(str(exc)):
+                    last_probe_error = str(exc)
+                    time.sleep(0.5)
+                    continue
+                raise
+            last_tab = tab_info
+            last_payload = payload
+            if _conversation_url_matches(tab_info.get("url", ""), config):
+                return {
+                    "url": tab_info.get("url", ""),
+                    "title": tab_info.get("title", ""),
+                    "signal": "conversation_url",
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
+                }
+            if bool(payload.get("bodyContainsExpected")):
+                return {
+                    "url": tab_info.get("url", ""),
+                    "title": tab_info.get("title", ""),
+                    "signal": "message_visible",
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
+                }
+            if bool(payload.get("composerEmpty")):
+                return {
+                    "url": tab_info.get("url", ""),
+                    "title": tab_info.get("title", ""),
+                    "signal": "composer_cleared",
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
+                }
+            time.sleep(0.5)
+
+        if project_page_mode and last_probe_error:
+            fallback_tab = last_tab or dict(page.front_tab)
+            return {
+                "url": fallback_tab.get("url", ""),
+                "title": fallback_tab.get("title", ""),
+                "signal": "submitted_unconfirmed",
+                "match_kind": str(composer_state.get("matchKind", "")),
+                "matched_hint": str(composer_state.get("matchedHint", "")),
+                "project_name": str(composer_state.get("projectName", "")),
+                "warning": last_probe_error,
+            }
+
+        dump_text = _body_text_unchecked()
+        dump_note = ""
+        if dump_text:
+            dump_path = log_text("chat_rotation_failure_dump", dump_text, suffix="txt")
+            dump_note = f" raw dump: {repo_relative(dump_path)}"
+        raise BridgeError(
+            "project ページへ handoff を送った後の確認に失敗しました。"
+            " composer が空に戻る、本文が会話へ現れる、会話 URL へ切り替わる、のいずれも確認できませんでした。"
+            f" last_url: {last_tab.get('url', '') if last_tab else ''}"
+            f" composer_empty: {bool(last_payload.get('composerEmpty')) if last_payload else False}"
+            f" body_contains_expected: {bool(last_payload.get('bodyContainsExpected')) if last_payload else False}"
+            f" match_kind: {composer_state.get('matchKind', '')}"
+            f" matched_hint: {composer_state.get('matchedHint', '')}"
+            f" project_name: {composer_state.get('projectName', '')}"
+            f"{dump_note}"
+        )
+
+
 def draft_message_in_chatgpt(text: str) -> None:
-    with open_chatgpt_page(reset_chat=False) as (_, page, config, _):
+    with open_chatgpt_page(reset_chat=False, surface_label="対象チャット") as (_, page, config, _):
         fill_chatgpt_composer(page, text, config, allow_manual_login=True)
+
+
+def derive_chatgpt_project_page_url(conversation_url: str, config: Mapping[str, Any]) -> str:
+    explicit = str(config.get("project_page_url", "")).strip()
+    if explicit:
+        return explicit
+    if "/c/" not in conversation_url:
+        raise BridgeError(
+            "現在の ChatGPT URL から project ページを導出できませんでした。"
+            " browser_config.json の project_page_url を設定してください。"
+        )
+    return conversation_url.split("/c/", 1)[0].rstrip("/")
+
+
+def navigate_current_chatgpt_tab(url: str, *, timeout_seconds: int = 30) -> dict[str, str]:
+    applescript = """
+on run argv
+    if (count of argv) is 0 then error "missing url"
+    set targetUrl to item 1 of argv
+    tell application "Safari"
+        if not running then error "browser not running"
+        if (count of windows) is 0 then error "no browser window"
+        set URL of current tab of front window to targetUrl
+    end tell
+    return targetUrl
+end run
+"""
+    result = _run_osascript_script(
+        applescript,
+        [url],
+        timeout_label="Safari の project ページ遷移",
+    )
+    if result.returncode != 0:
+        raise BridgeError(f"Safari の project ページ遷移に失敗しました: {result.stderr.strip()}")
+
+    config = load_browser_config()
+    deadline = time.time() + timeout_seconds
+    last_info: dict[str, str] | None = None
+    while time.time() < deadline:
+        info = frontmost_safari_tab_info(config, require_conversation=False)
+        last_info = info
+        if _normalized_url(info.get("url", "")) == _normalized_url(url):
+            return info
+        time.sleep(0.5)
+    raise BridgeError(
+        "project ページへ遷移できませんでした。"
+        f" 期待: {url} 実際: {last_info.get('url', '') if last_info else ''}"
+    )
+
+
+def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
+    config = load_browser_config()
+    current_tab = frontmost_safari_tab_info(config)
+    project_page_url = derive_chatgpt_project_page_url(current_tab.get("url", ""), config)
+    last_error = ""
+    last_info: dict[str, str] | None = None
+    last_signal = ""
+    last_warning = ""
+    for attempt in range(1, 3):
+        navigate_current_chatgpt_tab(project_page_url)
+        try:
+            sent = False
+            for hint in PROJECT_CHAT_COMPOSER_HINTS + ("",):
+                try:
+                    send_result = send_to_chatgpt_in_current_surface(
+                        handoff_text,
+                        require_conversation=False,
+                        require_target_chat=False,
+                        preferred_hint=hint or None,
+                        project_page_mode=True,
+                    )
+                    last_signal = str(send_result.get("signal", "")).strip()
+                    last_warning = str(send_result.get("warning", "")).strip()
+                    sent = True
+                    break
+                except BridgeError as exc:
+                    last_error = str(exc)
+            if not sent:
+                if attempt < 2:
+                    time.sleep(1.0)
+                    continue
+                raise BridgeError(
+                    "project ページの『＜project名＞ 内の新しいチャット』入力欄へ handoff を送れませんでした。"
+                    f" {last_error}"
+                )
+        except BridgeError as exc:
+            last_error = str(exc)
+            if attempt < 2:
+                time.sleep(1.0)
+                continue
+            raise
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                info = frontmost_safari_tab_info(config, require_conversation=True)
+            except BridgeError as exc:
+                last_error = str(exc)
+                time.sleep(0.5)
+                continue
+            last_info = info
+            if _conversation_url_matches(info.get("url", ""), config):
+                info = dict(info)
+                if last_signal:
+                    info["signal"] = last_signal
+                if last_warning:
+                    info["warning"] = last_warning
+                return info
+            time.sleep(0.5)
+
+        if last_signal == "submitted_unconfirmed":
+            try:
+                info = frontmost_safari_tab_info(config, require_conversation=False)
+            except BridgeError:
+                info = {"url": project_page_url, "title": ""}
+            info = dict(info)
+            info["signal"] = last_signal
+            if last_warning:
+                info["warning"] = last_warning
+            return info
+
+        if attempt < 2:
+            time.sleep(1.0)
+
+    dump_note = ""
+    dump_text = _body_text_unchecked()
+    if dump_text:
+        dump_path = log_text("chat_rotation_failure_dump", dump_text, suffix="txt")
+        dump_note = f" raw dump: {repo_relative(dump_path)}"
+    raise BridgeError(
+        "新チャット送信後に対象チャットを特定できませんでした。"
+        f" 現在: {last_info.get('url', '') if last_info else project_page_url}"
+        f" signal: {last_signal or 'unknown'} {last_error}".rstrip()
+        + dump_note
+    )
 
 
 def read_chatgpt_conversation_dom(page: SafariChatPage) -> str:
@@ -1768,9 +2758,23 @@ def read_chatgpt_conversation() -> str:
         return read_chatgpt_conversation_dom(page)
 
 
-def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
-    with open_chatgpt_page(reset_chat=False) as (_, page, config, front_tab):
+def _wait_for_chatgpt_reply_text(
+    *,
+    timeout_seconds: int | None = None,
+    request_text: str | None = None,
+    extractor: Callable[[str, str | None], Any],
+    stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
+    allow_project_page_wait: bool = False,
+) -> str:
+    with open_chatgpt_page(
+        reset_chat=False,
+        require_conversation=not allow_project_page_wait,
+        require_target_chat=not allow_project_page_wait,
+        surface_label="project ページ / 新チャット待機" if allow_project_page_wait else None,
+        allow_conversation_transition=allow_project_page_wait,
+    ) as (_, page, config, front_tab):
         timeout = int(timeout_seconds or browser_fetch_timeout_seconds(config))
+        extended_timeout = int(browser_extended_fetch_timeout_seconds(config))
         poll_seconds = float(config.get("poll_interval_seconds", 2))
         retry_count = int(config.get("apple_event_timeout_retry_count", DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_count"]))
         retry_delay_seconds = float(
@@ -1779,11 +2783,13 @@ def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
                 DEFAULT_BROWSER_CONFIG["apple_event_timeout_retry_delay_seconds"],
             )
         )
-        request_text = read_latest_prompt_request_text()
-        deadline = time.time() + timeout
+        request_text = request_text if request_text is not None else read_latest_prompt_request_text()
+        first_deadline = time.time() + timeout
+        extended_deadline = first_deadline + extended_timeout
         latest_text = ""
         timeout_attempts = 0
-        while time.time() < deadline:
+        stage = "initial"
+        while True:
             try:
                 latest_text = read_chatgpt_conversation_dom(page)
             except BridgeError as exc:
@@ -1805,7 +2811,7 @@ def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
                     ) from exc
                 raise
             try:
-                extract_last_chatgpt_reply(latest_text, after_text=request_text or None)
+                extractor(latest_text, request_text or None)
                 if timeout_attempts > 0:
                     print(
                         f"[retry] fetch_next_prompt は Safari timeout 後の再試行で回復しました。"
@@ -1815,16 +2821,92 @@ def wait_for_prompt_reply_text(timeout_seconds: int | None = None) -> str:
                 return latest_text
             except BridgeError:
                 pass
+
+            now = time.time()
+            if stage == "initial" and now >= first_deadline:
+                stage = "extended"
+                if stage_callback is not None:
+                    stage_callback(ChatGPTWaitEvent("timeout_first", latest_text))
+            elif stage == "extended" and now >= extended_deadline:
+                stage = "late_completion"
+                if stage_callback is not None:
+                    stage_callback(ChatGPTWaitEvent("timeout_extended", latest_text))
+                    stage_callback(ChatGPTWaitEvent("late_completion_mode", latest_text))
+
             page.wait_for_timeout(int(poll_seconds * 1000))
-        dump_note = ""
-        if latest_text.strip():
-            dump_path = log_text("raw_chatgpt_prompt_dump", latest_text, suffix="txt")
-            dump_note = f" raw dump: {repo_relative(dump_path)}"
-        raise BridgeError(
-            "制限時間内に有効な ChatGPT 返答ブロックを確認できませんでした。"
-            f" 対象チャットを確認してください: {front_tab.get('title', '')} {front_tab.get('url', '')}"
-            f"{dump_note}"
-        )
+
+
+def wait_for_prompt_reply_text(
+    timeout_seconds: int | None = None,
+    request_text: str | None = None,
+    stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
+    allow_project_page_wait: bool = False,
+) -> str:
+    return _wait_for_chatgpt_reply_text(
+        timeout_seconds=timeout_seconds,
+        request_text=request_text,
+        extractor=lambda raw_text, after_text: extract_last_chatgpt_reply(raw_text, after_text=after_text),
+        stage_callback=stage_callback,
+        allow_project_page_wait=allow_project_page_wait,
+    )
+
+
+def wait_for_handoff_reply_text(
+    *,
+    timeout_seconds: int | None = None,
+    request_text: str | None = None,
+    stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
+) -> str:
+    return _wait_for_chatgpt_reply_text(
+        timeout_seconds=timeout_seconds,
+        request_text=request_text,
+        extractor=lambda raw_text, after_text: extract_last_chatgpt_handoff(raw_text, after_text=after_text),
+        stage_callback=stage_callback,
+    )
+
+
+def build_chatgpt_handoff_request(
+    *,
+    state: Mapping[str, Any],
+    last_report: str,
+    next_todo: str,
+    open_questions: str,
+    current_status: str | None = None,
+) -> str:
+    summary = compact_last_report_text(last_report)
+    contract = build_chatgpt_reply_contract_section()
+    status_view = present_bridge_status(state)
+    status_text = current_status or f"{status_view.label}: {status_view.detail}"
+    return (
+        "次チャットへそのまま貼る完成済みの最初のメッセージだけを書いてください。\n"
+        "これは要約メモではありません。新しいチャットの最初の 1 通として、そのまま送れる本文だけを返してください。\n"
+        "前置き、見出し、箇条書き、補足説明、冗長な要約は禁止です。\n"
+        "今回必要な差分だけを短く含めてください。\n"
+        "本文の流れは project 前提 / 現在進捗 / 直前完了 / next request / bridge reply contract の順に固定してください。\n\n"
+        "返答は前置きなしで次のブロックだけにしてください。\n\n"
+        f"{HANDOFF_REPLY_START}\n"
+        "[新しいチャットの最初のメッセージ本文だけ]\n"
+        f"{HANDOFF_REPLY_END}\n\n"
+        "## current_status\n"
+        f"{status_text}\n\n"
+        "## last_report\n"
+        f"{summary}\n\n"
+        "## next_request\n"
+        f"- next_todo: {next_todo}\n"
+        f"- open_questions: {open_questions}\n\n"
+        "## bridge_reply_contract\n"
+        f"{contract}\n"
+    ).strip() + "\n"
+
+
+def build_human_review_auto_continue_request() -> str:
+    contract = build_chatgpt_reply_contract_section()
+    return (
+        "レビュー要求のみでは停止しない運用です。\n"
+        "human_review では止めず継続してください。\n"
+        "次の Codex 用 1 フェーズ prompt を reply contract に従って返してください。\n\n"
+        f"{contract}\n"
+    )
 
 
 def build_chatgpt_request(

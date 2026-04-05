@@ -27,6 +27,9 @@ from _bridge_common import (
     print_project_config_warnings,
     present_bridge_handoff,
     present_bridge_status,
+    is_retryable_pending_handoff_error,
+    recover_pending_handoff_state,
+    recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
     repo_relative,
@@ -34,6 +37,8 @@ from _bridge_common import (
     runtime_report_path,
     runtime_stop_path,
     safari_timeout_checklist_text,
+    should_prioritize_unarchived_report,
+    should_rotate_before_next_chat_request,
     state_snapshot,
     worker_repo_path,
 )
@@ -45,6 +50,37 @@ DEFAULT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_FETCH_TIMEOUT_SECONDS = 0
 DEFAULT_CODEX_RUNNING_WAIT_SECONDS = 120.0
 DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
+
+
+def start_bridge_mode(state: dict[str, Any]) -> str:
+    action = describe_next_action(state)
+    if action == "request_next_prompt":
+        return "初回入力から始められます"
+    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+        return "補足を入れて再開できます"
+    if is_retryable_pending_handoff_error(state):
+        return "同じコマンドで再試行できます"
+    blocked_guidance = blocked_next_guidance(state)
+    if blocked_guidance is not None:
+        return "先に確認が必要です"
+    return "このまま再開できます"
+
+
+def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]) -> tuple[str, str, str]:
+    blocked_guidance = blocked_next_guidance(state)
+    stale_codex_running = is_stale_codex_running_candidate("", state)
+    status = present_bridge_status(state, blocked=bool(blocked_guidance), stale_codex_running=stale_codex_running)
+    note = blocked_guidance[1] if blocked_guidance is not None else suggested_next_note(state)
+    if should_prioritize_unarchived_report(state):
+        note = "未退避 report が残っているため、handoff より先に archive と次の ChatGPT 返送導線へ戻します。"
+    elif str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
+        note = (
+            "次の ChatGPT request を送る前に使う handoff は回収済みですが、"
+            " まだ新チャットへ送れていません。"
+            " 同じコマンドを再実行すると composer 確認と送信確認を再試行します。"
+        )
+    guidance = entry_guidance(state, args)
+    return status.label, guidance, note
 
 
 def configure_output_streams() -> None:
@@ -59,13 +95,19 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     project_config = project_config or load_project_config()
     browser_config = load_browser_config()
     parser = argparse.ArgumentParser(
-        description="bridge の通常入口です。--project-path と --max-execution-count を渡して数手まとめて進めます。",
+        description="bridge の実行エンジンです。通常入口は scripts/start_bridge.py を使います。",
         epilog=(
-            "通常起動例: python3 scripts/run_until_stop.py "
+            "通常起動例: python3 scripts/start_bridge.py "
             "--project-path /path/to/target-repo --max-execution-count 6"
         ),
     )
     parser.add_argument("--max-steps", "--max-execution-count", dest="max_steps", type=int, default=DEFAULT_MAX_STEPS, help="最大何手まで進めるか")
+    parser.add_argument(
+        "--stop-at-cycle-boundary",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="archive で cycle が 1 つ進んだらその run を自然停止し、次 cycle の request は次回実行へ回す",
+    )
     parser.add_argument("--sleep-seconds", type=float, default=DEFAULT_SLEEP_SECONDS, help="各手のあいだに待つ秒数")
     parser.add_argument(
         "--heartbeat-seconds",
@@ -120,6 +162,7 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--next-todo", default="", help="report ベース request に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="report ベース request に渡す open_questions")
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
+    parser.add_argument("--entry-script", default="scripts/run_until_stop.py", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -128,7 +171,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "request_next_prompt":
         return (
             "このあと初回だけ、ChatGPT に送る本文入力を求めます。"
-            " 表示される短い例文をもとに進めたい内容だけ入力すると、bridge が固定の返答契約を付けて送信します。"
+            " 入力した本文がそのまま最初の依頼になり、bridge は固定の返答契約だけを足します。"
         )
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
         decision = str(state.get("chatgpt_decision", "")).strip()
@@ -137,10 +180,10 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
         if decision == "need_info":
             return "このあと不足情報の補足入力を求め、次の ChatGPT request に添えて送ります。"
         return "このあと再開用の補足入力を求め、次の ChatGPT request に添えて送ります。"
+    if action == "request_prompt_from_report" and str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
+        return "次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。"
     if action == "fetch_next_prompt":
-        return (
-            f"既存チャットの返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
-        )
+        return f"ChatGPT の返答を待って回収します。Safari fetch 待機の既定値は {args.fetch_timeout_seconds} 秒です。"
     if action == "launch_codex_once":
         return "prompt はそろっています。bridge が Codex worker を 1 回起動します。"
     if action == "wait_for_codex_report":
@@ -148,16 +191,16 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "archive_codex_report":
         return "完了報告を archive して次の依頼へ進めます。"
     if action == "request_prompt_from_report":
-        return "完了報告をもとに次の依頼を送ります。"
+        return "完了報告をもとに、同じチャットへ次の依頼を送ります。"
     if action == "completed":
         return "追加の操作は不要です。"
-    return "summary と note を見て次の 1 手を判断してください。"
+    return "summary と doctor を見て次の 1 手を判断してください。"
 
 
 def print_entry_banner(state: dict[str, Any], args: argparse.Namespace) -> None:
     status = present_bridge_status(state)
     project_path = args.worker_repo_path or "."
-    print("bridge entry: python3 scripts/run_until_stop.py")
+    print(f"bridge entry: python3 {args.entry_script}")
     print(f"- project_path: {project_path}")
     print(f"- max_execution_count: {args.max_steps}")
     print(f"- 現在の状況: {status.label}")
@@ -205,9 +248,11 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 
 def describe_next_action(state: dict[str, Any]) -> str:
     mode = str(state.get("mode", "idle"))
+    if should_prioritize_unarchived_report(state):
+        return "archive_codex_report"
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         return "request_next_prompt"
-    if mode == "waiting_prompt_reply":
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
         return "fetch_next_prompt"
     if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
         return "request_prompt_from_report"
@@ -246,9 +291,11 @@ def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
 
 
 def format_runner_command(args: argparse.Namespace) -> str:
-    command = ["python3", "scripts/run_until_stop.py", "--max-execution-count", str(args.max_steps)]
+    command = ["python3", args.entry_script, "--max-execution-count", str(args.max_steps)]
     if args.worker_repo_path:
         command.extend(["--project-path", str(args.worker_repo_path)])
+    if args.stop_at_cycle_boundary:
+        command.append("--stop-at-cycle-boundary")
     if args.sleep_seconds != DEFAULT_SLEEP_SECONDS:
         command.extend(["--sleep-seconds", str(args.sleep_seconds)])
     if args.heartbeat_seconds != DEFAULT_HEARTBEAT_SECONDS:
@@ -264,15 +311,57 @@ def format_runner_command(args: argparse.Namespace) -> str:
     return " ".join(command)
 
 
-def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]) -> str:
+def format_start_bridge_command(args: argparse.Namespace, mode: str = "run") -> str:
+    command = ["python3", "scripts/start_bridge.py"]
+    if args.worker_repo_path:
+        command.extend(["--project-path", str(args.worker_repo_path)])
+    command.extend(["--max-execution-count", str(args.max_steps)])
+    if mode == "status":
+        command.append("--status")
+    elif mode == "resume":
+        command.append("--resume")
+    elif mode == "doctor":
+        command.append("--doctor")
+    elif mode == "clear-error":
+        command.append("--clear-error")
+    return " ".join(command)
+
+
+def recommended_operator_step(
+    args: argparse.Namespace,
+    final_state: dict[str, Any],
+    *,
+    reason: str = "",
+) -> tuple[str, str]:
     action = describe_next_action(final_state)
+    stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
+
+    if runtime_stop_path().exists():
+        return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
+    if bool(final_state.get("pause")):
+        return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
+    if bool(final_state.get("error")):
+        return ("停止要因を整理して再開", format_start_bridge_command(args, mode="clear-error"))
+    if has_unarchived_report_conflict(final_state) or stale_codex_running:
+        return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
     if action in {"completed", "no_action"}:
-        return "なし"
-    return format_runner_command(args)
+        return ("追加操作なし", "なし")
+    if action == "request_next_prompt":
+        return ("初回入力から開始", format_start_bridge_command(args, mode="run"))
+    if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
+        return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
+    if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
+        return ("handoff 再送を再試行", format_start_bridge_command(args, mode="resume"))
+    return ("そのまま再開", format_start_bridge_command(args, mode="resume"))
+
+
+def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]) -> str:
+    return recommended_operator_step(args, final_state)[1]
 
 
 def suggested_next_note(final_state: dict[str, Any]) -> str:
     action = describe_next_action(final_state)
+    pending_request_signal = str(final_state.get("pending_request_signal", "")).strip()
     if is_no_codex_decision_state(final_state):
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
         decision = str(final_state.get("chatgpt_decision", "")).strip()
@@ -290,6 +379,11 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "request_next_prompt":
         return "Safari の current tab を対象チャットに合わせたまま再実行してください。初回だけ、表示される例文をもとに本文入力を行います。"
     if action == "fetch_next_prompt":
+        if pending_request_signal == "submitted_unconfirmed":
+            return (
+                "新しいチャットへの送信は通った可能性が高いため、"
+                "同じ handoff は再送せず reply を待ってから再実行してください。"
+            )
         return "CHATGPT_PROMPT_REPLY が同じ current tab に出たら再実行してください。"
     if action == "launch_codex_once":
         return (
@@ -302,12 +396,17 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "archive_codex_report":
         return "report はそろっているので、archive と次 request へ進めるため再実行してください。"
     if action == "request_prompt_from_report":
+        if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
+            return (
+                "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
+                " project ページの composer と送信可否を確認したまま再実行してください。"
+            )
         return "Safari の current tab を対象チャットに合わせたまま再実行してください。"
     if action == "completed":
         return "追加の操作は不要です。"
     if action == "no_action":
-        return "state.json と logs を確認し、必要なら原因を解消してから再開してください。"
-    return "state.json を確認してから再実行してください。"
+        return "summary と doctor を確認し、必要なら原因を解消してから再開してください。"
+    return "summary と doctor を確認してから再実行してください。"
 
 
 def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None:
@@ -320,20 +419,40 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
     if bool(final_state.get("pause")):
         return (
             "なし",
-            "state.pause=true のため停止中です。pause を解除してから再実行してください。",
+            "手動 pause 中です。pause を解除してから再実行してください。",
         )
 
     if bool(final_state.get("error")):
         error_message = str(final_state.get("error_message", "")).strip()
-        if is_apple_event_timeout_text(error_message):
+        pending_handoff_log = (
+            str(final_state.get("pending_handoff_log", "")).strip() if should_rotate_before_next_chat_request(final_state) else ""
+        )
+        if should_prioritize_unarchived_report(final_state):
+            note = (
+                "bridge/outbox/codex_report.md に未退避 report が残っています。"
+                " handoff 再送より先に、その report を archive して ChatGPT 返送導線へ戻してください。"
+            )
+        elif is_apple_event_timeout_text(error_message):
             note = (
                 "Safari timeout が起きています。"
                 f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
             )
+        elif pending_handoff_log:
+            note = (
+                "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
+                " project ページと『＜project名＞ 内の新しいチャット』入力欄を確認し、"
+                " error を clear して再実行すると同じ handoff で入力確認と送信確認を再試行します。"
+                f" handoff_log: {pending_handoff_log}"
+            )
+        elif str(final_state.get("pending_request_signal", "")).strip() == "submitted_unconfirmed":
+            note = (
+                "新しいチャットへの送信は通った可能性が高いため、"
+                " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
+            )
         else:
-            note = "state.error=true の原因を解消し、error を clear してから再実行してください。"
+            note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"
         if error_message:
-            note += f" error_message: {error_message}"
+            note += f" 技術メモ: {error_message}"
         return ("なし", note)
 
     if has_unarchived_report_conflict(final_state):
@@ -377,6 +496,8 @@ def stale_codex_running_note() -> str:
 def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
     if not codex_report_is_ready(runtime_report_path()):
         return False
+    if should_prioritize_unarchived_report(state):
+        return False
 
     mode = str(state.get("mode", "idle"))
     if mode in {"codex_done", "codex_running"}:
@@ -396,7 +517,7 @@ def describe_wait_message(action: str) -> str:
     if action == "request_next_prompt":
         return "ChatGPT request の送信完了を待っています。"
     if action == "request_prompt_from_report":
-        return "次フェーズ request の送信完了を待っています。"
+        return "次の ChatGPT request の送信処理を進めています。"
     return "bridge の処理完了を待っています。"
 
 
@@ -427,7 +548,9 @@ def handoff_report_reference(final_state: dict[str, Any]) -> str:
 
 
 def promote_report_ready_state(state: dict[str, Any]) -> dict[str, Any]:
-    return recover_report_ready_state(state, prompt_path=runtime_prompt_path())[0]
+    state, _ = recover_report_ready_state(state, prompt_path=runtime_prompt_path())
+    state, _ = recover_prepared_request_state(state)
+    return state
 
 
 def format_elapsed(seconds: float) -> str:
@@ -573,9 +696,16 @@ def run_command_with_heartbeat(
                     print(f"[codex] {snapshot.progress_line}")
                     last_codex_progress_line = snapshot.progress_line
             if next_heartbeat_at is not None and now >= next_heartbeat_at:
+                wait_suffix = ""
+                if action == "fetch_next_prompt":
+                    current_mode = str(load_state().get("mode", "")).strip()
+                    if current_mode == "extended_wait":
+                        wait_suffix = " stage=extended_wait"
+                    elif current_mode == "await_late_completion":
+                        wait_suffix = " stage=late_completion_mode"
                 print(
                     f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
-                    f"{describe_wait_message(action)}"
+                    f"{describe_wait_message(action)}{wait_suffix}"
                 )
                 next_heartbeat_at = now + heartbeat_seconds
 
@@ -601,6 +731,7 @@ def summarize_run(
     history: list[str],
     suggested_next_command_override: str | None = None,
     suggested_next_note_override: str | None = None,
+    cycle_boundary_stop: bool = False,
 ) -> str:
     blocked_guidance = blocked_next_guidance(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
@@ -623,12 +754,16 @@ def summarize_run(
         suggested_command = suggested_next_command(args, final_state)
     if suggested_note is None:
         suggested_note = suggested_next_note(final_state)
+    recommendation_label, recommended_command = recommended_operator_step(args, final_state, reason=reason)
+    if suggested_command == "なし" and recommended_command != "なし":
+        suggested_command = recommended_command
     handoff = present_bridge_handoff(
         final_state,
         reason=reason,
         suggested_note=suggested_note,
         blocked=bool(blocked_guidance),
         stale_codex_running=stale_codex_running,
+        cycle_boundary_stop=cycle_boundary_stop,
     )
     initial_status = present_bridge_status(initial_state)
     final_status = present_bridge_status(
@@ -641,12 +776,17 @@ def summarize_run(
     lines = [
         "# Run Until Stop Summary",
         "",
-        f"- reason: {reason}",
+        "## next_step",
+        f"- 現在の状況: {final_status.label}",
+        f"- 停止時の案内: {handoff.title}",
+        f"- おすすめの動き: {recommendation_label}",
+        f"- おすすめ 1 コマンド: {recommended_command}",
+        f"- 次に見るもの: {handoff.detail}",
+        f"- 次の操作: {suggested_command}",
+        f"- 補足: {suggested_note}",
+        "",
+        "## run",
         f"- initial_user_status: {initial_status.label}",
-        f"- final_user_status: {final_status.label}",
-        f"- final_user_status_detail: {final_status.detail}",
-        f"- handoff_title: {handoff.title}",
-        f"- handoff_detail: {handoff.detail}",
         f"- steps: {steps}",
         f"- max_steps: {args.max_steps}",
         f"- sleep_seconds: {args.sleep_seconds}",
@@ -657,14 +797,17 @@ def summarize_run(
         f"- codex_running_poll_seconds: {args.codex_running_poll_seconds}",
         f"- warnings: {len(warnings)}",
         f"- blocked: {bool(blocked_guidance)}",
+        f"- cycle_boundary_stop: {cycle_boundary_stop}",
         f"- stale_codex_running_candidate: {stale_codex_running}",
         f"- fetch_retry_timeouts: {fetch_retry_timeouts}",
         f"- fetch_retry_recoveries: {fetch_retry_recoveries}",
         f"- safari_timeout_blocked: {safari_timeout_blocked}",
         f"- next_action: {describe_next_action(final_state)}",
-        f"- suggested_next_command: {suggested_command}",
-        f"- suggested_next_note: {suggested_note}",
         f"- report_reference: {report_reference}",
+        "",
+        "## debug",
+        f"- technical_reason: {reason}",
+        f"- final_user_status_detail: {final_status.detail}",
         "",
     ]
     if codex_snapshot is not None:
@@ -718,6 +861,7 @@ def finish(
     history: list[str],
     suggested_next_command_override: str | None = None,
     suggested_next_note_override: str | None = None,
+    cycle_boundary_stop: bool = False,
     exit_code: int = 0,
 ) -> int:
     blocked_guidance = blocked_next_guidance(final_state)
@@ -734,6 +878,9 @@ def finish(
         suggested_next_command_override = suggested_next_command(args, final_state)
     if suggested_next_note_override is None:
         suggested_next_note_override = suggested_next_note(final_state)
+    recommendation_label, recommended_command = recommended_operator_step(args, final_state, reason=reason)
+    if suggested_next_command_override == "なし" and recommended_command != "なし":
+        suggested_next_command_override = recommended_command
 
     summary = summarize_run(
         args=args,
@@ -745,6 +892,7 @@ def finish(
         history=history,
         suggested_next_command_override=suggested_next_command_override,
         suggested_next_note_override=suggested_next_note_override,
+        cycle_boundary_stop=cycle_boundary_stop,
     )
     log_path = log_text("run_until_stop_summary", summary)
     handoff = present_bridge_handoff(
@@ -753,12 +901,15 @@ def finish(
         suggested_note=suggested_next_note_override,
         blocked=bool(blocked_guidance),
         stale_codex_running=stale_codex_running,
+        cycle_boundary_stop=cycle_boundary_stop,
     )
     report_reference = handoff_report_reference(final_state)
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
     print(summary.rstrip())
     print(f"log: {log_path}")
-    print(f"handoff: {handoff.title}")
+    print(f"next step: {handoff.title}")
+    print(f"- recommended_action: {recommendation_label}")
+    print(f"- recommended_command: {recommended_command}")
     print(f"- note: {handoff.detail}")
     print(f"- summary: {repo_relative(log_path)}")
     print(f"- suggested_next_command: {suggested_next_command_override}")
@@ -785,8 +936,15 @@ def run(argv: list[str] | None = None) -> int:
     steps = 0
     prompt_path = runtime_prompt_path()
     initial_state, recovered_report = recover_report_ready_state(load_state(), prompt_path=prompt_path)
+    initial_state, recovered_prepared = recover_prepared_request_state(initial_state)
+    initial_state, recovered_handoff = recover_pending_handoff_state(initial_state)
+    start_cycle = int(initial_state.get("cycle", 0))
     if recovered_report is not None:
         history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
+    if recovered_prepared:
+        history.append("- preflight: 送信済み request を waiting 状態へ復旧しました")
+    if recovered_handoff:
+        history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
     print_entry_banner(initial_state, args)
 
     try:
@@ -855,6 +1013,9 @@ def run(argv: list[str] | None = None) -> int:
     try:
         while steps < args.max_steps:
             before = promote_report_ready_state(load_state())
+            before, recovered_handoff = recover_pending_handoff_state(before)
+            if recovered_handoff:
+                history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
             try:
                 check_stop_conditions(before)
             except BridgeStop as exc:
@@ -968,6 +1129,26 @@ def run(argv: list[str] | None = None) -> int:
                     final_state=after,
                     history=history,
                     exit_code=result.returncode,
+                )
+
+            if args.stop_at_cycle_boundary and int(after.get("cycle", 0)) > start_cycle:
+                completed_cycle = int(after.get("cycle", 0))
+                history.append(
+                    f"- cycle boundary: cycle {completed_cycle} の archive 完了で停止し、次 cycle request は次回実行へ回しました"
+                )
+                return finish(
+                    args=args,
+                    reason=f"cycle {completed_cycle} の完了まで進めたため停止しました。",
+                    steps=steps,
+                    warnings=warnings,
+                    initial_state=initial_state,
+                    final_state=after,
+                    history=history,
+                    suggested_next_note_override=(
+                        f"この run は cycle {completed_cycle} の完了までで止めました。"
+                        " 次 cycle の ChatGPT request は次回実行で進みます。"
+                    ),
+                    cycle_boundary_stop=True,
                 )
 
             if state_signature(before) == state_signature(after):

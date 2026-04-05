@@ -1,0 +1,100 @@
+name: Bug report
+description: Report a bridge runtime, Safari automation, handoff, or recovery problem
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact anything sensitive before submitting.
+        Do not paste tokens, private config values, raw secrets, or private paths you do not want public.
+
+  - type: input
+    id: summary
+    attributes:
+      label: Short summary
+      description: What went wrong in one or two sentences?
+      placeholder: start_bridge.py stopped with a handoff retry error after project page rotation
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: What did you do, and what did you expect instead?
+      placeholder: |
+        1. Ran start_bridge.py with --project-path ...
+        2. Bridge sent the report-based request
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command used
+      description: Which bridge command did you run?
+      placeholder: python3 scripts/start_bridge.py --project-path ... --max-execution-count 6
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chat_mode
+    attributes:
+      label: Where did the problem happen?
+      options:
+        - First request
+        - Same-chat continuation
+        - Handoff / new-chat rotation
+        - Late completion / heavy chat
+        - Stop / recovery / doctor / clear-error
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chatgpt_project
+    attributes:
+      label: Were you using ChatGPT Projects?
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: macOS 15.x
+
+  - type: input
+    id: safari
+    attributes:
+      label: Safari version
+      placeholder: Safari 18.x
+
+  - type: textarea
+    id: codex_state
+    attributes:
+      label: Codex CLI state
+      description: Mention anything relevant like auth expiry, sandbox behavior, or whether Codex launched successfully.
+      placeholder: Codex launched normally / Codex auth may have expired / not sure
+
+  - type: textarea
+    id: status_doctor
+    attributes:
+      label: start_bridge.py --status / --doctor output
+      description: Paste the relevant output with sensitive paths or details redacted if needed.
+      placeholder: |
+        bridge status:
+        - ...
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Extra context
+      description: Anything else that would help, such as whether the chat was unusually heavy or whether Safari tab focus changed.
