@@ -8,7 +8,7 @@ It is intentionally short and practical:
 - what still needs manual user judgment
 - what depends on external services or local environment
 
-Use [README.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/README.md) for product-level explanation.
+Use [README.md](../README.md) for product-level explanation.
 Use this file when you are deciding whether the repository is ready to publish.
 
 ## 1. What Codex Can Prepare Inside This Repo
@@ -95,7 +95,7 @@ Manual hosting-side checklist:
 
 Codex can suggest wording, but these are still hosting-side actions.
 
-See [docs/GITHUB_METADATA_PROPOSAL.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/GITHUB_METADATA_PROPOSAL.md)
+See [docs/GITHUB_METADATA_PROPOSAL.md](GITHUB_METADATA_PROPOSAL.md)
 for candidate description / website / topic wording.
 
 ## 7. Local File Hygiene Before Publishing
@@ -132,7 +132,7 @@ If any of those are still fuzzy, publish later.
 After the repo is public, plan for some manual follow-up:
 
 - verify the public README renders well on GitHub
-- check that absolute path references still make sense in the published view
+- check that links and examples still read naturally in the published view
 - confirm `.gitignore` is preventing local runtime artifacts from leaking back in
 - decide how you want to handle external issues, PRs, or support expectations
 

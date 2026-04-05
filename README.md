@@ -16,7 +16,7 @@ This repository is optimized for a very specific workflow, not for generic brows
 If you want to try the bridge once without learning the whole runtime model first:
 
 1. Prepare Safari and open the target ChatGPT Project conversation or project page.
-2. Copy [bridge/project_config.example.json](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/project_config.example.json) to `bridge/project_config.json` and set your target repository path.
+2. Copy [bridge/project_config.example.json](bridge/project_config.example.json) to `bridge/project_config.json` and set your target repository path.
 3. Run:
 
 ```bash
@@ -148,7 +148,7 @@ At minimum, you need:
 
 No extra Python packages are currently required.
 
-See [requirements.txt](/Users/kasuyatomohiro/chatgpt-codex-bridge/requirements.txt).
+See [requirements.txt](requirements.txt).
 
 ## Required Safari / ChatGPT Setup
 
@@ -172,7 +172,7 @@ If you only remember three checks, remember these:
 
 The main project-level config is:
 
-- [bridge/project_config.example.json](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/project_config.example.json)
+- [bridge/project_config.example.json](bridge/project_config.example.json)
 
 Typical local setup is:
 
@@ -182,7 +182,7 @@ Typical local setup is:
 
 Browser timing and Safari-specific behavior live in:
 
-- [bridge/browser_config.json](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/browser_config.json)
+- [bridge/browser_config.json](bridge/browser_config.json)
 
 This repository currently treats Safari fetch waiting as:
 
@@ -466,13 +466,13 @@ Use the top-level README for adoption and first-run judgment.
 
 If you need the deeper runtime behavior, see:
 
-- [bridge/README_BRIDGE_FLOW.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/README_BRIDGE_FLOW.md)
-- [bridge/run_one_cycle.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/run_one_cycle.md)
-- [bridge/browser_notes.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/browser_notes.md)
-- [docs/OSS_PUBLISHING_CHECKLIST.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
-- [docs/GITHUB_METADATA_PROPOSAL.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/GITHUB_METADATA_PROPOSAL.md) for GitHub description / website / topics candidate wording
-- [CONTRIBUTING.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/CONTRIBUTING.md) for contribution and bug-report expectations
-- [SECURITY.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/SECURITY.md) for sensitive-report handling and security limitations
+- [bridge/README_BRIDGE_FLOW.md](bridge/README_BRIDGE_FLOW.md)
+- [bridge/run_one_cycle.md](bridge/run_one_cycle.md)
+- [bridge/browser_notes.md](bridge/browser_notes.md)
+- [docs/OSS_PUBLISHING_CHECKLIST.md](docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
+- [docs/GITHUB_METADATA_PROPOSAL.md](docs/GITHUB_METADATA_PROPOSAL.md) for GitHub description / website / topics candidate wording
+- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and bug-report expectations
+- [SECURITY.md](SECURITY.md) for sensitive-report handling and security limitations
 
 Those docs are more implementation-oriented.
 

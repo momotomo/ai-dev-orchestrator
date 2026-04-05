@@ -79,5 +79,5 @@ These remain human-owned even if Codex helps draft wording:
 - default issue / PR settings
 - LICENSE choice
 
-See [docs/OSS_PUBLISHING_CHECKLIST.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/OSS_PUBLISHING_CHECKLIST.md)
+See [docs/OSS_PUBLISHING_CHECKLIST.md](OSS_PUBLISHING_CHECKLIST.md)
 for the broader publishing checklist.

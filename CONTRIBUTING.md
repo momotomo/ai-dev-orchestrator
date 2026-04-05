@@ -4,9 +4,9 @@ Thanks for taking a look at `chatgpt-codex-bridge`.
 
 This repository is a narrow automation tool, not a generic browser automation framework. Before proposing changes, please read:
 
-- [README.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/README.md)
-- [docs/OSS_PUBLISHING_CHECKLIST.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/docs/OSS_PUBLISHING_CHECKLIST.md)
-- [bridge/README_BRIDGE_FLOW.md](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/README_BRIDGE_FLOW.md) when you need runtime detail
+- [README.md](README.md)
+- [docs/OSS_PUBLISHING_CHECKLIST.md](docs/OSS_PUBLISHING_CHECKLIST.md)
+- [bridge/README_BRIDGE_FLOW.md](bridge/README_BRIDGE_FLOW.md) when you need runtime detail
 
 ## Scope
 
