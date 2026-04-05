@@ -30,6 +30,15 @@ Please keep these assumptions in mind:
 
 Changes that weaken those assumptions should be treated carefully and explained clearly.
 
+## Local Checks
+
+The current GitHub Actions workflow runs the same lightweight checks that are expected locally:
+
+- `python3 -m py_compile scripts/*.py tests/*.py`
+- `python3 -m unittest discover -s tests -p 'test_*.py'`
+
+If you touch CLI guidance, handoff behavior, or request/fetch recovery wording, please run both before opening a PR.
+
 ## Bug Reports
 
 If you are filing a bug, it is especially helpful to include:
