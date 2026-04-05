@@ -1,6 +1,6 @@
-# chatgpt-codex-bridge
+# ai-dev-orchestrator
 
-`chatgpt-codex-bridge` is a macOS + Safari automation bridge between ChatGPT and Codex.
+`ai-dev-orchestrator` is a macOS + Safari automation bridge between ChatGPT and Codex.
 
 Its job is simple in principle:
 

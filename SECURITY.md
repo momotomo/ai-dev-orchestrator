@@ -1,6 +1,6 @@
 # Security
 
-`chatgpt-codex-bridge` is **not** a security-hardened automation platform and does not make a security guarantee.
+`ai-dev-orchestrator` is **not** a security-hardened automation platform and does not make a security guarantee.
 
 It automates:
 

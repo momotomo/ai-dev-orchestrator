@@ -1,6 +1,6 @@
 # OSS Publishing Checklist
 
-This checklist is for the final human pass before publishing `chatgpt-codex-bridge` as an OSS repository.
+This checklist is for the final human pass before publishing `ai-dev-orchestrator` as an OSS repository.
 
 It is intentionally short and practical:
 
@@ -46,14 +46,14 @@ If a task happens in GitHub settings, account settings, browser settings, OS set
 
 Do not auto-decide these without a human:
 
-- LICENSE choice
+- whether the current MIT `LICENSE` still matches your intent
 - public vs private visibility
 - whether logs or examples contain sensitive project details
 - whether the current repository name is appropriate for public release
 - whether current screenshots / project names / sample prompts reveal private work
 - whether the current safety warnings are sufficient for your risk tolerance
 
-If a LICENSE is still unset, that is a human publishing decision, not a Codex default.
+If you want a license other than the current MIT `LICENSE`, that is a human publishing decision.
 
 ## 4. Runtime / Environment Checks Before Publishing
 

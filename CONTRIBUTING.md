@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking a look at `chatgpt-codex-bridge`.
+Thanks for taking a look at `ai-dev-orchestrator`.
 
 This repository is a narrow automation tool, not a generic browser automation framework. Before proposing changes, please read:
 
