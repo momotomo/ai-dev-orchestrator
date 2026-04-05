@@ -11,6 +11,25 @@ Its job is simple in principle:
 
 This repository is optimized for a very specific workflow, not for generic browser automation.
 
+## Quick Start
+
+If you want to try the bridge once without learning the whole runtime model first:
+
+1. Prepare Safari and open the target ChatGPT Project conversation or project page.
+2. Copy [bridge/project_config.example.json](/Users/kasuyatomohiro/chatgpt-codex-bridge/bridge/project_config.example.json) to `bridge/project_config.json` and set your target repository path.
+3. Run:
+
+```bash
+python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
+```
+
+4. On the first request only, type the ChatGPT instruction **yourself**.
+5. Let the bridge continue, and if it stops, use `--status` or `--doctor` before retrying.
+
+The first request body is not auto-generated. What you type there is the source of truth.
+
+Before you start, it is often worth spending a few manual messages in ChatGPT to align the task size, constraints, and what should count as a single Codex phase.
+
 ## What This Tool Is For
 
 This bridge is for people who want to keep a long-running implementation loop going between:
@@ -28,6 +47,23 @@ The normal loop is:
 6. ChatGPT returns the next prompt
 
 The bridge is intentionally conservative in many places, but it is not a safety guarantee.
+
+## Good Fit / Poor Fit
+
+Good fit:
+
+- you already use ChatGPT Projects
+- you want ChatGPT to plan the next one-phase Codex task repeatedly
+- you are comfortable supervising an automation loop
+- you can tolerate Safari/UI-driven fragility
+
+Poor fit:
+
+- you want a generic browser automation framework
+- you want API-first or headless execution
+- you want strong guarantees or unattended reliability
+- you do not want to manually author the first request
+- you want the tool to decide project structure or task granularity for you
 
 ## Important Assumptions
 
@@ -76,6 +112,31 @@ For example, before starting the bridge, you may want to:
 
 That usually produces better one-phase prompts and smoother bridge runs.
 
+## First Request Example
+
+The first request should be short, concrete, and written by you.
+
+You can usually start from something like this:
+
+```text
+Target project: melody-craft-studio
+Target repo: /Users/you/projects/melody-craft-studio
+Current theme: sample browser wording cleanup
+Goal: keep the change small and avoid schema / resolver / playback changes
+Please return the next one-phase Codex prompt.
+```
+
+Or even shorter:
+
+```text
+Target repo: /Users/you/projects/melody-craft-studio
+What I want next: one small UI polish phase in the sample browser only
+Do not touch playback or export
+Please return the next one-phase Codex prompt.
+```
+
+The bridge sends your body as written and appends only the reply contract it needs for parsing.
+
 ## Environment Requirements
 
 At minimum, you need:
@@ -100,6 +161,12 @@ Before live use:
 - ensure ChatGPT Project pages are usable in your current account and UI
 
 The bridge assumes Safari current tab is the active operating surface.
+
+If you only remember three checks, remember these:
+
+- Safari current tab is the intended ChatGPT surface
+- `Allow JavaScript from Apple Events` is enabled
+- ChatGPT Project UI is visible and usable in the current session
 
 ## Configuration
 
@@ -144,6 +211,19 @@ The bridge may stop earlier when:
 - ChatGPT returns `need_info`
 - a blocked / error condition needs human attention
 
+## What Happens On The First Run
+
+The normal day-one flow is:
+
+1. start `scripts/start_bridge.py`
+2. type the first ChatGPT request yourself
+3. the bridge appends the fixed reply contract
+4. ChatGPT returns the next Codex prompt
+5. Codex runs once
+6. the bridge sends the Codex report back to ChatGPT
+
+After that, continuation is normally report-based.
+
 ## First Request: User-Authored Source of Truth
 
 The first ChatGPT request is special.
@@ -159,6 +239,8 @@ In other words:
 - the bridge adds only the machine-readable reply contract
 
 This is important because it keeps the origin of the first request explicit and reviewable.
+
+If the first request is vague, the whole loop usually degrades. It is worth making that first instruction concrete.
 
 ## After the First Request
 
@@ -179,6 +261,11 @@ Normal continuation stays in the same ChatGPT conversation by default.
 That is the expected behavior for ordinary report-based continuation.
 
 The bridge should not rotate to a new chat during normal same-chat continuation unless the chat has shown signs of becoming too heavy.
+
+In short:
+
+- normal case: stay in the same chat
+- heavy late-completion case: rotate before the next request
 
 ## When Handoff / New Chat Rotation Happens
 
@@ -202,6 +289,8 @@ So the order is:
 1. the heavy reply is fully recovered
 2. that reply is used for the Codex phase
 3. only before the next ChatGPT request, the bridge may rotate into a fresh project chat
+
+That means handoff is not “normal continuation” and not “cycle cleanup.” It is a conditional preprocessing step before the next ChatGPT send.
 
 ## ChatGPT Project Requirement
 
@@ -257,10 +346,17 @@ python3 scripts/start_bridge.py --clear-error --project-path /ABSOLUTE/PATH/TO/t
 Use them like this:
 
 - `start_bridge.py`: normal entry point
-- `--status`: lightweight state check
-- `--resume`: explicit “continue from here”
-- `--doctor`: inspect what kind of stop you are in
-- `--clear-error`: clear only bridge-side stop causes when that is actually appropriate
+- `--status`: quick “where am I and what should I run next?”
+- `--resume`: explicit “continue from here” when the bridge guidance already says normal resume is fine
+- `--doctor`: inspect why it stopped and whether you should resume, wait, or clear an error
+- `--clear-error`: clear only bridge-side stop causes when doctor / summary indicates that is the right move
+
+As a rule of thumb:
+
+- use `--status` when you are unsure
+- use `--resume` when the bridge already says resume is safe
+- use `--doctor` when something feels wrong
+- use `--clear-error` only after `--doctor` or the stop summary points you there
 
 ## What `clear-error` Is For
 
@@ -300,6 +396,18 @@ This repository tries to surface these conditions via:
 - stop summaries
 - runtime logs
 
+## Troubleshooting: First Things To Check
+
+If a run stops unexpectedly, check these first:
+
+1. Safari current tab is still the intended ChatGPT surface
+2. Safari Automation / Apple Events permission is still valid
+3. ChatGPT Project page or conversation UI did not drift
+4. Codex CLI auth is still valid
+5. the chat may have become too heavy and entered long-wait / late-completion behavior
+
+In many cases, those five checks are more useful than reading raw state first.
+
 ## What This Tool Depends On
 
 This tool depends strongly on:
@@ -312,6 +420,13 @@ This tool depends strongly on:
 - local filesystem layout in this repository
 
 If any of those change, behavior may drift or break.
+
+This is especially true for:
+
+- ChatGPT project-page composer detection
+- same-chat vs project-page surface detection
+- Safari tab targeting
+- Codex CLI authentication
 
 ## What This Tool Does Not Guarantee
 
@@ -346,6 +461,8 @@ You should still review:
 If something feels inconsistent, stop and inspect before letting it continue.
 
 ## More Detailed Operational Docs
+
+Use the top-level README for adoption and first-run judgment.
 
 If you need the deeper runtime behavior, see:
 
