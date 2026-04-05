@@ -282,20 +282,27 @@ def run_rotated_report_request(
         save_state(handoff_state)
 
     rotated_chat = rotate_chat_with_handoff(handoff_text)
+    rotation_signal = str(rotated_chat.get("signal", "")).strip()
+    soft_wait = rotation_signal == "submitted_unconfirmed"
     chat_rotated_log = log_text(
         "chat_rotated",
         "\n".join(
             [
                 f"url: {rotated_chat.get('url', '')}",
                 f"title: {rotated_chat.get('title', '')}",
-                f"signal: {rotated_chat.get('signal', '')}",
+                f"signal: {rotation_signal}",
+                f"delivery_mode: {'soft_success_wait' if soft_wait else 'confirmed_send'}",
                 f"match_kind: {rotated_chat.get('match_kind', '')}",
                 f"matched_hint: {rotated_chat.get('matched_hint', '')}",
                 f"project_name: {rotated_chat.get('project_name', '')}",
+                f"warning: {rotated_chat.get('warning', '')}",
             ]
         ),
     )
-    request_log = log_text("sent_prompt_request_from_report", handoff_text)
+    request_log = log_text(
+        "sent_prompt_request_from_report_soft_wait" if soft_wait else "sent_prompt_request_from_report",
+        handoff_text,
+    )
     request_hash = stable_text_hash(handoff_text)
 
     mutable_state = clear_error_fields(dict(state))
@@ -314,7 +321,7 @@ def run_rotated_report_request(
             "pending_request_hash": request_hash,
             "pending_request_source": request_source,
             "pending_request_log": repo_relative(request_log),
-            "pending_request_signal": str(rotated_chat.get("signal", "")).strip(),
+            "pending_request_signal": rotation_signal,
             "current_chat_session": rotated_chat.get("url", ""),
         }
     )
@@ -323,9 +330,11 @@ def run_rotated_report_request(
     if handoff_received_log:
         print(f"handoff received: {handoff_received_log}")
     print(f"chat rotated: {chat_rotated_log}")
-    if rotated_chat.get("signal"):
-        print(f"chat rotated signal: {rotated_chat.get('signal', '')}")
-    if str(rotated_chat.get("signal", "")).strip() == "submitted_unconfirmed":
+    if rotation_signal:
+        print(f"chat rotated signal: {rotation_signal}")
+    if rotated_chat.get("warning"):
+        print(f"chat rotated note: {rotated_chat.get('warning', '')}")
+    if soft_wait:
         print("next step: handoff の送信成立を優先し、再送せず ChatGPT 返答待ちへ進みます。")
     if rotated_chat.get("match_kind"):
         print(
@@ -334,7 +343,10 @@ def run_rotated_report_request(
             f" matched_hint={rotated_chat.get('matched_hint', '')}"
             f" project_name={rotated_chat.get('project_name', '')}"
         )
-    print(f"sent: {request_log}")
+    if soft_wait:
+        print(f"request queued (soft-wait): {request_log}")
+    else:
+        print(f"sent: {request_log}")
     return 0
 
 
