@@ -80,7 +80,7 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
+  - none
 - Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
   - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
@@ -88,6 +88,7 @@ catalog.
   - [#15 Ready: document free-form initial input as the exception, recovery, and override path](https://github.com/momotomo/ai-dev-orchestrator/issues/15)
   - [#16 Ready: align Codex completion handoff with ChatGPT review checks](https://github.com/momotomo/ai-dev-orchestrator/issues/16)
   - [#18 Ready: inventory runtime touchpoint boundaries for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/18)
+  - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
 
 The first public ready example intentionally keeps
 [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
@@ -118,6 +119,8 @@ promotion.
 - `#18` adds the smallest public example of finishing a runtime-adjacent
   inventory slice under planned parent `#10` without starting runtime
   implementation
+- `#20` adds the smallest public example of finishing the first bounded
+  runtime-ready implementation slice under planned parent `#10`
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -152,8 +155,11 @@ In the current public set:
   staged migration work
 - `#18` is the completed ready child for the inventory-only runtime touchpoint
   slice
-- `#20` is the current open ready child for the first bounded runtime
+- `#20` is the completed ready child for the first bounded runtime
   implementation slice at the initial entry boundary
+- the open `ready` queue has returned to zero after `#20`, so the next
+  runtime-adjacent slice should be chosen by backlog curation instead of
+  assumed automatically
 - `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues

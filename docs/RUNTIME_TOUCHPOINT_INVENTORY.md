@@ -33,10 +33,10 @@ report-based.
 This inventory should make it easier to cut the next bounded runtime-ready
 issues without smuggling in a broad rewrite.
 
-The first bounded implementation child cut from this inventory is now
-[#20](https://github.com/momotomo/ai-dev-orchestrator/issues/20), which keeps
-the change at the initial request boundary instead of widening into report
-continuation or signal remapping.
+The first bounded implementation child cut from this inventory is
+[#20](https://github.com/momotomo/ai-dev-orchestrator/issues/20), now a
+completed example that keeps the change at the initial request boundary instead
+of widening into report continuation or signal remapping.
 
 ## What Stays True In This Phase
 
@@ -62,16 +62,20 @@ During this inventory phase, all of the following stay unchanged:
   - `scripts/bridge_orchestrator.py`
   - `scripts/start_bridge.py`
 - current behavior:
-  - the operator types the first request body
-  - the bridge appends only the fixed reply contract
-  - the runtime records this as an `initial:` request source
+  - the operator normally starts with a current `ready` issue reference
+  - the bridge shapes a minimal initial request around that reference and
+    appends only the fixed reply contract
+  - free-form initial input still exists only as exception / recovery /
+    override
+  - the runtime records the normal path as `ready_issue:` and the override path
+    as `override:`
 - why this matters later:
-  - this is the clearest boundary where a future ready-issue reference could
-    become the runtime's primary execution anchor
+  - this is still the clearest boundary where ready-issue-first runtime
+    migration begins
 - inventory conclusion:
   - this is a real runtime boundary
-  - the first future runtime slice can likely change request scaffolding here
-    without changing the whole state machine
+  - `#20` completed the first bounded change here without changing the whole
+    state machine
 
 ### 2. Report-Based Next Request Generation
 
@@ -99,8 +103,9 @@ During this inventory phase, all of the following stay unchanged:
   - `scripts/request_prompt_from_report.py`
   - `scripts/_bridge_common.py`
 - current behavior:
-  - `pending_request_source` and related hashes distinguish `initial:`,
-    `report:`, `handoff:`, and `human_review_continue:` request families
+  - `pending_request_source` and related hashes now distinguish
+    `ready_issue:`, `override:`, `report:`, `handoff:`, and
+    `human_review_continue:` request families
   - idempotency guards use these sources to avoid duplicate sends
 - why this matters later:
   - if the runtime becomes ready-issue-aware, request provenance likely needs a
@@ -154,15 +159,17 @@ During this inventory phase, all of the following stay unchanged:
   - `README.md`
   - `bridge/README_BRIDGE_FLOW.md`
 - current behavior:
-  - operator guidance still mentions the user-authored first request because the
-    current runtime still asks for it
-  - docs now explain that normal operation should already be `ready`-issue-first
+  - operator guidance now treats `ready` issue reference as the normal runtime
+    entry
+  - free-form first input is now described as exception / recovery / override
+  - docs and CLI wording now align on `normal = ready issue`,
+    `exception = free-form override`
 - why this matters later:
-  - once the runtime becomes more ready-aware, CLI wording will need to stop
-    sounding like free-form input is the normal planning surface
+  - future runtime slices still need to carry that issue identity farther than
+    the initial entry boundary
 - inventory conclusion:
-  - some wording can still improve in docs
-  - runtime-facing CLI text is a real migration boundary once behavior changes
+  - `#20` completed the first wording-alignment slice
+  - report-continuation wording is still a later migration boundary
 
 ### 7. State Machine And Persisted Runtime Fields
 
@@ -238,7 +245,7 @@ Epic `#4`.
 
 Likely next candidates:
 
-- current bounded implementation child:
+- completed bounded implementation child:
   - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
 - one ready issue that adds issue-aware provenance to report-based continuation
   without changing late-completion or handoff behavior
