@@ -355,6 +355,26 @@ The first public example is `#11`, promoted from parent `#7`.
 That example keeps future backlog shaping in `#7` and `#8` instead of turning
 the first completed slice into a catch-all bucket.
 
+The second public example is `#12`, promoted from parent `#8`.
+That example shows a `done` transition that returns the open `ready` queue to
+zero while follow-up stays in existing `planned` backlog records.
+
+## Done-To-Backlog-Reconsideration Pattern
+
+After a `ready` issue reaches `done`, do not force another issue into `ready`
+immediately.
+
+Use this minimum reconsideration loop instead:
+
+1. move the completed issue to `state:done`
+2. decide whether unresolved work belongs in an existing `planned` parent
+3. if no bounded next slice is obvious, leave the open `ready` queue at zero
+4. review the `planned` backlog again only when the next direct Codex target is
+   clear
+
+This is a valid steady state in the current labels-first bootstrap.
+`ready` is a scarce execution slot, not a quota to keep filled at all times.
+
 ## Planned Issue Seed Notes
 
 Large themes should usually start as `planned`.

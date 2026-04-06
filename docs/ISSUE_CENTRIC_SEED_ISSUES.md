@@ -80,9 +80,10 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
-- Completed ready example:
+  - none
+- Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
+  - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
 
 The first public ready example intentionally keeps
 [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
@@ -102,8 +103,8 @@ promotion.
   explicit acceptance criteria and review focus
 - `#11` now also serves as the smallest public example of completion comment,
   ChatGPT review, and `done` transition
-- `#12` is the next open ready candidate and keeps the backlog-cadence slice
-  separate from runtime or operator-entry work
+- `#12` adds the smallest public example of finishing a backlog-cadence slice
+  and returning the open `ready` queue to zero
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -123,9 +124,11 @@ In the current public set:
 
 - `#11` is the completed calibration example
 - `#8` remains the flexible planned parent for promotion-cadence work
-- `#12` is the bounded ready child for the next docs-and-ops slice
+- `#12` is the completed ready child for the backlog-cadence slice
+- the open `ready` queue can now return to zero until the next clear direct
+  target is selected
 - `#5`, `#6`, `#9`, and `#10` remain planned because they are not the next
-  direct target yet
+  direct target yet and should be reconsidered during the next backlog review
 
 ## Epic Unit
 
@@ -476,7 +479,7 @@ The following are reasonable early promotion candidates once they are bounded
 enough:
 
 - Seed 05, completed publicly as `#11`
-- Seed 06, currently promoted publicly as `#12`
+- Seed 06, completed publicly as `#12`
 - Seed 02, if the next step is clarifying override-path docs only
 - Seed 10, if the next step is a runtime-inventory memo without code changes
 

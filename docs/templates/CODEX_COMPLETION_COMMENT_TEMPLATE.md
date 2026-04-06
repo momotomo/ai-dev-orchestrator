@@ -28,6 +28,12 @@ the phase is clearly `blocked`.
 - scope-boundary checks:
 - docs or behavior consistency checks:
 
+## Backlog Curation / Next-Ready Impact
+
+- should the current open `ready` queue return to zero after this issue?
+- which existing `planned` issue should absorb any follow-up?
+- which planned issues should be reconsidered during the next ready-selection pass?
+
 ## Remaining Issues
 
 - follow-up decision: none, existing issue, or new issue needed
