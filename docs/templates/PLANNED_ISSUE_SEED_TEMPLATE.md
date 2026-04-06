@@ -6,6 +6,10 @@ Suggested title pattern:
 
 - `Planned: <one likely future phase family>`
 
+If one bounded slice later becomes `ready`, keep this planned issue as the
+flexible parent when it still holds additional future slices. Link the ready
+child from both issues instead of overwriting the whole backlog theme.
+
 ```md
 ## Epic / Track
 

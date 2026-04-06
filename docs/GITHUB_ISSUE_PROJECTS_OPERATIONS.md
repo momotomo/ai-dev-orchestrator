@@ -183,6 +183,27 @@ Common exceptions:
 - `review -> blocked`: review found a blocker or a missing decision
 - `review -> planned`: follow-up work needs fresh issue slicing
 
+## Planned-To-Ready Promotion Pattern
+
+Use the smallest promotion move that preserves backlog shape:
+
+1. keep the Epic issue intact
+2. keep the `planned` issue intact when it still holds multiple future slices
+3. cut one child `ready` issue only for the bounded slice that is now a direct
+   Codex target
+4. link the ready child back to the Epic and the parent `planned` issue
+5. move concrete acceptance criteria, scope boundaries, and review focus into
+   the `ready` child
+
+This keeps the `planned` issue as the flexible backlog record while the
+`ready` child becomes the execution-unit source of truth.
+
+For the first bootstrap, a labels-first state model and a plain Project view
+are sufficient for this promotion step.
+You do not need `gh` or a custom Project field to make the first `ready` issue
+operational.
+This still does **not** mean the bridge runtime is already fully issue-centric.
+
 ## GitHub Projects Usage
 
 If you use GitHub Projects, keep the setup minimal.

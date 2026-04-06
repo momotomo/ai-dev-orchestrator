@@ -1,7 +1,7 @@
 ---
 name: Ready issue
 about: Prepare one Codex-ready execution unit for the issue-centric flow
-title: "[Ready]: "
+title: "Ready: "
 ---
 
 <!--
@@ -20,6 +20,9 @@ If you are promoting from the seed backlog, use
 `docs/ISSUE_CENTRIC_SEED_ISSUES.md` and
 `docs/templates/PLANNED_ISSUE_SEED_TEMPLATE.md` before switching to this
 template.
+
+If this issue was promoted from a `planned` parent, keep the parent planned
+issue linked and explain why this slice is the direct Codex target now.
 
 ## Background
 
@@ -45,7 +48,7 @@ Describe the intended outcome in one short paragraph.
 ## Related Docs / Related Issues
 
 - docs:
-- parent / child / follow-up issues:
+- Epic / parent planned / child / follow-up issues:
 - PRs:
 
 ## Notes For Codex
@@ -53,3 +56,9 @@ Describe the intended outcome in one short paragraph.
 - likely files or areas:
 - constraints:
 - validation expectations:
+
+## Review Focus After Completion
+
+- acceptance criteria that matter most:
+- scope-boundary checks:
+- likely follow-up split if needed:

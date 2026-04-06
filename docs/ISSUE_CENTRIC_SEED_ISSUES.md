@@ -79,9 +79,29 @@ catalog.
   - [#8 Planned: define planned-to-ready promotion cadence and backlog curation](https://github.com/momotomo/ai-dev-orchestrator/issues/8)
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
+- Registered ready issues:
+  - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
 
-Everything above remains `planned` for now.
+The first public ready example intentionally keeps
+[#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
+as the backlog-shaped `planned` parent and uses
+[#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
+as the bounded direct Codex target.
 Promote only the next bounded slice to `ready`.
+
+## First Ready Promotion Example
+
+Use the `#7 -> #11` pair as the smallest reference pattern for future
+promotion.
+
+- `#7` stays `planned` because it still holds the broader backlog theme and
+  future slices
+- `#11` becomes `ready` because it carries one bounded execution unit with
+  explicit acceptance criteria and review focus
+- the current labels-first bootstrap and plain Project view stay sufficient for
+  this initial operating route
+- future backlog work stays in `planned` issues instead of stretching the first
+  `ready` issue
 
 ## Epic Unit
 
