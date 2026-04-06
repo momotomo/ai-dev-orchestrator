@@ -124,13 +124,23 @@ During this inventory phase, all of the following stay unchanged:
   - `bridge/prompt_extraction_rules.md`
 - current behavior:
   - the runtime expects either `CHATGPT_PROMPT_REPLY` or `CHATGPT_NO_CODEX`
+  - the runtime still reads ChatGPT reply text from visible DOM text
+    (`innerText` / `textContent`), not from a markdown-lossless transport
   - extracted prompt text is written to `bridge/inbox/codex_prompt.md`
 - why this matters later:
   - issue-centric runtime migration might eventually carry issue identifiers or
     backlog-home metadata in a more explicit way
+  - markdown-fidelity transport is now its own runtime-adjacent boundary, not
+    just a docs concern
 - inventory conclusion:
-  - no change is required for the inventory phase
-  - the first runtime-adjacent slice can probably leave reply parsing unchanged
+  - `#22` is the completed bounded ready child for markdown-fidelity
+    feasibility on top of this boundary
+  - the observed feasibility verdict is recorded in
+    `docs/MARKDOWN_FIDELITY_FEASIBILITY.md`
+  - current evidence is strong enough to say visible-text extraction is lossy,
+    but not strong enough to promote the UI copy path as the primary transport
+  - the next implementation slice should therefore prefer Plan A
+    (BODY/base64 transport) over making Plan B the default runtime path
 
 ### 5. Same-Chat Continuation, Handoff, And Project-Page Send Signals
 
@@ -250,10 +260,17 @@ Likely next candidates:
 
 - completed bounded implementation child:
   - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
+- completed bounded feasibility child:
+  - [#22 Ready: test markdown-fidelity copy-response feasibility for bridge reply extraction](https://github.com/momotomo/ai-dev-orchestrator/issues/22)
+- current open ready child:
+  - none
+- one likely next ready slice after `#22`:
+  - move reply-body transport off visible DOM text and onto a bounded
+    BODY/base64 path without changing same-chat or late-completion semantics
 - one ready issue that adds issue-aware provenance to report-based continuation
   without changing late-completion or handoff behavior
-- one later ready issue that maps late-completion and project-page send signals
-  into the future issue-centric model
+- one later ready issue that maps late-completion and project-page send
+  signals into the future issue-centric model
 
 Until those slices are promoted, this document is the current boundary record
 for runtime-adjacent work.
