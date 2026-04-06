@@ -97,6 +97,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_closed_issue_url": "",
     "last_issue_centric_closed_issue_title": "",
     "last_issue_centric_close_order": "",
+    "last_issue_centric_review_status": "",
+    "last_issue_centric_review_log": "",
+    "last_issue_centric_review_comment_id": "",
+    "last_issue_centric_review_comment_url": "",
+    "last_issue_centric_review_close_policy": "",
     "last_issue_centric_stop_reason": "",
     "pause": False,
     "error": False,
@@ -1293,6 +1298,16 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_closed_issue_title: {state['last_issue_centric_closed_issue_title']}")
     if state.get("last_issue_centric_close_order"):
         fields.append(f"- last_issue_centric_close_order: {state['last_issue_centric_close_order']}")
+    if state.get("last_issue_centric_review_status"):
+        fields.append(f"- last_issue_centric_review_status: {state['last_issue_centric_review_status']}")
+    if state.get("last_issue_centric_review_log"):
+        fields.append(f"- last_issue_centric_review_log: {state['last_issue_centric_review_log']}")
+    if state.get("last_issue_centric_review_comment_id"):
+        fields.append(f"- last_issue_centric_review_comment_id: {state['last_issue_centric_review_comment_id']}")
+    if state.get("last_issue_centric_review_comment_url"):
+        fields.append(f"- last_issue_centric_review_comment_url: {state['last_issue_centric_review_comment_url']}")
+    if state.get("last_issue_centric_review_close_policy"):
+        fields.append(f"- last_issue_centric_review_close_policy: {state['last_issue_centric_review_close_policy']}")
     if state.get("last_issue_centric_stop_reason"):
         fields.append(f"- last_issue_centric_stop_reason: {state['last_issue_centric_stop_reason']}")
     if state.get("error_message"):

@@ -109,12 +109,12 @@ class PreparedIssueCentricDecision:
         if self.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED:
             if self.review_body is not None:
                 return (
-                    "human_review_needed dispatch is not implemented yet. "
-                    "The decoded review body has been prepared for the future review handoff step."
+                    "human_review_needed review execution is available as a narrow slice. "
+                    "The decoded review body has been prepared for the target-issue review comment step."
                 )
             return (
-                "human_review_needed dispatch is not implemented yet. "
-                "The decision metadata is ready for the future review-routing step."
+                "human_review_needed review execution is available as a narrow slice, "
+                "but this decision does not include CHATGPT_REVIEW."
             )
         return (
             "no_action has been validated and recorded. "

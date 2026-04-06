@@ -36,6 +36,7 @@ from _bridge_common import (
 )
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_close_current_issue import execute_close_current_issue
+from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
     IssueCentricContractError,
     maybe_parse_issue_centric_reply,
@@ -157,6 +158,36 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 }
             )
 
+        def apply_review_execution_state(
+            target_state: dict[str, object],
+            *,
+            review_execution: object,
+        ) -> None:
+            target_state.update(
+                {
+                    "last_issue_centric_review_status": review_execution.review_status,
+                    "last_issue_centric_review_log": repo_relative(review_execution.execution_log_path),
+                    "last_issue_centric_review_comment_id": (
+                        str(review_execution.created_comment.comment_id)
+                        if review_execution.created_comment is not None
+                        else ""
+                    ),
+                    "last_issue_centric_review_comment_url": (
+                        review_execution.created_comment.url
+                        if review_execution.created_comment is not None
+                        else ""
+                    ),
+                    "last_issue_centric_review_close_policy": review_execution.close_policy,
+                    "last_issue_centric_resolved_issue": (
+                        review_execution.resolved_issue.issue_url
+                        if review_execution.resolved_issue is not None
+                        else str(target_state.get("last_issue_centric_resolved_issue", "")).strip()
+                    ),
+                    "last_issue_centric_stop_reason": review_execution.safe_stop_reason,
+                    "chatgpt_decision_note": review_execution.safe_stop_reason,
+                }
+            )
+
         decision_log = log_text(
             "extracted_issue_centric_contract",
             contract_decision.render_debug_markdown(),
@@ -226,6 +257,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_closed_issue_url": "",
                 "last_issue_centric_closed_issue_title": "",
                 "last_issue_centric_close_order": "",
+                "last_issue_centric_review_status": "",
+                "last_issue_centric_review_log": "",
+                "last_issue_centric_review_comment_id": "",
+                "last_issue_centric_review_comment_url": "",
+                "last_issue_centric_review_close_policy": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
         )
@@ -458,10 +494,70 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 + trigger_note
                 + f" final mode: {launch_result.final_mode or 'unknown'}"
                 + f" continuation status: {launch_result.continuation_status}"
-                + " close_current_issue for codex_run / follow-up mutation / review automation はまだ未実装です。"
+                + " close_current_issue for codex_run / follow-up mutation / post-codex review automation はまだ未実装です。"
             )
 
-        if contract_decision.close_current_issue and contract_decision.action.value in {"no_action", "human_review_needed"}:
+        if contract_decision.action.value == "human_review_needed":
+            project_config = load_project_config()
+            review_execution = execute_human_review_action(
+                materialized.prepared,
+                prior_state=state,
+                project_config=project_config,
+                repo_path=project_repo_path(project_config),
+                source_decision_log=repo_relative(decision_log),
+                source_metadata_log=repo_relative(materialized.metadata_log_path),
+                source_artifact_path=(
+                    repo_relative(materialized.artifact_log_path)
+                    if materialized.artifact_log_path is not None
+                    else ""
+                ),
+                log_writer=log_text,
+                repo_relative=repo_relative,
+            )
+            apply_review_execution_state(mutable_state, review_execution=review_execution)
+            if contract_decision.close_current_issue and review_execution.status == "completed":
+                mutable_state.update(
+                    {
+                        "last_issue_centric_close_status": "blocked_review_then_close_unimplemented",
+                        "last_issue_centric_close_order": "after_review_blocked",
+                        "last_issue_centric_stop_reason": (
+                            review_execution.safe_stop_reason
+                            + " close_current_issue=true was left for a later slice after review comment posting."
+                        ),
+                        "chatgpt_decision_note": (
+                            review_execution.safe_stop_reason
+                            + " close_current_issue=true was left for a later slice after review comment posting."
+                        ),
+                    }
+                )
+            save_state(mutable_state)
+            review_note = ""
+            if review_execution.created_comment is not None:
+                review_note = f" review comment: {review_execution.created_comment.url}"
+            close_note = ""
+            if contract_decision.close_current_issue:
+                close_note = " close_current_issue は review 後にのみ検討し、この slice では実行していません。"
+            stop_label = (
+                "issue-centric contract reply を検出し、human_review_needed の最小 review comment mutation まで実行しました。"
+                if review_execution.status == "completed"
+                else "issue-centric contract reply を検出しましたが、human_review_needed review execution を完了できず停止しました。"
+            )
+            raise BridgeStop(
+                stop_label
+                + f" decision log: {repo_relative(decision_log)}"
+                + f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + (
+                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                    if materialized.artifact_log_path is not None
+                    else ""
+                )
+                + f" review: {repo_relative(review_execution.execution_log_path)}"
+                + review_note
+                + close_note
+                + " create_followup_issue mutation / Projects update はまだ未実装です。"
+            )
+
+        if contract_decision.close_current_issue and contract_decision.action.value == "no_action":
             project_config = load_project_config()
             close_execution = execute_close_current_issue(
                 materialized.prepared,
@@ -492,7 +588,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         save_state(mutable_state)
         raise BridgeStop(
             "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"
-            " issue create / codex_run / close_current_issue の narrow execution 以外、GitHub mutation の広い接続、state machine 切替はまだ未実装です。"
+            " issue create / codex_run / human_review_needed / close_current_issue の narrow execution 以外、GitHub mutation の広い接続、state machine 切替はまだ未実装です。"
             f" raw dump: {repo_relative(raw_log)}"
             f" decision log: {repo_relative(decision_log)}"
             f" metadata: {repo_relative(materialized.metadata_log_path)}"

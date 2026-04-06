@@ -164,6 +164,10 @@ During this inventory phase, all of the following stay unchanged:
     `no_action` closes and for `issue_create` closes that run after successful
     issue creation, while still leaving follow-up mutation, review automation,
     Project updates, and any broader cutover out of scope
+  - the current review slice goes one step farther again: it wires
+    `human_review_needed` to a narrow target-issue review comment mutation,
+    while keeping follow-up mutation, Project updates, and post-review close
+    automation out of scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

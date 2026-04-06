@@ -31,7 +31,9 @@ The current implementation boundary is:
 - implemented: narrow `close_current_issue` mutation for safe `no_action`
   closes and for `issue_create` closes that run only after the new issue is
   created successfully
-- not yet implemented: close / follow-up mutation or review automation
+- implemented: narrow `human_review_needed` execution that posts decoded
+  `CHATGPT_REVIEW` as a target-issue review comment
+- not yet implemented: follow-up mutation or review-close automation
 - not yet implemented: large state-machine rewrite or full contract cutover
 
 ## Overall Assumptions
@@ -220,6 +222,23 @@ For the current bounded `close_current_issue` slice:
 - if `github_project_url` is configured, this slice stops before close mutation
   because Project state sync is not implemented yet
 
+For the current bounded `human_review_needed` slice:
+
+- the decoded `CHATGPT_REVIEW` is posted as-is as a normal issue comment on the
+  resolved target issue
+- the target issue must resolve safely from the decision target and the current
+  issue-centric state; mismatches stop before mutation
+- the target issue must still be open; this slice does not post review comments
+  on already closed issues
+- `human_review_needed` without `CHATGPT_REVIEW` stops before mutation in this
+  execution slice
+- `human_review_needed` is the main action; review comment posting is attempted
+  before any later close / follow-up decision is considered
+- `human_review_needed + close_current_issue = true` records that close may only
+  be considered after review, but this slice does not execute the close
+- `human_review_needed + create_followup_issue = true` records the flag only;
+  it does not create follow-up work in this slice
+
 ## Bridge To Codex Contract
 
 ### Bridge To Codex Input
@@ -250,8 +269,8 @@ to the existing `launch_codex_once` entrypoint through a narrow adapter.
 It can also hand the resulting execution back to the existing
 `codex_running` / `codex_done` / report archive / next-request path.
 It has **not** yet implemented issue-centric `close_current_issue` for
-`codex_run`, follow-up mutation, review automation, Projects update, or a full
-runtime cutover.
+`codex_run` or post-review close automation, follow-up mutation, Projects
+update, or a full runtime cutover.
 
 ### Codex To Bridge Output
 
@@ -365,7 +384,7 @@ finished:
 - bridge-side follow-up mutation, full close automation for every action, and
   Projects-aware close / state sync
 - BODY-base64 transport execution beyond the bounded `issue_create`,
-  `codex_run`, and `close_current_issue` slices
+  `codex_run`, `close_current_issue`, and `human_review_needed` slices
 - large state-machine redesign
 - a full ChatGPT-side or Codex-side switch to the new contract
 
