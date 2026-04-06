@@ -133,6 +133,9 @@ That means the long-term direction is:
 - repo docs carry stable rules
 - completion comments and Git history carry the outcome
 
+For the current inventory of which bridge/runtime surfaces would need future
+implementation changes, see [RUNTIME_TOUCHPOINT_INVENTORY.md](RUNTIME_TOUCHPOINT_INVENTORY.md).
+
 ## Defaults And Exceptions
 
 The intended defaults remain:
@@ -157,3 +160,4 @@ Use these repo templates as the minimal starting point:
 - [Codex completion comment template](templates/CODEX_COMPLETION_COMMENT_TEMPLATE.md)
 - [GitHub issue / Projects operations](GITHUB_ISSUE_PROJECTS_OPERATIONS.md)
 - [Seed issue catalog](ISSUE_CENTRIC_SEED_ISSUES.md)
+- [Runtime touchpoint inventory](RUNTIME_TOUCHPOINT_INVENTORY.md)

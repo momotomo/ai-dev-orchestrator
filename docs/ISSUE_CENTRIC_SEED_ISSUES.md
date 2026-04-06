@@ -144,9 +144,13 @@ In the current public set:
   slice
 - `#8` remains the flexible planned parent for promotion-cadence work
 - `#12` is the completed ready child for the backlog-cadence slice
-- the open `ready` queue may return to zero after `#16` while the next bounded
-  direct target is reconsidered
-- `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
+- `#10` remains the flexible planned parent for runtime-boundary inventory and
+  staged migration work
+- `#18` is the current ready child for the inventory-only runtime touchpoint
+  slice
+- the open `ready` queue currently points to `#18` while the first
+  runtime-adjacent boundary is being documented
+- `#5`, `#6`, and `#9` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues
 
@@ -448,7 +452,10 @@ issues.
   - future runtime changes are listed as candidate slices, not bundled together
   - current bridge behavior remains unchanged
 - Likely future ready slices:
-  - one inventory-only memo slice
+  - one inventory-only memo slice, currently promoted publicly as `#18`
+  - one request-source boundary slice for the initial ready-issue-first entry
+  - one report-continuation provenance slice that keeps late-completion
+    semantics intact
 
 ### Seed 11
 
@@ -504,7 +511,7 @@ enough:
 - Seed 05, completed publicly as `#11`
 - Seed 06, completed publicly as `#12`
 - Seed 02, if the next step is clarifying override-path docs only
-- Seed 10, if the next step is a runtime-inventory memo without code changes
+- Seed 10, currently promoted publicly as `#18`
 
 Promote them only when the child issue is rewritten as a true `ready` issue.
 
