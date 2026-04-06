@@ -7,7 +7,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import launch_codex_once
-from _bridge_common import BridgeError, clear_error_fields, load_state, runtime_prompt_path, save_state, write_text
+from _bridge_common import (
+    BridgeError,
+    clear_error_fields,
+    codex_report_is_ready,
+    load_state,
+    repo_relative,
+    runtime_prompt_path,
+    runtime_report_path,
+    save_state,
+    write_text,
+)
 from issue_centric_codex_run import CodexRunExecutionResult
 from issue_centric_contract import IssueCentricAction
 from issue_centric_transport import PreparedIssueCentricDecision
@@ -25,6 +35,10 @@ class IssueCentricCodexLaunchResult:
     prompt_path: Path | None
     prompt_log_path: Path | None
     launch_log_path: Path
+    continuation_status: str
+    continuation_log_path: Path
+    report_status: str
+    report_file: str
     final_mode: str
     safe_stop_reason: str
 
@@ -39,6 +53,7 @@ def launch_issue_centric_codex_run(
     repo_relative: Callable[[Path], str],
     launch_runner: Callable[[dict[str, object], list[str] | None], int] | None = None,
     runtime_prompt_path_fn: Callable[[Mapping[str, Any] | None], Path] = runtime_prompt_path,
+    runtime_report_path_fn: Callable[[], Path] = runtime_report_path,
     write_text_fn: Callable[[Path, str], None] = write_text,
     save_state_fn: Callable[[dict[str, object]], None] = save_state,
     load_state_fn: Callable[[], dict[str, object]] = load_state,
@@ -85,16 +100,17 @@ def launch_issue_centric_codex_run(
         final_state = clear_error_fields(dict(load_state_fn()))
         final_mode = str(final_state.get("mode", "")).strip()
         launch_status = "launched"
-        safe_stop_reason = (
-            "Trigger comment was registered, an issue-centric Codex prompt was materialized, and the existing "
-            "launch_codex_once entrypoint was used for this codex_run path. Downstream close / follow-up / review "
-            "automation remain out of scope."
+        continuation_status, report_status, report_file, safe_stop_reason, result_status = assess_issue_centric_continuation(
+            final_state,
+            report_path=runtime_report_path_fn(),
         )
-        result_status = "completed"
     except Exception as exc:
         final_state = dict(load_state_fn())
         final_mode = str(final_state.get("mode", "")).strip()
         launch_status = "failed_after_trigger_comment"
+        continuation_status = "launch_failed_after_trigger_comment"
+        report_status = "not_ready"
+        report_file = ""
         safe_stop_reason = (
             "Trigger comment registration succeeded, but the issue-centric Codex launch failed after prompt "
             f"materialization. {exc}"
@@ -114,12 +130,28 @@ def launch_issue_centric_codex_run(
             final_mode=final_mode,
             safe_stop_reason=safe_stop_reason,
         )
+        continuation_log_path = _write_continuation_log(
+            log_writer=log_writer,
+            repo_relative=repo_relative,
+            now=now,
+            execution=execution,
+            launch_log_path=launch_log_path,
+            continuation_status=continuation_status,
+            report_status=report_status,
+            report_file=report_file,
+            final_mode=final_mode,
+            safe_stop_reason=safe_stop_reason,
+        )
         final_state.update(
             {
                 "last_issue_centric_launch_status": launch_status,
                 "last_issue_centric_launch_entrypoint": launch_entrypoint,
                 "last_issue_centric_launch_prompt_log": repo_relative(prompt_log_path),
                 "last_issue_centric_launch_log": repo_relative(launch_log_path),
+                "last_issue_centric_continuation_status": continuation_status,
+                "last_issue_centric_continuation_log": repo_relative(continuation_log_path),
+                "last_issue_centric_report_status": report_status,
+                "last_issue_centric_report_file": report_file,
                 "last_issue_centric_stop_reason": safe_stop_reason,
                 "chatgpt_decision_note": safe_stop_reason,
             }
@@ -141,12 +173,28 @@ def launch_issue_centric_codex_run(
         final_mode=final_mode,
         safe_stop_reason=safe_stop_reason,
     )
+    continuation_log_path = _write_continuation_log(
+        log_writer=log_writer,
+        repo_relative=repo_relative,
+        now=now,
+        execution=execution,
+        launch_log_path=launch_log_path,
+        continuation_status=continuation_status,
+        report_status=report_status,
+        report_file=report_file,
+        final_mode=final_mode,
+        safe_stop_reason=safe_stop_reason,
+    )
     final_state.update(
         {
             "last_issue_centric_launch_status": launch_status,
             "last_issue_centric_launch_entrypoint": launch_entrypoint,
             "last_issue_centric_launch_prompt_log": repo_relative(prompt_log_path),
             "last_issue_centric_launch_log": repo_relative(launch_log_path),
+            "last_issue_centric_continuation_status": continuation_status,
+            "last_issue_centric_continuation_log": repo_relative(continuation_log_path),
+            "last_issue_centric_report_status": report_status,
+            "last_issue_centric_report_file": report_file,
             "last_issue_centric_stop_reason": safe_stop_reason,
             "chatgpt_decision_note": safe_stop_reason,
         }
@@ -159,6 +207,10 @@ def launch_issue_centric_codex_run(
         prompt_path=prompt_path,
         prompt_log_path=prompt_log_path,
         launch_log_path=launch_log_path,
+        continuation_status=continuation_status,
+        continuation_log_path=continuation_log_path,
+        report_status=report_status,
+        report_file=report_file,
         final_mode=final_mode,
         safe_stop_reason=safe_stop_reason,
     )
@@ -207,6 +259,13 @@ def build_issue_centric_codex_prompt(
         "## Request",
         "",
         request_text,
+        "",
+        "## Report Handoff",
+        "",
+        "- 既存の Codex report template を使う",
+        f"- BRIDGE_SUMMARY か本文のどちらかで target issue `{execution.resolved_issue.issue_url}` を明示する",
+        f"- BRIDGE_SUMMARY か本文のどちらかで trigger comment `{execution.created_comment.url}` を明示する",
+        "- close / follow-up / review automation の判断は report の残課題へ留める",
         "",
         "## 追加確認 docs",
         "",
@@ -261,6 +320,85 @@ def _write_launch_log(
         )
         + "\n",
         "json",
+    )
+
+
+def _write_continuation_log(
+    *,
+    log_writer: Callable[[str, str, str], Path],
+    repo_relative: Callable[[Path], str],
+    now: datetime,
+    execution: CodexRunExecutionResult,
+    launch_log_path: Path,
+    continuation_status: str,
+    report_status: str,
+    report_file: str,
+    final_mode: str,
+    safe_stop_reason: str,
+) -> Path:
+    payload = execution.payload
+    return log_writer(
+        "issue_centric_codex_continuation",
+        json.dumps(
+            {
+                "action": "codex_run",
+                "executed_at": now.isoformat(),
+                "continuation_status": continuation_status,
+                "report_status": report_status,
+                "report_file": report_file,
+                "final_bridge_mode": final_mode,
+                "target_issue": payload.target_issue if payload is not None else "",
+                "trigger_comment": payload.trigger_comment if payload is not None else "",
+                "launch_log": repo_relative(launch_log_path),
+                "safe_stop_reason": safe_stop_reason,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        "json",
+    )
+
+
+def assess_issue_centric_continuation(
+    final_state: Mapping[str, Any],
+    *,
+    report_path: Path,
+) -> tuple[str, str, str, str, str]:
+    final_mode = str(final_state.get("mode", "")).strip()
+    report_ready = codex_report_is_ready(report_path)
+    report_file = repo_relative(report_path) if report_ready else ""
+
+    if report_ready and final_mode == "codex_done":
+        return (
+            "report_ready_for_archive",
+            "ready_for_archive",
+            report_file,
+            "Issue-centric Codex launch completed and the existing codex_done flow produced a report ready for archive.",
+            "completed",
+        )
+    if report_ready:
+        return (
+            "report_ready_for_recovery",
+            "ready_for_recovery",
+            report_file,
+            "Issue-centric Codex launch completed and a report is ready, but the final mode was not codex_done. The existing report recovery / archive path can take over next.",
+            "completed",
+        )
+    if final_mode == "codex_running" and bool(final_state.get("need_codex_run")):
+        return (
+            "delegated_to_existing_codex_wait",
+            "waiting_for_report",
+            "",
+            "Issue-centric Codex launch was handed off to the existing codex_running wait / poll path.",
+            "completed",
+        )
+    return (
+        "handoff_incomplete",
+        "not_ready",
+        "",
+        "Issue-centric Codex launch returned, but the bridge did not reach codex_running or codex_done and no report was ready. This slice stops before continuation can proceed.",
+        "blocked",
     )
 
 

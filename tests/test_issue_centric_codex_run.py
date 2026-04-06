@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import _bridge_common  # noqa: E402
+import archive_codex_report  # noqa: E402
 import fetch_next_prompt  # noqa: E402
 import issue_centric_codex_launch  # noqa: E402
 import issue_centric_codex_run  # noqa: E402
@@ -285,6 +287,8 @@ class CodexRunLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             temp_root = Path(tmp)
             prompt_path = temp_root / "codex_prompt.md"
+            report_path = temp_root / "codex_report.md"
+            report_path.write_text("# Report\n\nbody\n", encoding="utf-8")
 
             def fake_save_state(state: dict[str, object]) -> None:
                 saved_states.append(dict(state))
@@ -321,6 +325,7 @@ class CodexRunLaunchTests(unittest.TestCase):
                 repo_relative=lambda path: path.name,
                 launch_runner=fake_launch_runner,
                 runtime_prompt_path_fn=lambda _config=None: prompt_path,
+                runtime_report_path_fn=lambda: report_path,
                 write_text_fn=lambda path, text: path.write_text(text, encoding="utf-8"),
                 save_state_fn=fake_save_state,
                 load_state_fn=fake_load_state,
@@ -329,6 +334,9 @@ class CodexRunLaunchTests(unittest.TestCase):
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.launch_status, "launched")
             self.assertEqual(result.launch_entrypoint, "launch_codex_once.run")
+            self.assertEqual(result.continuation_status, "report_ready_for_archive")
+            self.assertEqual(result.report_status, "ready_for_archive")
+            self.assertEqual(result.report_file, str(report_path.resolve()))
             self.assertEqual(result.final_mode, "codex_done")
             self.assertEqual(len(launch_calls), 1)
             prompt_text = prompt_path.read_text(encoding="utf-8")
@@ -336,10 +344,14 @@ class CodexRunLaunchTests(unittest.TestCase):
             self.assertIn("target issue: https://github.com/example/repo/issues/20", prompt_text)
             self.assertIn("trigger comment: https://github.com/example/repo/issues/20#issuecomment-701", prompt_text)
             self.assertIn("Run this body.", prompt_text)
+            self.assertIn("## Report Handoff", prompt_text)
             self.assertEqual(saved_states[-1]["last_issue_centric_launch_status"], "launched")
             self.assertEqual(saved_states[-1]["last_issue_centric_launch_entrypoint"], "launch_codex_once.run")
+            self.assertEqual(saved_states[-1]["last_issue_centric_continuation_status"], "report_ready_for_archive")
+            self.assertEqual(saved_states[-1]["last_issue_centric_report_status"], "ready_for_archive")
             self.assertTrue(str(saved_states[-1]["last_issue_centric_launch_prompt_log"]).endswith(".md"))
             self.assertTrue(str(saved_states[-1]["last_issue_centric_launch_log"]).endswith(".json"))
+            self.assertTrue(str(saved_states[-1]["last_issue_centric_continuation_log"]).endswith(".json"))
 
     def test_launch_failure_preserves_trigger_comment_and_marks_blocked(self) -> None:
         prepared = self.prepared("#20", "Run this body.\n")
@@ -383,6 +395,7 @@ class CodexRunLaunchTests(unittest.TestCase):
 
             self.assertEqual(saved_states[-1]["last_issue_centric_launch_status"], "failed_after_trigger_comment")
             self.assertEqual(saved_states[-1]["last_issue_centric_launch_entrypoint"], "launch_codex_once.run")
+            self.assertEqual(saved_states[-1]["last_issue_centric_continuation_status"], "launch_failed_after_trigger_comment")
             self.assertIn("launch boom", str(saved_states[-1]["last_issue_centric_stop_reason"]))
 
     def test_launch_requires_assembled_payload(self) -> None:
@@ -411,6 +424,42 @@ class CodexRunLaunchTests(unittest.TestCase):
                 log_writer=TempLogWriter(REPO_ROOT / "logs"),
                 repo_relative=lambda path: path.name,
             )
+
+    def test_launch_can_delegate_to_existing_codex_wait_flow(self) -> None:
+        prepared = self.prepared("#20", "Run this body.\n")
+        execution = self.execution_result()
+        saved_states: list[dict[str, object]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            prompt_path = temp_root / "codex_prompt.md"
+
+            def fake_save_state(state: dict[str, object]) -> None:
+                saved_states.append(dict(state))
+
+            def fake_load_state() -> dict[str, object]:
+                latest = dict(saved_states[-1]) if saved_states else {}
+                latest.update({"mode": "codex_running", "need_codex_run": True})
+                return latest
+
+            result = issue_centric_codex_launch.launch_issue_centric_codex_run(
+                prepared,
+                execution,
+                state={"mode": "awaiting_user", "need_codex_run": False},
+                project_config={"worker_repo_path": "."},
+                log_writer=TempLogWriter(temp_root),
+                repo_relative=lambda path: path.name,
+                launch_runner=lambda state, argv: 0,
+                runtime_prompt_path_fn=lambda _config=None: prompt_path,
+                write_text_fn=lambda path, text: path.write_text(text, encoding="utf-8"),
+                save_state_fn=fake_save_state,
+                load_state_fn=fake_load_state,
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.continuation_status, "delegated_to_existing_codex_wait")
+            self.assertEqual(result.report_status, "waiting_for_report")
+            self.assertEqual(result.final_mode, "codex_running")
 
 
 class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
@@ -461,6 +510,10 @@ class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
             prompt_path=REPO_ROOT / "bridge" / "inbox" / "codex_prompt.md",
             prompt_log_path=REPO_ROOT / "logs" / "issue_centric_codex_prompt.md",
             launch_log_path=REPO_ROOT / "logs" / "issue_centric_launch.json",
+            continuation_status="report_ready_for_archive",
+            continuation_log_path=REPO_ROOT / "logs" / "issue_centric_continuation.json",
+            report_status="ready_for_archive",
+            report_file="bridge/outbox/codex_report.md",
             final_mode="codex_done",
             safe_stop_reason="codex_run trigger comment and launch completed.",
         )
@@ -506,6 +559,10 @@ class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
             self.assertEqual(saved["last_issue_centric_launch_entrypoint"], "launch_codex_once.run")
             self.assertEqual(saved["last_issue_centric_launch_log"], "logs/issue_centric_launch.json")
+            self.assertEqual(saved["last_issue_centric_continuation_status"], "report_ready_for_archive")
+            self.assertEqual(saved["last_issue_centric_continuation_log"], "logs/issue_centric_continuation.json")
+            self.assertEqual(saved["last_issue_centric_report_status"], "ready_for_archive")
+            self.assertEqual(saved["last_issue_centric_report_file"], "bridge/outbox/codex_report.md")
 
     def test_fetch_next_prompt_records_blocked_codex_run_reason(self) -> None:
         state = {
@@ -616,6 +673,83 @@ class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(BridgeError, "launch failed"):
                     fetch_next_prompt.run(dict(state), [])
+
+
+class IssueCentricContinuationArchiveTests(unittest.TestCase):
+    def test_archive_marks_issue_centric_report_as_ready_for_next_request(self) -> None:
+        state = {
+            "mode": "codex_done",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "cycle": 3,
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_trigger_comment_url": "https://github.com/example/repo/issues/20#issuecomment-701",
+            "last_issue_centric_launch_status": "launched",
+            "last_issue_centric_launch_log": "logs/launch.json",
+            "last_issue_centric_continuation_log": "logs/continuation.json",
+        }
+        saved_states: list[dict[str, object]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            outbox_path = temp_root / "codex_report.md"
+            history_dir = temp_root / "history"
+            outbox_path.write_text("# Report\n\nbody\n", encoding="utf-8")
+
+            def fake_log_text(prefix: str, content: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(content, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(archive_codex_report, "runtime_report_path", return_value=outbox_path),
+                patch.object(archive_codex_report, "runtime_history_dir", return_value=history_dir),
+                patch.object(archive_codex_report, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(archive_codex_report, "log_text", side_effect=fake_log_text),
+            ):
+                rc = archive_codex_report.run(dict(state))
+
+            self.assertEqual(rc, 0)
+            saved = saved_states[-1]
+            self.assertEqual(saved["mode"], "idle")
+            self.assertTrue(saved["need_chatgpt_next"])
+            self.assertEqual(saved["last_issue_centric_continuation_status"], "archived_for_next_request")
+            self.assertEqual(saved["last_issue_centric_report_status"], "archived")
+            self.assertIn("codex_report_cycle_0004_", saved["last_issue_centric_report_file"])
+            self.assertTrue(str(saved["last_issue_centric_continuation_log"]).endswith(".md"))
+
+    def test_next_request_builder_keeps_issue_centric_target_issue_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            template_path = temp_root / "request_template.md"
+            template_path.write_text("STATE\n{CURRENT_STATUS}\n", encoding="utf-8")
+
+            request = _bridge_common.build_chatgpt_request(
+                state={
+                    "mode": "idle",
+                    "need_chatgpt_prompt": False,
+                    "need_chatgpt_next": True,
+                    "need_codex_run": False,
+                    "last_issue_centric_action": "codex_run",
+                    "last_issue_centric_target_issue": "#20",
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                    "last_issue_centric_trigger_comment_url": "https://github.com/example/repo/issues/20#issuecomment-701",
+                    "last_issue_centric_continuation_status": "archived_for_next_request",
+                    "last_issue_centric_report_status": "archived",
+                    "last_issue_centric_report_file": "bridge/history/codex_report_cycle_0004_sample.md",
+                },
+                template_path=template_path,
+                next_todo="next",
+                open_questions="none",
+                last_report="===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+            )
+
+            self.assertIn("last_issue_centric_target_issue: #20", request)
+            self.assertIn("last_issue_centric_trigger_comment_url: https://github.com/example/repo/issues/20#issuecomment-701", request)
+            self.assertIn("last_issue_centric_continuation_status: archived_for_next_request", request)
+            self.assertIn("last_issue_centric_report_status: archived", request)
 
 
 if __name__ == "__main__":

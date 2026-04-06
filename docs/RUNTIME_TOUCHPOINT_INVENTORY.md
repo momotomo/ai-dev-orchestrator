@@ -154,6 +154,11 @@ During this inventory phase, all of the following stay unchanged:
     existing `launch_codex_once` entrypoint with an issue-centric adapter after
     trigger-comment registration, while still stopping short of close,
     follow-up, review automation, or any broader state-machine rewrite
+  - the current continuation slice goes one step farther again: it reuses the
+    existing `codex_running` / `codex_done` / report recovery / archive /
+    next-request preparation flow after issue-centric launch, while still
+    leaving close, follow-up, review automation, Project updates, and any full
+    cutover out of scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

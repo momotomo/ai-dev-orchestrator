@@ -25,6 +25,9 @@ The current implementation boundary is:
 - implemented: narrow issue-centric Codex launch wiring that turns the
   assembled `repo / target_issue / request / trigger_comment` payload into a
   runtime prompt and delegates to the existing `launch_codex_once` entrypoint
+- implemented: narrow continuation handoff from issue-centric `codex_run`
+  launch into the existing `codex_running` / `codex_done` / report archive /
+  next-request preparation flow
 - not yet implemented: bridge-side issue close execution
 - not yet implemented: close / follow-up mutation or review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -175,11 +178,16 @@ For the first bounded `codex_run` execution slice:
   Codex prompt from it
 - that prompt may be delegated to the existing `launch_codex_once` entrypoint
   without changing the larger runtime state machine
+- after launch, the bridge may reuse the existing `codex_running` wait /
+  `codex_done` / report archive / next-request preparation path rather than
+  introducing a separate issue-centric completion loop
 - the launch slice must make it clear whether comment registration succeeded,
   whether prompt materialization succeeded, and whether the existing launch
   entrypoint was reached
-- the current implementation still stops after the first Codex run completes or
-  fails; it does not yet automate close / follow-up / review decisions
+- the continuation slice must make it clear whether the existing wait / report /
+  archive path has taken over
+- the current implementation still does not automate close / follow-up / review
+  decisions after that continuation handoff
 
 The BASE64 requirement is part of the agreed design because the bridge should
 not rely on visible-text extraction or copy-button behavior to preserve
@@ -220,8 +228,10 @@ and repo docs as the durable sources it reads directly.
 The current implementation can now prepare the decoded body, register it as the
 trigger comment, assemble the downstream launch payload, and hand that payload
 to the existing `launch_codex_once` entrypoint through a narrow adapter.
+It can also hand the resulting execution back to the existing
+`codex_running` / `codex_done` / report archive / next-request path.
 It has **not** yet implemented issue-centric close / follow-up mutation,
-review automation, or a full runtime cutover.
+review automation, Projects update, or a full runtime cutover.
 
 ### Codex To Bridge Output
 

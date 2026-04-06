@@ -172,6 +172,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_launch_entrypoint": "",
                 "last_issue_centric_launch_prompt_log": "",
                 "last_issue_centric_launch_log": "",
+                "last_issue_centric_continuation_status": "",
+                "last_issue_centric_continuation_log": "",
+                "last_issue_centric_report_status": "",
+                "last_issue_centric_report_file": "",
                 "last_issue_centric_project_sync_status": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
@@ -317,6 +321,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                         else ""
                     ),
                     "last_issue_centric_launch_log": repo_relative(launch_result.launch_log_path),
+                    "last_issue_centric_continuation_status": launch_result.continuation_status,
+                    "last_issue_centric_continuation_log": repo_relative(launch_result.continuation_log_path),
+                    "last_issue_centric_report_status": launch_result.report_status,
+                    "last_issue_centric_report_file": launch_result.report_file,
                     "last_issue_centric_stop_reason": launch_result.safe_stop_reason,
                     "chatgpt_decision_note": launch_result.safe_stop_reason,
                 }
@@ -325,9 +333,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             trigger_note = ""
             if execution.created_comment is not None:
                 trigger_note = f" trigger comment: {execution.created_comment.url}"
-            raise BridgeStop(
+            stop_label = (
                 "issue-centric contract reply を検出し、codex_run を既存 Codex launch 入口へ narrow 接続しました。"
-                f" decision log: {repo_relative(decision_log)}"
+                if launch_result.status == "completed"
+                else "issue-centric contract reply を検出し、codex_run launch 後の continuation handoff で停止しました。"
+            )
+            raise BridgeStop(
+                stop_label
+                + f" decision log: {repo_relative(decision_log)}"
                 f" metadata: {repo_relative(materialized.metadata_log_path)}"
                 + (
                     f" artifact: {repo_relative(materialized.artifact_log_path)}"
@@ -342,8 +355,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 )
                 + f" prompt: {repo_relative(launch_result.prompt_log_path)}"
                 + f" launch: {repo_relative(launch_result.launch_log_path)}"
+                + f" continuation: {repo_relative(launch_result.continuation_log_path)}"
                 + trigger_note
                 + f" final mode: {launch_result.final_mode or 'unknown'}"
+                + f" continuation status: {launch_result.continuation_status}"
                 + " close_current_issue / follow-up mutation / review automation はまだ未実装です。"
             )
 
