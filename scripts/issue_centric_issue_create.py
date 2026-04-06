@@ -91,7 +91,8 @@ def execute_issue_create_action(
         project_sync_note = "Created the issue without Project placement because no GitHub Project was configured."
         safe_stop_reason = (
             f"issue_create is implemented through GitHub issue creation. Created issue #{created_issue.number}. "
-            "Project placement, close_current_issue execution, create_followup_issue mutation, and Codex dispatch remain unimplemented."
+            "Project placement, create_followup_issue mutation, and Codex dispatch remain unimplemented. "
+            "close_current_issue may run as a separate follow-up mutation in the bridge."
         )
         execution_status = "completed"
     except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
@@ -145,7 +146,7 @@ def execute_issue_create_action(
             "note": project_sync_note,
         },
         "next_step": (
-            "Implement Project placement / state sync / follow-up and close execution after this slice."
+            "Implement Project placement / state sync / follow-up after this slice."
         ),
         "safe_stop_reason": safe_stop_reason,
     }

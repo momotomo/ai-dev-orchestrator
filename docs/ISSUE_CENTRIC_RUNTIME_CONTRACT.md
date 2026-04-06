@@ -28,7 +28,9 @@ The current implementation boundary is:
 - implemented: narrow continuation handoff from issue-centric `codex_run`
   launch into the existing `codex_running` / `codex_done` / report archive /
   next-request preparation flow
-- not yet implemented: bridge-side issue close execution
+- implemented: narrow `close_current_issue` mutation for safe `no_action`
+  closes and for `issue_create` closes that run only after the new issue is
+  created successfully
 - not yet implemented: close / follow-up mutation or review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
 
@@ -201,6 +203,23 @@ Apply these additional rules:
   the close itself
 - `summary` is a short explanation of what the bridge should do next
 
+For the current bounded `close_current_issue` slice:
+
+- `action = issue_create` and `close_current_issue = true` runs close only
+  after the new issue-create mutation succeeds
+- `action = no_action` and `close_current_issue = true` is allowed as a narrow
+  "close only" path
+- `action = codex_run` and `close_current_issue = true` is blocked in this
+  slice before any `codex_run` mutation proceeds
+- `action = human_review_needed` and `close_current_issue = true` is blocked in
+  this slice because human judgment is still required
+- if the bridge cannot safely resolve the close target issue from the decision
+  target or the current issue-centric state, it must stop before mutation
+- if the issue is already closed, the bridge records a no-op close result
+  instead of sending another close mutation
+- if `github_project_url` is configured, this slice stops before close mutation
+  because Project state sync is not implemented yet
+
 ## Bridge To Codex Contract
 
 ### Bridge To Codex Input
@@ -230,8 +249,9 @@ trigger comment, assemble the downstream launch payload, and hand that payload
 to the existing `launch_codex_once` entrypoint through a narrow adapter.
 It can also hand the resulting execution back to the existing
 `codex_running` / `codex_done` / report archive / next-request path.
-It has **not** yet implemented issue-centric close / follow-up mutation,
-review automation, Projects update, or a full runtime cutover.
+It has **not** yet implemented issue-centric `close_current_issue` for
+`codex_run`, follow-up mutation, review automation, Projects update, or a full
+runtime cutover.
 
 ### Codex To Bridge Output
 
@@ -275,6 +295,9 @@ After review, the intended outcomes are:
 - keep the current issue open and continue on the same issue
 - create a follow-up issue
 - stop for explicit human judgment
+
+In the current bounded implementation, close mutation is only wired for
+`no_action` and for the post-success `issue_create` path.
 
 ## State Model
 
@@ -339,8 +362,10 @@ finished:
 
 - parser / dispatcher execution wiring beyond extraction, validation, and
   internal decision normalization
-- bridge-side issue create / close execution
-- BODY-base64 transport parsing for the new ChatGPT body blocks
+- bridge-side follow-up mutation, full close automation for every action, and
+  Projects-aware close / state sync
+- BODY-base64 transport execution beyond the bounded `issue_create`,
+  `codex_run`, and `close_current_issue` slices
 - large state-machine redesign
 - a full ChatGPT-side or Codex-side switch to the new contract
 

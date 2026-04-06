@@ -91,6 +91,12 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_report_status": "",
     "last_issue_centric_report_file": "",
     "last_issue_centric_project_sync_status": "",
+    "last_issue_centric_close_status": "",
+    "last_issue_centric_close_log": "",
+    "last_issue_centric_closed_issue_number": "",
+    "last_issue_centric_closed_issue_url": "",
+    "last_issue_centric_closed_issue_title": "",
+    "last_issue_centric_close_order": "",
     "last_issue_centric_stop_reason": "",
     "pause": False,
     "error": False,
@@ -1275,6 +1281,18 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_report_file: {state['last_issue_centric_report_file']}")
     if state.get("last_issue_centric_project_sync_status"):
         fields.append(f"- last_issue_centric_project_sync_status: {state['last_issue_centric_project_sync_status']}")
+    if state.get("last_issue_centric_close_status"):
+        fields.append(f"- last_issue_centric_close_status: {state['last_issue_centric_close_status']}")
+    if state.get("last_issue_centric_close_log"):
+        fields.append(f"- last_issue_centric_close_log: {state['last_issue_centric_close_log']}")
+    if state.get("last_issue_centric_closed_issue_number"):
+        fields.append(f"- last_issue_centric_closed_issue_number: {state['last_issue_centric_closed_issue_number']}")
+    if state.get("last_issue_centric_closed_issue_url"):
+        fields.append(f"- last_issue_centric_closed_issue_url: {state['last_issue_centric_closed_issue_url']}")
+    if state.get("last_issue_centric_closed_issue_title"):
+        fields.append(f"- last_issue_centric_closed_issue_title: {state['last_issue_centric_closed_issue_title']}")
+    if state.get("last_issue_centric_close_order"):
+        fields.append(f"- last_issue_centric_close_order: {state['last_issue_centric_close_order']}")
     if state.get("last_issue_centric_stop_reason"):
         fields.append(f"- last_issue_centric_stop_reason: {state['last_issue_centric_stop_reason']}")
     if state.get("error_message"):

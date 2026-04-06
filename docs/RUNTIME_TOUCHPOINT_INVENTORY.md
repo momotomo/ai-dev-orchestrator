@@ -159,6 +159,11 @@ During this inventory phase, all of the following stay unchanged:
     next-request preparation flow after issue-centric launch, while still
     leaving close, follow-up, review automation, Project updates, and any full
     cutover out of scope
+  - the current close slice goes one step farther again: it wires
+    `close_current_issue` as a narrow post-action mutation only for
+    `no_action` closes and for `issue_create` closes that run after successful
+    issue creation, while still leaving follow-up mutation, review automation,
+    Project updates, and any broader cutover out of scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

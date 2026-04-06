@@ -35,6 +35,7 @@ from _bridge_common import (
     write_text,
 )
 from issue_centric_codex_launch import launch_issue_centric_codex_run
+from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_contract import (
     IssueCentricContractError,
     maybe_parse_issue_centric_reply,
@@ -114,6 +115,48 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     except IssueCentricContractError as exc:
         raise BridgeError(f"issue-centric contract reply が不正でした: {exc}") from exc
     if contract_decision is not None:
+        def apply_close_execution_state(
+            target_state: dict[str, object],
+            *,
+            close_execution: object,
+        ) -> None:
+            target_state.update(
+                {
+                    "last_issue_centric_close_status": close_execution.close_status,
+                    "last_issue_centric_close_log": repo_relative(close_execution.execution_log_path),
+                    "last_issue_centric_closed_issue_number": (
+                        str(close_execution.issue_after.number)
+                        if close_execution.issue_after is not None
+                        else (
+                            str(close_execution.issue_before.number)
+                            if close_execution.issue_before is not None
+                            else ""
+                        )
+                    ),
+                    "last_issue_centric_closed_issue_url": (
+                        close_execution.issue_after.url
+                        if close_execution.issue_after is not None
+                        else (
+                            close_execution.issue_before.url
+                            if close_execution.issue_before is not None
+                            else ""
+                        )
+                    ),
+                    "last_issue_centric_closed_issue_title": (
+                        close_execution.issue_after.title
+                        if close_execution.issue_after is not None
+                        else (
+                            close_execution.issue_before.title
+                            if close_execution.issue_before is not None
+                            else ""
+                        )
+                    ),
+                    "last_issue_centric_close_order": close_execution.close_order,
+                    "last_issue_centric_stop_reason": close_execution.safe_stop_reason,
+                    "chatgpt_decision_note": close_execution.safe_stop_reason,
+                }
+            )
+
         decision_log = log_text(
             "extracted_issue_centric_contract",
             contract_decision.render_debug_markdown(),
@@ -177,6 +220,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_report_status": "",
                 "last_issue_centric_report_file": "",
                 "last_issue_centric_project_sync_status": "",
+                "last_issue_centric_close_status": "",
+                "last_issue_centric_close_log": "",
+                "last_issue_centric_closed_issue_number": "",
+                "last_issue_centric_closed_issue_url": "",
+                "last_issue_centric_closed_issue_title": "",
+                "last_issue_centric_close_order": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
         )
@@ -215,6 +264,28 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "chatgpt_decision_note": execution.safe_stop_reason,
                 }
             )
+            close_note = ""
+            if contract_decision.close_current_issue and execution.status == "completed":
+                close_execution = execute_close_current_issue(
+                    materialized.prepared,
+                    prior_state=state,
+                    project_config=project_config,
+                    repo_path=project_repo_path(project_config),
+                    source_decision_log=repo_relative(decision_log),
+                    source_metadata_log=repo_relative(materialized.metadata_log_path),
+                    source_action_execution_log=repo_relative(execution.execution_log_path),
+                    log_writer=log_text,
+                    repo_relative=repo_relative,
+                )
+                apply_close_execution_state(mutable_state, close_execution=close_execution)
+                close_note = f" close log: {repo_relative(close_execution.execution_log_path)}"
+            elif contract_decision.close_current_issue:
+                mutable_state.update(
+                    {
+                        "last_issue_centric_close_status": "not_attempted_primary_action_blocked",
+                        "last_issue_centric_close_order": "after_issue_create",
+                    }
+                )
             save_state(mutable_state)
             issue_note = ""
             if execution.created_issue is not None:
@@ -233,7 +304,35 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 )
                 + f" execution: {repo_relative(execution.execution_log_path)}"
                 + issue_note
-                + " close_current_issue / follow-up issue mutation / Project placement / Codex dispatch はまだ未実装です。"
+                + close_note
+                + " create_followup_issue mutation / Project placement / Codex dispatch はまだ未実装です。"
+            )
+
+        if contract_decision.action.value == "codex_run" and contract_decision.close_current_issue:
+            project_config = load_project_config()
+            close_execution = execute_close_current_issue(
+                materialized.prepared,
+                prior_state=state,
+                project_config=project_config,
+                repo_path=project_repo_path(project_config),
+                source_decision_log=repo_relative(decision_log),
+                source_metadata_log=repo_relative(materialized.metadata_log_path),
+                source_action_execution_log="",
+                log_writer=log_text,
+                repo_relative=repo_relative,
+            )
+            apply_close_execution_state(mutable_state, close_execution=close_execution)
+            save_state(mutable_state)
+            raise BridgeStop(
+                "issue-centric contract reply を検出しましたが、codex_run + close_current_issue はこの slice では安全に実行できないため停止しました。"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + (
+                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                    if materialized.artifact_log_path is not None
+                    else ""
+                )
+                + f" close: {repo_relative(close_execution.execution_log_path)}"
             )
 
         if contract_decision.action.value == "codex_run":
@@ -359,13 +458,41 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 + trigger_note
                 + f" final mode: {launch_result.final_mode or 'unknown'}"
                 + f" continuation status: {launch_result.continuation_status}"
-                + " close_current_issue / follow-up mutation / review automation はまだ未実装です。"
+                + " close_current_issue for codex_run / follow-up mutation / review automation はまだ未実装です。"
+            )
+
+        if contract_decision.close_current_issue and contract_decision.action.value in {"no_action", "human_review_needed"}:
+            project_config = load_project_config()
+            close_execution = execute_close_current_issue(
+                materialized.prepared,
+                prior_state=state,
+                project_config=project_config,
+                repo_path=project_repo_path(project_config),
+                source_decision_log=repo_relative(decision_log),
+                source_metadata_log=repo_relative(materialized.metadata_log_path),
+                source_action_execution_log="",
+                log_writer=log_text,
+                repo_relative=repo_relative,
+            )
+            apply_close_execution_state(mutable_state, close_execution=close_execution)
+            save_state(mutable_state)
+            raise BridgeStop(
+                "issue-centric contract reply を検出し、close_current_issue の最小 mutation slice まで実行しました。"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + f" close: {repo_relative(close_execution.execution_log_path)}"
+                + (
+                    f" action: {contract_decision.action.value}"
+                    if contract_decision.action.value != "no_action"
+                    else ""
+                )
+                + " create_followup_issue mutation / review automation / Projects update はまだ未実装です。"
             )
 
         save_state(mutable_state)
         raise BridgeStop(
             "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"
-            " issue create / close 実行、GitHub mutation、Codex 実行接続、state machine 切替はまだ未実装です。"
+            " issue create / codex_run / close_current_issue の narrow execution 以外、GitHub mutation の広い接続、state machine 切替はまだ未実装です。"
             f" raw dump: {repo_relative(raw_log)}"
             f" decision log: {repo_relative(decision_log)}"
             f" metadata: {repo_relative(materialized.metadata_log_path)}"

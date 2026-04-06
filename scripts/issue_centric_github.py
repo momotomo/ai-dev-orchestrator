@@ -40,6 +40,15 @@ class ResolvedGitHubIssue:
     source_ref: str
 
 
+@dataclass(frozen=True)
+class GitHubIssueSnapshot:
+    number: int
+    url: str
+    title: str
+    repository: str
+    state: str
+
+
 def resolve_github_repository(
     *,
     project_config: Mapping[str, Any],
@@ -204,15 +213,53 @@ def create_github_issue_comment(
     )
 
 
+def fetch_github_issue(
+    repository: str,
+    issue_number: int,
+    token: str,
+) -> GitHubIssueSnapshot:
+    payload_obj = _github_api_request(
+        method="GET",
+        url=f"https://api.github.com/repos/{repository}/issues/{issue_number}",
+        token=token,
+        payload=None,
+        context="GitHub issue fetch",
+    )
+    return _parse_issue_snapshot(
+        payload_obj,
+        repository=repository,
+        context="GitHub issue fetch",
+    )
+
+
+def close_github_issue(
+    repository: str,
+    issue_number: int,
+    token: str,
+) -> GitHubIssueSnapshot:
+    payload_obj = _github_api_request(
+        method="PATCH",
+        url=f"https://api.github.com/repos/{repository}/issues/{issue_number}",
+        token=token,
+        payload={"state": "closed"},
+        context="GitHub issue close",
+    )
+    return _parse_issue_snapshot(
+        payload_obj,
+        repository=repository,
+        context="GitHub issue close",
+    )
+
+
 def _github_api_request(
     *,
     method: str,
     url: str,
     token: str,
-    payload: dict[str, object],
+    payload: dict[str, object] | None,
     context: str,
 ) -> dict[str, object]:
-    encoded = json.dumps(payload).encode("utf-8")
+    encoded = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(
         url,
         data=encoded,
@@ -243,3 +290,31 @@ def _github_api_request(
     if not isinstance(payload_obj, dict):
         raise IssueCentricGitHubError(f"{context} returned a non-object JSON payload.")
     return payload_obj
+
+
+def _parse_issue_snapshot(
+    payload_obj: Mapping[str, Any],
+    *,
+    repository: str,
+    context: str,
+) -> GitHubIssueSnapshot:
+    number = payload_obj.get("number")
+    html_url = payload_obj.get("html_url")
+    returned_title = payload_obj.get("title")
+    returned_state = payload_obj.get("state")
+    if (
+        not isinstance(number, int)
+        or not isinstance(html_url, str)
+        or not isinstance(returned_title, str)
+        or not isinstance(returned_state, str)
+    ):
+        raise IssueCentricGitHubError(
+            f"{context} response is missing number / html_url / title / state."
+        )
+    return GitHubIssueSnapshot(
+        number=number,
+        url=html_url,
+        title=returned_title,
+        repository=repository,
+        state=returned_state,
+    )
