@@ -17,10 +17,11 @@ Mark what this PR touches:
 Please confirm the relevant items:
 
 - [ ] I did not silently change the assumption that ChatGPT Projects are required
-- [ ] I did not break the rule that the first ChatGPT request is user-authored and remains the source of truth
+- [ ] I did not contradict the documented source-of-truth split between ready issues, repo docs, and implementation records
+- [ ] If I touched the current first-request path, I called out whether it is still a user-authored runtime entry / override path
 - [ ] If I changed prompt / request behavior, I called out whether same-chat default still holds
 - [ ] If I changed handoff / new-chat behavior, I called out whether heavy-chat / late-completion preprocessing semantics changed
-- [ ] If I changed docs or guidance, I kept README / CONTRIBUTING / SECURITY / runbook wording aligned
+- [ ] If I changed docs or guidance, I kept README / CONTRIBUTING / SECURITY / `docs/ISSUE_CENTRIC_FLOW.md` / runbook wording aligned
 
 ## Validation
 

@@ -1,0 +1,115 @@
+# Issue-Centric Flow
+
+This document defines the source-of-truth layers for the phased move toward
+issue-centric operation in `ai-dev-orchestrator`.
+
+It is a transition document, not a claim that the bridge runtime is already
+fully migrated. The current first-party path remains:
+
+- ChatGPT Projects
+- Safari on macOS
+- Codex CLI
+
+This repository is still a narrow first-party workflow, not a generic browser
+automation framework.
+
+## Why This Exists
+
+Normal operation is being re-centered around a ready issue as the execution
+unit. The goal is to let the bridge carry issue numbers and state transitions
+instead of acting as a long-form meaning transport between tools.
+
+Phase 1 in this repository is docs-first:
+
+- redefine source of truth in repo docs
+- add minimal ready-issue and completion-comment templates
+- align README and contribution guidance
+
+This phase does **not** yet change:
+
+- bridge runtime implementation
+- bridge state machine behavior
+- same-chat as the default continuation mode
+- handoff / new-chat as the exception path
+- the Safari fetch wait assumptions of 1800 seconds normal wait and 600
+  seconds extended wait
+
+## Source-Of-Truth Layers
+
+Use the following layers consistently:
+
+- Upstream design source of truth: ChatGPT Projects design context
+- Execution-unit source of truth: ready issue
+- Permanent rules source of truth: repository docs
+- Implementation-result source of truth: PRs, commits, and issue completion
+  comments
+
+A ready issue is the smallest execution unit that is explicit enough for one
+Codex implementation phase without needing a second hidden task definition.
+
+## Current Runtime Relationship
+
+The current bridge runtime still has a user-authored first-request path.
+
+When that path is used:
+
+- the operator still types the initial ChatGPT request body
+- the bridge still appends its fixed reply contract
+- the typed body is the runtime input source for that send
+
+That does **not** replace the issue-centric source-of-truth model above.
+
+During this transition, normal operation should treat the ready issue as the
+execution-unit source of truth, while the current first-request path remains a
+runtime entry path until bridge changes land.
+
+In practice, if the bridge still asks for an initial free-form request, that
+request should usually reference the ready issue instead of redefining the task
+from scratch.
+
+## Normal Flow During The Transition
+
+1. Use ChatGPT Projects for upstream design context, tradeoffs, and planning.
+2. Capture the next Codex-sized execution unit in a ready issue.
+3. Use repository docs for durable operating rules and constraints.
+4. Run the current first-party path on ChatGPT Projects + macOS Safari +
+   Codex CLI.
+5. If a first request or override is needed, point it at the ready issue rather
+   than inventing a parallel source of truth.
+6. Record implementation results in commits, PRs, and an issue completion
+   comment.
+
+## Bridge Direction
+
+The bridge should move toward orchestration based on issue identifiers and
+state, not long prose hand-carried across turns.
+
+That means the long-term direction is:
+
+- bridge carries issue number, state, and routing metadata
+- ready issue carries the execution-unit meaning
+- repo docs carry stable rules
+- completion comments and Git history carry the outcome
+
+## Defaults And Exceptions
+
+The intended defaults remain:
+
+- same-chat by default
+- handoff / new-chat only as an exception path
+- Safari timeout assumptions unchanged
+
+The intended issue-centric operating model also means:
+
+- normal operation should not require a mandatory free-form initial user input
+- an override path may still remain for exceptions, recovery, or exploratory
+  work
+- unsupported paths continue to have no behavioral guarantee and remain at the
+  operator's own risk
+
+## Templates
+
+Use these repo templates as the minimal starting point:
+
+- [Ready issue template](../.github/ISSUE_TEMPLATE/ready_issue.md)
+- [Codex completion comment template](templates/CODEX_COMPLETION_COMMENT_TEMPLATE.md)

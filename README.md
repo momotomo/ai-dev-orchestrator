@@ -23,10 +23,15 @@ If you want to try the bridge once without learning the whole runtime model firs
 python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
 ```
 
-4. On the first request only, type the ChatGPT instruction **yourself**.
+4. With the current bridge runtime, on the first request only, type the ChatGPT
+   instruction **yourself**.
 5. Let the bridge continue, and if it stops, use `--status` or `--doctor` before retrying.
 
-The first request body is not auto-generated. What you type there is the source of truth.
+The first request body is still not auto-generated in the current runtime.
+During the phased move toward issue-centric normal operation, the ready issue is
+the intended execution-unit source of truth while this first-request path
+remains a runtime entry path. See
+[docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
 
 Before you start, it is often worth spending a few manual messages in ChatGPT to align the task size, constraints, and what should count as a single Codex phase.
 
@@ -40,7 +45,8 @@ This bridge is for people who want to keep a long-running implementation loop go
 The normal loop is:
 
 1. you start the bridge
-2. on the first request only, you write the initial ChatGPT instruction yourself
+2. on the first request only in the current runtime, you write the initial
+   ChatGPT instruction yourself
 3. ChatGPT returns the next Codex prompt
 4. Codex runs once and writes a report
 5. the bridge sends that report back to ChatGPT
@@ -62,7 +68,8 @@ Poor fit:
 - you want a generic browser automation framework
 - you want API-first or headless execution
 - you want strong guarantees or unattended reliability
-- you do not want to manually author the first request
+- you do not want any operator-authored first-request or override path in the
+  current runtime
 - you want the tool to decide project structure or task granularity for you
 
 ## Important Assumptions
@@ -112,17 +119,19 @@ For example, before starting the bridge, you may want to:
 
 That usually produces better one-phase prompts and smoother bridge runs.
 
-## First Request Example
+## Current First Request Example
 
-The first request should be short, concrete, and written by you.
+If you are using the current first-request path, keep it short, concrete, and
+written by you. During the issue-centric transition, it should usually point to
+the ready issue instead of restating the whole task from scratch.
 
 You can usually start from something like this:
 
 ```text
 Target project: melody-craft-studio
 Target repo: /Users/you/projects/melody-craft-studio
-Current theme: sample browser wording cleanup
-Goal: keep the change small and avoid schema / resolver / playback changes
+Ready issue: #123 sample browser wording cleanup
+Use the ready issue as the execution-unit source of truth
 Please return the next one-phase Codex prompt.
 ```
 
@@ -130,8 +139,8 @@ Or even shorter:
 
 ```text
 Target repo: /Users/you/projects/melody-craft-studio
-What I want next: one small UI polish phase in the sample browser only
-Do not touch playback or export
+Ready issue: #123
+Use the ready issue and keep the next phase inside the sample browser only
 Please return the next one-phase Codex prompt.
 ```
 
@@ -234,12 +243,12 @@ The normal day-one flow is:
 
 After that, continuation is normally report-based.
 
-## First Request: User-Authored Source of Truth
+## First Request In The Current Runtime
 
-The first ChatGPT request is special.
+The current bridge runtime still treats the first ChatGPT request as special.
 
 - The bridge does **not** auto-generate it from stale internal state.
-- The text you type is the source of truth.
+- The text you type is the runtime input source for that first send.
 - The bridge keeps your body as-is.
 - The bridge only appends the fixed reply contract needed for parsing.
 
@@ -248,7 +257,15 @@ In other words:
 - you write the actual intent
 - the bridge adds only the machine-readable reply contract
 
-This is important because it keeps the origin of the first request explicit and reviewable.
+This is important because it keeps the origin of the first request explicit and
+reviewable.
+
+During the issue-centric transition, this typed first request does **not**
+replace the repo-level source-of-truth model. For normal operation, the
+execution-unit source of truth is the ready issue described in
+[docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md), while the current
+first-request path remains a runtime entry path or override path until bridge
+changes land.
 
 If the first request is vague, the whole loop usually degrades. It is worth making that first instruction concrete.
 
@@ -263,6 +280,23 @@ That means:
 - ChatGPT returns the next one-phase prompt
 
 So the flow becomes increasingly automatic after the first user-authored request.
+
+## Issue-Centric Transition
+
+This repository is moving in phases toward issue-centric normal operation.
+
+Source of truth is being separated like this:
+
+- ChatGPT Projects design context: upstream design source of truth
+- ready issue: execution-unit source of truth
+- repo docs: permanent rules source of truth
+- PRs / commits / issue completion comments: implementation-result source of truth
+
+The current bridge runtime still keeps same-chat as the default, keeps
+handoff / new-chat as the exception path, and still has the user-authored
+first-request path until runtime changes land. Unsupported paths still have no
+behavioral guarantee. See
+[docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
 
 ## Same-Chat by Default
 
@@ -482,6 +516,7 @@ If you need the deeper runtime behavior, see:
 - [bridge/README_BRIDGE_FLOW.md](bridge/README_BRIDGE_FLOW.md)
 - [bridge/run_one_cycle.md](bridge/run_one_cycle.md)
 - [bridge/browser_notes.md](bridge/browser_notes.md)
+- [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md) for the phased issue-centric source-of-truth model and template entry points
 - [docs/OSS_PUBLISHING_CHECKLIST.md](docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
 - [docs/GITHUB_METADATA_PROPOSAL.md](docs/GITHUB_METADATA_PROPOSAL.md) for GitHub description / website / topics candidate wording
 - [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and bug-report expectations
