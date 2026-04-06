@@ -142,6 +142,10 @@ During this inventory phase, all of the following stay unchanged:
   - the next bounded Plan A transport slice can decode allowed BASE64 payloads
     into UTF-8 prepared artifacts and still stop safely before any issue
     mutation or execution wiring is added
+  - the next bounded execution slice after that can connect only
+    `action=issue_create` to a narrow GitHub issue-create mutation while still
+    leaving close, follow-up, review automation, Codex dispatch, and Project
+    placement out of scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

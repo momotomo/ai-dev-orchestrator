@@ -19,7 +19,8 @@ The current implementation boundary is:
 
 - implemented: parser / validator / normalizer front-end
 - implemented: BASE64 payload decode into prepared runtime artifacts
-- not yet implemented: bridge-side issue create / close execution
+- implemented: narrow `issue_create` execution from decoded `CHATGPT_ISSUE_BODY`
+- not yet implemented: bridge-side issue close execution
 - not yet implemented: BODY payload use for GitHub mutation or Codex launch
 - not yet implemented: large state-machine rewrite or full contract cutover
 
@@ -145,6 +146,18 @@ For the current bounded transport implementation:
 - a payload that decodes to the empty string is treated as invalid
 - invalid BASE64 and invalid UTF-8 are reported as different transport errors
 
+For the first bounded `issue_create` execution slice:
+
+- the decoded `CHATGPT_ISSUE_BODY` must use a narrow draft rule
+- the first non-empty line must be a level-1 heading of the form `# Title`
+- that H1 becomes the GitHub issue title
+- the remaining text becomes the GitHub issue body
+- an empty title or empty remaining body is rejected before mutation
+- if `github_project_url` is configured, this slice stops before mutation
+  because Project placement is not implemented yet
+- if no Project is configured, the bridge may use issue-only fallback for the
+  create step
+
 The BASE64 requirement is part of the agreed design because the bridge should
 not rely on visible-text extraction or copy-button behavior to preserve
 markdown fidelity in future implementation phases.
@@ -180,6 +193,8 @@ When ChatGPT returns `CHATGPT_CODEX_BODY`, the bridge should decode that body
 and register it as a comment on the target issue before Codex runs.
 Codex should then treat the issue body, issue comments, `AGENTS.md` if present,
 and repo docs as the durable sources it reads directly.
+
+The current implementation has **not** connected that Codex-side step yet.
 
 ### Codex To Bridge Output
 

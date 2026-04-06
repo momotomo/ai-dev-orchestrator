@@ -14,10 +14,12 @@ from _bridge_common import (
     clear_pending_request_fields,
     extract_last_chatgpt_reply,
     guarded_main,
+    load_project_config,
     load_state,
     log_text,
     mark_next_request_requires_rotation,
     next_request_rotation_reason,
+    project_repo_path,
     read_pending_request_text,
     read_text,
     repo_relative,
@@ -39,6 +41,7 @@ from issue_centric_transport import (
     IssueCentricTransportError,
     materialize_issue_centric_decision,
 )
+from issue_centric_issue_create import execute_issue_create_action
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -153,9 +156,71 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     if materialized.prepared.primary_body is not None
                     else ""
                 ),
+                "last_issue_centric_execution_status": "",
+                "last_issue_centric_execution_log": "",
+                "last_issue_centric_created_issue_number": "",
+                "last_issue_centric_created_issue_url": "",
+                "last_issue_centric_created_issue_title": "",
+                "last_issue_centric_project_sync_status": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
         )
+
+        if contract_decision.action.value == "issue_create":
+            project_config = load_project_config()
+            execution = execute_issue_create_action(
+                materialized.prepared,
+                project_config=project_config,
+                repo_path=project_repo_path(project_config),
+                source_decision_log=repo_relative(decision_log),
+                source_metadata_log=repo_relative(materialized.metadata_log_path),
+                source_artifact_path=(
+                    repo_relative(materialized.artifact_log_path)
+                    if materialized.artifact_log_path is not None
+                    else ""
+                ),
+                log_writer=log_text,
+                repo_relative=repo_relative,
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_execution_status": execution.status,
+                    "last_issue_centric_execution_log": repo_relative(execution.execution_log_path),
+                    "last_issue_centric_created_issue_number": (
+                        str(execution.created_issue.number) if execution.created_issue is not None else ""
+                    ),
+                    "last_issue_centric_created_issue_url": (
+                        execution.created_issue.url if execution.created_issue is not None else ""
+                    ),
+                    "last_issue_centric_created_issue_title": (
+                        execution.created_issue.title if execution.created_issue is not None else ""
+                    ),
+                    "last_issue_centric_project_sync_status": execution.project_sync_status,
+                    "last_issue_centric_stop_reason": execution.safe_stop_reason,
+                    "chatgpt_decision_note": execution.safe_stop_reason,
+                }
+            )
+            save_state(mutable_state)
+            issue_note = ""
+            if execution.created_issue is not None:
+                issue_note = (
+                    f" created issue: #{execution.created_issue.number} "
+                    f"{execution.created_issue.url}"
+                )
+            raise BridgeStop(
+                "issue-centric contract reply を検出し、issue_create の最小 execution slice まで実行しました。"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + (
+                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                    if materialized.artifact_log_path is not None
+                    else ""
+                )
+                + f" execution: {repo_relative(execution.execution_log_path)}"
+                + issue_note
+                + " close_current_issue / follow-up issue mutation / Project placement / Codex dispatch はまだ未実装です。"
+            )
+
         save_state(mutable_state)
         raise BridgeStop(
             "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"

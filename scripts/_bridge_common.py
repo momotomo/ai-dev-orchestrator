@@ -73,6 +73,12 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_metadata_log": "",
     "last_issue_centric_artifact_file": "",
     "last_issue_centric_artifact_kind": "",
+    "last_issue_centric_execution_status": "",
+    "last_issue_centric_execution_log": "",
+    "last_issue_centric_created_issue_number": "",
+    "last_issue_centric_created_issue_url": "",
+    "last_issue_centric_created_issue_title": "",
+    "last_issue_centric_project_sync_status": "",
     "last_issue_centric_stop_reason": "",
     "pause": False,
     "error": False,
@@ -102,6 +108,8 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "worker_repo_path": ".",
     "worker_repo_marker_mode": "strict",
     "worker_repo_markers": [],
+    "github_repository": "",
+    "github_project_url": "",
     "codex_bin": "codex",
     "codex_model": "",
     "codex_sandbox": "",
@@ -1115,6 +1123,8 @@ def load_project_config() -> dict[str, Any]:
     _require_project_config_text(config, "codex_bin")
     _require_project_config_text(config, "codex_model", allow_empty=True)
     _require_project_config_text(config, "codex_sandbox", allow_empty=True)
+    _require_project_config_text(config, "github_repository", allow_empty=True)
+    _require_project_config_text(config, "github_project_url", allow_empty=True)
     _validate_project_timeout(config)
     _require_project_config_text(config, "report_request_next_todo")
     _require_project_config_text(config, "report_request_open_questions")
@@ -1217,6 +1227,18 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_artifact_file: {state['last_issue_centric_artifact_file']}")
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
+    if state.get("last_issue_centric_execution_status"):
+        fields.append(f"- last_issue_centric_execution_status: {state['last_issue_centric_execution_status']}")
+    if state.get("last_issue_centric_execution_log"):
+        fields.append(f"- last_issue_centric_execution_log: {state['last_issue_centric_execution_log']}")
+    if state.get("last_issue_centric_created_issue_number"):
+        fields.append(f"- last_issue_centric_created_issue_number: {state['last_issue_centric_created_issue_number']}")
+    if state.get("last_issue_centric_created_issue_url"):
+        fields.append(f"- last_issue_centric_created_issue_url: {state['last_issue_centric_created_issue_url']}")
+    if state.get("last_issue_centric_created_issue_title"):
+        fields.append(f"- last_issue_centric_created_issue_title: {state['last_issue_centric_created_issue_title']}")
+    if state.get("last_issue_centric_project_sync_status"):
+        fields.append(f"- last_issue_centric_project_sync_status: {state['last_issue_centric_project_sync_status']}")
     if state.get("last_issue_centric_stop_reason"):
         fields.append(f"- last_issue_centric_stop_reason: {state['last_issue_centric_stop_reason']}")
     if state.get("error_message"):

@@ -6,6 +6,8 @@
   "worker_repo_markers": [
     "go.mod"
   ],
+  "github_repository": "",
+  "github_project_url": "",
   "codex_bin": "codex",
   "codex_model": "",
   "codex_sandbox": "",
