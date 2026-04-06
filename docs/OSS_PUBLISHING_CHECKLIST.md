@@ -9,6 +9,12 @@ It is intentionally short and practical:
 - what depends on external services or local environment
 
 Use [README.md](../README.md) for product-level explanation.
+Use [docs/ISSUE_CENTRIC_FLOW.md](ISSUE_CENTRIC_FLOW.md) when checking the
+phased issue-centric source-of-truth model.
+Use [docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md](GITHUB_ISSUE_PROJECTS_OPERATIONS.md)
+when checking GitHub-side issue and review operations.
+Use [docs/ISSUE_CENTRIC_SEED_ISSUES.md](ISSUE_CENTRIC_SEED_ISSUES.md) when
+checking seed backlog and ready-promotion design.
 Use this file when you are deciding whether the repository is ready to publish.
 
 ## 1. What Codex Can Prepare Inside This Repo
@@ -72,7 +78,13 @@ Before calling the repo “ready”, confirm:
 
 Before publishing, confirm the repo still clearly says all of the following:
 
-- the first ChatGPT request is user-authored and is the source of truth
+- the issue-centric source-of-truth layers are explicit:
+  - ChatGPT Projects design context for upstream design
+  - ready issues for execution units
+  - repo docs for permanent rules
+  - PRs / commits / issue completion comments for implementation results
+- the current first ChatGPT request path is user-authored when that runtime path is used
+- the current first-request path is explained as a transitional runtime / override path, not as a contradiction to ready-issue normal operation
 - the bridge appends reply contracts but does not invent the first task body
 - the tool is safety-biased but not guaranteed safe
 - the tool can consume Codex usage aggressively
@@ -123,7 +135,7 @@ You are probably ready to publish when all of these are true:
 
 - README explains what the tool is and is not
 - the normal entry point is clearly `scripts/start_bridge.py`
-- the first-request ownership model is obvious
+- the phased relationship between ready issues and the current first-request path is obvious
 - same-chat default and handoff/new-chat preprocessing behavior are explained
 - major failure modes are called out
 - manual responsibilities are separated from Codex-owned changes
