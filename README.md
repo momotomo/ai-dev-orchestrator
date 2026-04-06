@@ -48,6 +48,30 @@ This means the normal entry is `ready`-issue-first even though the current
 bridge runtime still uses a user-authored first request when that runtime path
 is exercised.
 
+## Exception / Recovery / Override Path During The Transition
+
+Free-form initial input is still allowed in the current runtime, but it is not
+the normal operator entry.
+
+Use it only when one of these narrow cases applies:
+
+1. the backlog is not yet curated enough and you need one small exploratory
+   phase before writing the next issue cleanly
+2. an urgent one-point correction needs one bounded pass before the backlog can
+   be updated normally
+3. the bridge stopped in a way that needs a short recovery clarification before
+   the same issue-centric flow can continue
+4. an override is needed to steer the current runtime back toward the intended
+   `ready` issue or backlog home
+
+When you do use free-form input:
+
+- keep it short and bounded to one phase
+- point back to the current `ready` issue when one exists
+- if there is no `ready` issue yet, name the intended backlog or issue home so
+  the result can return there afterward
+- do not use the text to silently replace the normal `ready`-issue-first path
+
 Before you start, it is often worth spending a few manual messages in ChatGPT to align the task size, constraints, and what should count as a single Codex phase.
 
 ## What This Tool Is For
@@ -136,11 +160,13 @@ That usually produces better one-phase prompts and smoother bridge runs.
 
 ## Current First Request / Override Example
 
-If you are using the current first-request path, keep it short, concrete, and
-written by you. During the issue-centric transition, it should usually point to
-the ready issue instead of restating the whole task from scratch.
+If you are using the current first-request path in one of the exception /
+recovery / override cases above, keep it short, concrete, and written by you.
+During the issue-centric transition, it should usually point to the ready issue
+instead of restating the whole task from scratch.
 By the time you type this message, you should already know the current `ready`
-issue or have just promoted one from the `planned` backlog.
+issue, have just promoted one from the `planned` backlog, or know which backlog
+home the exploratory or recovery result should return to.
 
 You can usually start from something like this:
 
@@ -162,6 +188,10 @@ Please return the next one-phase Codex prompt.
 ```
 
 The bridge sends your body as written and appends only the reply contract it needs for parsing.
+
+If there is not yet a `ready` issue because you are in a genuine exception or
+recovery case, say that plainly and keep the request limited to one bounded
+exploratory or corrective pass.
 
 ## Environment Requirements
 

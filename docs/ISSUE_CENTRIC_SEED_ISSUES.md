@@ -80,7 +80,7 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - none
+  - [#15 Ready: document free-form initial input as the exception, recovery, and override path](https://github.com/momotomo/ai-dev-orchestrator/issues/15)
 - Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
   - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
@@ -108,6 +108,8 @@ promotion.
   and returning the open `ready` queue to zero
 - `#14` adds the smallest public example of finishing the normal
   operator-entry slice under planned parent `#5`
+- `#15` is the current open ready example for the exception / recovery /
+  override-path slice under planned parent `#6`
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -128,11 +130,14 @@ In the current public set:
 - `#11` is the completed calibration example
 - `#5` remains the flexible planned parent for operator-entry wording
 - `#14` is the completed ready child for the normal operator-entry slice
+- `#6` remains the flexible planned parent for exception / recovery / override
+  wording
+- `#15` is the current open ready child for the exception / recovery /
+  override-path slice
 - `#8` remains the flexible planned parent for promotion-cadence work
 - `#12` is the completed ready child for the backlog-cadence slice
-- the open `ready` queue may return to zero after `#14` while the next bounded
-  direct target is reconsidered
-- `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
+- the open `ready` queue currently points to `#15` as the next direct target
+- `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and later-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues
 
@@ -308,7 +313,8 @@ issues.
   - override use does not blur the normal ready-issue path
   - unsupported paths remain operator-risk paths, not maintained guarantees
 - Likely future ready slices:
-  - one docs slice for override-path rules
+  - one docs slice for override-path rules, including when free-form input is
+    still allowed and how it must return to backlog / issue truth afterward
   - one runtime-inventory slice that maps override usage to future changes
 
 ### Seed 03

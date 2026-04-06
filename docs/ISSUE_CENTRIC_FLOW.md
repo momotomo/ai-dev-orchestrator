@@ -66,6 +66,9 @@ runtime entry path until bridge changes land.
 In practice, if the bridge still asks for an initial free-form request, that
 request should usually reference the ready issue instead of redefining the task
 from scratch.
+If there is no current `ready` issue in a genuine exception or recovery case,
+the request should still stay bounded and name the intended backlog or issue
+home the result should return to.
 
 ## Current Operator Entry During The Transition
 
@@ -81,6 +84,30 @@ Use the operator entry in this order:
 
 This keeps the normal entry centered on the `ready` issue even while the
 current runtime still has a user-authored first-request path.
+
+## Minimal Exception / Recovery / Override Cases
+
+Free-form initial input is still allowed in the current runtime, but only as an
+exception path.
+
+Use it only when at least one of these narrow cases applies:
+
+- backlog curation is not ready yet and one exploratory Codex-sized pass is
+  needed before the next issue can be written clearly
+- an urgent one-point correction needs one bounded pass before the backlog can
+  be updated normally
+- the bridge or operator flow needs a short recovery clarification after an
+  abnormal stop, `human_review`, `need_info`, or similar interruption
+- a temporary override is needed to steer the runtime back toward the intended
+  `ready` issue or backlog home
+
+When this path is used:
+
+- keep the request short and bounded to one phase
+- point back to the current `ready` issue when one exists
+- if no `ready` issue exists yet, name the intended backlog or issue home
+- return the outcome to backlog / issue truth afterward instead of letting the
+  free-form text become a parallel long-lived task definition
 
 ## Normal Flow During The Transition
 
@@ -118,7 +145,7 @@ The intended issue-centric operating model also means:
 
 - normal operation should not require a mandatory free-form initial user input
 - an override path may still remain for exceptions, recovery, or exploratory
-  work
+  work, but it should stay bounded and return to backlog / issue truth
 - unsupported paths continue to have no behavioral guarantee and remain at the
   operator's own risk
 
