@@ -32,6 +32,8 @@ report-based.
 
 This inventory should make it easier to cut the next bounded runtime-ready
 issues without smuggling in a broad rewrite.
+For the current agreed interface shape those slices should converge toward, see
+[ISSUE_CENTRIC_RUNTIME_CONTRACT.md](ISSUE_CENTRIC_RUNTIME_CONTRACT.md).
 
 The first bounded implementation child cut from this inventory is
 [#20](https://github.com/momotomo/ai-dev-orchestrator/issues/20), now a
@@ -207,7 +209,8 @@ ready-issue-first:
 - changing how the initial request is scaffolded or sourced
 - carrying ready-issue or backlog-home identity through report-based
   continuation
-- extending request provenance beyond `initial:` / `report:` / `handoff:`
+- extending request provenance beyond `ready_issue:` / `override:` /
+  `report:` / `handoff:`
 - updating operator-facing runtime wording so it matches the new behavior
 
 The following should stay deferred until later runtime phases:

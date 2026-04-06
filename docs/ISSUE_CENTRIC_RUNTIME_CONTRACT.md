@@ -1,0 +1,254 @@
+# Issue-Centric Runtime Contract
+
+This document records the current agreed design contract for the phased move
+toward issue-centric runtime operation in `ai-dev-orchestrator`.
+
+Use this document as the runtime / interface contract source of truth for
+follow-up implementation work.
+Use [ISSUE_CENTRIC_FLOW.md](ISSUE_CENTRIC_FLOW.md) for source-of-truth layers,
+[GITHUB_ISSUE_PROJECTS_OPERATIONS.md](GITHUB_ISSUE_PROJECTS_OPERATIONS.md) for
+GitHub-side operating rules, and
+[RUNTIME_TOUCHPOINT_INVENTORY.md](RUNTIME_TOUCHPOINT_INVENTORY.md) for the
+staging boundaries that led to this contract.
+
+This is still a design document.
+It does **not** claim that the full contract below is already implemented in
+the bridge runtime.
+
+## Overall Assumptions
+
+Use these assumptions consistently:
+
+- the `ready` issue is the execution-unit source of truth
+- the backlog may use three layers: `Epic -> planned parent -> ready`
+  implementation issue
+- Codex directly implements only the `ready` implementation issue
+- the current open `ready` count should usually stay at `0` or `1`
+- ChatGPT is the judgment and review authority
+- the bridge is the execution and routing authority
+- Codex is the implementation authority for one bounded `ready` issue
+- the first-party path remains `ChatGPT Projects + macOS Safari + Codex CLI`
+- `same-chat` remains the default continuation mode
+- `handoff / new chat` remains the exception path
+- Safari timeout expectations remain `1800 + 600`
+- `submitted_unconfirmed` and `pending_request_signal` remain important current
+  delivery-safety signals
+- unsupported paths remain best-effort and at the operator's own risk
+
+The bridge should continue moving toward issue-aware orchestration, not toward
+becoming a generic long-form meaning transport between tools.
+
+## Role Split
+
+Use the three actors like this:
+
+- ChatGPT: decide the next bounded slice, review completed work, and decide
+  close / continue / follow-up outcomes
+- bridge: carry the contract fields, execute the runtime steps, and perform the
+  eventual issue-create / issue-close side effects
+- Codex: implement one `ready` issue, then leave the result back on that issue
+
+## Bridge To ChatGPT Contract
+
+### Bridge To ChatGPT Input
+
+The bridge should send only this minimum structured context:
+
+- `repo`
+- `target_issue`
+- `request`
+
+Use `target_issue` like this:
+
+- `target_issue = none`: ask ChatGPT to decide the next bounded issue-level
+  action
+- `target_issue = <issue number or issue URL>`: ask ChatGPT to review that
+  issue and decide whether to continue, close, or split follow-up work
+
+`request` is the human-readable instruction for the current turn.
+The bridge may still add its parser contract, but it should avoid adding extra
+hidden task definition beyond these fields.
+
+### ChatGPT To Bridge Output
+
+ChatGPT should return:
+
+1. one JSON envelope
+2. optional body blocks
+
+The JSON envelope should include at least:
+
+- `action`
+- `target_issue`
+- `close_current_issue`
+- `create_followup_issue`
+- `summary`
+
+`action` is limited to:
+
+- `issue_create`
+- `codex_run`
+- `no_action`
+- `human_review_needed`
+
+Use the optional body blocks below:
+
+- `CHATGPT_ISSUE_BODY`
+- `CHATGPT_CODEX_BODY`
+- `CHATGPT_REVIEW`
+
+Use them under these rules:
+
+- `CHATGPT_ISSUE_BODY` appears only when `action = issue_create`
+- `CHATGPT_CODEX_BODY` appears only when `action = codex_run`
+- `CHATGPT_REVIEW` appears only when ChatGPT actually performed review
+- all three body blocks are BASE64-encoded body payloads
+
+The BASE64 requirement is part of the agreed design because the bridge should
+not rely on visible-text extraction or copy-button behavior to preserve
+markdown fidelity in future implementation phases.
+
+Apply these additional rules:
+
+- when `target_issue = none`, `action = codex_run` is not allowed
+- `create_followup_issue` is a helper flag, not a separate action
+- `close_current_issue` means close is appropriate, not that ChatGPT performs
+  the close itself
+- `summary` is a short explanation of what the bridge should do next
+
+## Bridge To Codex Contract
+
+### Bridge To Codex Input
+
+The bridge should send Codex this minimum context:
+
+- `repo`
+- `target_issue`
+- `request`
+- `trigger_comment` (optional)
+
+`request` should stay natural-language, but it should instruct Codex to:
+
+- confirm the target issue
+- inspect issue comments when needed
+- inspect `AGENTS.md` if present
+- inspect repo docs
+- follow the repo's Git operating rules
+
+When ChatGPT returns `CHATGPT_CODEX_BODY`, the bridge should decode that body
+and register it as a comment on the target issue before Codex runs.
+Codex should then treat the issue body, issue comments, `AGENTS.md` if present,
+and repo docs as the durable sources it reads directly.
+
+### Codex To Bridge Output
+
+Codex should return:
+
+- `result`
+- `target_issue`
+- `summary`
+
+`result` is limited to:
+
+- `completed`
+- `consultation_needed`
+- `blocked`
+- `failed`
+
+Use those results with these meanings:
+
+- `completed`: Codex left a completion report comment on the issue
+- `consultation_needed`: Codex left a consultation comment on the issue
+- `blocked`: Codex left a blocked-reason comment on the issue
+- `failed`: a bridge or runtime execution failure happened before a valid issue
+  outcome was recorded
+
+## End-To-End Transition Summary
+
+The intended high-level flow is:
+
+1. if `target_issue = none`, ChatGPT normally returns `issue_create`
+2. after `issue_create`, the bridge creates the new issue and treats that new
+   issue as the current execution target
+3. `codex_run` means implement or re-implement an already chosen target issue
+4. after Codex returns `completed`, control goes back to ChatGPT review
+5. after `consultation_needed` or `blocked`, control also goes back to ChatGPT
+   judgment
+6. `failed` means runtime abnormality, not an issue-state decision
+
+After review, the intended outcomes are:
+
+- close the current issue and create the next issue
+- keep the current issue open and continue on the same issue
+- create a follow-up issue
+- stop for explicit human judgment
+
+## State Model
+
+The minimum state model stays:
+
+- `planned`
+- `ready`
+- `in_progress`
+- `review`
+- `done`
+- `blocked`
+
+Use them like this:
+
+- `planned`: candidate or parent work that may still be split or merged
+- `ready`: one bounded implementation issue that Codex may directly execute
+- `in_progress`: implementation is currently underway
+- `review`: completion exists and ChatGPT review is pending or active
+- `done`: accepted result with coherent issue history
+- `blocked`: execution cannot continue safely without outside change
+
+## GitHub Projects And Issue-Only Fallback
+
+If a GitHub Project is specified for the workflow, manage runtime-adjacent
+backlog state through that Project.
+If no Project is specified, use issue-only fallback.
+
+When Projects are used:
+
+- `State` is the mandatory canonical state field
+- `Kind` and `Track` may be useful, but they are recommended fields, not
+  required fields
+
+When Projects are not used:
+
+- `state:*` labels are the canonical fallback state system
+- small issue labels such as `type:epic`, `track:runtime`, `track:ops`, and
+  `track:docs` remain acceptable issue-only helpers
+
+If both a Project `State` field and `state:*` labels exist, keep them aligned
+and treat the Project `State` field as the canonical state record.
+
+### Minimum State Mapping
+
+| Canonical state | GitHub Project `State` field | Issue-only fallback label |
+| --- | --- | --- |
+| planned | `planned` | `state:planned` |
+| ready | `ready` | `state:ready` |
+| in_progress | `in_progress` | `state:in_progress` |
+| review | `review` | `state:review` |
+| done | `done` | `state:done` |
+| blocked | `blocked` | `state:blocked` |
+
+## What This Contract Does Not Claim Yet
+
+This document records agreed design direction.
+It does **not** claim that the repository already implements all of the
+contract below.
+
+In particular, this document does **not** claim that the following are already
+finished:
+
+- bridge-side issue create / close execution
+- BODY-base64 transport parsing for the new ChatGPT body blocks
+- large state-machine redesign
+- a full ChatGPT-side or Codex-side switch to the new contract
+
+Until those implementation slices land, the current bridge/runtime behavior and
+current docs still describe the live system, while this document describes the
+agreed contract boundary for what comes next.
