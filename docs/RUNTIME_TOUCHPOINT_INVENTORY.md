@@ -137,6 +137,9 @@ During this inventory phase, all of the following stay unchanged:
     feasibility on top of this boundary
   - the observed feasibility verdict is recorded in
     `docs/MARKDOWN_FIDELITY_FEASIBILITY.md`
+  - the first Plan A front-end slice can safely stop after extracting and
+    validating the new JSON envelope plus opaque BASE64 body payloads, before
+    any issue mutation or execution wiring is added
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

@@ -76,6 +76,15 @@ ChatGPT should return:
 1. one JSON envelope
 2. optional body blocks
 
+The current parser / dispatcher front-end expects that envelope to be framed
+as:
+
+```text
+===CHATGPT_DECISION_JSON===
+{...}
+===END_DECISION_JSON===
+```
+
 The JSON envelope should include at least:
 
 - `action`
@@ -96,6 +105,22 @@ Use the optional body blocks below:
 - `CHATGPT_ISSUE_BODY`
 - `CHATGPT_CODEX_BODY`
 - `CHATGPT_REVIEW`
+
+The current parser framing for those blocks is:
+
+```text
+===CHATGPT_ISSUE_BODY===
+[BASE64 payload]
+===END_ISSUE_BODY===
+
+===CHATGPT_CODEX_BODY===
+[BASE64 payload]
+===END_CODEX_BODY===
+
+===CHATGPT_REVIEW===
+[BASE64 payload]
+===END_REVIEW===
+```
 
 Use them under these rules:
 
@@ -244,6 +269,8 @@ contract below.
 In particular, this document does **not** claim that the following are already
 finished:
 
+- parser / dispatcher execution wiring beyond extraction, validation, and
+  internal decision normalization
 - bridge-side issue create / close execution
 - BODY-base64 transport parsing for the new ChatGPT body blocks
 - large state-machine redesign

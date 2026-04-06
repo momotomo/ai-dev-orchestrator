@@ -7,6 +7,7 @@ from pathlib import Path
 
 from _bridge_common import (
     BridgeError,
+    BridgeStop,
     build_human_review_auto_continue_request,
     clear_chat_rotation_fields,
     clear_error_fields,
@@ -29,6 +30,10 @@ from _bridge_common import (
     should_rotate_before_next_chat_request,
     wait_for_prompt_reply_text,
     write_text,
+)
+from issue_centric_contract import (
+    IssueCentricContractError,
+    maybe_parse_issue_centric_reply,
 )
 
 
@@ -94,6 +99,22 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
         )
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
+    try:
+        contract_decision = maybe_parse_issue_centric_reply(raw_text, after_text=request_text or None)
+    except IssueCentricContractError as exc:
+        raise BridgeError(f"issue-centric contract reply が不正でした: {exc}") from exc
+    if contract_decision is not None:
+        decision_log = log_text(
+            "extracted_issue_centric_contract",
+            contract_decision.render_debug_markdown(),
+            suffix="md",
+        )
+        raise BridgeStop(
+            "issue-centric contract reply を検出しました。"
+            " parser / dispatcher の前段では action・target_issue・body blocks の抽出と検証までは完了していますが、"
+            " issue create / close 実行、BODY 利用本実装、state machine 切替はまだ未実装です。"
+            f" raw dump: {repo_relative(raw_log)} decision log: {repo_relative(decision_log)}"
+        )
     decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
     reply_body = decision.body if decision.kind == "codex_prompt" else (decision.raw_block or decision.note)
     reply_hash = stable_text_hash(f"{decision.kind}\n{reply_body.strip()}")
