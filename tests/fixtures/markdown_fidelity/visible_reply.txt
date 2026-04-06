@@ -1,0 +1,16 @@
+ChatGPT:
+Thought for 4s
+Heading
+bullet one
+bullet two
+Inline x sample.
+Python
+
+
+実行する
+print("hello")
+
+
+
+
+

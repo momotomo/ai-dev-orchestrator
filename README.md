@@ -34,6 +34,11 @@ accepts a ready issue reference as the normal entry while free-form first input
 remains an exception / recovery / override path. See
 [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
 
+The current runtime still reads ChatGPT replies from visible DOM text, which is
+not markdown-lossless. The bounded feasibility verdict for a copy-response
+alternative is recorded in
+[docs/MARKDOWN_FIDELITY_FEASIBILITY.md](docs/MARKDOWN_FIDELITY_FEASIBILITY.md).
+
 ## Normal Operator Entry During The Transition
 
 For normal operation, the operator should start here:

@@ -80,7 +80,7 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - none
+  - [#22 Ready: test markdown-fidelity copy-response feasibility for bridge reply extraction](https://github.com/momotomo/ai-dev-orchestrator/issues/22)
 - Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
   - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
@@ -121,6 +121,8 @@ promotion.
   implementation
 - `#20` adds the smallest public example of finishing the first bounded
   runtime-ready implementation slice under planned parent `#10`
+- `#22` is the current bounded ready child for deciding whether markdown
+  fidelity can use a Plan B copy-response path or should move to Plan A
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -157,9 +159,8 @@ In the current public set:
   slice
 - `#20` is the completed ready child for the first bounded runtime
   implementation slice at the initial entry boundary
-- the open `ready` queue has returned to zero after `#20`, so the next
-  runtime-adjacent slice should be chosen by backlog curation instead of
-  assumed automatically
+- `#22` is the current open ready child for reply-fidelity feasibility at the
+  extraction boundary
 - `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues
