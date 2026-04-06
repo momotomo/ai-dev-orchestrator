@@ -20,17 +20,18 @@ If you want to try the bridge once without learning the whole runtime model firs
 3. Run:
 
 ```bash
-python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --max-execution-count 6
+python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --ready-issue-ref '#123 short title' --max-execution-count 6
 ```
 
-4. With the current bridge runtime, on the first request only, type the ChatGPT
-   instruction **yourself**.
+4. Start the first runtime request from the current `ready` issue reference. If
+   you omit `--ready-issue-ref`, the runtime will ask for one and only falls
+   back to free-form first input when you intentionally use the override path.
 5. Let the bridge continue, and if it stops, use `--status` or `--doctor` before retrying.
 
-The first request body is still not auto-generated in the current runtime.
-During the phased move toward issue-centric normal operation, the ready issue is
-the intended execution-unit source of truth while this first-request path
-remains a runtime entry path. See
+The bridge still does not auto-fetch or deeply interpret GitHub issues.
+During the phased move toward issue-centric normal operation, the runtime now
+accepts a ready issue reference as the normal entry while free-form first input
+remains an exception / recovery / override path. See
 [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
 
 ## Normal Operator Entry During The Transition
@@ -41,12 +42,12 @@ For normal operation, the operator should start here:
 2. if one exists, use it as the direct execution-unit reference
 3. if none exists, review the `planned` backlog and promote the next bounded
    slice to one `ready` issue
-4. only then, if the current runtime still asks for an initial request or
-   override input, type a short request that points back to that `ready` issue
+4. start the bridge with `--ready-issue-ref`, or enter that reference when the
+   runtime prompts for it
+5. only use free-form first input when you intentionally need the override path
 
-This means the normal entry is `ready`-issue-first even though the current
-bridge runtime still uses a user-authored first request when that runtime path
-is exercised.
+This keeps the normal entry `ready`-issue-first while the current runtime still
+keeps a bounded free-form override path.
 
 ## Exception / Recovery / Override Path During The Transition
 
@@ -84,8 +85,8 @@ This bridge is for people who want to keep a long-running implementation loop go
 The normal loop is:
 
 1. you start the bridge
-2. on the first request only in the current runtime, you write the initial
-   ChatGPT instruction yourself
+2. on the first request in the current runtime, you normally provide the
+   current `ready` issue reference
 3. ChatGPT returns the next Codex prompt
 4. Codex runs once and writes a report
 5. the bridge sends that report back to ChatGPT
@@ -158,15 +159,21 @@ For example, before starting the bridge, you may want to:
 
 That usually produces better one-phase prompts and smoother bridge runs.
 
-## Current First Request / Override Example
+## Current Ready-Issue Entry / Override Example
 
-If you are using the current first-request path in one of the exception /
+For the normal path, start from the current `ready` issue reference directly:
+
+```bash
+python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/target-repo --ready-issue-ref '#123 sample browser wording cleanup' --max-execution-count 6
+```
+
+If you are using the free-form first-request path in one of the exception /
 recovery / override cases above, keep it short, concrete, and written by you.
 During the issue-centric transition, it should usually point to the ready issue
 instead of restating the whole task from scratch.
-By the time you type this message, you should already know the current `ready`
-issue, have just promoted one from the `planned` backlog, or know which backlog
-home the exploratory or recovery result should return to.
+By the time you type this override message, you should already know the current
+`ready` issue, have just promoted one from the `planned` backlog, or know which
+backlog home the exploratory or recovery result should return to.
 
 You can usually start from something like this:
 

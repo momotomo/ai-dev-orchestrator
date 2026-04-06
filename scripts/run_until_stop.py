@@ -55,7 +55,7 @@ DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
 def start_bridge_mode(state: dict[str, Any]) -> str:
     action = describe_next_action(state)
     if action == "request_next_prompt":
-        return "初回入力から始められます"
+        return "ready issue 参照から始められます"
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
         return "補足を入れて再開できます"
     if is_retryable_pending_handoff_error(state):
@@ -162,6 +162,8 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--next-todo", default="", help="report ベース request に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="report ベース request に渡す open_questions")
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
+    parser.add_argument("--ready-issue-ref", default="", help="通常入口で使う current ready issue の参照")
+    parser.add_argument("--request-body", default="", help="例外 / recovery / override 用の初回本文")
     parser.add_argument("--entry-script", default="scripts/run_until_stop.py", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
@@ -169,9 +171,19 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
 def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     action = describe_next_action(state)
     if action == "request_next_prompt":
+        if getattr(args, "request_body", "").strip():
+            return (
+                "このあと指定済みの free-form override 本文を使って最初の依頼を送ります。"
+                " 通常入口の ready issue 参照は今回だけ使いません。"
+            )
+        if getattr(args, "ready_issue_ref", "").strip():
+            return (
+                "このあと指定済みの current ready issue 参照を使って最初の依頼を組み立てます。"
+                " free-form 初回本文は override 用にだけ残しています。"
+            )
         return (
-            "このあと初回だけ、ChatGPT に送る本文入力を求めます。"
-            " 入力した本文がそのまま最初の依頼になり、bridge は固定の返答契約だけを足します。"
+            "このあと通常は current ready issue の参照を受けて最初の依頼を組み立てます。"
+            " ready issue を使えない時だけ free-form override 本文を入力し、bridge は固定の返答契約だけを足します。"
         )
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
         decision = str(state.get("chatgpt_decision", "")).strip()
@@ -287,6 +299,10 @@ def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--open-questions", args.open_questions])
     if args.current_status:
         command.extend(["--current-status", args.current_status])
+    if args.ready_issue_ref:
+        command.extend(["--ready-issue-ref", args.ready_issue_ref])
+    if args.request_body:
+        command.extend(["--request-body", args.request_body])
     return command
 
 
@@ -294,6 +310,10 @@ def format_runner_command(args: argparse.Namespace) -> str:
     command = ["python3", args.entry_script, "--max-execution-count", str(args.max_steps)]
     if args.worker_repo_path:
         command.extend(["--project-path", str(args.worker_repo_path)])
+    if args.ready_issue_ref:
+        command.extend(["--ready-issue-ref", str(args.ready_issue_ref)])
+    if args.request_body:
+        command.extend(["--request-body", str(args.request_body)])
     if args.stop_at_cycle_boundary:
         command.append("--stop-at-cycle-boundary")
     if args.sleep_seconds != DEFAULT_SLEEP_SECONDS:
@@ -315,6 +335,8 @@ def format_start_bridge_command(args: argparse.Namespace, mode: str = "run") -> 
     command = ["python3", "scripts/start_bridge.py"]
     if args.worker_repo_path:
         command.extend(["--project-path", str(args.worker_repo_path)])
+    if getattr(args, "ready_issue_ref", "").strip():
+        command.extend(["--ready-issue-ref", str(args.ready_issue_ref)])
     command.extend(["--max-execution-count", str(args.max_steps)])
     if mode == "status":
         command.append("--status")
@@ -347,7 +369,9 @@ def recommended_operator_step(
     if action in {"completed", "no_action"}:
         return ("追加操作なし", "なし")
     if action == "request_next_prompt":
-        return ("初回入力から開始", format_start_bridge_command(args, mode="run"))
+        if getattr(args, "request_body", "").strip():
+            return ("override 入力で開始", format_start_bridge_command(args, mode="run"))
+        return ("ready issue 参照で開始", format_start_bridge_command(args, mode="run"))
     if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
         return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
     if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
@@ -377,7 +401,10 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
             return f"{base} bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。"
         return "ChatGPT が Codex 不要と判断しました。人が次の判断を行ってください。"
     if action == "request_next_prompt":
-        return "Safari の current tab を対象チャットに合わせたまま再実行してください。初回だけ、表示される例文をもとに本文入力を行います。"
+        return (
+            "Safari の current tab を対象チャットに合わせたまま再実行してください。"
+            " 通常は current ready issue の参照で始め、ready issue を使えない時だけ free-form override を入力します。"
+        )
     if action == "fetch_next_prompt":
         if pending_request_signal == "submitted_unconfirmed":
             return (

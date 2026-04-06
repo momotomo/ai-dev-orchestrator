@@ -20,9 +20,17 @@ import run_until_stop  # noqa: E402
 from _bridge_common import present_bridge_handoff, present_bridge_status  # noqa: E402
 
 
-def make_args(project_path: str = "/tmp/repo", max_execution_count: int = 6) -> argparse.Namespace:
+def make_args(
+    project_path: str = "/tmp/repo",
+    max_execution_count: int = 6,
+    *,
+    ready_issue_ref: str = "",
+    request_body: str = "",
+) -> argparse.Namespace:
     return argparse.Namespace(
         project_path=project_path,
+        ready_issue_ref=ready_issue_ref,
+        request_body=request_body,
         max_execution_count=max_execution_count,
         status=False,
         resume=False,
@@ -32,7 +40,7 @@ def make_args(project_path: str = "/tmp/repo", max_execution_count: int = 6) -> 
 
 
 class HelpSmokeTest(unittest.TestCase):
-    def test_start_bridge_help_mentions_user_authored_first_request(self) -> None:
+    def test_start_bridge_help_mentions_ready_issue_normal_entry(self) -> None:
         result = subprocess.run(
             [sys.executable, "scripts/start_bridge.py", "--help"],
             cwd=REPO_ROOT,
@@ -42,14 +50,16 @@ class HelpSmokeTest(unittest.TestCase):
         )
         output = result.stdout
         self.assertIn("bridge の通常入口", output)
-        self.assertIn("初回 request の本文は自分で書きます", output)
+        self.assertIn("ready issue の参照を使います", output)
+        self.assertIn("--ready-issue-ref", output)
         self.assertIn("reply contract だけを追加します", output)
 
 
 class HumanFacingStatusTests(unittest.TestCase):
-    def test_first_request_waiting_uses_source_of_truth_wording(self) -> None:
+    def test_first_request_waiting_uses_ready_issue_entry_wording(self) -> None:
         view = present_bridge_status({"mode": "idle", "need_chatgpt_prompt": True})
-        self.assertEqual(view.label, "初回依頼文の入力待ち")
+        self.assertEqual(view.label, "ready issue参照で開始待ち")
+        self.assertIn("current ready issue", view.detail)
         self.assertIn("reply contract", view.detail)
 
     def test_same_chat_next_request_uses_preparation_wording(self) -> None:
@@ -242,6 +252,30 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertEqual(label, "そのまま再開")
         self.assertIn("--resume", command)
+
+    def test_request_next_prompt_recommends_ready_issue_entry(self) -> None:
+        args = run_until_stop.parse_args(
+            [
+                "--project-path",
+                "/tmp/repo",
+                "--max-execution-count",
+                "6",
+                "--entry-script",
+                "scripts/start_bridge.py",
+                "--ready-issue-ref",
+                "#20 runtime entry",
+            ],
+            {},
+        )
+        label, command = run_until_stop.recommended_operator_step(
+            args,
+            {
+                "mode": "idle",
+                "need_chatgpt_prompt": True,
+            },
+        )
+        self.assertEqual(label, "ready issue 参照で開始")
+        self.assertIn("--ready-issue-ref", command)
 
 
 if __name__ == "__main__":

@@ -49,26 +49,33 @@ Codex implementation phase without needing a second hidden task definition.
 
 ## Current Runtime Relationship
 
-The current bridge runtime still has a user-authored first-request path.
+The current bridge runtime now accepts a ready issue reference as the normal
+initial entry, while still keeping a user-authored free-form override path.
 
-When that path is used:
+When the normal runtime entry is used:
+
+- the operator passes a current `ready` issue reference
+- the bridge shapes only a minimal first request around that reference
+- the bridge still appends its fixed reply contract
+- the runtime records the send as a ready-entry provenance source
+
+When the free-form override path is used:
 
 - the operator still types the initial ChatGPT request body
 - the bridge still appends its fixed reply contract
-- the typed body is the runtime input source for that send
+- the typed body is the runtime input source for that override send
 
 That does **not** replace the issue-centric source-of-truth model above.
 
 During this transition, normal operation should treat the ready issue as the
-execution-unit source of truth, while the current first-request path remains a
-runtime entry path until bridge changes land.
+execution-unit source of truth, while the current runtime entry and override
+paths remain operational surfaces until further bridge changes land.
 
-In practice, if the bridge still asks for an initial free-form request, that
-request should usually reference the ready issue instead of redefining the task
-from scratch.
+In practice, normal operation should start from the current `ready` issue
+reference directly.
 If there is no current `ready` issue in a genuine exception or recovery case,
-the request should still stay bounded and name the intended backlog or issue
-home the result should return to.
+the override request should still stay bounded and name the intended backlog or
+issue home the result should return to.
 
 ## Current Operator Entry During The Transition
 
@@ -78,12 +85,13 @@ Use the operator entry in this order:
 2. if there is one, use that issue as the direct execution-unit reference
 3. if there is no open `ready` issue, review the `planned` backlog and promote
    the next bounded slice to one `ready` issue
-4. only after that, if the current runtime still asks for an initial request or
-   override input, type a short request that points back to the chosen `ready`
-   issue
+4. start the runtime with that ready issue reference, or enter it when the
+   runtime asks for it
+5. only if the runtime cannot use the normal entry, use a short override that
+   points back to the chosen `ready` issue
 
-This keeps the normal entry centered on the `ready` issue even while the
-current runtime still has a user-authored first-request path.
+This keeps the normal entry centered on the `ready` issue while the current
+runtime still preserves a bounded override path.
 
 ## Minimal Exception / Recovery / Override Cases
 

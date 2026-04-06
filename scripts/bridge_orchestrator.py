@@ -50,6 +50,8 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--next-todo", default="", help="request 系 script に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="request 系 script に渡す open_questions")
     parser.add_argument("--current-status", default="", help="request 系 script に渡す CURRENT_STATUS 上書き")
+    parser.add_argument("--ready-issue-ref", default="", help="request_next_prompt.py に渡す current ready issue 参照")
+    parser.add_argument("--request-body", default="", help="request_next_prompt.py に渡す override 用の初回本文")
     return parser.parse_args(argv)
 
 
@@ -73,6 +75,10 @@ def build_initial_request_argv(args: argparse.Namespace) -> list[str]:
     request_argv: list[str] = []
     if args.worker_repo_path:
         request_argv.extend(["--project-path", args.worker_repo_path])
+    if args.ready_issue_ref:
+        request_argv.extend(["--ready-issue-ref", args.ready_issue_ref])
+    if args.request_body:
+        request_argv.extend(["--request-body", args.request_body])
     return request_argv
 
 
@@ -124,7 +130,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         status = present_bridge_status(state)
-        print(f"{status.label}です。ChatGPT に送る最初の文面を入力すると、bridge が固定の返答契約を付けて送信します。")
+        print(
+            f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
+            " free-form 初回本文は override 用にだけ残しています。"
+        )
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
 
     if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
