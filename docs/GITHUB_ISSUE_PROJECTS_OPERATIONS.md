@@ -349,6 +349,7 @@ At minimum, the handoff packet should cover:
 - which files changed
 - what validation ran and what remains unverified
 - which review checks should be repeated explicitly
+- which workflow or runtime-boundary assumptions were kept or clarified
 - what follow-up or backlog-return decision is suggested
 - which branch, commit, or PR carries the implementation artifact
 
@@ -357,6 +358,8 @@ The packet should map cleanly into review-side checks:
 - `Summary` -> acceptance-criteria coverage
 - `Changed Files` and `Validation` -> diff and verification context
 - `Review Focus` -> explicit acceptance, scope, docs, and follow-up checks
+- `Workflow / Runtime Impact` -> which operator-entry, override, same-chat,
+  handoff, timeout, or runtime-boundary assumptions still hold
 - `Backlog Curation / Next-Ready Impact` -> whether open `ready` returns to
   zero and where follow-up belongs
 - `Remaining Issues` and `Branch / Commit / PR` -> unresolved items and review
@@ -398,6 +401,11 @@ afterward.
 The fifth public example is `#16`, promoted from parent `#9`.
 That example focuses on tightening the completion-to-review handoff itself so
 future review passes can reuse the same minimum packet more consistently.
+
+The sixth public example is `#18`, promoted from parent `#10`.
+That example keeps the work inventory-only while documenting which runtime
+touchpoints are real future migration boundaries and which runtime behaviors
+must stay unchanged until later slices.
 
 ## Done-To-Backlog-Reconsideration Pattern
 
