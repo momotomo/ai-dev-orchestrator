@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import json
-import os
-import re
-import subprocess
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from issue_centric_contract import IssueCentricAction
+from issue_centric_github import (
+    CreatedGitHubIssue,
+    IssueCentricGitHubError,
+    create_github_issue,
+    resolve_github_repository,
+    resolve_github_token,
+)
 from issue_centric_transport import PreparedIssueCentricDecision
 
 
@@ -26,14 +28,6 @@ class IssueCreateDraft:
     body: str
     title_line: str
     source_artifact_path: str
-
-
-@dataclass(frozen=True)
-class CreatedGitHubIssue:
-    number: int
-    url: str
-    title: str
-    repository: str
 
 
 @dataclass(frozen=True)
@@ -65,7 +59,6 @@ def execute_issue_create_action(
     if prepared.decision.action is not IssueCentricAction.ISSUE_CREATE:
         raise IssueCentricIssueCreateError("issue_create execution only accepts action=issue_create.")
 
-    env_map = env or os.environ
     now = (now_fn or _utcnow)()
     draft: IssueCreateDraft | None = None
     draft_log_path: Path | None = None
@@ -90,8 +83,8 @@ def execute_issue_create_action(
             )
             raise IssueCentricIssueCreateError(project_sync_note)
 
-        repository = resolve_github_repository(project_config=project_config, repo_path=repo_path)
-        token, token_source = resolve_github_token(env=env_map)
+        repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
+        token, token_source = resolve_github_token(env=env)
         creator = issue_creator or create_github_issue
         created_issue = creator(repository, draft.title, draft.body, token)
         project_sync_status = "issue_only_fallback"
@@ -101,7 +94,7 @@ def execute_issue_create_action(
             "Project placement, close_current_issue execution, create_followup_issue mutation, and Codex dispatch remain unimplemented."
         )
         execution_status = "completed"
-    except IssueCentricIssueCreateError as exc:
+    except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
         token_source = ""
         safe_stop_reason = (
             "issue_create execution stopped before full handoff completion. "
@@ -211,114 +204,6 @@ def materialize_issue_create_draft(
         title_line=title_line,
         source_artifact_path=source_artifact_path,
     )
-
-
-def resolve_github_repository(
-    *,
-    project_config: Mapping[str, Any],
-    repo_path: Path,
-) -> str:
-    configured = str(project_config.get("github_repository", "")).strip()
-    if configured:
-        return configured
-
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        raise IssueCentricIssueCreateError(
-            "GitHub repository could not be resolved. Set bridge/project_config.json `github_repository` or configure an origin remote."
-        ) from exc
-
-    remote_url = completed.stdout.strip()
-    if not remote_url:
-        raise IssueCentricIssueCreateError(
-            "GitHub repository could not be resolved because the origin remote is empty."
-        )
-    match = re.match(r"^(?:https://github\.com/|git@github\.com:)([^/]+/[^/]+?)(?:\.git)?$", remote_url)
-    if not match:
-        raise IssueCentricIssueCreateError(
-            f"Origin remote is not a supported GitHub remote URL: {remote_url}"
-        )
-    return match.group(1)
-
-
-def resolve_github_token(*, env: Mapping[str, str]) -> tuple[str, str]:
-    for name in ("AIDO_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
-        value = str(env.get(name, "")).strip()
-        if value:
-            return value, name
-
-    try:
-        completed = subprocess.run(
-            ["gh", "auth", "token"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        completed = None
-
-    if completed is not None:
-        token = completed.stdout.strip()
-        if token:
-            return token, "gh auth token"
-
-    raise IssueCentricIssueCreateError(
-        "GitHub token is unavailable. Set AIDO_GITHUB_TOKEN, GITHUB_TOKEN, or GH_TOKEN, or make `gh auth token` available."
-    )
-
-
-def create_github_issue(repository: str, title: str, body: str, token: str) -> CreatedGitHubIssue:
-    payload = json.dumps({"title": title, "body": body}).encode("utf-8")
-    request = urllib.request.Request(
-        f"https://api.github.com/repos/{repository}/issues",
-        data=payload,
-        method="POST",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "User-Agent": "ai-dev-orchestrator-bridge",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        raise IssueCentricIssueCreateError(
-            f"GitHub issue create failed with HTTP {exc.code}: {detail or exc.reason}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise IssueCentricIssueCreateError(f"GitHub issue create failed: {exc.reason}") from exc
-
-    try:
-        payload_obj = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise IssueCentricIssueCreateError("GitHub issue create returned invalid JSON.") from exc
-
-    number = payload_obj.get("number")
-    html_url = payload_obj.get("html_url")
-    returned_title = payload_obj.get("title")
-    if not isinstance(number, int) or not isinstance(html_url, str) or not isinstance(returned_title, str):
-        raise IssueCentricIssueCreateError(
-            "GitHub issue create response is missing number / html_url / title."
-        )
-
-    return CreatedGitHubIssue(
-        number=number,
-        url=html_url,
-        title=returned_title,
-        repository=repository,
-    )
-
-
 def _render_issue_draft_markdown(draft: IssueCreateDraft) -> str:
     return (
         "# Issue-Centric GitHub Issue Draft\n\n"

@@ -20,8 +20,11 @@ The current implementation boundary is:
 - implemented: parser / validator / normalizer front-end
 - implemented: BASE64 payload decode into prepared runtime artifacts
 - implemented: narrow `issue_create` execution from decoded `CHATGPT_ISSUE_BODY`
+- implemented: narrow `codex_run` execution from decoded `CHATGPT_CODEX_BODY`
+  through target-issue trigger comment creation
 - not yet implemented: bridge-side issue close execution
-- not yet implemented: BODY payload use for GitHub mutation or Codex launch
+- not yet implemented: issue-centric Codex launch wiring after trigger comment
+- not yet implemented: close / follow-up mutation or review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
 
 ## Overall Assumptions
@@ -158,6 +161,19 @@ For the first bounded `issue_create` execution slice:
 - if no Project is configured, the bridge may use issue-only fallback for the
   create step
 
+For the first bounded `codex_run` execution slice:
+
+- the decoded `CHATGPT_CODEX_BODY` is treated as the trigger comment body
+  without markdown reformatting
+- `target_issue` may be resolved from `#123`, `123`, `owner/repo#123`, or a
+  full GitHub issue URL
+- the bridge may register that body as a trigger comment on the resolved issue
+- after comment creation, the bridge may assemble `repo / target_issue /
+  request / trigger_comment` metadata for the future Codex launch step
+- this slice does **not** require issue-centric Codex launch to happen yet
+- the safe stop after comment creation must make it clear whether comment
+  registration succeeded and whether launch was attempted
+
 The BASE64 requirement is part of the agreed design because the bridge should
 not rely on visible-text extraction or copy-button behavior to preserve
 markdown fidelity in future implementation phases.
@@ -194,7 +210,9 @@ and register it as a comment on the target issue before Codex runs.
 Codex should then treat the issue body, issue comments, `AGENTS.md` if present,
 and repo docs as the durable sources it reads directly.
 
-The current implementation has **not** connected that Codex-side step yet.
+The current implementation can now prepare the decoded body, register it as the
+trigger comment, and assemble the downstream launch payload.
+It has **not** connected the issue-centric Codex launch step itself yet.
 
 ### Codex To Bridge Output
 

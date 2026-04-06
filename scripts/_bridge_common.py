@@ -78,6 +78,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_created_issue_number": "",
     "last_issue_centric_created_issue_url": "",
     "last_issue_centric_created_issue_title": "",
+    "last_issue_centric_resolved_issue": "",
+    "last_issue_centric_trigger_comment_id": "",
+    "last_issue_centric_trigger_comment_url": "",
+    "last_issue_centric_execution_payload_log": "",
+    "last_issue_centric_launch_status": "",
     "last_issue_centric_project_sync_status": "",
     "last_issue_centric_stop_reason": "",
     "pause": False,
@@ -1237,6 +1242,16 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_created_issue_url: {state['last_issue_centric_created_issue_url']}")
     if state.get("last_issue_centric_created_issue_title"):
         fields.append(f"- last_issue_centric_created_issue_title: {state['last_issue_centric_created_issue_title']}")
+    if state.get("last_issue_centric_resolved_issue"):
+        fields.append(f"- last_issue_centric_resolved_issue: {state['last_issue_centric_resolved_issue']}")
+    if state.get("last_issue_centric_trigger_comment_id"):
+        fields.append(f"- last_issue_centric_trigger_comment_id: {state['last_issue_centric_trigger_comment_id']}")
+    if state.get("last_issue_centric_trigger_comment_url"):
+        fields.append(f"- last_issue_centric_trigger_comment_url: {state['last_issue_centric_trigger_comment_url']}")
+    if state.get("last_issue_centric_execution_payload_log"):
+        fields.append(f"- last_issue_centric_execution_payload_log: {state['last_issue_centric_execution_payload_log']}")
+    if state.get("last_issue_centric_launch_status"):
+        fields.append(f"- last_issue_centric_launch_status: {state['last_issue_centric_launch_status']}")
     if state.get("last_issue_centric_project_sync_status"):
         fields.append(f"- last_issue_centric_project_sync_status: {state['last_issue_centric_project_sync_status']}")
     if state.get("last_issue_centric_stop_reason"):

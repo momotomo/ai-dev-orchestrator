@@ -146,6 +146,10 @@ During this inventory phase, all of the following stay unchanged:
     `action=issue_create` to a narrow GitHub issue-create mutation while still
     leaving close, follow-up, review automation, Codex dispatch, and Project
     placement out of scope
+  - the next sibling execution slice can connect only `action=codex_run` to a
+    narrow GitHub issue-comment mutation plus assembled launch payload while
+    still leaving issue-centric Codex launch, close, follow-up, and review
+    automation out of scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

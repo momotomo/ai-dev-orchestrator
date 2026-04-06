@@ -37,11 +37,12 @@ from issue_centric_contract import (
     IssueCentricContractError,
     maybe_parse_issue_centric_reply,
 )
+from issue_centric_codex_run import execute_codex_run_action
+from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import (
     IssueCentricTransportError,
     materialize_issue_centric_decision,
 )
-from issue_centric_issue_create import execute_issue_create_action
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -161,6 +162,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_created_issue_number": "",
                 "last_issue_centric_created_issue_url": "",
                 "last_issue_centric_created_issue_title": "",
+                "last_issue_centric_resolved_issue": "",
+                "last_issue_centric_trigger_comment_id": "",
+                "last_issue_centric_trigger_comment_url": "",
+                "last_issue_centric_execution_payload_log": "",
+                "last_issue_centric_launch_status": "",
                 "last_issue_centric_project_sync_status": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
@@ -219,6 +225,70 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 + f" execution: {repo_relative(execution.execution_log_path)}"
                 + issue_note
                 + " close_current_issue / follow-up issue mutation / Project placement / Codex dispatch はまだ未実装です。"
+            )
+
+        if contract_decision.action.value == "codex_run":
+            project_config = load_project_config()
+            execution = execute_codex_run_action(
+                materialized.prepared,
+                project_config=project_config,
+                repo_path=project_repo_path(project_config),
+                source_decision_log=repo_relative(decision_log),
+                source_metadata_log=repo_relative(materialized.metadata_log_path),
+                source_artifact_path=(
+                    repo_relative(materialized.artifact_log_path)
+                    if materialized.artifact_log_path is not None
+                    else ""
+                ),
+                log_writer=log_text,
+                repo_relative=repo_relative,
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_execution_status": execution.status,
+                    "last_issue_centric_execution_log": repo_relative(execution.execution_log_path),
+                    "last_issue_centric_resolved_issue": (
+                        execution.resolved_issue.issue_url if execution.resolved_issue is not None else ""
+                    ),
+                    "last_issue_centric_trigger_comment_id": (
+                        str(execution.created_comment.comment_id)
+                        if execution.created_comment is not None
+                        else ""
+                    ),
+                    "last_issue_centric_trigger_comment_url": (
+                        execution.created_comment.url if execution.created_comment is not None else ""
+                    ),
+                    "last_issue_centric_execution_payload_log": (
+                        repo_relative(execution.payload_log_path)
+                        if execution.payload_log_path is not None
+                        else ""
+                    ),
+                    "last_issue_centric_launch_status": execution.launch_status,
+                    "last_issue_centric_stop_reason": execution.safe_stop_reason,
+                    "chatgpt_decision_note": execution.safe_stop_reason,
+                }
+            )
+            save_state(mutable_state)
+            trigger_note = ""
+            if execution.created_comment is not None:
+                trigger_note = f" trigger comment: {execution.created_comment.url}"
+            raise BridgeStop(
+                "issue-centric contract reply を検出し、codex_run の最小 execution slice まで実行しました。"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + (
+                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                    if materialized.artifact_log_path is not None
+                    else ""
+                )
+                + f" execution: {repo_relative(execution.execution_log_path)}"
+                + (
+                    f" payload: {repo_relative(execution.payload_log_path)}"
+                    if execution.payload_log_path is not None
+                    else ""
+                )
+                + trigger_note
+                + " issue-centric Codex launch / close_current_issue / follow-up mutation / review automation はまだ未実装です。"
             )
 
         save_state(mutable_state)
