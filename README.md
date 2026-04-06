@@ -32,7 +32,8 @@ The bridge still does not auto-fetch or deeply interpret GitHub issues.
 During the phased move toward issue-centric normal operation, the runtime now
 accepts a ready issue reference as the normal entry while free-form first input
 remains an exception / recovery / override path. See
-[docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
+[docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md) and
+[docs/ISSUE_CENTRIC_RUNTIME_CONTRACT.md](docs/ISSUE_CENTRIC_RUNTIME_CONTRACT.md).
 
 ## Normal Operator Entry During The Transition
 

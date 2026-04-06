@@ -143,6 +143,8 @@ That means the long-term direction is:
 
 For the current inventory of which bridge/runtime surfaces would need future
 implementation changes, see [RUNTIME_TOUCHPOINT_INVENTORY.md](RUNTIME_TOUCHPOINT_INVENTORY.md).
+For the currently agreed bridge / ChatGPT / Codex design contract, see
+[ISSUE_CENTRIC_RUNTIME_CONTRACT.md](ISSUE_CENTRIC_RUNTIME_CONTRACT.md).
 
 ## Defaults And Exceptions
 
@@ -169,3 +171,4 @@ Use these repo templates as the minimal starting point:
 - [GitHub issue / Projects operations](GITHUB_ISSUE_PROJECTS_OPERATIONS.md)
 - [Seed issue catalog](ISSUE_CENTRIC_SEED_ISSUES.md)
 - [Runtime touchpoint inventory](RUNTIME_TOUCHPOINT_INVENTORY.md)
+- [Issue-centric runtime contract](ISSUE_CENTRIC_RUNTIME_CONTRACT.md)

@@ -7,6 +7,9 @@ Use [docs/ISSUE_CENTRIC_FLOW.md](ISSUE_CENTRIC_FLOW.md) for the source-of-truth
 layers and transition framing.
 Use this document for the practical GitHub issue, GitHub Projects, review, and
 PR flow.
+Use [docs/ISSUE_CENTRIC_RUNTIME_CONTRACT.md](ISSUE_CENTRIC_RUNTIME_CONTRACT.md)
+for the bridge / ChatGPT / Codex contract that future runtime work should
+converge toward.
 
 This is still a docs-first / GitHub-operations phase.
 It does **not** mean the bridge runtime is already fully issue-centric.
@@ -264,7 +267,7 @@ If you use GitHub Projects, keep the setup minimal.
 
 Recommended approach:
 
-- use a single-select `Status` field with the exact values `planned`, `ready`,
+- use a single-select `State` field with the exact values `planned`, `ready`,
   `in_progress`, `review`, `done`, and `blocked`
 - keep the Project item synchronized with the GitHub issue state
 - use Project views for queue management, not as a replacement for issue scope
@@ -297,7 +300,7 @@ Optional work-type labels can stay narrow:
 - `track:ops`
 - `track:runtime`
 
-If you use both Project status and `state:*` labels, keep them synchronized.
+If you use both Project `State` and `state:*` labels, keep them synchronized.
 Do not let labels become a second conflicting state system.
 
 ## Ready-Issue To Review Flow
