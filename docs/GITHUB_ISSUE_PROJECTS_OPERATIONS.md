@@ -359,6 +359,11 @@ The second public example is `#12`, promoted from parent `#8`.
 That example shows a `done` transition that returns the open `ready` queue to
 zero while follow-up stays in existing `planned` backlog records.
 
+The third public example is `#14`, promoted from parent `#5`.
+That example shows normal operator entry moving to current-open-`ready`
+selection while the current free-form first request stays documented as a
+runtime entry / override path rather than the normal planning surface.
+
 ## Done-To-Backlog-Reconsideration Pattern
 
 After a `ready` issue reaches `done`, do not force another issue into `ready`

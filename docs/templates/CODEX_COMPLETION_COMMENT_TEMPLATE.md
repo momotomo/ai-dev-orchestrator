@@ -28,6 +28,12 @@ the phase is clearly `blocked`.
 - scope-boundary checks:
 - docs or behavior consistency checks:
 
+## Operator Entry / Override Impact
+
+- does this change the normal operator entry or only clarify it?
+- does free-form initial input remain an exception / recovery / override path?
+- which related docs or issue examples should stay aligned?
+
 ## Backlog Curation / Next-Ready Impact
 
 - should the current open `ready` queue return to zero after this issue?
