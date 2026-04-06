@@ -364,6 +364,12 @@ That example shows normal operator entry moving to current-open-`ready`
 selection while the current free-form first request stays documented as a
 runtime entry / override path rather than the normal planning surface.
 
+The fourth public example is `#15`, promoted from parent `#6`.
+That example shows the matching exception-path rule: free-form initial input
+may still be used for exception, recovery, or override cases, but it stays
+outside the normal ready-first path and should return to backlog or issue truth
+afterward.
+
 ## Done-To-Backlog-Reconsideration Pattern
 
 After a `ready` issue reaches `done`, do not force another issue into `ready`
