@@ -89,6 +89,7 @@ catalog.
   - [#16 Ready: align Codex completion handoff with ChatGPT review checks](https://github.com/momotomo/ai-dev-orchestrator/issues/16)
   - [#18 Ready: inventory runtime touchpoint boundaries for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/18)
   - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
+  - [#22 Ready: test markdown-fidelity copy-response feasibility for bridge reply extraction](https://github.com/momotomo/ai-dev-orchestrator/issues/22)
 
 The first public ready example intentionally keeps
 [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
@@ -121,6 +122,8 @@ promotion.
   implementation
 - `#20` adds the smallest public example of finishing the first bounded
   runtime-ready implementation slice under planned parent `#10`
+- `#22` adds the smallest public example of finishing a markdown-fidelity
+  feasibility slice and rejecting Plan B in favor of Plan A
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -157,9 +160,10 @@ In the current public set:
   slice
 - `#20` is the completed ready child for the first bounded runtime
   implementation slice at the initial entry boundary
-- the open `ready` queue has returned to zero after `#20`, so the next
-  runtime-adjacent slice should be chosen by backlog curation instead of
-  assumed automatically
+- `#22` is the completed ready child for reply-fidelity feasibility at the
+  extraction boundary
+- current open `ready` is `none` again until a bounded Plan A transport slice
+  is promoted
 - `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues
