@@ -80,7 +80,7 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - none
+  - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
 - Completed ready example:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
 
@@ -102,10 +102,30 @@ promotion.
   explicit acceptance criteria and review focus
 - `#11` now also serves as the smallest public example of completion comment,
   ChatGPT review, and `done` transition
+- `#12` is the next open ready candidate and keeps the backlog-cadence slice
+  separate from runtime or operator-entry work
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
   `ready` issue
+
+## Promotion Cadence Pattern
+
+Use the current public backlog like this:
+
+1. keep completed examples linked from their parent `planned` issues
+2. after a `done` ready issue, review the remaining `planned` backlog
+3. choose the next `ready` slice only when one issue is clearly the next direct
+   Codex target
+4. leave other plausible candidates in `planned`
+
+In the current public set:
+
+- `#11` is the completed calibration example
+- `#8` remains the flexible planned parent for promotion-cadence work
+- `#12` is the bounded ready child for the next docs-and-ops slice
+- `#5`, `#6`, `#9`, and `#10` remain planned because they are not the next
+  direct target yet
 
 ## Epic Unit
 
@@ -177,7 +197,7 @@ Suggested order:
 1. register Epic issues
 2. register child `planned` issues
 3. create one Project only after the seed set is visible enough to manage
-4. promote only the next one or two slices to `ready`
+4. promote only the next one clear slice to `ready` by default
 
 Suggested Project views:
 
@@ -343,6 +363,7 @@ issues.
   - seed issues remain flexible enough to evolve
 - Likely future ready slices:
   - one docs-only cadence slice
+  - one follow-up slice for duplicate merge or archival rules if still needed
 
 ### Seed 07
 
@@ -446,15 +467,17 @@ start in this order:
 4. create Seeds 07-09 under Epic C
 5. create Seeds 10-12 under Epic D
 6. keep everything in `planned` first
-7. promote only one or two slices to `ready` after the ready gate is satisfied
+7. promote only one clear slice to `ready` after the ready gate is satisfied,
+   unless a rare second fallback slice is truly needed
 
 ## Likely First Ready Candidates
 
 The following are reasonable early promotion candidates once they are bounded
 enough:
 
+- Seed 05, completed publicly as `#11`
+- Seed 06, currently promoted publicly as `#12`
 - Seed 02, if the next step is clarifying override-path docs only
-- Seed 05, if the next step is a small manual GitHub state/label bootstrap
 - Seed 10, if the next step is a runtime-inventory memo without code changes
 
 Promote them only when the child issue is rewritten as a true `ready` issue.

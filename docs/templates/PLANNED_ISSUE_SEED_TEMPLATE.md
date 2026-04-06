@@ -45,6 +45,11 @@ child from both issues instead of overwriting the whole backlog theme.
 
 - Which conditions would justify rewriting one slice as a `ready` issue?
 
+## Backlog Curation Notes
+
+- Which existing planned issue should absorb follow-up work if review finds it?
+- Why is this not the next direct `ready` issue yet?
+
 ## Related Docs / Related Issues
 
 - docs:

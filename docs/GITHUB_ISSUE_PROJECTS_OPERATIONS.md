@@ -204,6 +204,60 @@ You do not need `gh` or a custom Project field to make the first `ready` issue
 operational.
 This still does **not** mean the bridge runtime is already fully issue-centric.
 
+## Backlog Curation Cadence
+
+Use a very small cadence for backlog curation:
+
+1. review the backlog after a `ready` issue reaches `done`, `blocked`, or
+   returns to `planned`
+2. review again before starting a new Codex phase if no open `ready` issue is
+   visible
+3. review whenever completion or review creates unresolved work that does not
+   belong inside the finished issue
+
+In normal operation, keep `ready` intentionally scarce:
+
+- default to zero or one open `ready` issue
+- only allow a second open `ready` issue when there is a strong operator need
+  for a clearly bounded fallback and the queue still stays easy to read
+- if multiple candidates are plausible, keep them in `planned` until one is the
+  obvious next direct Codex target
+
+This keeps the operator focused on choosing the next one phase, not sorting a
+mini backlog of semi-ready work.
+
+## Next-Ready Selection Rules
+
+When you choose the next `ready` issue from the `planned` backlog, prefer the
+slice that best satisfies all of the following:
+
+- it passes the ready gate and already has explicit scope, acceptance criteria,
+  related docs, and review focus
+- it advances the current first-party path without requiring bridge runtime
+  changes
+- it can be reviewed against repo docs and GitHub state without inventing new
+  operating surfaces
+- it leaves other future work behind in the parent `planned` issue instead of
+  stretching the new `ready` issue
+
+Use the latest completed `done` example as a calibration point.
+For example, after `#11` completed, the next smallest compatible ops slice is a
+cadence-and-curation rule set under `#8`, not a broader runtime theme.
+
+## Backlog Curation Rules
+
+Keep the backlog readable with these minimum rules:
+
+- keep Epic, `planned`, and `ready` links intact whenever a child issue is cut
+- if review finds unresolved work that still fits an existing `planned` parent,
+  add it there instead of creating a duplicate issue
+- create a new `planned` issue only when no existing Epic or planned parent
+  describes the follow-up honestly
+- close or rewrite duplicate planned issues once one surviving issue clearly
+  owns the theme
+- keep GitHub Projects as a list or grouping surface; the issue body and
+  `state:*` label remain the authoritative operating record
+
 ## GitHub Projects Usage
 
 If you use GitHub Projects, keep the setup minimal.

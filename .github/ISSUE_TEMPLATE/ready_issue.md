@@ -33,6 +33,10 @@ Reference ChatGPT Projects context or repo docs when relevant.
 
 Describe the intended outcome in one short paragraph.
 
+## Why This Is Next
+
+- Why is this the next direct Codex target instead of staying in `planned`?
+
 ## In Scope
 
 - 
