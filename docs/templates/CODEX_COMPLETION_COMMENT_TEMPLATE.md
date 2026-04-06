@@ -33,10 +33,10 @@ the phase is clearly `blocked`.
 - docs or behavior consistency checks:
 - follow-up split or backlog-return checks:
 
-## Operator Entry / Override Impact
+## Workflow / Runtime Impact
 
-- does this change the normal operator entry or only clarify it?
-- does free-form initial input remain an exception / recovery / override path?
+- does this change the normal operator entry, only clarify it, or only document a runtime boundary?
+- do same-chat, handoff / new-chat, timeout, and signal assumptions remain unchanged where expected?
 - which related docs or issue examples should stay aligned?
 
 ## Backlog Curation / Next-Ready Impact

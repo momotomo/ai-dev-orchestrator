@@ -572,6 +572,7 @@ If you need the deeper runtime behavior, see:
 - [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md) for the phased issue-centric source-of-truth model and template entry points
 - [docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md](docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md) for GitHub issue states, Projects usage, review rubric, and template flow
 - [docs/ISSUE_CENTRIC_SEED_ISSUES.md](docs/ISSUE_CENTRIC_SEED_ISSUES.md) for Epic units, planned issue seeds, ready-promotion gates, and backlog bootstrap order
+- [docs/RUNTIME_TOUCHPOINT_INVENTORY.md](docs/RUNTIME_TOUCHPOINT_INVENTORY.md) for the current boundary between docs-first issue-centric operation and future bridge/runtime migration work
 - [docs/OSS_PUBLISHING_CHECKLIST.md](docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
 - [docs/GITHUB_METADATA_PROPOSAL.md](docs/GITHUB_METADATA_PROPOSAL.md) for GitHub description / website / topics candidate wording
 - [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and bug-report expectations

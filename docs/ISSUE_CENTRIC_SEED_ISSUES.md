@@ -87,6 +87,7 @@ catalog.
   - [#14 Ready: document ready issue selection as the normal operator entry](https://github.com/momotomo/ai-dev-orchestrator/issues/14)
   - [#15 Ready: document free-form initial input as the exception, recovery, and override path](https://github.com/momotomo/ai-dev-orchestrator/issues/15)
   - [#16 Ready: align Codex completion handoff with ChatGPT review checks](https://github.com/momotomo/ai-dev-orchestrator/issues/16)
+  - [#18 Ready: inventory runtime touchpoint boundaries for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/18)
 
 The first public ready example intentionally keeps
 [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
@@ -114,6 +115,9 @@ promotion.
   recovery / override-path slice under planned parent `#6`
 - `#16` adds the smallest public example of finishing the completion /
   review handoff slice under planned parent `#9`
+- `#18` adds the smallest public example of finishing a runtime-adjacent
+  inventory slice under planned parent `#10` without starting runtime
+  implementation
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -144,8 +148,12 @@ In the current public set:
   slice
 - `#8` remains the flexible planned parent for promotion-cadence work
 - `#12` is the completed ready child for the backlog-cadence slice
-- the open `ready` queue may return to zero after `#16` while the next bounded
-  direct target is reconsidered
+- `#10` remains the flexible planned parent for runtime-boundary inventory and
+  staged migration work
+- `#18` is the completed ready child for the inventory-only runtime touchpoint
+  slice
+- the open `ready` queue may return to zero after `#18` while the next
+  runtime-adjacent slice is reconsidered
 - `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues
@@ -448,7 +456,10 @@ issues.
   - future runtime changes are listed as candidate slices, not bundled together
   - current bridge behavior remains unchanged
 - Likely future ready slices:
-  - one inventory-only memo slice
+  - one inventory-only memo slice, currently promoted publicly as `#18`
+  - one request-source boundary slice for the initial ready-issue-first entry
+  - one report-continuation provenance slice that keeps late-completion
+    semantics intact
 
 ### Seed 11
 
@@ -504,7 +515,7 @@ enough:
 - Seed 05, completed publicly as `#11`
 - Seed 06, completed publicly as `#12`
 - Seed 02, if the next step is clarifying override-path docs only
-- Seed 10, if the next step is a runtime-inventory memo without code changes
+- Seed 10, currently promoted publicly as `#18`
 
 Promote them only when the child issue is rewritten as a true `ready` issue.
 
