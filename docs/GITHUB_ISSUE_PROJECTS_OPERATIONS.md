@@ -283,6 +283,24 @@ The practical review inputs are:
 - the PR or commit diff
 - the relevant repo docs
 
+## Completion-To-Review-To-Done Pattern
+
+In a labels-first bootstrap, keep the loop small and explicit:
+
+1. Codex posts one completion comment against the `ready` issue.
+2. The comment should summarize changed files, validation, review focus, and
+   whether follow-up work is needed.
+3. Move the issue label from `state:ready` to `state:review`.
+4. ChatGPT reviews the issue body, completion comment, and diff or commit.
+5. If the slice is accepted, move the label from `state:review` to
+   `state:done`.
+6. If additional work is needed, keep it as a new or existing `planned`
+   follow-up instead of stretching the completed issue.
+
+The first public example is `#11`, promoted from parent `#7`.
+That example keeps future backlog shaping in `#7` and `#8` instead of turning
+the first completed slice into a catch-all bucket.
+
 ## Planned Issue Seed Notes
 
 Large themes should usually start as `planned`.

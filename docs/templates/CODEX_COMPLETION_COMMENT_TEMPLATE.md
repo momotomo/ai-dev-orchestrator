@@ -22,8 +22,15 @@ the phase is clearly `blocked`.
 - Manual checks:
 - Remaining unverified areas:
 
+## Review Focus
+
+- acceptance criteria that should be checked again in review:
+- scope-boundary checks:
+- docs or behavior consistency checks:
+
 ## Remaining Issues
 
+- follow-up decision: none, existing issue, or new issue needed
 - follow-up issue(s) or child issue(s):
 - blockers, known gaps, or decisions still needed:
 
