@@ -33,6 +33,21 @@ the intended execution-unit source of truth while this first-request path
 remains a runtime entry path. See
 [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
 
+## Normal Operator Entry During The Transition
+
+For normal operation, the operator should start here:
+
+1. check the current open `ready` issue
+2. if one exists, use it as the direct execution-unit reference
+3. if none exists, review the `planned` backlog and promote the next bounded
+   slice to one `ready` issue
+4. only then, if the current runtime still asks for an initial request or
+   override input, type a short request that points back to that `ready` issue
+
+This means the normal entry is `ready`-issue-first even though the current
+bridge runtime still uses a user-authored first request when that runtime path
+is exercised.
+
 Before you start, it is often worth spending a few manual messages in ChatGPT to align the task size, constraints, and what should count as a single Codex phase.
 
 ## What This Tool Is For
@@ -119,11 +134,13 @@ For example, before starting the bridge, you may want to:
 
 That usually produces better one-phase prompts and smoother bridge runs.
 
-## Current First Request Example
+## Current First Request / Override Example
 
 If you are using the current first-request path, keep it short, concrete, and
 written by you. During the issue-centric transition, it should usually point to
 the ready issue instead of restating the whole task from scratch.
+By the time you type this message, you should already know the current `ready`
+issue or have just promoted one from the `planned` backlog.
 
 You can usually start from something like this:
 

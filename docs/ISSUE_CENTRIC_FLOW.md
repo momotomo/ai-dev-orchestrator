@@ -67,6 +67,21 @@ In practice, if the bridge still asks for an initial free-form request, that
 request should usually reference the ready issue instead of redefining the task
 from scratch.
 
+## Current Operator Entry During The Transition
+
+Use the operator entry in this order:
+
+1. check whether there is a current open `ready` issue
+2. if there is one, use that issue as the direct execution-unit reference
+3. if there is no open `ready` issue, review the `planned` backlog and promote
+   the next bounded slice to one `ready` issue
+4. only after that, if the current runtime still asks for an initial request or
+   override input, type a short request that points back to the chosen `ready`
+   issue
+
+This keeps the normal entry centered on the `ready` issue even while the
+current runtime still has a user-authored first-request path.
+
 ## Normal Flow During The Transition
 
 1. Use ChatGPT Projects for upstream design context, tradeoffs, and planning.
