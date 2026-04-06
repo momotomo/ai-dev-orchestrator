@@ -83,6 +83,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_trigger_comment_url": "",
     "last_issue_centric_execution_payload_log": "",
     "last_issue_centric_launch_status": "",
+    "last_issue_centric_launch_entrypoint": "",
+    "last_issue_centric_launch_prompt_log": "",
+    "last_issue_centric_launch_log": "",
     "last_issue_centric_project_sync_status": "",
     "last_issue_centric_stop_reason": "",
     "pause": False,
@@ -1252,6 +1255,12 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_execution_payload_log: {state['last_issue_centric_execution_payload_log']}")
     if state.get("last_issue_centric_launch_status"):
         fields.append(f"- last_issue_centric_launch_status: {state['last_issue_centric_launch_status']}")
+    if state.get("last_issue_centric_launch_entrypoint"):
+        fields.append(f"- last_issue_centric_launch_entrypoint: {state['last_issue_centric_launch_entrypoint']}")
+    if state.get("last_issue_centric_launch_prompt_log"):
+        fields.append(f"- last_issue_centric_launch_prompt_log: {state['last_issue_centric_launch_prompt_log']}")
+    if state.get("last_issue_centric_launch_log"):
+        fields.append(f"- last_issue_centric_launch_log: {state['last_issue_centric_launch_log']}")
     if state.get("last_issue_centric_project_sync_status"):
         fields.append(f"- last_issue_centric_project_sync_status: {state['last_issue_centric_project_sync_status']}")
     if state.get("last_issue_centric_stop_reason"):

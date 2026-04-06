@@ -5,6 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import launch_codex_once
 from _bridge_common import (
     BridgeError,
     BridgeStop,
@@ -33,6 +34,7 @@ from _bridge_common import (
     wait_for_prompt_reply_text,
     write_text,
 )
+from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_contract import (
     IssueCentricContractError,
     maybe_parse_issue_centric_reply,
@@ -167,6 +169,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_trigger_comment_url": "",
                 "last_issue_centric_execution_payload_log": "",
                 "last_issue_centric_launch_status": "",
+                "last_issue_centric_launch_entrypoint": "",
+                "last_issue_centric_launch_prompt_log": "",
+                "last_issue_centric_launch_log": "",
                 "last_issue_centric_project_sync_status": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
@@ -268,12 +273,60 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "chatgpt_decision_note": execution.safe_stop_reason,
                 }
             )
-            save_state(mutable_state)
+            if execution.status != "completed":
+                save_state(mutable_state)
+                trigger_note = ""
+                if execution.created_comment is not None:
+                    trigger_note = f" trigger comment: {execution.created_comment.url}"
+                raise BridgeStop(
+                    "issue-centric contract reply を検出し、codex_run の trigger comment execution まで実行しました。"
+                    f" decision log: {repo_relative(decision_log)}"
+                    f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                    + (
+                        f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                        if materialized.artifact_log_path is not None
+                        else ""
+                    )
+                    + f" execution: {repo_relative(execution.execution_log_path)}"
+                    + (
+                        f" payload: {repo_relative(execution.payload_log_path)}"
+                        if execution.payload_log_path is not None
+                        else ""
+                    )
+                    + trigger_note
+                    + " issue-centric Codex launch はまだ進めませんでした。"
+                )
+
+            launch_result = launch_issue_centric_codex_run(
+                materialized.prepared,
+                execution,
+                state=mutable_state,
+                project_config=project_config,
+                log_writer=log_text,
+                repo_relative=repo_relative,
+                launch_runner=launch_codex_once.run,
+            )
+            post_launch_state = dict(load_state())
+            post_launch_state.update(
+                {
+                    "last_issue_centric_launch_status": launch_result.launch_status,
+                    "last_issue_centric_launch_entrypoint": launch_result.launch_entrypoint,
+                    "last_issue_centric_launch_prompt_log": (
+                        repo_relative(launch_result.prompt_log_path)
+                        if launch_result.prompt_log_path is not None
+                        else ""
+                    ),
+                    "last_issue_centric_launch_log": repo_relative(launch_result.launch_log_path),
+                    "last_issue_centric_stop_reason": launch_result.safe_stop_reason,
+                    "chatgpt_decision_note": launch_result.safe_stop_reason,
+                }
+            )
+            save_state(post_launch_state)
             trigger_note = ""
             if execution.created_comment is not None:
                 trigger_note = f" trigger comment: {execution.created_comment.url}"
             raise BridgeStop(
-                "issue-centric contract reply を検出し、codex_run の最小 execution slice まで実行しました。"
+                "issue-centric contract reply を検出し、codex_run を既存 Codex launch 入口へ narrow 接続しました。"
                 f" decision log: {repo_relative(decision_log)}"
                 f" metadata: {repo_relative(materialized.metadata_log_path)}"
                 + (
@@ -287,8 +340,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     if execution.payload_log_path is not None
                     else ""
                 )
+                + f" prompt: {repo_relative(launch_result.prompt_log_path)}"
+                + f" launch: {repo_relative(launch_result.launch_log_path)}"
                 + trigger_note
-                + " issue-centric Codex launch / close_current_issue / follow-up mutation / review automation はまだ未実装です。"
+                + f" final mode: {launch_result.final_mode or 'unknown'}"
+                + " close_current_issue / follow-up mutation / review automation はまだ未実装です。"
             )
 
         save_state(mutable_state)

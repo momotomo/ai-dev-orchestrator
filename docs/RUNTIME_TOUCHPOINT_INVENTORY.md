@@ -150,6 +150,10 @@ During this inventory phase, all of the following stay unchanged:
     narrow GitHub issue-comment mutation plus assembled launch payload while
     still leaving issue-centric Codex launch, close, follow-up, and review
     automation out of scope
+  - the current bounded launch slice now goes one step farther: it reuses the
+    existing `launch_codex_once` entrypoint with an issue-centric adapter after
+    trigger-comment registration, while still stopping short of close,
+    follow-up, review automation, or any broader state-machine rewrite
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A
