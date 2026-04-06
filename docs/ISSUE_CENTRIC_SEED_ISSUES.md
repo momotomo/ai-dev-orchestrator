@@ -84,6 +84,9 @@ catalog.
 - Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
   - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
+  - [#14 Ready: document ready issue selection as the normal operator entry](https://github.com/momotomo/ai-dev-orchestrator/issues/14)
+  - [#15 Ready: document free-form initial input as the exception, recovery, and override path](https://github.com/momotomo/ai-dev-orchestrator/issues/15)
+  - [#16 Ready: align Codex completion handoff with ChatGPT review checks](https://github.com/momotomo/ai-dev-orchestrator/issues/16)
 
 The first public ready example intentionally keeps
 [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
@@ -105,6 +108,12 @@ promotion.
   ChatGPT review, and `done` transition
 - `#12` adds the smallest public example of finishing a backlog-cadence slice
   and returning the open `ready` queue to zero
+- `#14` adds the smallest public example of finishing the normal
+  operator-entry slice under planned parent `#5`
+- `#15` adds the smallest public example of finishing the exception /
+  recovery / override-path slice under planned parent `#6`
+- `#16` adds the smallest public example of finishing the completion /
+  review handoff slice under planned parent `#9`
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -123,12 +132,23 @@ Use the current public backlog like this:
 In the current public set:
 
 - `#11` is the completed calibration example
+- `#5` remains the flexible planned parent for operator-entry wording
+- `#14` is the completed ready child for the normal operator-entry slice
+- `#6` remains the flexible planned parent for exception / recovery / override
+  wording
+- `#15` is the completed ready child for the exception / recovery /
+  override-path slice
+- `#9` remains the flexible planned parent for completion-to-review handoff
+  wording
+- `#16` is the completed ready child for the completion / review handoff
+  slice
 - `#8` remains the flexible planned parent for promotion-cadence work
 - `#12` is the completed ready child for the backlog-cadence slice
-- the open `ready` queue can now return to zero until the next clear direct
-  target is selected
-- `#5`, `#6`, `#9`, and `#10` remain planned because they are not the next
-  direct target yet and should be reconsidered during the next backlog review
+- the open `ready` queue may return to zero after `#16` while the next bounded
+  direct target is reconsidered
+- `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
+  decisions should return to backlog curation instead of stretching completed
+  ready issues
 
 ## Epic Unit
 
@@ -302,7 +322,8 @@ issues.
   - override use does not blur the normal ready-issue path
   - unsupported paths remain operator-risk paths, not maintained guarantees
 - Likely future ready slices:
-  - one docs slice for override-path rules
+  - one docs slice for override-path rules, including when free-form input is
+    still allowed and how it must return to backlog / issue truth afterward
   - one runtime-inventory slice that maps override usage to future changes
 
 ### Seed 03
@@ -381,7 +402,8 @@ issues.
   - review inputs are explicit and stable
   - completion-to-review transition stays small and repeatable
 - Likely future ready slices:
-  - one template/docs slice for completion and review wording
+  - one template/docs slice for completion and review wording, including a
+    stable review handoff packet and review-focus mapping
 
 ### Seed 08
 
@@ -478,6 +500,7 @@ start in this order:
 The following are reasonable early promotion candidates once they are bounded
 enough:
 
+- Seed 01, currently promoted publicly as `#14`
 - Seed 05, completed publicly as `#11`
 - Seed 06, completed publicly as `#12`
 - Seed 02, if the next step is clarifying override-path docs only

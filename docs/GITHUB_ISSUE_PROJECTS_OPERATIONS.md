@@ -337,13 +337,38 @@ The practical review inputs are:
 - the PR or commit diff
 - the relevant repo docs
 
+## Completion Handoff Packet
+
+Treat the completion comment as the minimum handoff packet for ChatGPT review.
+It should not reopen the whole task definition or invent a second planning
+document.
+
+At minimum, the handoff packet should cover:
+
+- what was completed against the issue acceptance criteria
+- which files changed
+- what validation ran and what remains unverified
+- which review checks should be repeated explicitly
+- what follow-up or backlog-return decision is suggested
+- which branch, commit, or PR carries the implementation artifact
+
+The packet should map cleanly into review-side checks:
+
+- `Summary` -> acceptance-criteria coverage
+- `Changed Files` and `Validation` -> diff and verification context
+- `Review Focus` -> explicit acceptance, scope, docs, and follow-up checks
+- `Backlog Curation / Next-Ready Impact` -> whether open `ready` returns to
+  zero and where follow-up belongs
+- `Remaining Issues` and `Branch / Commit / PR` -> unresolved items and review
+  anchors
+
 ## Completion-To-Review-To-Done Pattern
 
 In a labels-first bootstrap, keep the loop small and explicit:
 
 1. Codex posts one completion comment against the `ready` issue.
-2. The comment should summarize changed files, validation, review focus, and
-   whether follow-up work is needed.
+2. The comment should act as the minimum review handoff packet: changed files,
+   validation, explicit review focus, follow-up decision, and artifact links.
 3. Move the issue label from `state:ready` to `state:review`.
 4. ChatGPT reviews the issue body, completion comment, and diff or commit.
 5. If the slice is accepted, move the label from `state:review` to
@@ -358,6 +383,21 @@ the first completed slice into a catch-all bucket.
 The second public example is `#12`, promoted from parent `#8`.
 That example shows a `done` transition that returns the open `ready` queue to
 zero while follow-up stays in existing `planned` backlog records.
+
+The third public example is `#14`, promoted from parent `#5`.
+That example shows normal operator entry moving to current-open-`ready`
+selection while the current free-form first request stays documented as a
+runtime entry / override path rather than the normal planning surface.
+
+The fourth public example is `#15`, promoted from parent `#6`.
+That example shows the matching exception-path rule: free-form initial input
+may still be used for exception, recovery, or override cases, but it stays
+outside the normal ready-first path and should return to backlog or issue truth
+afterward.
+
+The fifth public example is `#16`, promoted from parent `#9`.
+That example focuses on tightening the completion-to-review handoff itself so
+future review passes can reuse the same minimum packet more consistently.
 
 ## Done-To-Backlog-Reconsideration Pattern
 
