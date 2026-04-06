@@ -3,6 +3,11 @@
 - What changed?
 - Why was this change needed?
 
+## Linked Work
+
+- Ready issue:
+- Follow-up issue(s), if any:
+
 ## Scope
 
 Mark what this PR touches:
@@ -18,10 +23,12 @@ Please confirm the relevant items:
 
 - [ ] I did not silently change the assumption that ChatGPT Projects are required
 - [ ] I did not contradict the documented source-of-truth split between ready issues, repo docs, and implementation records
+- [ ] If this PR implements a ready issue, I linked it above and kept the scope aligned to that issue
+- [ ] If unresolved work remains, I called out whether it should become a follow-up issue instead of stretching the current one
 - [ ] If I touched the current first-request path, I called out whether it is still a user-authored runtime entry / override path
 - [ ] If I changed prompt / request behavior, I called out whether same-chat default still holds
 - [ ] If I changed handoff / new-chat behavior, I called out whether heavy-chat / late-completion preprocessing semantics changed
-- [ ] If I changed docs or guidance, I kept README / CONTRIBUTING / SECURITY / `docs/ISSUE_CENTRIC_FLOW.md` / runbook wording aligned
+- [ ] If I changed docs or guidance, I kept README / CONTRIBUTING / SECURITY / `docs/ISSUE_CENTRIC_FLOW.md` / `docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md` / runbook wording aligned
 
 ## Validation
 

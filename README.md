@@ -298,6 +298,9 @@ first-request path until runtime changes land. Unsupported paths still have no
 behavioral guarantee. See
 [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md).
 
+For GitHub-side issue states, GitHub Projects handling, and review flow, see
+[docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md](docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md).
+
 ## Same-Chat by Default
 
 Normal continuation stays in the same ChatGPT conversation by default.
@@ -517,6 +520,7 @@ If you need the deeper runtime behavior, see:
 - [bridge/run_one_cycle.md](bridge/run_one_cycle.md)
 - [bridge/browser_notes.md](bridge/browser_notes.md)
 - [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md) for the phased issue-centric source-of-truth model and template entry points
+- [docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md](docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md) for GitHub issue states, Projects usage, review rubric, and template flow
 - [docs/OSS_PUBLISHING_CHECKLIST.md](docs/OSS_PUBLISHING_CHECKLIST.md) for publish-time manual checks and hosting-side responsibilities
 - [docs/GITHUB_METADATA_PROPOSAL.md](docs/GITHUB_METADATA_PROPOSAL.md) for GitHub description / website / topics candidate wording
 - [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and bug-report expectations

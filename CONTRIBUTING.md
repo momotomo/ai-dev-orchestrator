@@ -6,6 +6,7 @@ This repository is a narrow automation tool, not a generic browser automation fr
 
 - [README.md](README.md)
 - [docs/ISSUE_CENTRIC_FLOW.md](docs/ISSUE_CENTRIC_FLOW.md)
+- [docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md](docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md)
 - [docs/OSS_PUBLISHING_CHECKLIST.md](docs/OSS_PUBLISHING_CHECKLIST.md)
 - [bridge/README_BRIDGE_FLOW.md](bridge/README_BRIDGE_FLOW.md) when you need runtime detail
 
@@ -26,6 +27,7 @@ Please keep these assumptions in mind:
 
 - repo docs are the permanent rules source of truth
 - during the current transition, the ready issue is the normal execution-unit source of truth
+- only `ready` issues should be direct Codex implementation targets
 - the current bridge runtime may still use a user-authored first ChatGPT request when that entry path or override path is used
 - the bridge may append reply contracts, but it should not silently invent the initial request body
 - same-chat continuation is the default
@@ -80,6 +82,7 @@ In general, good pull requests here:
 
 - keep runtime behavior changes narrow
 - preserve the documented issue-centric source-of-truth model and clearly call out any change to the current first-request / override path
+- keep GitHub issue / Projects guidance aligned with ready-issue execution and review flow
 - keep README / runbook / help text aligned with actual behavior
 - avoid over-promising reliability or safety
 

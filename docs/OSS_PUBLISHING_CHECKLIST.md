@@ -11,6 +11,8 @@ It is intentionally short and practical:
 Use [README.md](../README.md) for product-level explanation.
 Use [docs/ISSUE_CENTRIC_FLOW.md](ISSUE_CENTRIC_FLOW.md) when checking the
 phased issue-centric source-of-truth model.
+Use [docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md](GITHUB_ISSUE_PROJECTS_OPERATIONS.md)
+when checking GitHub-side issue and review operations.
 Use this file when you are deciding whether the repository is ready to publish.
 
 ## 1. What Codex Can Prepare Inside This Repo

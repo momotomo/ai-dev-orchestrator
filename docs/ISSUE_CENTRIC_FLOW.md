@@ -113,3 +113,4 @@ Use these repo templates as the minimal starting point:
 
 - [Ready issue template](../.github/ISSUE_TEMPLATE/ready_issue.md)
 - [Codex completion comment template](templates/CODEX_COMPLETION_COMMENT_TEMPLATE.md)
+- [GitHub issue / Projects operations](GITHUB_ISSUE_PROJECTS_OPERATIONS.md)

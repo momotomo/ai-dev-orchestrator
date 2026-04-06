@@ -6,8 +6,15 @@ title: "[Ready]: "
 
 <!--
 Use this template when the issue should be the normal execution-unit source of
-truth for one implementation phase. See docs/ISSUE_CENTRIC_FLOW.md.
+truth for one implementation phase. See docs/ISSUE_CENTRIC_FLOW.md and
+docs/GITHUB_ISSUE_PROJECTS_OPERATIONS.md.
 -->
+
+This template assumes the issue is already in `ready` state and should represent
+`1 issue = 1 phase = one coherent value bundle`.
+
+If the work still needs major decomposition, keep it in `planned` first instead
+of using this template as a catch-all execution bucket.
 
 ## Background
 
@@ -33,7 +40,8 @@ Describe the intended outcome in one short paragraph.
 ## Related Docs / Related Issues
 
 - docs:
-- issues / PRs:
+- parent / child / follow-up issues:
+- PRs:
 
 ## Notes For Codex
 
