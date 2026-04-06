@@ -12,7 +12,6 @@ from _bridge_common import (
     clear_chat_rotation_fields,
     clear_error_fields,
     clear_pending_request_fields,
-    promote_pending_request,
     extract_last_chatgpt_reply,
     guarded_main,
     load_state,
@@ -28,12 +27,17 @@ from _bridge_common import (
     stage_prepared_request,
     stable_text_hash,
     should_rotate_before_next_chat_request,
+    promote_pending_request,
     wait_for_prompt_reply_text,
     write_text,
 )
 from issue_centric_contract import (
     IssueCentricContractError,
     maybe_parse_issue_centric_reply,
+)
+from issue_centric_transport import (
+    IssueCentricTransportError,
+    materialize_issue_centric_decision,
 )
 
 
@@ -109,11 +113,61 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             contract_decision.render_debug_markdown(),
             suffix="md",
         )
+        try:
+            materialized = materialize_issue_centric_decision(
+                contract_decision,
+                log_writer=log_text,
+                repo_relative=repo_relative,
+                raw_log_path=raw_log,
+                decision_log_path=decision_log,
+            )
+        except IssueCentricTransportError as exc:
+            raise BridgeError(f"issue-centric contract transport を準備できませんでした: {exc}") from exc
+
+        reply_hash = stable_text_hash(contract_decision.raw_segment.strip())
+        mutable_state = clear_error_fields(dict(state))
+        clear_pending_request_fields(mutable_state)
+        mutable_state.update(
+            {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": False,
+                "last_prompt_file": "",
+                "last_processed_request_hash": pending_request_hash
+                or str(state.get("last_processed_request_hash", "")).strip(),
+                "last_processed_reply_hash": reply_hash,
+                "chatgpt_decision": f"issue_centric:{contract_decision.action.value}",
+                "chatgpt_decision_note": materialized.safe_stop_reason,
+                "last_issue_centric_action": contract_decision.action.value,
+                "last_issue_centric_target_issue": contract_decision.target_issue or "none",
+                "last_issue_centric_decision_log": repo_relative(decision_log),
+                "last_issue_centric_metadata_log": repo_relative(materialized.metadata_log_path),
+                "last_issue_centric_artifact_file": (
+                    repo_relative(materialized.artifact_log_path)
+                    if materialized.artifact_log_path is not None
+                    else ""
+                ),
+                "last_issue_centric_artifact_kind": (
+                    materialized.prepared.primary_body.kind.value
+                    if materialized.prepared.primary_body is not None
+                    else ""
+                ),
+                "last_issue_centric_stop_reason": materialized.safe_stop_reason,
+            }
+        )
+        save_state(mutable_state)
         raise BridgeStop(
-            "issue-centric contract reply を検出しました。"
-            " parser / dispatcher の前段では action・target_issue・body blocks の抽出と検証までは完了していますが、"
-            " issue create / close 実行、BODY 利用本実装、state machine 切替はまだ未実装です。"
-            f" raw dump: {repo_relative(raw_log)} decision log: {repo_relative(decision_log)}"
+            "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"
+            " issue create / close 実行、GitHub mutation、Codex 実行接続、state machine 切替はまだ未実装です。"
+            f" raw dump: {repo_relative(raw_log)}"
+            f" decision log: {repo_relative(decision_log)}"
+            f" metadata: {repo_relative(materialized.metadata_log_path)}"
+            + (
+                f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                if materialized.artifact_log_path is not None
+                else ""
+            )
         )
     decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
     reply_body = decision.body if decision.kind == "codex_prompt" else (decision.raw_block or decision.note)

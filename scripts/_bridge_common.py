@@ -67,6 +67,13 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_processed_reply_hash": "",
     "current_chat_session": "",
     "human_review_auto_continue_count": 0,
+    "last_issue_centric_action": "",
+    "last_issue_centric_target_issue": "",
+    "last_issue_centric_decision_log": "",
+    "last_issue_centric_metadata_log": "",
+    "last_issue_centric_artifact_file": "",
+    "last_issue_centric_artifact_kind": "",
+    "last_issue_centric_stop_reason": "",
     "pause": False,
     "error": False,
     "error_message": "",
@@ -1198,6 +1205,20 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- chatgpt_decision: {state['chatgpt_decision']}")
     if state.get("chatgpt_decision_note"):
         fields.append(f"- chatgpt_decision_note: {state['chatgpt_decision_note']}")
+    if state.get("last_issue_centric_action"):
+        fields.append(f"- last_issue_centric_action: {state['last_issue_centric_action']}")
+    if state.get("last_issue_centric_target_issue"):
+        fields.append(f"- last_issue_centric_target_issue: {state['last_issue_centric_target_issue']}")
+    if state.get("last_issue_centric_decision_log"):
+        fields.append(f"- last_issue_centric_decision_log: {state['last_issue_centric_decision_log']}")
+    if state.get("last_issue_centric_metadata_log"):
+        fields.append(f"- last_issue_centric_metadata_log: {state['last_issue_centric_metadata_log']}")
+    if state.get("last_issue_centric_artifact_file"):
+        fields.append(f"- last_issue_centric_artifact_file: {state['last_issue_centric_artifact_file']}")
+    if state.get("last_issue_centric_artifact_kind"):
+        fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
+    if state.get("last_issue_centric_stop_reason"):
+        fields.append(f"- last_issue_centric_stop_reason: {state['last_issue_centric_stop_reason']}")
     if state.get("error_message"):
         fields.append(f"- error_message: {state['error_message']}")
     return "\n".join(fields)

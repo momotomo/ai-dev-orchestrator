@@ -15,6 +15,14 @@ This is still a design document.
 It does **not** claim that the full contract below is already implemented in
 the bridge runtime.
 
+The current implementation boundary is:
+
+- implemented: parser / validator / normalizer front-end
+- implemented: BASE64 payload decode into prepared runtime artifacts
+- not yet implemented: bridge-side issue create / close execution
+- not yet implemented: BODY payload use for GitHub mutation or Codex launch
+- not yet implemented: large state-machine rewrite or full contract cutover
+
 ## Overall Assumptions
 
 Use these assumptions consistently:
@@ -128,6 +136,14 @@ Use them under these rules:
 - `CHATGPT_CODEX_BODY` appears only when `action = codex_run`
 - `CHATGPT_REVIEW` appears only when ChatGPT actually performed review
 - all three body blocks are BASE64-encoded body payloads
+
+For the current bounded transport implementation:
+
+- multi-line BASE64 payloads are allowed; line whitespace is stripped before
+  decode
+- decoded UTF-8 text is preserved as-is, including trailing newlines
+- a payload that decodes to the empty string is treated as invalid
+- invalid BASE64 and invalid UTF-8 are reported as different transport errors
 
 The BASE64 requirement is part of the agreed design because the bridge should
 not rely on visible-text extraction or copy-button behavior to preserve

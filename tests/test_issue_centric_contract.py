@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import fetch_next_prompt  # noqa: E402
 import issue_centric_contract  # noqa: E402
+import issue_centric_transport  # noqa: E402
 from _bridge_common import BridgeStop  # noqa: E402
 
 
@@ -65,6 +67,18 @@ def build_raw_reply(
     if extra_after:
         lines.append(extra_after)
     return "\n".join(lines)
+
+
+class TempLogWriter:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.counter = 0
+
+    def __call__(self, prefix: str, content: str, suffix: str = "md") -> Path:
+        self.counter += 1
+        path = self.root / f"{self.counter:02d}_{prefix}.{suffix}"
+        path.write_text(content, encoding="utf-8")
+        return path
 
 
 class IssueCentricContractParserTests(unittest.TestCase):
@@ -486,6 +500,297 @@ class IssueCentricContractParserTests(unittest.TestCase):
         self.assertIsNone(issue_centric_contract.maybe_parse_issue_centric_reply(raw, after_text="request body"))
 
 
+class IssueCentricTransportTests(unittest.TestCase):
+    def materialize(
+        self,
+        decision: issue_centric_contract.IssueCentricDecision,
+    ) -> issue_centric_transport.MaterializedIssueCentricDecision:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_writer = TempLogWriter(root)
+            materialized = issue_centric_transport.materialize_issue_centric_decision(
+                decision,
+                log_writer=log_writer,
+                repo_relative=lambda path: path.name,
+            )
+            body_path = materialized.artifact_log_path
+            metadata_path = materialized.metadata_log_path
+            if body_path is not None:
+                self.assertTrue(body_path.exists())
+            self.assertTrue(metadata_path.exists())
+            return materialized
+
+    def test_materializes_issue_create_body_artifact(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            build_raw_reply(
+                {
+                    "action": "issue_create",
+                    "target_issue": "none",
+                    "close_current_issue": False,
+                    "create_followup_issue": True,
+                    "summary": "Create a new issue from the decoded body.",
+                },
+                parts=[
+                    block("issue", b64("## New issue\n\n- item\n")),
+                    block(
+                        "json",
+                        json.dumps(
+                            {
+                                "action": "issue_create",
+                                "target_issue": "none",
+                                "close_current_issue": False,
+                                "create_followup_issue": True,
+                                "summary": "Create a new issue from the decoded body.",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ),
+                ],
+            ),
+            after_text="request body",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_writer = TempLogWriter(root)
+            materialized = issue_centric_transport.materialize_issue_centric_decision(
+                decision,
+                log_writer=log_writer,
+                repo_relative=lambda path: path.name,
+            )
+
+            self.assertEqual(
+                materialized.prepared.primary_body.kind,
+                issue_centric_transport.IssueCentricArtifactKind.ISSUE_BODY,
+            )
+            self.assertEqual(
+                materialized.artifact_log_path.read_text(encoding="utf-8"),
+                "## New issue\n\n- item\n",
+            )
+            self.assertEqual(
+                materialized.metadata["prepared_artifact"]["kind"],
+                "issue_body",
+            )
+
+    def test_materializes_codex_body_artifact(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            build_raw_reply(
+                {
+                    "action": "codex_run",
+                    "target_issue": "#123",
+                    "close_current_issue": False,
+                    "create_followup_issue": False,
+                    "summary": "Run Codex from the decoded body.",
+                },
+                parts=[
+                    block("codex", b64("Run Codex with this body.\n")),
+                    block(
+                        "json",
+                        json.dumps(
+                            {
+                                "action": "codex_run",
+                                "target_issue": "#123",
+                                "close_current_issue": False,
+                                "create_followup_issue": False,
+                                "summary": "Run Codex from the decoded body.",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ),
+                ],
+            ),
+            after_text="request body",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materialized = issue_centric_transport.materialize_issue_centric_decision(
+                decision,
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+            )
+
+            self.assertEqual(
+                materialized.prepared.primary_body.kind,
+                issue_centric_transport.IssueCentricArtifactKind.CODEX_BODY,
+            )
+            self.assertEqual(
+                materialized.artifact_log_path.read_text(encoding="utf-8"),
+                "Run Codex with this body.\n",
+            )
+            self.assertEqual(
+                materialized.metadata["pending_runtime_action"],
+                "codex_run_dispatch",
+            )
+
+    def test_materializes_human_review_artifact(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            build_raw_reply(
+                {
+                    "action": "human_review_needed",
+                    "target_issue": "#55",
+                    "close_current_issue": False,
+                    "create_followup_issue": True,
+                    "summary": "Review notes are required.",
+                },
+                parts=[
+                    block("review", b64("## Review\n\nNeeds follow-up.\n")),
+                    block(
+                        "json",
+                        json.dumps(
+                            {
+                                "action": "human_review_needed",
+                                "target_issue": "#55",
+                                "close_current_issue": False,
+                                "create_followup_issue": True,
+                                "summary": "Review notes are required.",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ),
+                ],
+            ),
+            after_text="request body",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materialized = issue_centric_transport.materialize_issue_centric_decision(
+                decision,
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+            )
+
+            self.assertEqual(
+                materialized.prepared.primary_body.kind,
+                issue_centric_transport.IssueCentricArtifactKind.REVIEW,
+            )
+            self.assertEqual(
+                materialized.artifact_log_path.read_text(encoding="utf-8"),
+                "## Review\n\nNeeds follow-up.\n",
+            )
+
+    def test_materializes_multiline_base64_payload(self) -> None:
+        payload = b64("```python\nprint('ok')\n```\n")
+        multiline = f"{payload[:10]}\n{payload[10:20]}\n{payload[20:]}"
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            build_raw_reply(
+                {
+                    "action": "codex_run",
+                    "target_issue": "#123",
+                    "close_current_issue": False,
+                    "create_followup_issue": False,
+                    "summary": "Multiline payload.",
+                },
+                parts=[
+                    block("codex", multiline),
+                    block(
+                        "json",
+                        json.dumps(
+                            {
+                                "action": "codex_run",
+                                "target_issue": "#123",
+                                "close_current_issue": False,
+                                "create_followup_issue": False,
+                                "summary": "Multiline payload.",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ),
+                ],
+            ),
+            after_text="request body",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materialized = issue_centric_transport.materialize_issue_centric_decision(
+                decision,
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+            )
+            self.assertEqual(
+                materialized.artifact_log_path.read_text(encoding="utf-8"),
+                "```python\nprint('ok')\n```\n",
+            )
+
+    def test_rejects_invalid_base64_at_transport_stage(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Invalid base64 payload.",
+            issue_body_base64="!!not-base64!!",
+            codex_body_base64=None,
+            review_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        with self.assertRaisesRegex(
+            issue_centric_transport.IssueCentricBodyDecodeError,
+            "not valid base64",
+        ):
+            issue_centric_transport.decode_issue_centric_decision(decision)
+
+    def test_rejects_invalid_utf8_at_transport_stage(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue="#123",
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Invalid UTF-8 payload.",
+            issue_body_base64=None,
+            codex_body_base64=base64.b64encode(b"\xff").decode("ascii"),
+            review_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        with self.assertRaisesRegex(
+            issue_centric_transport.IssueCentricBodyDecodeError,
+            "not valid UTF-8",
+        ):
+            issue_centric_transport.decode_issue_centric_decision(decision)
+
+    def test_rejects_empty_decoded_payload(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Empty decoded payload.",
+            issue_body_base64="",
+            codex_body_base64=None,
+            review_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        with self.assertRaisesRegex(
+            issue_centric_transport.IssueCentricBodyDecodeError,
+            "decodes to empty text",
+        ):
+            issue_centric_transport.decode_issue_centric_decision(decision)
+
+    def test_rejects_forbidden_body_before_decode(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Forbidden body.",
+            issue_body_base64=b64("Should not decode"),
+            codex_body_base64=None,
+            review_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        with self.assertRaisesRegex(
+            issue_centric_transport.IssueCentricContractError,
+            "no_action must not include body blocks",
+        ):
+            issue_centric_transport.decode_issue_centric_decision(decision)
+
+
 class FetchNextPromptContractStopTests(unittest.TestCase):
     def test_fetch_next_prompt_stops_safely_when_new_contract_is_detected(self) -> None:
         state = {
@@ -507,20 +812,100 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
             }
         )
 
-        with (
-            patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-            patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
-            patch.object(
-                fetch_next_prompt,
-                "log_text",
-                side_effect=[
-                    REPO_ROOT / "logs" / "raw-log.txt",
-                    REPO_ROOT / "logs" / "decision-log.md",
-                ],
-            ),
-        ):
-            with self.assertRaisesRegex(BridgeStop, "issue-centric contract reply を検出しました"):
-                fetch_next_prompt.run(dict(state), [])
+        saved_states: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            ):
+                with self.assertRaisesRegex(
+                    BridgeStop,
+                    "BODY base64 transport の prepared artifact まで作成しました",
+                ):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(len(saved_states), 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["mode"], "awaiting_user")
+            self.assertEqual(saved["chatgpt_decision"], "issue_centric:no_action")
+            self.assertEqual(saved["last_issue_centric_action"], "no_action")
+            self.assertEqual(saved["last_issue_centric_target_issue"], "none")
+            self.assertEqual(saved["last_issue_centric_artifact_file"], "")
+            self.assertTrue(str(saved["last_issue_centric_metadata_log"]).endswith(".json"))
+
+    def test_fetch_next_prompt_prepares_codex_artifact_then_stops(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#20",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#20",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Dispatch the prepared Codex body later.",
+            },
+            parts=[
+                block("codex", b64("Prepared Codex body\n")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": "#20",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Dispatch the prepared Codex body later.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        saved_states: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            ):
+                with self.assertRaisesRegex(BridgeStop, "artifact: .*prepared_issue_centric_codex_body"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_action"], "codex_run")
+            self.assertEqual(saved["last_issue_centric_target_issue"], "#20")
+            self.assertEqual(saved["last_issue_centric_artifact_kind"], "codex_body")
+            artifact_path = temp_root / Path(str(saved["last_issue_centric_artifact_file"])).name
+            self.assertTrue(artifact_path.exists())
+            self.assertEqual(artifact_path.read_text(encoding="utf-8"), "Prepared Codex body\n")
+            metadata_path = temp_root / Path(str(saved["last_issue_centric_metadata_log"])).name
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["pending_runtime_action"], "codex_run_dispatch")
+            self.assertEqual(metadata["prepared_artifact"]["kind"], "codex_body")
 
 
 if __name__ == "__main__":

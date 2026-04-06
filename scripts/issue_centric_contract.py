@@ -325,6 +325,11 @@ def normalize_issue_centric_reply(extracted: ExtractedIssueCentricReply) -> Issu
     return decision
 
 
+def validate_issue_centric_decision(decision: IssueCentricDecision) -> IssueCentricDecision:
+    _validate_decision(decision)
+    return decision
+
+
 def parse_issue_centric_reply(
     raw_text: str,
     *,
