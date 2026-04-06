@@ -80,7 +80,7 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - none
+  - [#16 Ready: align Codex completion handoff with ChatGPT review checks](https://github.com/momotomo/ai-dev-orchestrator/issues/16)
 - Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
   - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
@@ -111,6 +111,8 @@ promotion.
   operator-entry slice under planned parent `#5`
 - `#15` adds the smallest public example of finishing the exception /
   recovery / override-path slice under planned parent `#6`
+- `#16` is the current open ready example for tightening the completion /
+  review handoff under planned parent `#9`
 - the current labels-first bootstrap and plain Project view stay sufficient for
   this initial operating route
 - future backlog work stays in `planned` issues instead of stretching the first
@@ -135,10 +137,13 @@ In the current public set:
   wording
 - `#15` is the completed ready child for the exception / recovery /
   override-path slice
+- `#9` remains the flexible planned parent for completion-to-review handoff
+  wording
+- `#16` is the current open ready child for the completion / review handoff
+  slice
 - `#8` remains the flexible planned parent for promotion-cadence work
 - `#12` is the completed ready child for the backlog-cadence slice
-- the open `ready` queue may return to zero after `#15` while the next bounded
-  direct target is reconsidered
+- the open `ready` queue currently points to `#16` as the next direct target
 - `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues
@@ -395,7 +400,8 @@ issues.
   - review inputs are explicit and stable
   - completion-to-review transition stays small and repeatable
 - Likely future ready slices:
-  - one template/docs slice for completion and review wording
+  - one template/docs slice for completion and review wording, including a
+    stable review handoff packet and review-focus mapping
 
 ### Seed 08
 

@@ -65,4 +65,5 @@ Describe the intended outcome in one short paragraph.
 
 - acceptance criteria that matter most:
 - scope-boundary checks:
-- likely follow-up split if needed:
+- docs or behavior consistency checks:
+- likely follow-up split or backlog-return decision if needed:
