@@ -168,6 +168,11 @@ During this inventory phase, all of the following stay unchanged:
     `human_review_needed` to a narrow target-issue review comment mutation,
     while keeping follow-up mutation, Project updates, and post-review close
     automation out of scope
+  - the current Project slice goes one step farther again: it wires
+    `issue_create` to narrow GitHub Project placement plus `State` field
+    setting when explicit Project config is present, while keeping Project
+    sync for other actions, follow-up mutation, and broader cutover out of
+    scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

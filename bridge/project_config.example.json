@@ -8,6 +8,8 @@
   ],
   "github_repository": "",
   "github_project_url": "",
+  "github_project_state_field_name": "State",
+  "github_project_default_issue_state": "",
   "codex_bin": "codex",
   "codex_model": "",
   "codex_sandbox": "",

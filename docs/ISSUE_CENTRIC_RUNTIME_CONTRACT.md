@@ -20,6 +20,8 @@ The current implementation boundary is:
 - implemented: parser / validator / normalizer front-end
 - implemented: BASE64 payload decode into prepared runtime artifacts
 - implemented: narrow `issue_create` execution from decoded `CHATGPT_ISSUE_BODY`
+- implemented: narrow GitHub Project placement for `issue_create` when
+  `github_project_url` and required State config are present
 - implemented: narrow `codex_run` execution from decoded `CHATGPT_CODEX_BODY`
   through target-issue trigger comment creation
 - implemented: narrow issue-centric Codex launch wiring that turns the
@@ -165,10 +167,26 @@ For the first bounded `issue_create` execution slice:
 - that H1 becomes the GitHub issue title
 - the remaining text becomes the GitHub issue body
 - an empty title or empty remaining body is rejected before mutation
-- if `github_project_url` is configured, this slice stops before mutation
-  because Project placement is not implemented yet
 - if no Project is configured, the bridge may use issue-only fallback for the
   create step
+- if `github_project_url` is configured, the bridge must pass Project preflight
+  before issue creation
+- the current narrow Project preflight requires:
+  - `github_project_url`
+  - `github_project_state_field_name` (defaults to `State` when omitted)
+  - `github_project_default_issue_state`
+- if Project preflight fails, the bridge stops before issue creation
+- if Project preflight succeeds, the bridge may:
+  - create the GitHub issue
+  - add that issue to the configured Project
+  - set the configured Project `State` value
+- if Project item creation fails after issue creation, the created issue is
+  left in place and the bridge records partial success
+- if Project `State` set fails after Project item creation, both the created
+  issue and Project item are left in place and the bridge records partial
+  success
+- when `issue_create + close_current_issue = true`, close is considered only
+  after Project placement succeeds
 
 For the first bounded `codex_run` execution slice:
 

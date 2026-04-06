@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import fetch_next_prompt  # noqa: E402
 import issue_centric_contract  # noqa: E402
+import issue_centric_github  # noqa: E402
 import issue_centric_issue_create  # noqa: E402
 import issue_centric_transport  # noqa: E402
 from _bridge_common import BridgeStop  # noqa: E402
@@ -119,6 +120,7 @@ class IssueCreateExecutionTests(unittest.TestCase):
                 url="https://github.com/example/repo/issues/51",
                 title=title,
                 repository=repository,
+                node_id="ISSUE_node_51",
             )
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,7 +187,7 @@ class IssueCreateExecutionTests(unittest.TestCase):
                 repo_relative=lambda path: path.name,
             )
 
-    def test_project_requirement_blocks_before_issue_create(self) -> None:
+    def test_project_requirement_blocks_before_issue_create_when_state_config_is_missing(self) -> None:
         prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
         called = False
 
@@ -201,6 +203,8 @@ class IssueCreateExecutionTests(unittest.TestCase):
                 project_config={
                     "github_repository": "example/repo",
                     "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "",
                 },
                 repo_path=REPO_ROOT,
                 source_decision_log="logs/decision.md",
@@ -209,14 +213,232 @@ class IssueCreateExecutionTests(unittest.TestCase):
                 log_writer=TempLogWriter(root),
                 repo_relative=lambda path: path.name,
                 issue_creator=fake_creator,
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: (_ for _ in ()).throw(
+                    AssertionError("resolver should not be called")
+                ),
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
             self.assertEqual(result.status, "blocked")
-            self.assertEqual(result.project_sync_status, "blocked_project_required_unimplemented")
+            self.assertEqual(result.project_sync_status, "blocked_project_preflight")
             self.assertFalse(called)
             execution = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
             self.assertIsNone(execution["created_issue"])
+
+    def test_project_issue_create_places_item_and_sets_state(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+        create_calls: list[tuple[str, str, str, str]] = []
+        item_calls: list[tuple[str, str, str]] = []
+        state_calls: list[tuple[str, str, str, str, str]] = []
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            create_calls.append((repository, title, body, token))
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=52,
+                url="https://github.com/example/repo/issues/52",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_52",
+            )
+
+        def fake_resolver(project_url: str, state_field_name: str, state_option_name: str, token: str) -> issue_centric_github.ResolvedGitHubProjectState:
+            return issue_centric_github.ResolvedGitHubProjectState(
+                project_id="PVT_proj_1",
+                project_url=project_url,
+                project_title="Issue Centric",
+                owner_login="example",
+                owner_kind="users",
+                state_field_id="PVTSSF_field_1",
+                state_field_name=state_field_name,
+                state_option_id="PVTSSO_ready",
+                state_option_name=state_option_name,
+            )
+
+        def fake_item_creator(project_id: str, issue_node_id: str, token: str) -> issue_centric_github.CreatedGitHubProjectItem:
+            item_calls.append((project_id, issue_node_id, token))
+            return issue_centric_github.CreatedGitHubProjectItem(item_id="PVT_item_1", project_id=project_id)
+
+        def fake_state_setter(project_id: str, item_id: str, field_id: str, option_id: str, token: str) -> None:
+            state_calls.append((project_id, item_id, field_id, option_id, token))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=fake_resolver,
+                project_item_creator=fake_item_creator,
+                project_state_setter=fake_state_setter,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.project_sync_status, "project_state_synced")
+            self.assertEqual(result.project_item_id, "PVT_item_1")
+            self.assertEqual(result.project_state_field_name, "State")
+            self.assertEqual(result.project_state_value_name, "ready")
+            self.assertEqual(create_calls[0], ("example/repo", "Ready: title", "Body paragraph.\n", "token-123"))
+            self.assertEqual(item_calls[0], ("PVT_proj_1", "ISSUE_node_52", "token-123"))
+            self.assertEqual(state_calls[0], ("PVT_proj_1", "PVT_item_1", "PVTSSF_field_1", "PVTSSO_ready", "token-123"))
+
+    def test_project_item_create_failure_is_recorded_as_partial_success(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=53,
+                url="https://github.com/example/repo/issues/53",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_53",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_1",
+                    project_url=project_url,
+                    project_title="Issue Centric",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_field_1",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_ready",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda project_id, issue_node_id, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("item failed")
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
+            self.assertEqual(result.created_issue.number, 53)
+            self.assertIn("item failed", result.safe_stop_reason)
+
+    def test_project_preflight_success_but_issue_create_failure_is_recorded(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repository, title, body, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("issue create failed")
+                ),
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_1",
+                    project_url=project_url,
+                    project_title="Issue Centric",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_field_1",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_ready",
+                    state_option_name=state_option_name,
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "issue_create_failed_before_project_item")
+            self.assertIsNone(result.created_issue)
+            self.assertIn("issue create failed", result.safe_stop_reason)
+
+    def test_project_state_set_failure_is_recorded_as_partial_success(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=54,
+                url="https://github.com/example/repo/issues/54",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_54",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_1",
+                    project_url=project_url,
+                    project_title="Issue Centric",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_field_1",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_ready",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda project_id, issue_node_id, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="PVT_item_54",
+                    project_id=project_id,
+                ),
+                project_state_setter=lambda project_id, item_id, field_id, option_id, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("state failed")
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "issue_created_project_state_failed")
+            self.assertEqual(result.project_item_id, "PVT_item_54")
+            self.assertIn("state failed", result.safe_stop_reason)
 
     def test_github_mutation_failure_is_recorded_as_blocked(self) -> None:
         prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
@@ -273,8 +495,12 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             ),
             draft_log_path=REPO_ROOT / "logs" / "draft.md",
             execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            project_url="",
             project_sync_status="issue_only_fallback",
             project_sync_note="No project configured.",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
             safe_stop_reason="issue_create completed.",
         )
 
@@ -303,6 +529,7 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_created_issue_number"], "77")
             self.assertEqual(saved["last_issue_centric_created_issue_url"], "https://github.com/example/repo/issues/77")
             self.assertEqual(saved["last_issue_centric_project_sync_status"], "issue_only_fallback")
+            self.assertEqual(saved["last_issue_centric_project_item_id"], "")
 
     def test_fetch_next_prompt_records_blocked_issue_create_reason(self) -> None:
         state = {
@@ -328,8 +555,12 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             created_issue=None,
             draft_log_path=REPO_ROOT / "logs" / "draft.md",
             execution_log_path=REPO_ROOT / "logs" / "execution.json",
-            project_sync_status="blocked_project_required_unimplemented",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="blocked_project_preflight",
             project_sync_note="Project config present.",
+            project_item_id="",
+            project_state_field_name="State",
+            project_state_value_name="ready",
             safe_stop_reason="issue_create blocked before mutation.",
         )
 
@@ -346,8 +577,9 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
-                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "https://github.com/users/example/projects/1", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "https://github.com/users/example/projects/1", "github_project_state_field_name": "State", "github_project_default_issue_state": "ready", "worker_repo_path": "."}),
                 patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result),
+                patch.object(fetch_next_prompt, "execute_close_current_issue") as close_mock,
             ):
                 with self.assertRaisesRegex(BridgeStop, "issue_create の最小 execution slice まで実行しました"):
                     fetch_next_prompt.run(dict(state), [])
@@ -355,7 +587,73 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             saved = saved_states[0]
             self.assertEqual(saved["last_issue_centric_execution_status"], "blocked")
             self.assertEqual(saved["last_issue_centric_created_issue_number"], "")
-            self.assertEqual(saved["last_issue_centric_project_sync_status"], "blocked_project_required_unimplemented")
+            self.assertEqual(saved["last_issue_centric_project_sync_status"], "blocked_project_preflight")
+            self.assertEqual(close_mock.call_count, 0)
+
+    def test_fetch_next_prompt_records_project_item_and_state_when_issue_create_syncs_project(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#24",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_issue_create_reply("# Ready: title\n\nBody paragraph.\n")
+        saved_states: list[dict[str, object]] = []
+
+        fake_result = issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Ready: title",
+                body="Body paragraph.\n",
+                title_line="# Ready: title",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=88,
+                url="https://github.com/example/repo/issues/88",
+                title="Ready: title",
+                repository="example/repo",
+                node_id="ISSUE_node_88",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Project synced.",
+            project_item_id="PVT_item_88",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            safe_stop_reason="issue_create completed with project sync.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "https://github.com/users/example/projects/1", "github_project_state_field_name": "State", "github_project_default_issue_state": "ready", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result),
+            ):
+                with self.assertRaisesRegex(BridgeStop, "project item: PVT_item_88"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_project_sync_status"], "project_state_synced")
+            self.assertEqual(saved["last_issue_centric_project_url"], "https://github.com/users/example/projects/1")
+            self.assertEqual(saved["last_issue_centric_project_item_id"], "PVT_item_88")
+            self.assertEqual(saved["last_issue_centric_project_state_field"], "State")
+            self.assertEqual(saved["last_issue_centric_project_state_value"], "ready")
 
 
 if __name__ == "__main__":

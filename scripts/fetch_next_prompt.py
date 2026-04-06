@@ -251,6 +251,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_report_status": "",
                 "last_issue_centric_report_file": "",
                 "last_issue_centric_project_sync_status": "",
+                "last_issue_centric_project_url": "",
+                "last_issue_centric_project_item_id": "",
+                "last_issue_centric_project_state_field": "",
+                "last_issue_centric_project_state_value": "",
                 "last_issue_centric_close_status": "",
                 "last_issue_centric_close_log": "",
                 "last_issue_centric_closed_issue_number": "",
@@ -296,6 +300,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                         execution.created_issue.title if execution.created_issue is not None else ""
                     ),
                     "last_issue_centric_project_sync_status": execution.project_sync_status,
+                    "last_issue_centric_project_url": execution.project_url,
+                    "last_issue_centric_project_item_id": execution.project_item_id,
+                    "last_issue_centric_project_state_field": execution.project_state_field_name,
+                    "last_issue_centric_project_state_value": execution.project_state_value_name,
                     "last_issue_centric_stop_reason": execution.safe_stop_reason,
                     "chatgpt_decision_note": execution.safe_stop_reason,
                 }
@@ -340,8 +348,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 )
                 + f" execution: {repo_relative(execution.execution_log_path)}"
                 + issue_note
+                + (
+                    f" project item: {execution.project_item_id}"
+                    if execution.project_item_id
+                    else ""
+                )
                 + close_note
-                + " create_followup_issue mutation / Project placement / Codex dispatch はまだ未実装です。"
+                + " create_followup_issue mutation / other action Project sync / Codex dispatch はまだ未実装です。"
             )
 
         if contract_decision.action.value == "codex_run" and contract_decision.close_current_issue:

@@ -313,8 +313,12 @@ class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
             ),
             draft_log_path=REPO_ROOT / "logs" / "draft.md",
             execution_log_path=REPO_ROOT / "logs" / "issue_create.json",
+            project_url="",
             project_sync_status="issue_only_fallback",
             project_sync_note="No project configured.",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
             safe_stop_reason="issue_create completed.",
         )
         fake_close = issue_centric_close_current_issue.IssueCloseExecutionResult(

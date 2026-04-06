@@ -9,11 +9,16 @@ from typing import Any, Callable, Mapping
 
 from issue_centric_contract import IssueCentricAction
 from issue_centric_github import (
+    CreatedGitHubProjectItem,
     CreatedGitHubIssue,
     IssueCentricGitHubError,
+    ResolvedGitHubProjectState,
+    add_issue_to_github_project,
     create_github_issue,
+    resolve_github_project_state,
     resolve_github_repository,
     resolve_github_token,
+    set_github_project_item_state,
 )
 from issue_centric_transport import PreparedIssueCentricDecision
 
@@ -37,8 +42,12 @@ class IssueCreateExecutionResult:
     created_issue: CreatedGitHubIssue | None
     draft_log_path: Path | None
     execution_log_path: Path
+    project_url: str
     project_sync_status: str
     project_sync_note: str
+    project_item_id: str
+    project_state_field_name: str
+    project_state_value_name: str
     safe_stop_reason: str
 
 
@@ -53,6 +62,9 @@ def execute_issue_create_action(
     log_writer: Callable[[str, str, str], Path],
     repo_relative: Callable[[Path], str],
     issue_creator: Callable[[str, str, str, str], CreatedGitHubIssue] | None = None,
+    project_state_resolver: Callable[[str, str, str, str], ResolvedGitHubProjectState] | None = None,
+    project_item_creator: Callable[[str, str, str], CreatedGitHubProjectItem] | None = None,
+    project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> IssueCreateExecutionResult:
@@ -63,9 +75,13 @@ def execute_issue_create_action(
     draft: IssueCreateDraft | None = None
     draft_log_path: Path | None = None
     created_issue: CreatedGitHubIssue | None = None
+    resolved_project: ResolvedGitHubProjectState | None = None
+    created_project_item: CreatedGitHubProjectItem | None = None
     project_sync_status = "not_requested"
     project_sync_note = "No GitHub Project requirement was configured."
     repository = ""
+    project_url = ""
+    token_source = ""
 
     try:
         draft = materialize_issue_create_draft(prepared, source_artifact_path=source_artifact_path)
@@ -75,35 +91,118 @@ def execute_issue_create_action(
             "md",
         )
 
-        configured_project_url = str(project_config.get("github_project_url", "")).strip()
-        if configured_project_url:
-            project_sync_status = "blocked_project_required_unimplemented"
-            project_sync_note = (
-                "github_project_url is configured, but Project placement is not implemented in this slice."
-            )
-            raise IssueCentricIssueCreateError(project_sync_note)
-
         repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
         token, token_source = resolve_github_token(env=env)
+        configured_project_url = str(project_config.get("github_project_url", "")).strip()
+        project_state_field_name = str(project_config.get("github_project_state_field_name", "State")).strip() or "State"
+        project_default_issue_state = str(project_config.get("github_project_default_issue_state", "")).strip()
+        if configured_project_url:
+            project_url = configured_project_url
+            if not project_state_field_name:
+                raise IssueCentricIssueCreateError(
+                    "github_project_state_field_name must not be empty when github_project_url is configured."
+                )
+            if not project_default_issue_state:
+                raise IssueCentricIssueCreateError(
+                    "github_project_default_issue_state must not be empty when github_project_url is configured."
+                )
+            resolver = project_state_resolver or resolve_github_project_state
+            resolved_project = resolver(
+                configured_project_url,
+                project_state_field_name,
+                project_default_issue_state,
+                token,
+            )
+
         creator = issue_creator or create_github_issue
         created_issue = creator(repository, draft.title, draft.body, token)
-        project_sync_status = "issue_only_fallback"
-        project_sync_note = "Created the issue without Project placement because no GitHub Project was configured."
-        safe_stop_reason = (
-            f"issue_create is implemented through GitHub issue creation. Created issue #{created_issue.number}. "
-            "Project placement, create_followup_issue mutation, and Codex dispatch remain unimplemented. "
-            "close_current_issue may run as a separate follow-up mutation in the bridge."
-        )
-        execution_status = "completed"
+
+        if resolved_project is None:
+            project_sync_status = "issue_only_fallback"
+            project_sync_note = "Created the issue without Project placement because no GitHub Project was configured."
+            safe_stop_reason = (
+                f"issue_create is implemented through GitHub issue creation. Created issue #{created_issue.number}. "
+                "Project placement, create_followup_issue mutation, and Codex dispatch remain unimplemented. "
+                "close_current_issue may run as a separate follow-up mutation in the bridge."
+            )
+            execution_status = "completed"
+        else:
+            if not created_issue.node_id:
+                raise IssueCentricIssueCreateError(
+                    "GitHub issue create did not return node_id required for Project placement."
+                )
+            item_creator = project_item_creator or add_issue_to_github_project
+            try:
+                created_project_item = item_creator(
+                    resolved_project.project_id,
+                    created_issue.node_id,
+                    token,
+                )
+            except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
+                project_sync_status = "issue_created_project_item_failed"
+                project_sync_note = f"Created issue #{created_issue.number}, but Project item create failed. {exc}"
+                safe_stop_reason = project_sync_note
+                execution_status = "blocked"
+            else:
+                state_setter = project_state_setter or set_github_project_item_state
+                try:
+                    state_setter(
+                        resolved_project.project_id,
+                        created_project_item.item_id,
+                        resolved_project.state_field_id,
+                        resolved_project.state_option_id,
+                        token,
+                    )
+                except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
+                    project_sync_status = "issue_created_project_state_failed"
+                    project_sync_note = (
+                        f"Created issue #{created_issue.number} and added Project item {created_project_item.item_id}, "
+                        f"but State set failed. {exc}"
+                    )
+                    safe_stop_reason = project_sync_note
+                    execution_status = "blocked"
+                else:
+                    project_sync_status = "project_state_synced"
+                    project_sync_note = (
+                        f"Created issue #{created_issue.number}, added it to Project `{resolved_project.project_title}`, "
+                        f"and set {resolved_project.state_field_name}={resolved_project.state_option_name}."
+                    )
+                    safe_stop_reason = (
+                        project_sync_note
+                        + " close_current_issue may run only after this Project placement succeeds."
+                    )
+                    execution_status = "completed"
     except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
-        token_source = ""
+        configured_project_url = str(project_config.get("github_project_url", "")).strip()
+        if configured_project_url:
+            project_url = configured_project_url
+            if resolved_project is None:
+                project_sync_status = "blocked_project_preflight"
+                project_sync_note = f"Project placement preflight failed before issue creation. {exc}"
+            elif created_issue is None:
+                project_sync_status = "issue_create_failed_before_project_item"
+                project_sync_note = (
+                    "Project preflight succeeded, but GitHub issue creation failed before Project item placement. "
+                    f"{exc}"
+                )
         safe_stop_reason = (
             "issue_create execution stopped before full handoff completion. "
             f"{exc}"
         )
         execution_status = "blocked"
     except Exception as exc:
-        token_source = ""
+        configured_project_url = str(project_config.get("github_project_url", "")).strip()
+        if configured_project_url:
+            project_url = configured_project_url
+            if resolved_project is None:
+                project_sync_status = "blocked_project_preflight"
+                project_sync_note = f"Project placement preflight failed before issue creation. {exc}"
+            elif created_issue is None:
+                project_sync_status = "issue_create_failed_before_project_item"
+                project_sync_note = (
+                    "Project preflight succeeded, but GitHub issue creation failed before Project item placement. "
+                    f"{exc}"
+                )
         safe_stop_reason = (
             "issue_create execution stopped after a GitHub mutation failure. "
             f"{exc}"
@@ -135,6 +234,7 @@ def execute_issue_create_action(
                 "url": created_issue.url,
                 "title": created_issue.title,
                 "repository": created_issue.repository,
+                "node_id": created_issue.node_id,
             }
             if created_issue is not None
             else None
@@ -142,11 +242,17 @@ def execute_issue_create_action(
         "close_current_issue": prepared.decision.close_current_issue,
         "create_followup_issue": prepared.decision.create_followup_issue,
         "project_sync": {
+            "project_url": project_url,
             "status": project_sync_status,
             "note": project_sync_note,
+            "project_title": resolved_project.project_title if resolved_project is not None else "",
+            "project_id": resolved_project.project_id if resolved_project is not None else "",
+            "item_id": created_project_item.item_id if created_project_item is not None else "",
+            "state_field_name": resolved_project.state_field_name if resolved_project is not None else "",
+            "state_option_name": resolved_project.state_option_name if resolved_project is not None else "",
         },
         "next_step": (
-            "Implement Project placement / state sync / follow-up after this slice."
+            "Implement create_followup_issue, other action Project sync, and broader runtime cutover after this slice."
         ),
         "safe_stop_reason": safe_stop_reason,
     }
@@ -161,8 +267,12 @@ def execute_issue_create_action(
         created_issue=created_issue,
         draft_log_path=draft_log_path,
         execution_log_path=execution_log_path,
+        project_url=project_url,
         project_sync_status=project_sync_status,
         project_sync_note=project_sync_note,
+        project_item_id=created_project_item.item_id if created_project_item is not None else "",
+        project_state_field_name=resolved_project.state_field_name if resolved_project is not None else "",
+        project_state_value_name=resolved_project.state_option_name if resolved_project is not None else "",
         safe_stop_reason=safe_stop_reason,
     )
 

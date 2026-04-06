@@ -91,6 +91,10 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_report_status": "",
     "last_issue_centric_report_file": "",
     "last_issue_centric_project_sync_status": "",
+    "last_issue_centric_project_url": "",
+    "last_issue_centric_project_item_id": "",
+    "last_issue_centric_project_state_field": "",
+    "last_issue_centric_project_state_value": "",
     "last_issue_centric_close_status": "",
     "last_issue_centric_close_log": "",
     "last_issue_centric_closed_issue_number": "",
@@ -1286,6 +1290,14 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_report_file: {state['last_issue_centric_report_file']}")
     if state.get("last_issue_centric_project_sync_status"):
         fields.append(f"- last_issue_centric_project_sync_status: {state['last_issue_centric_project_sync_status']}")
+    if state.get("last_issue_centric_project_url"):
+        fields.append(f"- last_issue_centric_project_url: {state['last_issue_centric_project_url']}")
+    if state.get("last_issue_centric_project_item_id"):
+        fields.append(f"- last_issue_centric_project_item_id: {state['last_issue_centric_project_item_id']}")
+    if state.get("last_issue_centric_project_state_field"):
+        fields.append(f"- last_issue_centric_project_state_field: {state['last_issue_centric_project_state_field']}")
+    if state.get("last_issue_centric_project_state_value"):
+        fields.append(f"- last_issue_centric_project_state_value: {state['last_issue_centric_project_state_value']}")
     if state.get("last_issue_centric_close_status"):
         fields.append(f"- last_issue_centric_close_status: {state['last_issue_centric_close_status']}")
     if state.get("last_issue_centric_close_log"):
