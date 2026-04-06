@@ -270,11 +270,16 @@ When a future theme is still too large for one phase:
 Use [docs/templates/PLANNED_ISSUE_SEED_TEMPLATE.md](templates/PLANNED_ISSUE_SEED_TEMPLATE.md)
 if you want a lightweight starting point for future seed issues.
 
+Use [docs/ISSUE_CENTRIC_SEED_ISSUES.md](ISSUE_CENTRIC_SEED_ISSUES.md) for the
+current Epic and planned issue catalog.
+
 ## Related Templates
 
 Use these together:
 
 - [docs/ISSUE_CENTRIC_FLOW.md](ISSUE_CENTRIC_FLOW.md)
+- [docs/ISSUE_CENTRIC_SEED_ISSUES.md](ISSUE_CENTRIC_SEED_ISSUES.md)
+- [Epic seed template](templates/EPIC_SEED_TEMPLATE.md)
 - [Ready issue template](../.github/ISSUE_TEMPLATE/ready_issue.md)
 - [Codex completion comment template](templates/CODEX_COMPLETION_COMMENT_TEMPLATE.md)
 - [Planned issue seed template](templates/PLANNED_ISSUE_SEED_TEMPLATE.md)

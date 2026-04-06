@@ -16,6 +16,11 @@ This template assumes the issue is already in `ready` state and should represent
 If the work still needs major decomposition, keep it in `planned` first instead
 of using this template as a catch-all execution bucket.
 
+If you are promoting from the seed backlog, use
+`docs/ISSUE_CENTRIC_SEED_ISSUES.md` and
+`docs/templates/PLANNED_ISSUE_SEED_TEMPLATE.md` before switching to this
+template.
+
 ## Background
 
 Describe the upstream context that matters here.
