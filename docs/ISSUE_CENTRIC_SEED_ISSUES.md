@@ -57,6 +57,32 @@ Use the seed set like this:
 If the GitHub surface is still mostly empty, seed the issues first and keep the
 Project setup intentionally minimal.
 
+## Current Public Bootstrap
+
+The current public bootstrap is intentionally smaller than the full seed
+catalog.
+
+- Labels:
+  - [repo labels](https://github.com/momotomo/ai-dev-orchestrator/labels)
+  - current added taxonomy: `type:epic`, `state:*`, `track:*`
+- Project:
+  - [ai-dev-orchestrator Issue-Centric Seed Backlog](https://github.com/users/momotomo/projects/4)
+- Registered Epic issues:
+  - [#1 Epic: issue-centric execution contract and operator path](https://github.com/momotomo/ai-dev-orchestrator/issues/1)
+  - [#2 Epic: GitHub backlog and Project bootstrap for issue-centric work](https://github.com/momotomo/ai-dev-orchestrator/issues/2)
+  - [#3 Epic: completion, review, and follow-up slicing loop](https://github.com/momotomo/ai-dev-orchestrator/issues/3)
+  - [#4 Epic: runtime migration inventory and staged orchestration](https://github.com/momotomo/ai-dev-orchestrator/issues/4)
+- Registered planned issues:
+  - [#5 Planned: make ready issue the normal operator entry example](https://github.com/momotomo/ai-dev-orchestrator/issues/5)
+  - [#6 Planned: position free-form initial input as an exception and recovery override](https://github.com/momotomo/ai-dev-orchestrator/issues/6)
+  - [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
+  - [#8 Planned: define planned-to-ready promotion cadence and backlog curation](https://github.com/momotomo/ai-dev-orchestrator/issues/8)
+  - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
+  - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
+
+Everything above remains `planned` for now.
+Promote only the next bounded slice to `ready`.
+
 ## Epic Unit
 
 An Epic issue should represent one stable theme that spans multiple future
@@ -140,6 +166,13 @@ Optional lightweight classification:
 - `track:docs`
 - `track:ops`
 - `track:runtime`
+
+A minimal initial bootstrap may keep state in `state:*` labels and use the
+Project as a plain list or grouping surface until a custom state field becomes
+worth the maintenance cost.
+
+`gh` is optional for this bootstrap step; GitHub UI or direct API calls are
+valid as well.
 
 If you start from the current default GitHub label set only, add as little as
 possible beyond the state model already proposed in

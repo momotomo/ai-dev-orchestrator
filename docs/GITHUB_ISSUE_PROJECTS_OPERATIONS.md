@@ -198,6 +198,10 @@ Recommended approach:
 If you are not using a Project field yet, labels can temporarily mirror the
 state model.
 
+For an initial bootstrap, a labels-first setup plus a plain Project list view is
+acceptable.
+`gh` is optional for this step; GitHub UI or direct API calls are also valid.
+
 ## Minimal Label Taxonomy
 
 Keep labels small and honest.
@@ -213,9 +217,10 @@ If needed, the minimal proposal is:
 
 Optional work-type labels can stay narrow:
 
-- `type:docs`
-- `type:runtime`
-- `type:ops`
+- `type:epic`
+- `track:docs`
+- `track:ops`
+- `track:runtime`
 
 If you use both Project status and `state:*` labels, keep them synchronized.
 Do not let labels become a second conflicting state system.
