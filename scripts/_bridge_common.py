@@ -300,7 +300,10 @@ def present_bridge_status(
         return BridgeStatusView("人確認待ち", detail)
 
     if mode == "idle" and need_chatgpt_prompt:
-        return BridgeStatusView("初回依頼文の入力待ち", "最初の依頼文はあなたが入力します。bridge は reply contract だけを足します。")
+        return BridgeStatusView(
+            "ready issue参照で開始待ち",
+            "通常は current ready issue の参照で始めます。free-form 初回本文は override 用で、bridge は reply contract だけを足します。",
+        )
 
     if mode == "waiting_prompt_reply":
         if pending_request_signal == "submitted_unconfirmed":
@@ -401,8 +404,8 @@ def present_bridge_handoff(
         return BridgeHandoffView("人の確認が必要です。summary と doctor を確認してください。", detail)
     if status.label == "完了":
         return BridgeHandoffView("完了しました。", detail)
-    if status.label == "初回依頼文の入力待ち":
-        return BridgeHandoffView("最初の依頼文を入力してください。", detail)
+    if status.label == "ready issue参照で開始待ち":
+        return BridgeHandoffView("current ready issue の参照で開始してください。", detail)
     if status.label == "ChatGPTへ依頼準備中":
         return BridgeHandoffView("ChatGPT への次の依頼を送る準備ができています。", detail)
     if status.label == "ChatGPT返答待ち":

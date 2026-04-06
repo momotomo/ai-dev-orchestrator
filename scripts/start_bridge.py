@@ -13,19 +13,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawTextHelpFormatter,
         description=(
             "bridge の通常入口です。\n"
-            "初回だけ ChatGPT への最初の依頼文をあなたが入力し、その後は report ベースで継続します。"
+            "通常は current ready issue の参照から始め、その後は report ベースで継続します。"
         ),
         epilog=(
             "よく使う例:\n"
-            "  python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/repo --max-execution-count 6\n"
+            "  python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/repo --ready-issue-ref '#123 sample browser wording cleanup' --max-execution-count 6\n"
             "  python3 scripts/start_bridge.py --status --project-path /ABSOLUTE/PATH/TO/repo\n"
             "  python3 scripts/start_bridge.py --doctor --project-path /ABSOLUTE/PATH/TO/repo\n\n"
-            "初回 request の本文は自分で書きます。bridge は本文を自動生成せず、reply contract だけを追加します。"
+            "通常入口では ready issue の参照を使います。free-form 初回本文は exception / recovery / override 用で、bridge は本文を改変せず reply contract だけを追加します。"
         ),
     )
     parser.add_argument(
         "--project-path",
         help="Codex worker を動かす target repo の絶対パス",
+    )
+    parser.add_argument(
+        "--ready-issue-ref",
+        default="",
+        help="通常入口で使う current ready issue の参照。例: '#123 sample browser wording cleanup'",
+    )
+    parser.add_argument(
+        "--request-body",
+        default="",
+        help="例外 / recovery / override 用の初回本文。通常入口の代替としては使わない",
     )
     parser.add_argument(
         "--max-execution-count",
@@ -62,7 +72,8 @@ def build_derived_args(args: argparse.Namespace) -> argparse.Namespace:
     project_config = run_until_stop.load_project_config()
     browser_config = run_until_stop.load_browser_config()
     return run_until_stop.parse_args(
-        [
+        (
+            [
             "--project-path",
             args.project_path or str(run_until_stop.worker_repo_path(project_config)),
             "--max-execution-count",
@@ -71,7 +82,10 @@ def build_derived_args(args: argparse.Namespace) -> argparse.Namespace:
             str(run_until_stop.browser_fetch_timeout_seconds(browser_config)),
             "--entry-script",
             "scripts/start_bridge.py",
-        ],
+        ]
+            + (["--ready-issue-ref", args.ready_issue_ref] if args.ready_issue_ref else [])
+            + (["--request-body", args.request_body] if args.request_body else [])
+        ),
         project_config,
     )
 
@@ -188,7 +202,14 @@ def main(argv: list[str] | None = None) -> int:
     print("bridge start: このコマンドが通常入口です。", flush=True)
     print(f"- project_path: {project_path_display}", flush=True)
     print(f"- max_execution_count: {args.max_execution_count}", flush=True)
-    print("- 初回だけ、あなたが最初の ChatGPT 依頼文を入力します。", flush=True)
+    if args.ready_issue_ref:
+        print(f"- ready_issue_ref: {args.ready_issue_ref}", flush=True)
+        print("- 通常入口として、この ready issue 参照を使って最初の ChatGPT request を組み立てます。", flush=True)
+    elif args.request_body:
+        print("- free-form override: 指定された初回本文を例外経路として使います。", flush=True)
+    else:
+        print("- 通常入口では、current ready issue の参照を受けて最初の ChatGPT request を組み立てます。", flush=True)
+    print("- free-form 初回本文は exception / recovery / override 用にだけ残しています。", flush=True)
     print("- 2 回目以降は report ベースで継続し、通常は同じチャットを使います。", flush=True)
     if args.resume:
         print("- resume: ここから続きとして進めます。", flush=True)
@@ -201,6 +222,10 @@ def main(argv: list[str] | None = None) -> int:
         "--entry-script",
         "scripts/start_bridge.py",
     ]
+    if args.ready_issue_ref:
+        forwarded_argv.extend(["--ready-issue-ref", args.ready_issue_ref])
+    if args.request_body:
+        forwarded_argv.extend(["--request-body", args.request_body])
     return run_until_stop.run(forwarded_argv)
 
 

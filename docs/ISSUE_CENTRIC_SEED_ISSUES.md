@@ -80,7 +80,7 @@ catalog.
   - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
   - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
 - Current open ready issues:
-  - none
+  - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
 - Completed ready examples:
   - [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
   - [#12 Ready: define one-next-ready cadence for the labels-first backlog](https://github.com/momotomo/ai-dev-orchestrator/issues/12)
@@ -152,8 +152,8 @@ In the current public set:
   staged migration work
 - `#18` is the completed ready child for the inventory-only runtime touchpoint
   slice
-- the open `ready` queue may return to zero after `#18` while the next
-  runtime-adjacent slice is reconsidered
+- `#20` is the current open ready child for the first bounded runtime
+  implementation slice at the initial entry boundary
 - `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
   decisions should return to backlog curation instead of stretching completed
   ready issues

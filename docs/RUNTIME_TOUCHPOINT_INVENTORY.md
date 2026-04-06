@@ -33,6 +33,11 @@ report-based.
 This inventory should make it easier to cut the next bounded runtime-ready
 issues without smuggling in a broad rewrite.
 
+The first bounded implementation child cut from this inventory is now
+[#20](https://github.com/momotomo/ai-dev-orchestrator/issues/20), which keeps
+the change at the initial request boundary instead of widening into report
+continuation or signal remapping.
+
 ## What Stays True In This Phase
 
 During this inventory phase, all of the following stay unchanged:
@@ -233,8 +238,8 @@ Epic `#4`.
 
 Likely next candidates:
 
-- one ready issue that narrows the initial request boundary around the current
-  `ready` issue while preserving manual override cases
+- current bounded implementation child:
+  - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
 - one ready issue that adds issue-aware provenance to report-based continuation
   without changing late-completion or handoff behavior
 - one later ready issue that maps late-completion and project-page send signals
