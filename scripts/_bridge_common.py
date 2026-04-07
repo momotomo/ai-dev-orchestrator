@@ -1080,6 +1080,26 @@ def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
     return "no_action"
 
 
+def resolve_prepared_request_transition(state: Mapping[str, Any]) -> str:
+    """Return action key for the prepared_request path (fresh_prepared generation).
+
+    When a prepared request is fresh and its builder can be determined, returns
+    the concrete send action so the runner can reuse the prepared request without
+    rebuilding it.  Falls back to "need_next_generation" only when the builder
+    cannot be determined.
+
+    Returns one of:
+        "request_next_prompt"        - prepared source is ready_issue: / override: / initial:
+        "request_prompt_from_report" - prepared source is report: / handoff: / human_review_continue:
+        "need_next_generation"       - builder could not be determined; caller should treat as
+                                       need_next_generation and select builder from mode instead
+    """
+    action = prepared_request_action(state)
+    if action:
+        return action
+    return "need_next_generation"
+
+
 def stage_prepared_request(
     state: dict[str, Any],
     *,

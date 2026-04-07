@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_fallback_legacy_transition, resolve_issue_centric_route_choice, resolve_next_generation_transition, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_fallback_legacy_transition, resolve_issue_centric_route_choice, resolve_next_generation_transition, resolve_prepared_request_transition, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -278,32 +278,33 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
+    # Resolve the concrete action key via shared spine helpers.
+    # prepared_request → resolve_prepared_request_transition (may fall back to need_next_generation)
+    # need_next_generation → resolve_next_generation_transition
+    # fallback_legacy      → resolve_fallback_legacy_transition
     if runtime_action == "prepared_request":
-        prepared_action = prepared_request_action(state)
-        if prepared_action == "request_next_prompt":
-            status = present_bridge_status(state)
-            print(
-                f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
-                f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
-            )
-            return request_next_prompt.run(dict(state), build_initial_request_argv(args))
-        if prepared_action == "request_prompt_from_report":
-            status = present_bridge_status(state)
-            print(
-                f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
-                f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
-            )
-            return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-        # builder could not be determined; fall through to need_next_generation
-        runtime_action = "need_next_generation"
-
-    if runtime_action == "need_next_generation":
+        next_action = resolve_prepared_request_transition(state)
+        if next_action == "need_next_generation":
+            # builder could not be determined; treat as need_next_generation
+            next_action = resolve_next_generation_transition(state)
+    elif runtime_action == "need_next_generation":
         next_action = resolve_next_generation_transition(state)
     else:
-        # fallback_legacy: degraded / unavailable / invalidated issue-centric situations.
-        # Codex lifecycle branches (ready_for_codex, codex_running, codex_done) are handled
-        # earlier in this function and are never reached here.
+        # fallback_legacy: runtime is degraded / unavailable / invalidated.
+        # Codex lifecycle branches (ready_for_codex, codex_running, codex_done) are
+        # handled earlier in this function and will not appear as next_action here.
         next_action = resolve_fallback_legacy_transition(state)
+
+    if next_action in {"request_next_prompt", "request_prompt_from_report"} and runtime_action == "prepared_request":
+        # Prepared-request send: reuse without rebuilding.
+        status = present_bridge_status(state)
+        print(
+            f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
+            f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
+        )
+        if next_action == "request_next_prompt":
+            return request_next_prompt.run(dict(state), build_initial_request_argv(args))
+        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
 
     if next_action == "request_next_prompt":
         status = present_bridge_status(state)
@@ -314,7 +315,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
 
     if next_action == "fetch_next_prompt":
-        # Only reachable from fallback_legacy (waiting_prompt_reply / extended_wait / await_late_completion).
+        # Reachable from fallback_legacy when mode is waiting_prompt_reply / extended_wait /
+        # await_late_completion.  Not reachable from prepared_request or need_next_generation.
         status = present_bridge_status(state)
         if route_choice.route_selected == "fallback_legacy":
             print(

@@ -40,6 +40,7 @@ from _bridge_common import (
     resolve_issue_centric_preferred_loop_action,
     resolve_issue_centric_route_choice,
     resolve_next_generation_transition,
+    resolve_prepared_request_transition,
     resolve_runtime_next_action,
     repo_relative,
     runtime_prompt_path,
@@ -273,17 +274,18 @@ def describe_next_action(state: dict[str, Any]) -> str:
         return "archive_codex_report"
 
     # Issue-centric state view is the primary authority for route choice.
-    # mode is used only as compatibility display inside each branch.
+    # mode is kept as compatibility display; concrete action selection is
+    # delegated to shared spine helpers in _bridge_common.
     runtime_action, _ = resolve_runtime_next_action(state)
 
     if runtime_action == "pending_reply":
         return "fetch_next_prompt"
 
     if runtime_action == "prepared_request":
-        action = prepared_request_action(state)
-        if action:
-            return action
-        # prepared_request_action could not determine builder → treat as need_next_generation
+        next_action = resolve_prepared_request_transition(state)
+        if next_action != "need_next_generation":
+            return next_action
+        # builder could not be determined → treat as need_next_generation
         runtime_action = "need_next_generation"
 
     if runtime_action == "need_next_generation":
