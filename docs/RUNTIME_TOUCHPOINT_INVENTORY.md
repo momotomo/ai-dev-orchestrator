@@ -195,8 +195,13 @@ During this inventory phase, all of the following stay unchanged:
   - the current codex-run-followup combo slice goes one step farther again:
     it wires `codex_run + create_followup_issue` to a narrow
     `trigger comment -> Codex launch -> continuation handoff -> follow-up
-    issue create` path, while keeping
-    `codex_run + create_followup_issue + close_current_issue` out of scope
+    issue create` path
+  - the current codex-run-followup-close combo slice goes one step farther
+    again: it wires
+    `codex_run + create_followup_issue + close_current_issue` to a narrow
+    `trigger comment -> Codex launch -> continuation handoff -> follow-up
+    issue create -> close` path, while broader `codex_run + close` and other
+    multi-flag automation stay out of scope
   - the current dispatcher slice goes one step farther again: it moves the
     already-implemented issue-centric execution matrix out of
     `fetch_next_prompt.py` and into `scripts/issue_centric_execution.py`,

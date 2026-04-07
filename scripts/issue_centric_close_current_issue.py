@@ -53,6 +53,7 @@ def execute_close_current_issue(
     allow_human_review_close: bool = False,
     allow_human_review_followup_close: bool = False,
     allow_issue_create_followup_close: bool = False,
+    allow_codex_run_followup_close: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> IssueCloseExecutionResult:
@@ -70,6 +71,7 @@ def execute_close_current_issue(
         allow_human_review_close=allow_human_review_close,
         allow_human_review_followup_close=allow_human_review_followup_close,
         allow_issue_create_followup_close=allow_issue_create_followup_close,
+        allow_codex_run_followup_close=allow_codex_run_followup_close,
     )
 
     try:
@@ -87,6 +89,7 @@ def execute_close_current_issue(
             allow_human_review_close=allow_human_review_close,
             allow_human_review_followup_close=allow_human_review_followup_close,
             allow_issue_create_followup_close=allow_issue_create_followup_close,
+            allow_codex_run_followup_close=allow_codex_run_followup_close,
         )
         if resolved_issue.repository != repository:
             raise IssueCentricCloseCurrentIssueError(
@@ -132,6 +135,14 @@ def execute_close_current_issue(
                 safe_stop_reason = (
                     f"close_current_issue closed issue #{issue_after.number} after the review comment was posted."
                 )
+            elif (
+                prepared.decision.action is IssueCentricAction.CODEX_RUN
+                and allow_codex_run_followup_close
+                and prepared.decision.create_followup_issue
+            ):
+                safe_stop_reason = (
+                    f"close_current_issue closed issue #{issue_after.number} after the issue-centric Codex launch / continuation path and follow-up issue path succeeded."
+                )
             else:
                 safe_stop_reason = (
                     f"close_current_issue closed issue #{issue_after.number} after the primary action completed."
@@ -159,6 +170,7 @@ def execute_close_current_issue(
         "allow_human_review_close": allow_human_review_close,
         "allow_human_review_followup_close": allow_human_review_followup_close,
         "allow_issue_create_followup_close": allow_issue_create_followup_close,
+        "allow_codex_run_followup_close": allow_codex_run_followup_close,
         "resolved_repository": repository,
         "token_source": token_source,
         "resolved_issue": (
@@ -220,6 +232,7 @@ def resolve_close_target_issue(
     allow_human_review_close: bool = False,
     allow_human_review_followup_close: bool = False,
     allow_issue_create_followup_close: bool = False,
+    allow_codex_run_followup_close: bool = False,
 ) -> ResolvedGitHubIssue:
     decision_target = str(prepared.decision.target_issue or "").strip()
     state_resolved = str(prior_state.get("last_issue_centric_resolved_issue", "")).strip()
@@ -242,9 +255,12 @@ def resolve_close_target_issue(
     )
 
     if prepared.decision.action is IssueCentricAction.CODEX_RUN:
-        raise IssueCentricCloseCurrentIssueError(
-            "action=codex_run cannot execute close_current_issue in this slice because the current execution unit remains active."
-        )
+        if prepared.decision.create_followup_issue and allow_codex_run_followup_close:
+            pass
+        else:
+            raise IssueCentricCloseCurrentIssueError(
+                "action=codex_run cannot execute close_current_issue in this slice because the current execution unit remains active."
+            )
     if prepared.decision.action is IssueCentricAction.ISSUE_CREATE:
         if prepared.decision.create_followup_issue and not allow_issue_create_followup_close:
             raise IssueCentricCloseCurrentIssueError(
@@ -282,6 +298,7 @@ def _determine_close_order(
     allow_human_review_close: bool = False,
     allow_human_review_followup_close: bool = False,
     allow_issue_create_followup_close: bool = False,
+    allow_codex_run_followup_close: bool = False,
 ) -> str:
     if action is IssueCentricAction.ISSUE_CREATE:
         if allow_issue_create_followup_close:
@@ -294,7 +311,7 @@ def _determine_close_order(
             return "after_human_review_followup"
         return "after_human_review" if allow_human_review_close else "blocked_human_review_needed"
     if action is IssueCentricAction.CODEX_RUN:
-        return "blocked_codex_run"
+        return "after_codex_run_followup" if allow_codex_run_followup_close else "blocked_codex_run"
     return "not_supported"
 
 

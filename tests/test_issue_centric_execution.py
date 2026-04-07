@@ -194,7 +194,7 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             launch_runner=lambda state, argv=None: 0,
         )
 
-    def test_dispatcher_blocks_codex_run_followup_close_combo(self) -> None:
+    def test_dispatcher_runs_codex_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             decision = issue_centric_contract.IssueCentricDecision(
@@ -210,25 +210,110 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
                 raw_json="{}",
                 raw_segment="segment",
             )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_codex_run(*args, **kwargs):
+                calls.append("trigger")
+                log_path = root / "codex-trigger.json"
+                log_path.write_text("{}", encoding="utf-8")
+                payload_path = root / "payload.json"
+                payload_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(703, 20),
+                    payload=SimpleNamespace(
+                        repo=str(REPO_ROOT),
+                        target_issue="https://github.com/example/repo/issues/20",
+                        request="Implement the issue.\n",
+                        trigger_comment="https://github.com/example/repo/issues/20#issuecomment-703",
+                    ),
+                    payload_log_path=payload_path,
+                    execution_log_path=log_path,
+                    launch_status="not_implemented",
+                    launch_note="not implemented",
+                    safe_stop_reason="trigger comment created",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                prompt_log = root / "prompt.md"
+                prompt_log.write_text("prompt", encoding="utf-8")
+                launch_log = root / "launch.json"
+                launch_log.write_text("{}", encoding="utf-8")
+                cont_log = root / "continuation.json"
+                cont_log.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="launched",
+                    launch_entrypoint="launch_codex_once.run",
+                    prompt_log_path=prompt_log,
+                    launch_log_path=launch_log,
+                    continuation_status="delegated_to_existing_codex_wait",
+                    continuation_log_path=cont_log,
+                    report_status="waiting_for_report",
+                    report_file="",
+                    final_mode="codex_running",
+                    safe_stop_reason="launch and continuation delegated",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=fake_issue(81),
+                    execution_log_path=log_path,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_81",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="follow-up created after codex handoff",
+                )
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_codex_run_followup",
+                    execution_log_path=log_path,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed current issue after codex continuation and follow-up",
+                )
+
             result = self.dispatch(
                 decision=decision,
-                materialized=materialized_from_decision(decision, root=root),
+                materialized=materialized,
                 root=root,
-                execute_close_current_issue_fn=lambda *args, **kwargs: SimpleNamespace(
-                    status="blocked",
-                    close_status="blocked",
-                    close_order="blocked_codex_run",
-                    execution_log_path=root / "close.json",
-                    issue_before=None,
-                    issue_after=None,
-                    safe_stop_reason="codex_run + close_current_issue is blocked",
-                ),
+                execute_codex_run_action_fn=fake_codex_run,
+                launch_issue_centric_codex_run_fn=fake_launch,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
             )
 
-            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
-            self.assertEqual(result.final_status, "blocked")
-            self.assertEqual([step.name for step in result.steps], ["close_current_issue"])
-            self.assertTrue(result.final_state["last_issue_centric_dispatch_result"])
+            self.assertEqual(calls, ["trigger", "launch", "followup", "close"])
+            self.assertEqual(result.matrix_path, "codex_run_followup_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                [step.name for step in result.steps],
+                [
+                    "codex_trigger_comment",
+                    "codex_launch_and_continuation",
+                    "followup_issue_create",
+                    "close_current_issue",
+                ],
+            )
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "81")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run_followup")
 
     def test_dispatcher_runs_codex_followup_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -427,6 +512,216 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_status, "partial")
             self.assertEqual(result.final_state["last_issue_centric_launch_status"], "launched")
             self.assertEqual(result.final_state["last_issue_centric_followup_status"], "blocked_project_preflight")
+
+    def test_dispatcher_does_not_close_when_codex_followup_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                summary="Run codex, create follow-up, and close current issue.",
+                issue_body_base64=None,
+                codex_body_base64=b64("Implement the issue.\n"),
+                review_base64=None,
+                followup_issue_body_base64=b64("# Follow-up\n\nBody\n"),
+                raw_json="{}",
+                raw_segment="segment",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_codex_run(*args, **kwargs):
+                calls.append("trigger")
+                log_path = root / "codex-trigger.json"
+                log_path.write_text("{}", encoding="utf-8")
+                payload_path = root / "payload.json"
+                payload_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(704, 20),
+                    payload=SimpleNamespace(
+                        repo=str(REPO_ROOT),
+                        target_issue="https://github.com/example/repo/issues/20",
+                        request="Implement the issue.\n",
+                        trigger_comment="https://github.com/example/repo/issues/20#issuecomment-704",
+                    ),
+                    payload_log_path=payload_path,
+                    execution_log_path=log_path,
+                    launch_status="not_implemented",
+                    launch_note="not implemented",
+                    safe_stop_reason="trigger comment created",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                prompt_log = root / "prompt.md"
+                prompt_log.write_text("prompt", encoding="utf-8")
+                launch_log = root / "launch.json"
+                launch_log.write_text("{}", encoding="utf-8")
+                cont_log = root / "continuation.json"
+                cont_log.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="launched",
+                    launch_entrypoint="launch_codex_once.run",
+                    prompt_log_path=prompt_log,
+                    launch_log_path=launch_log,
+                    continuation_status="delegated_to_existing_codex_wait",
+                    continuation_log_path=cont_log,
+                    report_status="waiting_for_report",
+                    report_file="",
+                    final_mode="codex_running",
+                    safe_stop_reason="launch and continuation delegated",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    followup_status="blocked_project_preflight",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=None,
+                    execution_log_path=log_path,
+                    project_sync_status="blocked_project_preflight",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="follow-up blocked",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_codex_run_action_fn=fake_codex_run,
+                launch_issue_centric_codex_run_fn=fake_launch,
+                execute_followup_issue_action_fn=fake_followup,
+            )
+
+            self.assertEqual(calls, ["trigger", "launch", "followup"])
+            self.assertEqual(result.matrix_path, "codex_run_followup_then_close")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_launch_status"], "launched")
+            self.assertEqual(result.final_state["last_issue_centric_followup_status"], "blocked_project_preflight")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "not_attempted_followup_blocked")
+
+    def test_dispatcher_keeps_codex_and_followup_success_when_codex_followup_close_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                summary="Run codex, create follow-up, and close current issue.",
+                issue_body_base64=None,
+                codex_body_base64=b64("Implement the issue.\n"),
+                review_base64=None,
+                followup_issue_body_base64=b64("# Follow-up\n\nBody\n"),
+                raw_json="{}",
+                raw_segment="segment",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_codex_run(*args, **kwargs):
+                calls.append("trigger")
+                log_path = root / "codex-trigger.json"
+                log_path.write_text("{}", encoding="utf-8")
+                payload_path = root / "payload.json"
+                payload_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(705, 20),
+                    payload=SimpleNamespace(
+                        repo=str(REPO_ROOT),
+                        target_issue="https://github.com/example/repo/issues/20",
+                        request="Implement the issue.\n",
+                        trigger_comment="https://github.com/example/repo/issues/20#issuecomment-705",
+                    ),
+                    payload_log_path=payload_path,
+                    execution_log_path=log_path,
+                    launch_status="not_implemented",
+                    launch_note="not implemented",
+                    safe_stop_reason="trigger comment created",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                prompt_log = root / "prompt.md"
+                prompt_log.write_text("prompt", encoding="utf-8")
+                launch_log = root / "launch.json"
+                launch_log.write_text("{}", encoding="utf-8")
+                cont_log = root / "continuation.json"
+                cont_log.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="launched",
+                    launch_entrypoint="launch_codex_once.run",
+                    prompt_log_path=prompt_log,
+                    launch_log_path=launch_log,
+                    continuation_status="delegated_to_existing_codex_wait",
+                    continuation_log_path=cont_log,
+                    report_status="waiting_for_report",
+                    report_file="",
+                    final_mode="codex_running",
+                    safe_stop_reason="launch and continuation delegated",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=fake_issue(83),
+                    execution_log_path=log_path,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_83",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="follow-up created after codex handoff",
+                )
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    close_status="failed_after_mutation_attempt",
+                    close_order="after_codex_run_followup",
+                    execution_log_path=log_path,
+                    issue_before=fake_issue(20),
+                    issue_after=None,
+                    safe_stop_reason="close failed after reviewable codex/followup success",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_codex_run_action_fn=fake_codex_run,
+                launch_issue_centric_codex_run_fn=fake_launch,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["trigger", "launch", "followup", "close"])
+            self.assertEqual(result.matrix_path, "codex_run_followup_then_close")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "83")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run_followup")
 
     def test_dispatcher_runs_issue_create_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

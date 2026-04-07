@@ -101,7 +101,7 @@ def execute_followup_issue_action(
     draft: IssueCreateDraft | None = None
     issue_create_result: IssueCreateExecutionResult | None = None
     if is_codex_run_combo and prepared.decision.close_current_issue:
-        close_policy = "blocked_codex_followup_close_unimplemented"
+        close_policy = "after_codex_followup_success_then_close"
     elif is_codex_run_combo:
         close_policy = "after_codex_followup_success_only"
     elif is_issue_create_combo and prepared.decision.close_current_issue:
@@ -173,7 +173,7 @@ def execute_followup_issue_action(
             if is_codex_run_combo:
                 safe_stop_reason = (
                     f"Created follow-up issue #{issue_create_result.created_issue.number} after the issue-centric Codex launch / continuation path succeeded. "
-                    "The current issue stays open in this slice."
+                    "close_current_issue may run only after this follow-up creation path succeeds."
                 )
             elif is_issue_create_combo:
                 safe_stop_reason = (

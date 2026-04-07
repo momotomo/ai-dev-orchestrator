@@ -15,6 +15,8 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import fetch_next_prompt  # noqa: E402
 import issue_centric_close_current_issue  # noqa: E402
+import issue_centric_codex_launch  # noqa: E402
+import issue_centric_codex_run  # noqa: E402
 import issue_centric_contract  # noqa: E402
 import issue_centric_followup_issue  # noqa: E402
 import issue_centric_github  # noqa: E402
@@ -427,6 +429,50 @@ class FollowupIssueExecutionTests(unittest.TestCase):
             self.assertEqual(result.close_policy, "after_codex_followup_success_only")
             self.assertEqual(result.created_issue.number, 77)
 
+    def test_followup_issue_sets_close_policy_for_codex_run_followup_close_combo(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue="#20",
+            close_current_issue=True,
+            create_followup_issue=True,
+            summary="Run codex, create follow-up, and then close current issue.",
+            issue_body_base64=None,
+            codex_body_base64=b64("Implement the issue.\n"),
+            review_base64=None,
+            followup_issue_body_base64=b64("# Follow-up title\n\nBody paragraph.\n"),
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                allow_codex_run_combo=True,
+                issue_creator=lambda repository, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=78,
+                    url="https://github.com/example/repo/issues/78",
+                    title=title,
+                    repository=repository,
+                    node_id="ISSUE_node_78",
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.followup_status, "completed")
+            self.assertEqual(result.close_policy, "after_codex_followup_success_then_close")
+            self.assertEqual(result.created_issue.number, 78)
+
 
 class FetchNextPromptFollowupTests(unittest.TestCase):
     def test_fetch_executes_no_action_followup_then_close(self) -> None:
@@ -544,7 +590,7 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_created_issue_number"], "74")
             self.assertEqual(saved["last_issue_centric_close_status"], "closed")
 
-    def test_fetch_blocks_followup_for_codex_close_combo(self) -> None:
+    def test_fetch_executes_codex_followup_close_combo(self) -> None:
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "request-hash",
@@ -553,6 +599,8 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             "pending_request_signal": "",
             "last_processed_request_hash": "",
             "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_target_issue": "#20",
         }
         raw = build_raw_reply(
             action="codex_run",
@@ -579,30 +627,156 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(
                     fetch_next_prompt,
+                    "load_project_config",
+                    return_value={
+                        "github_repository": "example/repo",
+                        "github_project_url": "",
+                        "worker_repo_path": ".",
+                    },
+                ),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_state",
+                    return_value={
+                        **state,
+                        "mode": "codex_running",
+                        "last_issue_centric_execution_status": "completed",
+                        "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                        "last_issue_centric_target_issue": "#20",
+                    },
+                ),
+                patch.object(
+                    fetch_next_prompt,
+                    "execute_codex_run_action",
+                    return_value=issue_centric_codex_run.CodexRunExecutionResult(
+                        status="completed",
+                        resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                            repository="example/repo",
+                            issue_number=20,
+                            issue_url="https://github.com/example/repo/issues/20",
+                            source_ref="#20",
+                        ),
+                        created_comment=issue_centric_github.CreatedGitHubComment(
+                            comment_id=820,
+                            url="https://github.com/example/repo/issues/20#issuecomment-820",
+                            body="Implement the issue.\n",
+                            repository="example/repo",
+                            issue_number=20,
+                        ),
+                        payload=issue_centric_codex_run.CodexRunExecutionPayload(
+                            repo="/tmp/repo",
+                            target_issue="https://github.com/example/repo/issues/20",
+                            request="Implement the issue.\n",
+                            trigger_comment="https://github.com/example/repo/issues/20#issuecomment-820",
+                        ),
+                        payload_log_path=temp_root / "payload.json",
+                        execution_log_path=temp_root / "codex.json",
+                        launch_status="not_implemented",
+                        launch_note="Not implemented.",
+                        safe_stop_reason="codex_run completed through trigger comment creation.",
+                    ),
+                ) as codex_mock,
+                patch.object(
+                    fetch_next_prompt,
+                    "launch_issue_centric_codex_run",
+                    return_value=issue_centric_codex_launch.IssueCentricCodexLaunchResult(
+                        status="completed",
+                        launch_status="launched",
+                        launch_entrypoint="launch_codex_once.run",
+                        prompt_path=temp_root / "codex_prompt.md",
+                        prompt_log_path=temp_root / "prompt-log.md",
+                        launch_log_path=temp_root / "launch.json",
+                        continuation_status="delegated_to_existing_codex_wait",
+                        continuation_log_path=temp_root / "continuation.json",
+                        report_status="waiting_for_report",
+                        report_file="",
+                        final_mode="codex_running",
+                        safe_stop_reason="codex_run trigger comment and launch completed.",
+                    ),
+                ) as launch_mock,
+                patch.object(
+                    fetch_next_prompt,
+                    "execute_followup_issue_action",
+                    return_value=issue_centric_followup_issue.FollowupIssueExecutionResult(
+                        status="completed",
+                        followup_status="completed",
+                        parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                            repository="example/repo",
+                            issue_number=20,
+                            issue_url="https://github.com/example/repo/issues/20",
+                            source_ref="#20",
+                        ),
+                        draft=issue_centric_issue_create.IssueCreateDraft(
+                            title="Follow-up title",
+                            body="Body\n",
+                            title_line="# Follow-up title",
+                            source_artifact_path="logs/prepared_followup_issue_body.md",
+                        ),
+                        created_issue=issue_centric_github.CreatedGitHubIssue(
+                            number=84,
+                            url="https://github.com/example/repo/issues/84",
+                            title="Follow-up title",
+                            repository="example/repo",
+                            node_id="ISSUE_node_84",
+                        ),
+                        issue_create_execution_log_path=temp_root / "followup-inner.json",
+                        execution_log_path=temp_root / "followup.json",
+                        project_url="",
+                        project_sync_status="issue_only_fallback",
+                        project_sync_note="No project configured.",
+                        project_item_id="",
+                        project_state_field_name="",
+                        project_state_value_name="",
+                        close_policy="after_codex_followup_success_then_close",
+                        safe_stop_reason="Created follow-up issue after codex continuation.",
+                    ),
+                ) as followup_mock,
+                patch.object(
+                    fetch_next_prompt,
                     "execute_close_current_issue",
                     return_value=issue_centric_close_current_issue.IssueCloseExecutionResult(
-                        status="blocked",
-                        close_status="blocked",
-                        close_order="blocked_codex_run",
-                        resolved_issue=None,
-                        issue_before=None,
-                        issue_after=None,
+                        status="completed",
+                        close_status="closed",
+                        close_order="after_codex_run_followup",
+                        resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                            repository="example/repo",
+                            issue_number=20,
+                            issue_url="https://github.com/example/repo/issues/20",
+                            source_ref="#20",
+                        ),
+                        issue_before=issue_centric_github.GitHubIssueSnapshot(
+                            number=20,
+                            url="https://github.com/example/repo/issues/20",
+                            title="Current issue",
+                            repository="example/repo",
+                            state="open",
+                        ),
+                        issue_after=issue_centric_github.GitHubIssueSnapshot(
+                            number=20,
+                            url="https://github.com/example/repo/issues/20",
+                            title="Current issue",
+                            repository="example/repo",
+                            state="closed",
+                        ),
                         execution_log_path=temp_root / "close.json",
-                        safe_stop_reason="codex_run + close_current_issue is blocked in this slice.",
+                        safe_stop_reason="Closed current issue after codex continuation and follow-up.",
                     ),
                 ) as close_mock,
-                patch.object(fetch_next_prompt, "execute_codex_run_action") as codex_mock,
             ):
                 with self.assertRaisesRegex(
                     BridgeStop,
-                    "codex_run \\+ close_current_issue はこの slice では安全に実行できない",
+                    "trigger comment / launch / continuation / narrow follow-up issue create / narrow close",
                 ):
                     fetch_next_prompt.run(dict(state), [])
 
             self.assertEqual(close_mock.call_count, 1)
-            self.assertEqual(codex_mock.call_count, 0)
-            saved = saved_states[0]
-            self.assertEqual(saved["last_issue_centric_close_status"], "blocked")
+            self.assertEqual(codex_mock.call_count, 1)
+            self.assertEqual(launch_mock.call_count, 1)
+            self.assertEqual(followup_mock.call_count, 1)
+            saved = saved_states[-1]
+            self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
+            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "84")
+            self.assertEqual(saved["last_issue_centric_close_order"], "after_codex_run_followup")
 
     def test_fetch_does_not_close_when_followup_is_blocked(self) -> None:
         state = {
