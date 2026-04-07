@@ -15,8 +15,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from issue_centric_normalized_summary import (
+    IssueCentricNextRequestContext,
     load_issue_centric_normalized_summary,
+    render_issue_centric_next_request_section,
     render_issue_centric_summary_for_request,
+    resolve_issue_centric_next_request_context,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -82,6 +85,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_principal_issue": "",
     "last_issue_centric_principal_issue_kind": "",
     "last_issue_centric_next_request_hint": "",
+    "last_issue_centric_next_request_target": "",
+    "last_issue_centric_next_request_target_source": "",
+    "last_issue_centric_next_request_fallback_reason": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1301,6 +1307,16 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         )
     if state.get("last_issue_centric_next_request_hint"):
         fields.append(f"- last_issue_centric_next_request_hint: {state['last_issue_centric_next_request_hint']}")
+    if state.get("last_issue_centric_next_request_target"):
+        fields.append(f"- last_issue_centric_next_request_target: {state['last_issue_centric_next_request_target']}")
+    if state.get("last_issue_centric_next_request_target_source"):
+        fields.append(
+            f"- last_issue_centric_next_request_target_source: {state['last_issue_centric_next_request_target_source']}"
+        )
+    if state.get("last_issue_centric_next_request_fallback_reason"):
+        fields.append(
+            f"- last_issue_centric_next_request_fallback_reason: {state['last_issue_centric_next_request_fallback_reason']}"
+        )
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
     if state.get("last_issue_centric_execution_status"):
@@ -3100,6 +3116,7 @@ def build_chatgpt_handoff_request(
     next_todo: str,
     open_questions: str,
     current_status: str | None = None,
+    issue_centric_next_request_section: str | None = None,
 ) -> str:
     summary = compact_last_report_text(last_report)
     contract = build_chatgpt_reply_contract_section()
@@ -3108,6 +3125,9 @@ def build_chatgpt_handoff_request(
         state,
         fallback_text=f"{status_view.label}: {status_view.detail}",
     )
+    next_request_section = issue_centric_next_request_section
+    if next_request_section is None:
+        _, next_request_section = prepare_issue_centric_next_request_context(state)
     return (
         "次チャットへそのまま貼る完成済みの最初のメッセージだけを書いてください。\n"
         "これは要約メモではありません。新しいチャットの最初の 1 通として、そのまま送れる本文だけを返してください。\n"
@@ -3125,6 +3145,7 @@ def build_chatgpt_handoff_request(
         "## next_request\n"
         f"- next_todo: {next_todo}\n"
         f"- open_questions: {open_questions}\n\n"
+        f"{next_request_section}"
         "## bridge_reply_contract\n"
         f"{contract}\n"
     ).strip() + "\n"
@@ -3149,6 +3170,7 @@ def build_chatgpt_request(
     current_status: str | None = None,
     last_report: str | None = None,
     resume_note: str | None = None,
+    issue_centric_next_request_section: str | None = None,
 ) -> str:
     template_text = read_text(template_path).strip()
     if not template_text:
@@ -3174,11 +3196,15 @@ def build_chatgpt_request(
         )
         resume_section = "\n".join(lines).strip() + "\n"
 
+    next_request_section = issue_centric_next_request_section
+    if next_request_section is None:
+        _, next_request_section = prepare_issue_centric_next_request_context(state)
     values = {
         "CURRENT_STATUS": current_status or build_issue_centric_request_status(state),
         "LAST_REPORT": compact_last_report_text(last_report or read_last_report_text(state)),
         "NEXT_TODO": next_todo,
         "OPEN_QUESTIONS": open_questions,
+        "ISSUE_CENTRIC_NEXT_REQUEST_SECTION": next_request_section or "",
         "RESUME_CONTEXT_SECTION": resume_section,
     }
     return render_template(template_text, values).strip() + "\n"
@@ -3197,3 +3223,13 @@ def build_issue_centric_request_status(
     if not rendered.strip():
         return base
     return f"{base}\n\n## issue_centric_summary\n{rendered}".strip()
+
+
+def prepare_issue_centric_next_request_context(
+    state: Mapping[str, Any],
+) -> tuple[IssueCentricNextRequestContext | None, str]:
+    context = resolve_issue_centric_next_request_context(state, repo_root=ROOT_DIR)
+    config = load_project_config()
+    repo_label = str(config.get("github_repository", "")).strip() or str(project_repo_path(config))
+    section = render_issue_centric_next_request_section(context, repo_label=repo_label)
+    return context, section

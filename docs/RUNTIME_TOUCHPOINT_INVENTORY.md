@@ -219,6 +219,10 @@ During this inventory phase, all of the following stay unchanged:
     report-based request builder append that summary to `CURRENT_STATUS`
     instead of forcing the next-request layer to inspect many scattered
     execution fields directly
+  - the current next-request resolver slice goes one step farther again: it
+    lets the report-based request builders prefer the normalized summary when
+    resolving the next `target_issue`, while still falling back to older
+    state-based hints if the summary is missing, stale, or unclear
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

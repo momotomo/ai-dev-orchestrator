@@ -18,6 +18,7 @@ from _bridge_common import (
     guarded_main,
     load_project_config,
     log_text,
+    prepare_issue_centric_next_request_context,
     present_resume_prompt,
     promote_pending_request,
     read_pending_handoff_text,
@@ -139,6 +140,7 @@ def dispatch_request(
     request_source: str,
     prepared_prefix: str,
     sent_prefix: str,
+    issue_centric_next_request_context: object | None = None,
     success_updates: dict[str, object] | None = None,
 ) -> int:
     prepared_log = log_text(prepared_prefix, request_text)
@@ -146,6 +148,10 @@ def dispatch_request(
 
     prepared_state = clear_error_fields(dict(state))
     clear_pending_request_fields(prepared_state)
+    if issue_centric_next_request_context is not None:
+        prepared_state.update(
+            _issue_centric_next_request_state_updates(issue_centric_next_request_context)
+        )
     stage_prepared_request(
         prepared_state,
         request_hash=request_hash,
@@ -178,6 +184,10 @@ def dispatch_request(
         request_source=request_source,
         request_log=repo_relative(request_log),
     )
+    if issue_centric_next_request_context is not None:
+        mutable_state.update(
+            _issue_centric_next_request_state_updates(issue_centric_next_request_context)
+        )
     if success_updates:
         mutable_state.update(success_updates)
     save_state(mutable_state)
@@ -192,6 +202,9 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
+    issue_centric_next_request_context, issue_centric_next_request_section = (
+        prepare_issue_centric_next_request_context(state)
+    )
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
         print("request: 前回未送信の ChatGPT request を再送します。")
@@ -205,6 +218,7 @@ def run_resume_request(
             current_status=args.current_status or None,
             last_report=last_report,
             resume_note=resume_note or None,
+            issue_centric_next_request_section=issue_centric_next_request_section,
         )
         request_hash = stable_text_hash(request_text)
         request_source = build_report_request_source(state, resume_note)
@@ -225,6 +239,7 @@ def run_resume_request(
         request_source=request_source,
         prepared_prefix="prepared_prompt_request_from_report",
         sent_prefix="sent_prompt_request_from_report",
+        issue_centric_next_request_context=issue_centric_next_request_context,
         success_updates={
             "chatgpt_decision": "",
             "chatgpt_decision_note": "",
@@ -238,6 +253,9 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
+    issue_centric_next_request_context, issue_centric_next_request_section = (
+        prepare_issue_centric_next_request_context(state)
+    )
     request_source = build_report_request_source(state, "")
     pending_handoff_text = ""
     pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
@@ -255,6 +273,7 @@ def run_rotated_report_request(
             next_todo=args.next_todo,
             open_questions=args.open_questions,
             current_status=args.current_status or None,
+            issue_centric_next_request_section=issue_centric_next_request_section,
         )
         handoff_request_log = log_text("handoff_requested", handoff_request_text)
         send_to_chatgpt(handoff_request_text)
@@ -279,6 +298,10 @@ def run_rotated_report_request(
                 "pending_handoff_log": repo_relative(handoff_received_log),
             }
         )
+        if issue_centric_next_request_context is not None:
+            handoff_state.update(
+                _issue_centric_next_request_state_updates(issue_centric_next_request_context)
+            )
         save_state(handoff_state)
 
     rotated_chat = rotate_chat_with_handoff(handoff_text)
@@ -325,6 +348,10 @@ def run_rotated_report_request(
             "current_chat_session": rotated_chat.get("url", ""),
         }
     )
+    if issue_centric_next_request_context is not None:
+        mutable_state.update(
+            _issue_centric_next_request_state_updates(issue_centric_next_request_context)
+        )
     save_state(mutable_state)
 
     if handoff_received_log:
@@ -375,6 +402,17 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if should_rotate_before_next_chat_request(state):
         return run_rotated_report_request(state, args, last_report)
     return run_resume_request(state, args, last_report, "")
+
+
+def _issue_centric_next_request_state_updates(context: object) -> dict[str, object]:
+    target_issue = str(getattr(context, "target_issue", "") or "").strip()
+    target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
+    fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
+    return {
+        "last_issue_centric_next_request_target": target_issue,
+        "last_issue_centric_next_request_target_source": target_issue_source,
+        "last_issue_centric_next_request_fallback_reason": fallback_reason,
+    }
 
 
 if __name__ == "__main__":

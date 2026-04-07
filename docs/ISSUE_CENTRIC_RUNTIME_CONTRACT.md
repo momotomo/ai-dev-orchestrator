@@ -65,6 +65,9 @@ The current implementation boundary is:
   records the current issue, created issues, closed issue, lifecycle-sync
   result, principal issue candidate, and next-request hint for the next
   ChatGPT request layer
+- implemented: narrow next-request target resolver that uses the normalized
+  summary to choose the next ChatGPT `target_issue` context before falling
+  back to older state-based hints
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -434,6 +437,14 @@ For the current dispatcher / orchestrator boundary:
   - an open current issue wins for the narrow `codex_run` and
     `human_review_needed` continuation paths
   - anything ambiguous falls back to `issue_resolution_unclear`
+- the next-request resolver currently uses a matching narrow rule:
+  - `followup_issue` principal candidates win first
+  - `primary_issue` principal candidates win second
+  - `current_issue` principal candidates win third
+  - `issue_resolution_unclear` or any summary/state inconsistency falls back
+    to older state-based issue hints
+  - missing or stale summary data does not block the old report-based request
+    path
 
 ## Bridge To Codex Contract
 
@@ -519,6 +530,10 @@ Next-request issue context is also still narrow: the bridge writes a normalized
 summary / hint layer and the existing request builder appends that layer to
 `CURRENT_STATUS`, but it does not yet replace the full report-based request
 shape or introduce a new global state machine.
+The next-request builder may now also render a narrow
+`issue_centric_next_request` section with `repo`, resolved `target_issue`,
+resolution source, and `next_request_hint`, but that still sits on top of the
+existing report-based request format rather than replacing it.
 
 ## State Model
 

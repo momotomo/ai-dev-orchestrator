@@ -17,6 +17,8 @@ Git ルールや worker 共通ルールを prompt 本文へ長く重複記載せ
 - next_todo: {NEXT_TODO}
 - open_questions: {OPEN_QUESTIONS}
 
+{ISSUE_CENTRIC_NEXT_REQUEST_SECTION}
+
 {RESUME_CONTEXT_SECTION}
 
 live 1 周確認へ寄せる場合は、返答内で次を優先してください。

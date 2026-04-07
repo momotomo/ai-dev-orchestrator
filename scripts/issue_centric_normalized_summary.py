@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 
 _ISSUE_URL_RE = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)")
 _ISSUE_REF_RE = re.compile(r"^(?:[^/\s]+/[^/\s]+#|#)?(\d+)$")
+
+
+@dataclass(frozen=True)
+class IssueCentricNextRequestContext:
+    target_issue: str
+    target_issue_source: str
+    next_request_hint: str
+    principal_issue_kind: str
+    used_normalized_summary: bool
+    fallback_reason: str
+    summary_path: str
 
 
 def build_issue_centric_normalized_summary(
@@ -146,6 +158,77 @@ def render_issue_centric_summary_for_request(summary: Mapping[str, Any]) -> str:
     return "\n".join(line for line in lines if line.strip())
 
 
+def resolve_issue_centric_next_request_context(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> IssueCentricNextRequestContext | None:
+    summary_path = str(state.get("last_issue_centric_normalized_summary", "")).strip()
+    summary = load_issue_centric_normalized_summary(state, repo_root=repo_root)
+    if summary is not None:
+        principal_kind = str(summary.get("principal_issue_kind", "")).strip()
+        next_request_hint = str(summary.get("next_request_hint", "")).strip()
+        principal = summary.get("principal_issue_candidate")
+        if (
+            isinstance(principal, Mapping)
+            and principal_kind not in {"", "unresolved"}
+            and next_request_hint != "issue_resolution_unclear"
+            and _summary_matches_state(summary, state)
+        ):
+            target_issue = (
+                str(principal.get("url", "")).strip()
+                or str(principal.get("ref", "")).strip()
+            )
+            if target_issue:
+                return IssueCentricNextRequestContext(
+                    target_issue=target_issue,
+                    target_issue_source="normalized_summary",
+                    next_request_hint=next_request_hint,
+                    principal_issue_kind=principal_kind,
+                    used_normalized_summary=True,
+                    fallback_reason="",
+                    summary_path=summary_path,
+                )
+
+    fallback_target = _resolve_next_request_target_from_state(state)
+    if fallback_target:
+        return IssueCentricNextRequestContext(
+            target_issue=fallback_target,
+            target_issue_source="existing_state_fallback",
+            next_request_hint=str(state.get("last_issue_centric_next_request_hint", "")).strip()
+            or "issue_resolution_unclear",
+            principal_issue_kind=str(state.get("last_issue_centric_principal_issue_kind", "")).strip()
+            or "fallback",
+            used_normalized_summary=False,
+            fallback_reason=_fallback_reason_for_summary(summary, summary_path),
+            summary_path=summary_path,
+        )
+    return None
+
+
+def render_issue_centric_next_request_section(
+    context: IssueCentricNextRequestContext | None,
+    *,
+    repo_label: str,
+) -> str:
+    if context is None:
+        return ""
+    lines = [
+        "## issue_centric_next_request",
+        "",
+        f"- repo: {repo_label}",
+        f"- target_issue: {context.target_issue}",
+        f"- target_issue_source: {context.target_issue_source}",
+        f"- principal_issue_kind: {context.principal_issue_kind}",
+        f"- next_request_hint: {context.next_request_hint}",
+    ]
+    if context.summary_path:
+        lines.append(f"- normalized_summary: {context.summary_path}")
+    if context.fallback_reason:
+        lines.append(f"- fallback_reason: {context.fallback_reason}")
+    return "\n".join(lines).strip() + "\n"
+
+
 def _choose_principal_issue_candidate(
     *,
     action: str,
@@ -276,3 +359,76 @@ def _issue_label(value: object) -> str:
     if title:
         core = f"{core} ({title})".strip()
     return core.strip()
+
+
+def _resolve_next_request_target_from_state(state: Mapping[str, Any]) -> str:
+    preferred = [
+        str(state.get("last_issue_centric_principal_issue", "")).strip(),
+        str(state.get("last_issue_centric_followup_issue_url", "")).strip(),
+        str(state.get("last_issue_centric_primary_issue_url", "")).strip(),
+        str(state.get("last_issue_centric_resolved_issue", "")).strip(),
+        str(state.get("last_issue_centric_target_issue", "")).strip(),
+    ]
+    for candidate in preferred:
+        if candidate and candidate != "none":
+            return candidate
+    return ""
+
+
+def _fallback_reason_for_summary(summary: Mapping[str, Any] | None, summary_path: str) -> str:
+    if summary is None:
+        return "normalized_summary_missing_or_unreadable" if summary_path else "normalized_summary_missing"
+    if str(summary.get("next_request_hint", "")).strip() == "issue_resolution_unclear":
+        return "normalized_summary_requested_fallback"
+    return "normalized_summary_inconsistent_with_state"
+
+
+def _summary_matches_state(summary: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    principal = summary.get("principal_issue_candidate")
+    if not isinstance(principal, Mapping):
+        return False
+    principal_url = str(principal.get("url", "")).strip()
+    principal_number = str(principal.get("number", "")).strip()
+    principal_kind = str(summary.get("principal_issue_kind", "")).strip()
+
+    if principal_kind == "followup_issue":
+        return _matches_issue(
+            principal_url,
+            principal_number,
+            str(state.get("last_issue_centric_followup_issue_url", "")).strip(),
+            str(state.get("last_issue_centric_followup_issue_number", "")).strip(),
+        )
+    if principal_kind == "primary_issue":
+        return _matches_issue(
+            principal_url,
+            principal_number,
+            str(state.get("last_issue_centric_primary_issue_url", "")).strip(),
+            str(state.get("last_issue_centric_primary_issue_number", "")).strip(),
+        )
+    if principal_kind == "current_issue":
+        return _matches_issue(
+            principal_url,
+            principal_number,
+            str(state.get("last_issue_centric_resolved_issue", "")).strip()
+            or str(state.get("last_issue_centric_target_issue", "")).strip(),
+            _extract_issue_number(
+                str(state.get("last_issue_centric_resolved_issue", "")).strip()
+                or str(state.get("last_issue_centric_target_issue", "")).strip()
+            ),
+        )
+    return False
+
+
+def _matches_issue(
+    candidate_url: str,
+    candidate_number: str,
+    state_url_or_ref: str,
+    state_number: str,
+) -> bool:
+    if not state_url_or_ref and not state_number:
+        return True
+    if candidate_number and state_number and candidate_number == state_number:
+        return True
+    if candidate_url and state_url_or_ref and candidate_url == state_url_or_ref:
+        return True
+    return False

@@ -5,6 +5,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -12,7 +14,8 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import issue_centric_normalized_summary  # noqa: E402
-from _bridge_common import build_chatgpt_request  # noqa: E402
+import request_prompt_from_report  # noqa: E402
+from _bridge_common import build_chatgpt_handoff_request, build_chatgpt_request  # noqa: E402
 
 
 class IssueCentricNormalizedSummaryTests(unittest.TestCase):
@@ -154,7 +157,10 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             template_path = root / "request_template.md"
-            template_path.write_text("STATE\n{CURRENT_STATUS}\n", encoding="utf-8")
+            template_path.write_text(
+                "STATE\n{CURRENT_STATUS}\n\n{ISSUE_CENTRIC_NEXT_REQUEST_SECTION}\n",
+                encoding="utf-8",
+            )
 
             request = build_chatgpt_request(
                 state={
@@ -174,6 +180,171 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertIn("issue_centric_principal_issue_kind: followup_issue", request)
             self.assertIn("issue_centric_next_request_hint: continue_on_followup_issue", request)
             self.assertIn("issue_centric_principal_issue: #81 https://github.com/example/repo/issues/81 (Follow-up issue)", request)
+            self.assertIn("## issue_centric_next_request", request)
+            self.assertIn("- target_issue: https://github.com/example/repo/issues/81", request)
+            self.assertIn("- target_issue_source: normalized_summary", request)
+
+    def test_resolver_falls_back_to_existing_state_when_summary_is_missing(self) -> None:
+        context = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
+            {
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            },
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIsNotNone(context)
+        self.assertEqual(context.target_issue, "https://github.com/example/repo/issues/20")
+        self.assertEqual(context.target_issue_source, "existing_state_fallback")
+        self.assertEqual(context.fallback_reason, "normalized_summary_missing")
+
+    def test_resolver_falls_back_when_summary_is_unclear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "principal_issue_kind": "unresolved",
+                        "principal_issue_candidate": None,
+                        "next_request_hint": "issue_resolution_unclear",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(context)
+            self.assertEqual(context.target_issue, "https://github.com/example/repo/issues/20")
+            self.assertEqual(context.target_issue_source, "existing_state_fallback")
+            self.assertEqual(context.fallback_reason, "normalized_summary_requested_fallback")
+
+    def test_resolver_falls_back_when_summary_conflicts_with_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "88",
+                            "url": "https://github.com/example/repo/issues/88",
+                            "title": "Conflicting issue",
+                            "ref": "#88",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                    "last_issue_centric_principal_issue": "https://github.com/example/repo/issues/81",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(context)
+            self.assertEqual(context.target_issue, "https://github.com/example/repo/issues/81")
+            self.assertEqual(context.target_issue_source, "existing_state_fallback")
+            self.assertEqual(context.fallback_reason, "normalized_summary_inconsistent_with_state")
+
+    def test_handoff_builder_uses_summary_based_target_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "issue_create",
+                        "final_status": "completed",
+                        "principal_issue_kind": "primary_issue",
+                        "principal_issue_candidate": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "next_request_hint": "continue_on_primary_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            handoff = build_chatgpt_handoff_request(
+                state={
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                },
+                last_report="===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+                next_todo="next",
+                open_questions="none",
+            )
+
+            self.assertIn("## issue_centric_next_request", handoff)
+            self.assertIn("- target_issue: https://github.com/example/repo/issues/51", handoff)
+            self.assertIn("- next_request_hint: continue_on_primary_issue", handoff)
+
+    def test_request_prompt_from_report_updates_state_with_resolved_next_request_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            saved_states: list[dict[str, object]] = []
+
+            def fake_log_text(prefix: str, content: str, suffix: str = "md") -> Path:
+                path = root / f"{prefix}.{suffix}"
+                path.write_text(content, encoding="utf-8")
+                return path
+
+            args = SimpleNamespace(
+                next_todo="next",
+                open_questions="none",
+                current_status="",
+                resume_note="",
+            )
+            with (
+                patch.object(request_prompt_from_report, "log_text", side_effect=fake_log_text),
+                patch.object(request_prompt_from_report, "save_state", side_effect=lambda state: saved_states.append(dict(state))),
+                patch.object(request_prompt_from_report, "send_to_chatgpt", return_value=None),
+            ):
+                rc = request_prompt_from_report.run_resume_request(
+                    {
+                        "mode": "idle",
+                        "last_issue_centric_normalized_summary": str(summary_path),
+                    },
+                    args,
+                    "===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+                    "",
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target"], "https://github.com/example/repo/issues/81")
+            self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target_source"], "normalized_summary")
 
 
 if __name__ == "__main__":
