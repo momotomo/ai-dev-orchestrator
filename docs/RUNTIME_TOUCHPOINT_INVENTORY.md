@@ -271,6 +271,11 @@ During this inventory phase, all of the following stay unchanged:
     an explicit fallback path for degraded / unavailable / invalidated
     issue-centric states instead of as a peer default alongside the
     issue-centric preferred route
+  - the current issue-centric spine closure slice goes one step farther
+    again: it lets the ordinary prepare / send / fetch / recovery /
+    next-request loop follow the same issue-centric preferred route end to
+    end, while keeping the older request-centric path only as the explicit
+    fallback for degraded / unavailable / invalidated states
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

@@ -97,6 +97,11 @@ The current implementation boundary is:
   `issue_centric_ready`, while keeping the older request-centric path as an
   explicit legacy fallback only for degraded / unavailable / invalidated
   situations
+- implemented: narrow issue-centric spine closure for the normal loop, so
+  prepare / send / fetch / recovery / next-request resolution now prefer one
+  shared issue-centric route choice and only drop to the older
+  request-centric helpers when the runtime is degraded, unavailable, or
+  invalidated
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -165,6 +170,11 @@ The current read-side bridge is intentionally layered like this:
   `issue_centric_ready`, issue-centric is the first choice for prepare /
   send / fetch / next-action resolution; otherwise the older request-centric
   path is preserved only as an explicit conditional fallback
+- the normal prepare / send / fetch / recovery / next-request loop now closes
+  through that same issue-centric spine as long as the runtime stays ready:
+  prepared requests stay on the issue-centric path, pending reply recovery
+  stays there, and the next-request layer only falls back when degraded /
+  unavailable / invalidated conditions explicitly require it
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
