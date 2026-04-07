@@ -25,6 +25,7 @@ from _bridge_common import (
     load_project_config,
     log_text,
     mark_error,
+    format_next_action_note,
     prepared_request_action,
     project_config_warnings,
     print_project_config_warnings,
@@ -215,7 +216,9 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "archive_codex_report":
         return "完了報告を archive して次の依頼へ進めます。"
     if action == "request_prompt_from_report":
-        return "完了報告をもとに、同じチャットへ次の依頼を送ります。"
+        # Use shared wording helper for the generic (non-awaiting_user, non-handoff-rotation)
+        # case so route context is reflected without local branching.
+        return format_next_action_note(state, next_action="request_prompt_from_report", route_choice=resolve_issue_centric_route_choice(state))
     if action == "completed":
         return "追加の操作は不要です。"
     return "summary と doctor を見て次の 1 手を判断してください。"

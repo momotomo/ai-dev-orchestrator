@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_fallback_legacy_transition, resolve_issue_centric_route_choice, resolve_next_generation_transition, resolve_prepared_request_transition, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, format_next_action_note, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_fallback_legacy_transition, resolve_issue_centric_route_choice, resolve_next_generation_transition, resolve_prepared_request_transition, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -267,18 +267,17 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # Issue-centric state view is the primary routing authority.
     # mode is preserved for Codex lifecycle steps and compatibility display.
     runtime_action, runtime_action_reason = resolve_runtime_next_action(state)
-    # route_choice is retained for informational print messages only
+    # route_choice provides routing context for wording and informational notes.
     route_choice = resolve_issue_centric_route_choice(state)
 
     if runtime_action == "pending_reply":
+        # Wording layer: shared dispatch note for pending_reply.
+        note = format_next_action_note(state, next_action="pending_reply", runtime_action_reason=runtime_action_reason)
         status = present_bridge_status(state)
-        print(
-            f"{status.label}です。issue-centric preferred route で pending generation の reply 回収を優先します。"
-            f" lifecycle={runtime_action_reason or 'issue_centric_fresh_pending'}"
-        )
+        print(f"{status.label}です。{note}")
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
-    # Resolve the concrete action key via shared spine helpers.
+    # Action-key resolution via shared spine helpers.
     # prepared_request → resolve_prepared_request_transition (may fall back to need_next_generation)
     # need_next_generation → resolve_next_generation_transition
     # fallback_legacy      → resolve_fallback_legacy_transition
@@ -295,58 +294,24 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         # handled earlier in this function and will not appear as next_action here.
         next_action = resolve_fallback_legacy_transition(state)
 
-    if next_action in {"request_next_prompt", "request_prompt_from_report"} and runtime_action == "prepared_request":
-        # Prepared-request send: reuse without rebuilding.
-        status = present_bridge_status(state)
-        print(
-            f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
-            f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
-        )
-        if next_action == "request_next_prompt":
-            return request_next_prompt.run(dict(state), build_initial_request_argv(args))
-        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-
-    if next_action == "request_next_prompt":
-        status = present_bridge_status(state)
-        print(
-            f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
-            " free-form 初回本文は override 用にだけ残しています。"
-        )
-        return request_next_prompt.run(dict(state), build_initial_request_argv(args))
-
-    if next_action == "fetch_next_prompt":
-        # Reachable from fallback_legacy when mode is waiting_prompt_reply / extended_wait /
-        # await_late_completion.  Not reachable from prepared_request or need_next_generation.
-        status = present_bridge_status(state)
-        if route_choice.route_selected == "fallback_legacy":
-            print(
-                f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
-                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
-            )
-        else:
-            print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
-        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
-
-    if next_action == "request_prompt_from_report":
-        status = present_bridge_status(state)
-        if str(state.get("mode", "")).strip() == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
-            print(f"{status.label}です。次の ChatGPT request に添える補足入力を受けて再開します。")
-        elif route_choice.route_selected == "issue_centric":
-            print(
-                f"{status.label}です。issue-centric preferred route で、次の ChatGPT request を準備して送ります。"
-                f" target_issue={route_choice.target_issue or 'unresolved'}."
-            )
-        elif str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
-            print(f"{status.label}です。次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
-        else:
-            print(
-                f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で同じチャットへ次フェーズ要求を送ります。"
-                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
-            )
-        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-
+    # Wording layer: shared dispatch note (action key + routing context).
+    note = format_next_action_note(
+        state,
+        next_action=next_action,
+        runtime_action=runtime_action,
+        runtime_action_reason=runtime_action_reason,
+        route_choice=route_choice,
+    )
     status = present_bridge_status(state)
-    print(f"{status.label}です。今回の 1 手はありません。必要なら state.json の詳細を確認してください。")
+    print(f"{status.label}です。{note}")
+
+    # Dispatch layer: route to the appropriate script.
+    if next_action == "request_next_prompt":
+        return request_next_prompt.run(dict(state), build_initial_request_argv(args))
+    if next_action == "request_prompt_from_report":
+        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
+    if next_action == "fetch_next_prompt":
+        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
     return 0
 
 
