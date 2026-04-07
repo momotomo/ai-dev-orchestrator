@@ -1100,6 +1100,78 @@ def resolve_prepared_request_transition(state: Mapping[str, Any]) -> str:
     return "need_next_generation"
 
 
+def format_next_action_note(
+    state: Mapping[str, Any],
+    *,
+    next_action: str,
+    runtime_action: str = "",
+    runtime_action_reason: str = "",
+    route_choice: "IssueCentricRouteChoice | None" = None,
+) -> str:
+    """Return the human-facing dispatch note for a resolved runtime action.
+
+    Callers prepend the status label and a separator:
+
+        note = format_next_action_note(state, next_action=..., ...)
+        print(f"{status.label}です。{note}")
+
+    next_action is one of the action keys produced by the shared spine helpers:
+        "pending_reply"              - runtime_action pass-through for fresh_pending
+        "request_next_prompt"        - initial request path
+        "request_prompt_from_report" - report / handoff / next-phase request path
+        "fetch_next_prompt"          - reply-wait fetch path
+        "completed"                  - session finished; no dispatch needed
+        "no_action" / other          - no matching action; generic fallback note
+
+    runtime_action (optional): distinguishes prepared_request context so the note
+        says "prepared request を再生成せず、そのまま送信します。" instead of the
+        normal generation note.
+    runtime_action_reason (optional): included in lifecycle annotation notes.
+    route_choice (optional): provides routing context for fetch / report notes.
+    """
+    if next_action == "pending_reply":
+        return (
+            "issue-centric preferred route で pending generation の reply 回収を優先します。"
+            f" lifecycle={runtime_action_reason or 'issue_centric_fresh_pending'}"
+        )
+    if runtime_action == "prepared_request" and next_action in {"request_next_prompt", "request_prompt_from_report"}:
+        return (
+            "issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
+            f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
+        )
+    if next_action == "request_next_prompt":
+        return (
+            "通常は current ready issue の参照から最初の request を組み立てます。"
+            " free-form 初回本文は override 用にだけ残しています。"
+        )
+    if next_action == "fetch_next_prompt":
+        if route_choice is not None and route_choice.route_selected == "fallback_legacy":
+            return (
+                "issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
+                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
+            )
+        return "ChatGPT 返答から次の prompt または停止判断を回収します。"
+    if next_action == "request_prompt_from_report":
+        mode = str(state.get("mode", "")).strip()
+        if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+            return "次の ChatGPT request に添える補足入力を受けて再開します。"
+        if route_choice is not None and route_choice.route_selected == "issue_centric":
+            return (
+                "issue-centric preferred route で、次の ChatGPT request を準備して送ります。"
+                f" target_issue={route_choice.target_issue or 'unresolved'}."
+            )
+        if str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
+            return "次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。"
+        route_reason = route_choice.route_reason if route_choice is not None else ""
+        return (
+            "issue-centric preferred route は今回使わず、legacy fallback で同じチャットへ次フェーズ要求を送ります。"
+            f" 理由: {route_reason or 'legacy fallback required'}."
+        )
+    if next_action == "completed":
+        return "追加の操作は不要です。"
+    return "今回の 1 手はありません。必要なら state.json の詳細を確認してください。"
+
+
 def stage_prepared_request(
     state: dict[str, Any],
     *,
