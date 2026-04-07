@@ -111,14 +111,30 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "last_issue_centric_created_issue_number": "",
             "last_issue_centric_created_issue_url": "",
             "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
             "last_issue_centric_project_sync_status": "",
             "last_issue_centric_project_url": "",
             "last_issue_centric_project_item_id": "",
             "last_issue_centric_project_state_field": "",
             "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
             "last_issue_centric_followup_status": "",
             "last_issue_centric_followup_log": "",
             "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
             "last_issue_centric_close_status": "",
             "last_issue_centric_close_log": "",
             "last_issue_centric_closed_issue_number": "",
@@ -178,15 +194,21 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             launch_runner=lambda state, argv=None: 0,
         )
 
-    def test_dispatcher_blocks_followup_for_non_no_action_combo(self) -> None:
+    def test_dispatcher_blocks_followup_for_codex_run_combo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            decision = build_decision(
-                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            decision = issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
                 target_issue="#20",
+                close_current_issue=False,
                 create_followup_issue=True,
-                issue_text="# Title\n\nBody\n",
-                followup_text="# Follow-up\n\nBody\n",
+                summary="Run codex and create follow-up.",
+                issue_body_base64=None,
+                codex_body_base64=b64("Implement the issue.\n"),
+                review_base64=None,
+                followup_issue_body_base64=b64("# Follow-up\n\nBody\n"),
+                raw_json="{}",
+                raw_segment="segment",
             )
             result = self.dispatch(
                 decision=decision,
@@ -198,6 +220,150 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_status, "blocked")
             self.assertEqual([step.name for step in result.steps], ["unsupported_followup_combo"])
             self.assertTrue(result.final_state["last_issue_centric_dispatch_result"])
+
+    def test_dispatcher_runs_issue_create_followup_then_close_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                issue_text="# Primary issue\n\nPrimary body\n",
+                followup_text="# Follow-up issue\n\nFollow-up body\n",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_issue_create(*args, **kwargs):
+                calls.append("issue_create")
+                log_path = root / "issue_create.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=log_path,
+                    created_issue=fake_issue(71),
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_primary",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="created primary issue",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    execution_log_path=log_path,
+                    created_issue=fake_issue(72),
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_followup",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="created follow-up issue",
+                )
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_issue_create_followup",
+                    execution_log_path=log_path,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed current issue after primary and follow-up",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_issue_create_action_fn=fake_issue_create,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["issue_create", "followup", "close"])
+            self.assertEqual(result.matrix_path, "issue_create_followup_then_close")
+            self.assertEqual(
+                [step.name for step in result.steps],
+                ["issue_create", "followup_issue_create", "close_current_issue"],
+            )
+            self.assertEqual(result.final_state["last_issue_centric_primary_issue_number"], "71")
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "72")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_issue_create_followup")
+
+    def test_dispatcher_keeps_primary_success_when_issue_create_followup_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                issue_text="# Primary issue\n\nPrimary body\n",
+                followup_text="# Follow-up issue\n\nFollow-up body\n",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_issue_create(*args, **kwargs):
+                calls.append("issue_create")
+                log_path = root / "issue_create.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=log_path,
+                    created_issue=fake_issue(71),
+                    project_sync_status="issue_only_fallback",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="created primary issue",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    followup_status="blocked_project_preflight",
+                    execution_log_path=log_path,
+                    created_issue=None,
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    project_sync_status="blocked_project_preflight",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="follow-up blocked before mutation",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_issue_create_action_fn=fake_issue_create,
+                execute_followup_issue_action_fn=fake_followup,
+            )
+
+            self.assertEqual(calls, ["issue_create", "followup"])
+            self.assertEqual(result.matrix_path, "issue_create_followup_then_close")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_primary_issue_number"], "71")
+            self.assertEqual(result.final_state["last_issue_centric_followup_status"], "blocked_project_preflight")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "not_attempted_followup_blocked")
 
     def test_dispatcher_runs_issue_create_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

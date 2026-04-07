@@ -79,6 +79,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_created_issue_number": "",
     "last_issue_centric_created_issue_url": "",
     "last_issue_centric_created_issue_title": "",
+    "last_issue_centric_primary_issue_number": "",
+    "last_issue_centric_primary_issue_url": "",
+    "last_issue_centric_primary_issue_title": "",
     "last_issue_centric_resolved_issue": "",
     "last_issue_centric_trigger_comment_id": "",
     "last_issue_centric_trigger_comment_url": "",
@@ -96,9 +99,22 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_project_item_id": "",
     "last_issue_centric_project_state_field": "",
     "last_issue_centric_project_state_value": "",
+    "last_issue_centric_primary_project_sync_status": "",
+    "last_issue_centric_primary_project_url": "",
+    "last_issue_centric_primary_project_item_id": "",
+    "last_issue_centric_primary_project_state_field": "",
+    "last_issue_centric_primary_project_state_value": "",
     "last_issue_centric_followup_status": "",
     "last_issue_centric_followup_log": "",
     "last_issue_centric_followup_parent_issue": "",
+    "last_issue_centric_followup_issue_number": "",
+    "last_issue_centric_followup_issue_url": "",
+    "last_issue_centric_followup_issue_title": "",
+    "last_issue_centric_followup_project_sync_status": "",
+    "last_issue_centric_followup_project_url": "",
+    "last_issue_centric_followup_project_item_id": "",
+    "last_issue_centric_followup_project_state_field": "",
+    "last_issue_centric_followup_project_state_value": "",
     "last_issue_centric_close_status": "",
     "last_issue_centric_close_log": "",
     "last_issue_centric_closed_issue_number": "",
@@ -1268,6 +1284,12 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_created_issue_url: {state['last_issue_centric_created_issue_url']}")
     if state.get("last_issue_centric_created_issue_title"):
         fields.append(f"- last_issue_centric_created_issue_title: {state['last_issue_centric_created_issue_title']}")
+    if state.get("last_issue_centric_primary_issue_number"):
+        fields.append(f"- last_issue_centric_primary_issue_number: {state['last_issue_centric_primary_issue_number']}")
+    if state.get("last_issue_centric_primary_issue_url"):
+        fields.append(f"- last_issue_centric_primary_issue_url: {state['last_issue_centric_primary_issue_url']}")
+    if state.get("last_issue_centric_primary_issue_title"):
+        fields.append(f"- last_issue_centric_primary_issue_title: {state['last_issue_centric_primary_issue_title']}")
     if state.get("last_issue_centric_resolved_issue"):
         fields.append(f"- last_issue_centric_resolved_issue: {state['last_issue_centric_resolved_issue']}")
     if state.get("last_issue_centric_trigger_comment_id"):
@@ -1302,6 +1324,32 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_project_state_field: {state['last_issue_centric_project_state_field']}")
     if state.get("last_issue_centric_project_state_value"):
         fields.append(f"- last_issue_centric_project_state_value: {state['last_issue_centric_project_state_value']}")
+    if state.get("last_issue_centric_primary_project_sync_status"):
+        fields.append(f"- last_issue_centric_primary_project_sync_status: {state['last_issue_centric_primary_project_sync_status']}")
+    if state.get("last_issue_centric_primary_project_url"):
+        fields.append(f"- last_issue_centric_primary_project_url: {state['last_issue_centric_primary_project_url']}")
+    if state.get("last_issue_centric_primary_project_item_id"):
+        fields.append(f"- last_issue_centric_primary_project_item_id: {state['last_issue_centric_primary_project_item_id']}")
+    if state.get("last_issue_centric_primary_project_state_field"):
+        fields.append(f"- last_issue_centric_primary_project_state_field: {state['last_issue_centric_primary_project_state_field']}")
+    if state.get("last_issue_centric_primary_project_state_value"):
+        fields.append(f"- last_issue_centric_primary_project_state_value: {state['last_issue_centric_primary_project_state_value']}")
+    if state.get("last_issue_centric_followup_issue_number"):
+        fields.append(f"- last_issue_centric_followup_issue_number: {state['last_issue_centric_followup_issue_number']}")
+    if state.get("last_issue_centric_followup_issue_url"):
+        fields.append(f"- last_issue_centric_followup_issue_url: {state['last_issue_centric_followup_issue_url']}")
+    if state.get("last_issue_centric_followup_issue_title"):
+        fields.append(f"- last_issue_centric_followup_issue_title: {state['last_issue_centric_followup_issue_title']}")
+    if state.get("last_issue_centric_followup_project_sync_status"):
+        fields.append(f"- last_issue_centric_followup_project_sync_status: {state['last_issue_centric_followup_project_sync_status']}")
+    if state.get("last_issue_centric_followup_project_url"):
+        fields.append(f"- last_issue_centric_followup_project_url: {state['last_issue_centric_followup_project_url']}")
+    if state.get("last_issue_centric_followup_project_item_id"):
+        fields.append(f"- last_issue_centric_followup_project_item_id: {state['last_issue_centric_followup_project_item_id']}")
+    if state.get("last_issue_centric_followup_project_state_field"):
+        fields.append(f"- last_issue_centric_followup_project_state_field: {state['last_issue_centric_followup_project_state_field']}")
+    if state.get("last_issue_centric_followup_project_state_value"):
+        fields.append(f"- last_issue_centric_followup_project_state_value: {state['last_issue_centric_followup_project_state_value']}")
     if state.get("last_issue_centric_close_status"):
         fields.append(f"- last_issue_centric_close_status: {state['last_issue_centric_close_status']}")
     if state.get("last_issue_centric_close_log"):

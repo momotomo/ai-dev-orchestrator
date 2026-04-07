@@ -51,9 +51,13 @@ def dispatch_issue_centric_execution(
     steps: list[IssueCentricExecutionStep] = []
     decision_action = contract_decision.action.value
 
-    if contract_decision.create_followup_issue and decision_action not in {"no_action", "human_review_needed"}:
+    if contract_decision.create_followup_issue and decision_action not in {
+        "no_action",
+        "human_review_needed",
+        "issue_create",
+    }:
         unsupported_reason = (
-            "create_followup_issue execution is currently implemented only for action=no_action and the narrow human_review_needed combo. "
+            "create_followup_issue execution is currently implemented only for action=no_action, action=issue_create, and the narrow human_review_needed combo. "
             f"The combination action={decision_action} + create_followup_issue=true is blocked in this slice."
         )
         mutable_state.update(
@@ -80,6 +84,7 @@ def dispatch_issue_centric_execution(
             repo_relative=repo_relative,
             stop_message=(
                 "issue-centric contract reply を検出しましたが、create_followup_issue の narrow execution は action=no_action と human_review_needed review combo にだけ対応しています。"
+                " issue_create combo は narrow happy path のみ対応しています。"
                 f" decision log: {source_decision_log}"
                 f" metadata: {source_metadata_log}"
                 + unsupported_reason
@@ -87,6 +92,70 @@ def dispatch_issue_centric_execution(
         )
 
     if decision_action == "issue_create":
+        if contract_decision.create_followup_issue and materialized.prepared.issue_body is None:
+            blocked_reason = (
+                "issue_create + create_followup_issue requires a prepared CHATGPT_ISSUE_BODY artifact before any issue mutation can run."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_execution_status": "blocked_missing_primary_issue_artifact",
+                    "last_issue_centric_stop_reason": blocked_reason,
+                    "chatgpt_decision_note": blocked_reason,
+                }
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="issue_create",
+                    status="blocked_missing_primary_issue_artifact",
+                    log_path="",
+                    note=blocked_reason,
+                )
+            )
+            return _finalize_dispatch(
+                matrix_path="blocked_issue_create_followup_missing_primary",
+                final_status="blocked",
+                steps=steps,
+                mutable_state=mutable_state,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                stop_message=(
+                    "issue-centric contract reply を検出しましたが、issue_create + create_followup_issue の narrow combo に必要な primary issue artifact が不足しているため停止しました。"
+                    f" decision log: {source_decision_log}"
+                    f" metadata: {source_metadata_log}"
+                ),
+            )
+        if contract_decision.create_followup_issue and materialized.prepared.followup_issue_body is None:
+            blocked_reason = (
+                "issue_create + create_followup_issue requires a prepared CHATGPT_FOLLOWUP_ISSUE_BODY artifact before follow-up issue creation can run."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_followup_status": "blocked_missing_followup_artifact",
+                    "last_issue_centric_stop_reason": blocked_reason,
+                    "chatgpt_decision_note": blocked_reason,
+                }
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="followup_issue_create",
+                    status="blocked_missing_followup_artifact",
+                    log_path="",
+                    note=blocked_reason,
+                )
+            )
+            return _finalize_dispatch(
+                matrix_path="blocked_issue_create_followup_missing_followup",
+                final_status="blocked",
+                steps=steps,
+                mutable_state=mutable_state,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                stop_message=(
+                    "issue-centric contract reply を検出しましたが、issue_create + create_followup_issue の narrow combo に必要な follow-up artifact が不足しているため停止しました。"
+                    f" decision log: {source_decision_log}"
+                    f" metadata: {source_metadata_log}"
+                ),
+            )
         execution = execute_issue_create_action_fn(
             materialized.prepared,
             project_config=project_config,
@@ -96,6 +165,7 @@ def dispatch_issue_centric_execution(
             source_artifact_path=source_artifact_path,
             log_writer=log_writer,
             repo_relative=repo_relative,
+            allow_followup_combo=contract_decision.create_followup_issue,
         )
         _apply_issue_create_execution_state(
             mutable_state,
@@ -112,39 +182,125 @@ def dispatch_issue_centric_execution(
         )
         close_note = ""
         final_status = execution.status
-        if contract_decision.close_current_issue and execution.status == "completed":
-            close_execution = execute_close_current_issue_fn(
+        followup_note = ""
+        followup_execution = None
+        close_execution = None
+        if contract_decision.create_followup_issue and execution.status == "completed":
+            followup_execution = execute_followup_issue_action_fn(
                 materialized.prepared,
                 prior_state=prior_state,
                 project_config=project_config,
                 repo_path=repo_path,
                 source_decision_log=source_decision_log,
                 source_metadata_log=source_metadata_log,
-                source_action_execution_log=repo_relative(execution.execution_log_path),
+                source_artifact_path=source_artifact_path,
                 log_writer=log_writer,
                 repo_relative=repo_relative,
+                allow_issue_create_combo=True,
             )
-            _apply_close_execution_state(
+            _apply_followup_execution_state(
                 mutable_state,
-                close_execution=close_execution,
+                followup_execution=followup_execution,
                 repo_relative=repo_relative,
             )
             steps.append(
                 IssueCentricExecutionStep(
-                    name="close_current_issue",
-                    status=close_execution.status,
-                    log_path=repo_relative(close_execution.execution_log_path),
-                    note=close_execution.safe_stop_reason,
+                    name="followup_issue_create",
+                    status=followup_execution.status,
+                    log_path=repo_relative(followup_execution.execution_log_path),
+                    note=followup_execution.safe_stop_reason,
                 )
             )
-            close_note = f" close log: {repo_relative(close_execution.execution_log_path)}"
-            if close_execution.status != "completed":
+            if followup_execution.created_issue is not None:
+                followup_note = (
+                    f" follow-up issue: #{followup_execution.created_issue.number} "
+                    f"{followup_execution.created_issue.url}"
+                )
+            if followup_execution.status != "completed":
                 final_status = "partial"
+            if contract_decision.close_current_issue and followup_execution.status == "completed":
+                close_execution = execute_close_current_issue_fn(
+                    materialized.prepared,
+                    prior_state=prior_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(followup_execution.execution_log_path),
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                    allow_issue_create_followup_close=True,
+                )
+                _apply_close_execution_state(
+                    mutable_state,
+                    close_execution=close_execution,
+                    repo_relative=repo_relative,
+                )
+                steps.append(
+                    IssueCentricExecutionStep(
+                        name="close_current_issue",
+                        status=close_execution.status,
+                        log_path=repo_relative(close_execution.execution_log_path),
+                        note=close_execution.safe_stop_reason,
+                    )
+                )
+                close_note = f" close log: {repo_relative(close_execution.execution_log_path)}"
+                if close_execution.status != "completed":
+                    final_status = "partial"
+            elif contract_decision.close_current_issue:
+                mutable_state.update(
+                    {
+                        "last_issue_centric_close_status": "not_attempted_followup_blocked",
+                        "last_issue_centric_close_order": "after_issue_create_followup",
+                    }
+                )
+                steps.append(
+                    IssueCentricExecutionStep(
+                        name="close_current_issue",
+                        status="not_attempted_followup_blocked",
+                        log_path="",
+                        note="close_current_issue runs only after primary issue create, follow-up issue create, and any required Project sync complete.",
+                    )
+                )
+                final_status = "partial"
+        if contract_decision.close_current_issue and execution.status == "completed":
+            if not contract_decision.create_followup_issue:
+                close_execution = execute_close_current_issue_fn(
+                    materialized.prepared,
+                    prior_state=prior_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(execution.execution_log_path),
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                )
+                _apply_close_execution_state(
+                    mutable_state,
+                    close_execution=close_execution,
+                    repo_relative=repo_relative,
+                )
+                steps.append(
+                    IssueCentricExecutionStep(
+                        name="close_current_issue",
+                        status=close_execution.status,
+                        log_path=repo_relative(close_execution.execution_log_path),
+                        note=close_execution.safe_stop_reason,
+                    )
+                )
+                close_note = f" close log: {repo_relative(close_execution.execution_log_path)}"
+                if close_execution.status != "completed":
+                    final_status = "partial"
         elif contract_decision.close_current_issue:
             mutable_state.update(
                 {
                     "last_issue_centric_close_status": "not_attempted_primary_action_blocked",
-                    "last_issue_centric_close_order": "after_issue_create",
+                    "last_issue_centric_close_order": (
+                        "after_issue_create_followup"
+                        if contract_decision.create_followup_issue
+                        else "after_issue_create"
+                    ),
                 }
             )
             steps.append(
@@ -152,18 +308,59 @@ def dispatch_issue_centric_execution(
                     name="close_current_issue",
                     status="not_attempted_primary_action_blocked",
                     log_path="",
-                    note="close_current_issue runs only after issue create + project sync completes.",
+                    note=(
+                        "close_current_issue runs only after primary issue create, follow-up issue create, and any required Project sync complete."
+                        if contract_decision.create_followup_issue
+                        else "close_current_issue runs only after issue create + project sync completes."
+                    ),
                 )
             )
             final_status = "partial"
         issue_note = ""
         if execution.created_issue is not None:
-            issue_note = f" created issue: #{execution.created_issue.number} {execution.created_issue.url}"
+            issue_note = f" created primary issue: #{execution.created_issue.number} {execution.created_issue.url}"
+        if execution.status != "completed":
+            stop_label = (
+                "issue-centric contract reply を検出しましたが、issue_create primary execution を完了できず停止しました。"
+            )
+        elif contract_decision.create_followup_issue and followup_execution is not None:
+            if (
+                contract_decision.close_current_issue
+                and close_execution is not None
+                and close_execution.status == "completed"
+            ):
+                stop_label = (
+                    "issue-centric contract reply を検出し、issue_create の primary issue create / narrow follow-up issue create / narrow close まで実行しました。"
+                )
+            elif followup_execution.status == "completed":
+                stop_label = (
+                    "issue-centric contract reply を検出し、issue_create の primary issue create と narrow follow-up issue create まで実行しました。"
+                )
+            else:
+                stop_label = (
+                    "issue-centric contract reply を検出し、issue_create の primary issue create までは完了しましたが、その後の narrow follow-up issue create で停止しました。"
+                )
+        elif execution.status == "completed" and contract_decision.close_current_issue:
+            stop_label = (
+                "issue-centric contract reply を検出し、issue_create の primary issue create と narrow close まで実行しました。"
+            )
+        else:
+            stop_label = (
+                "issue-centric contract reply を検出し、issue_create の最小 execution slice まで実行しました。"
+            )
         return _finalize_dispatch(
             matrix_path=(
-                "issue_create_then_close"
-                if contract_decision.close_current_issue
-                else "issue_create"
+                "issue_create_followup_then_close"
+                if contract_decision.create_followup_issue and contract_decision.close_current_issue
+                else (
+                    "issue_create_followup"
+                    if contract_decision.create_followup_issue
+                    else (
+                        "issue_create_then_close"
+                        if contract_decision.close_current_issue
+                        else "issue_create"
+                    )
+                )
             ),
             final_status=final_status,
             steps=steps,
@@ -171,15 +368,20 @@ def dispatch_issue_centric_execution(
             log_writer=log_writer,
             repo_relative=repo_relative,
             stop_message=(
-                "issue-centric contract reply を検出し、issue_create の最小 execution slice まで実行しました。"
-                f" decision log: {source_decision_log}"
-                f" metadata: {source_metadata_log}"
+                stop_label
+                + f" decision log: {source_decision_log}"
+                + f" metadata: {source_metadata_log}"
                 + (f" artifact: {source_artifact_path}" if source_artifact_path else "")
                 + f" execution: {repo_relative(execution.execution_log_path)}"
                 + issue_note
                 + (f" project item: {execution.project_item_id}" if execution.project_item_id else "")
+                + followup_note
                 + close_note
-                + " create_followup_issue mutation / other action Project sync / Codex dispatch はまだ未実装です。"
+                + (
+                    " codex_run + create_followup_issue / other action Project sync / Codex dispatch はまだ未実装です。"
+                    if contract_decision.create_followup_issue
+                    else " create_followup_issue mutation / other action Project sync / Codex dispatch はまだ未実装です。"
+                )
             ),
         )
 
@@ -860,6 +1062,20 @@ def _apply_issue_create_execution_state(
             "last_issue_centric_project_item_id": execution.project_item_id,
             "last_issue_centric_project_state_field": execution.project_state_field_name,
             "last_issue_centric_project_state_value": execution.project_state_value_name,
+            "last_issue_centric_primary_issue_number": (
+                str(execution.created_issue.number) if execution.created_issue is not None else ""
+            ),
+            "last_issue_centric_primary_issue_url": (
+                execution.created_issue.url if execution.created_issue is not None else ""
+            ),
+            "last_issue_centric_primary_issue_title": (
+                execution.created_issue.title if execution.created_issue is not None else ""
+            ),
+            "last_issue_centric_primary_project_sync_status": execution.project_sync_status,
+            "last_issue_centric_primary_project_url": execution.project_url,
+            "last_issue_centric_primary_project_item_id": execution.project_item_id,
+            "last_issue_centric_primary_project_state_field": execution.project_state_field_name,
+            "last_issue_centric_primary_project_state_value": execution.project_state_value_name,
             "last_issue_centric_stop_reason": execution.safe_stop_reason,
             "chatgpt_decision_note": execution.safe_stop_reason,
         }
@@ -1007,11 +1223,31 @@ def _apply_followup_execution_state(
                 if followup_execution.parent_issue is not None
                 else ""
             ),
+            "last_issue_centric_followup_issue_number": (
+                str(followup_execution.created_issue.number)
+                if followup_execution.created_issue is not None
+                else ""
+            ),
+            "last_issue_centric_followup_issue_url": (
+                followup_execution.created_issue.url
+                if followup_execution.created_issue is not None
+                else ""
+            ),
+            "last_issue_centric_followup_issue_title": (
+                followup_execution.created_issue.title
+                if followup_execution.created_issue is not None
+                else ""
+            ),
             "last_issue_centric_project_sync_status": followup_execution.project_sync_status,
             "last_issue_centric_project_url": followup_execution.project_url,
             "last_issue_centric_project_item_id": followup_execution.project_item_id,
             "last_issue_centric_project_state_field": followup_execution.project_state_field_name,
             "last_issue_centric_project_state_value": followup_execution.project_state_value_name,
+            "last_issue_centric_followup_project_sync_status": followup_execution.project_sync_status,
+            "last_issue_centric_followup_project_url": followup_execution.project_url,
+            "last_issue_centric_followup_project_item_id": followup_execution.project_item_id,
+            "last_issue_centric_followup_project_state_field": followup_execution.project_state_field_name,
+            "last_issue_centric_followup_project_state_value": followup_execution.project_state_value_name,
             "last_issue_centric_stop_reason": followup_execution.safe_stop_reason,
             "chatgpt_decision_note": followup_execution.safe_stop_reason,
         }

@@ -186,6 +186,12 @@ During this inventory phase, all of the following stay unchanged:
     `review comment -> follow-up issue create` path, and allows optional
     close only after that follow-up path succeeds; broader follow-up
     automation for `issue_create` / `codex_run` remains out of scope
+  - the current issue-create-followup combo slice goes one step farther
+    again: it wires `issue_create + create_followup_issue` to a narrow
+    `primary issue create -> follow-up issue create -> optional close`
+    path, reusing the same Project placement / `State` sync rules for both
+    issues; broader `codex_run + create_followup_issue` automation remains
+    out of scope
   - the current dispatcher slice goes one step farther again: it moves the
     already-implemented issue-centric execution matrix out of
     `fetch_next_prompt.py` and into `scripts/issue_centric_execution.py`,

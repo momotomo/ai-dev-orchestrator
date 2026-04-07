@@ -64,6 +64,7 @@ def execute_followup_issue_action(
     project_item_creator: Callable[[str, str, str], object] | None = None,
     project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
     allow_human_review_combo: bool = False,
+    allow_issue_create_combo: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> FollowupIssueExecutionResult:
@@ -71,9 +72,17 @@ def execute_followup_issue_action(
         prepared.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED
         and allow_human_review_combo
     )
-    if prepared.decision.action is not IssueCentricAction.NO_ACTION and not is_human_review_combo:
+    is_issue_create_combo = (
+        prepared.decision.action is IssueCentricAction.ISSUE_CREATE
+        and allow_issue_create_combo
+    )
+    if (
+        prepared.decision.action is not IssueCentricAction.NO_ACTION
+        and not is_human_review_combo
+        and not is_issue_create_combo
+    ):
         raise IssueCentricFollowupIssueError(
-            "follow-up issue execution only accepts action=no_action unless the narrow human_review_needed combo is explicitly enabled."
+            "follow-up issue execution only accepts action=no_action unless the narrow human_review_needed or issue_create combo is explicitly enabled."
         )
     if not prepared.decision.create_followup_issue:
         raise IssueCentricFollowupIssueError(
@@ -85,7 +94,11 @@ def execute_followup_issue_action(
     parent_issue: ResolvedGitHubIssue | None = None
     draft: IssueCreateDraft | None = None
     issue_create_result: IssueCreateExecutionResult | None = None
-    if is_human_review_combo and prepared.decision.close_current_issue:
+    if is_issue_create_combo and prepared.decision.close_current_issue:
+        close_policy = "after_issue_create_followup_success_then_close"
+    elif is_issue_create_combo:
+        close_policy = "after_issue_create_followup_success_only"
+    elif is_human_review_combo and prepared.decision.close_current_issue:
         close_policy = "after_review_followup_success_then_close"
     elif is_human_review_combo:
         close_policy = "after_review_followup_success_only"
@@ -117,9 +130,13 @@ def execute_followup_issue_action(
         issue_create_result = execute_issue_create_draft(
             draft,
             action_label=(
+                "issue_create_followup_issue_create"
+                if is_issue_create_combo
+                else (
                 "review_followup_issue_create"
                 if is_human_review_combo
                 else "followup_issue_create"
+                )
             ),
             close_current_issue=prepared.decision.close_current_issue,
             create_followup_issue=True,
@@ -133,12 +150,18 @@ def execute_followup_issue_action(
             project_state_resolver=project_state_resolver,
             project_item_creator=project_item_creator,
             project_state_setter=project_state_setter,
+            allow_followup_combo=is_issue_create_combo,
             env=env,
             now_fn=lambda: now,
         )
         if issue_create_result.status == "completed":
             followup_status = "completed"
-            if is_human_review_combo:
+            if is_issue_create_combo:
+                safe_stop_reason = (
+                    f"Created follow-up issue #{issue_create_result.created_issue.number} after the primary issue create step succeeded. "
+                    "close_current_issue may run only after both primary and follow-up issue creation paths succeed."
+                )
+            elif is_human_review_combo:
                 safe_stop_reason = (
                     f"Created follow-up issue #{issue_create_result.created_issue.number} for current issue "
                     f"#{parent_issue.issue_number} after the review comment step succeeded. "
@@ -219,6 +242,7 @@ def execute_followup_issue_action(
         "close_current_issue": prepared.decision.close_current_issue,
         "close_policy": close_policy,
         "allow_human_review_combo": allow_human_review_combo,
+        "allow_issue_create_combo": allow_issue_create_combo,
         "inner_issue_create_log": (
             repo_relative(issue_create_result.execution_log_path)
             if issue_create_result is not None

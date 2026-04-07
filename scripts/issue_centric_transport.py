@@ -105,6 +105,11 @@ class PreparedIssueCentricDecision:
     @property
     def safe_stop_reason(self) -> str:
         if self.decision.action is IssueCentricAction.ISSUE_CREATE:
+            if self.decision.create_followup_issue:
+                return (
+                    "issue_create + create_followup_issue execution is available as a narrow slice. "
+                    "The decoded primary issue body and follow-up issue body have been prepared for sequential issue creation."
+                )
             return (
                 "issue_create execution is not implemented yet. "
                 "The decoded issue body has been prepared for the future GitHub issue-create step."

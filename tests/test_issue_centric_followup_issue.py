@@ -56,6 +56,7 @@ def build_raw_reply(
     create_followup_issue: bool,
     followup_text: str | None = None,
     issue_text: str | None = None,
+    codex_text: str | None = None,
 ) -> str:
     parts = [
         "あなた:",
@@ -76,6 +77,14 @@ def build_raw_reply(
                 issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
                 b64(followup_text),
                 issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+            ]
+        )
+    if codex_text is not None:
+        parts.extend(
+            [
+                issue_centric_contract.CODEX_BODY_START,
+                b64(codex_text),
+                issue_centric_contract.CODEX_BODY_END,
             ]
         )
     parts.extend(
@@ -330,6 +339,50 @@ class FollowupIssueExecutionTests(unittest.TestCase):
             self.assertEqual(result.close_policy, "after_review_followup_success_only")
             self.assertEqual(result.created_issue.number, 75)
 
+    def test_followup_issue_can_run_for_issue_create_combo_when_opted_in(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue="#20",
+            close_current_issue=False,
+            create_followup_issue=True,
+            summary="Create primary and follow-up issues.",
+            issue_body_base64=b64("# Primary issue\n\nPrimary body.\n"),
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=b64("# Follow-up title\n\nBody paragraph.\n"),
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                allow_issue_create_combo=True,
+                issue_creator=lambda repository, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=76,
+                    url="https://github.com/example/repo/issues/76",
+                    title=title,
+                    repository=repository,
+                    node_id="ISSUE_node_76",
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.followup_status, "completed")
+            self.assertEqual(result.close_policy, "after_issue_create_followup_success_only")
+            self.assertEqual(result.created_issue.number, 76)
+
 
 class FetchNextPromptFollowupTests(unittest.TestCase):
     def test_fetch_executes_no_action_followup_then_close(self) -> None:
@@ -447,7 +500,7 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_created_issue_number"], "74")
             self.assertEqual(saved["last_issue_centric_close_status"], "closed")
 
-    def test_fetch_blocks_followup_for_non_no_action_combo(self) -> None:
+    def test_fetch_blocks_followup_for_unsupported_codex_combo(self) -> None:
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "request-hash",
@@ -458,11 +511,11 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             "last_processed_reply_hash": "",
         }
         raw = build_raw_reply(
-            action="issue_create",
-            target_issue="none",
+            action="codex_run",
+            target_issue="#20",
             close_current_issue=False,
             create_followup_issue=True,
-            issue_text="# Issue title\n\nBody\n",
+            codex_text="Implement the issue.\n",
             followup_text="# Follow-up title\n\nBody\n",
         )
 
@@ -483,7 +536,7 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     BridgeStop,
-                    "action=no_action と human_review_needed review combo にだけ対応しています",
+                    "action=no_action, action=issue_create, and the narrow human_review_needed combo",
                 ):
                     fetch_next_prompt.run(dict(state), [])
 

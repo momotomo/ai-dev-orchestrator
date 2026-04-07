@@ -375,6 +375,58 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
             self.assertEqual(result.close_order, "after_human_review_followup")
             self.assertIn("review comment and follow-up issue path", result.safe_stop_reason)
 
+    def test_close_current_issue_allows_issue_create_followup_when_opted_in(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                summary="Close after primary and follow-up issue create.",
+                issue_body_base64=b64("# Primary issue\n\nBody\n"),
+                codex_body_base64=None,
+                review_base64=None,
+                followup_issue_body_base64=b64("# Follow-up\n\nBody\n"),
+                raw_json="{}",
+                raw_segment="segment",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="logs/issue_create_followup.json",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="closed",
+                ),
+                allow_issue_create_followup_close=True,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.close_status, "closed")
+            self.assertEqual(result.close_order, "after_issue_create_followup")
+            self.assertIn("primary issue and follow-up issue paths", result.safe_stop_reason)
+
 
 class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
     def test_issue_create_can_close_current_issue_after_creation(self) -> None:

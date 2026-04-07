@@ -100,6 +100,7 @@ def execute_issue_create_action(
     project_state_resolver: Callable[[str, str, str, str], ResolvedGitHubProjectState] | None = None,
     project_item_creator: Callable[[str, str, str], CreatedGitHubProjectItem] | None = None,
     project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
+    allow_followup_combo: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> IssueCreateExecutionResult:
@@ -127,6 +128,7 @@ def execute_issue_create_action(
         project_state_resolver=project_state_resolver,
         project_item_creator=project_item_creator,
         project_state_setter=project_state_setter,
+        allow_followup_combo=allow_followup_combo,
         env=env,
         now_fn=now_fn,
     )
@@ -148,6 +150,7 @@ def execute_issue_create_draft(
     project_state_resolver: Callable[[str, str, str, str], ResolvedGitHubProjectState] | None = None,
     project_item_creator: Callable[[str, str, str], CreatedGitHubProjectItem] | None = None,
     project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
+    allow_followup_combo: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> IssueCreateExecutionResult:
@@ -199,11 +202,18 @@ def execute_issue_create_draft(
         if resolved_project is None:
             project_sync_status = "issue_only_fallback"
             project_sync_note = "Created the issue without Project placement because no GitHub Project was configured."
-            safe_stop_reason = (
-                f"issue_create is implemented through GitHub issue creation. Created issue #{created_issue.number}. "
-                "Broader create_followup_issue execution, other action Project sync, and Codex dispatch remain unimplemented. "
-                "close_current_issue may run as a separate follow-up mutation in the bridge."
-            )
+            if allow_followup_combo:
+                safe_stop_reason = (
+                    f"issue_create is implemented through GitHub issue creation. Created primary issue #{created_issue.number}. "
+                    "The narrow follow-up issue create path may run only after this primary issue create step succeeds. "
+                    "close_current_issue may run only after both issue-create paths succeed."
+                )
+            else:
+                safe_stop_reason = (
+                    f"issue_create is implemented through GitHub issue creation. Created issue #{created_issue.number}. "
+                    "Broader create_followup_issue execution, other action Project sync, and Codex dispatch remain unimplemented. "
+                    "close_current_issue may run as a separate follow-up mutation in the bridge."
+                )
             execution_status = "completed"
         else:
             if not created_issue.node_id:
@@ -246,10 +256,16 @@ def execute_issue_create_draft(
                         f"Created issue #{created_issue.number}, added it to Project `{resolved_project.project_title}`, "
                         f"and set {resolved_project.state_field_name}={resolved_project.state_option_name}."
                     )
-                    safe_stop_reason = (
-                        project_sync_note
-                        + " close_current_issue may run only after this Project placement succeeds."
-                    )
+                    if allow_followup_combo:
+                        safe_stop_reason = (
+                            project_sync_note
+                            + " The narrow follow-up issue create path may run only after this Project placement succeeds."
+                        )
+                    else:
+                        safe_stop_reason = (
+                            project_sync_note
+                            + " close_current_issue may run only after this Project placement succeeds."
+                        )
                     execution_status = "completed"
     except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
         configured_project_url = str(project_config.get("github_project_url", "")).strip()

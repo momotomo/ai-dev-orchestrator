@@ -14,7 +14,9 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import fetch_next_prompt  # noqa: E402
+import issue_centric_close_current_issue  # noqa: E402
 import issue_centric_contract  # noqa: E402
+import issue_centric_followup_issue  # noqa: E402
 import issue_centric_github  # noqa: E402
 import issue_centric_issue_create  # noqa: E402
 import issue_centric_transport  # noqa: E402
@@ -25,38 +27,62 @@ def b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def build_decision(body_text: str) -> issue_centric_contract.IssueCentricDecision:
+def build_decision(
+    body_text: str,
+    *,
+    target_issue: str | None = None,
+    close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
+) -> issue_centric_contract.IssueCentricDecision:
     return issue_centric_contract.IssueCentricDecision(
         action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
-        target_issue=None,
-        close_current_issue=False,
-        create_followup_issue=False,
+        target_issue=target_issue,
+        close_current_issue=close_current_issue,
+        create_followup_issue=create_followup_issue,
         summary="Create a GitHub issue from the decoded body.",
         issue_body_base64=b64(body_text),
         codex_body_base64=None,
         review_base64=None,
-        followup_issue_body_base64=None,
+        followup_issue_body_base64=(b64(followup_text) if followup_text is not None else None),
         raw_json="{}",
         raw_segment="segment",
     )
 
 
-def build_issue_create_reply(body_text: str) -> str:
-    return "\n".join(
+def build_issue_create_reply(
+    body_text: str,
+    *,
+    target_issue: str | None = "none",
+    close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
+) -> str:
+    parts = [
+        "あなた:",
+        "request body",
+        "ChatGPT:",
+        issue_centric_contract.ISSUE_BODY_START,
+        b64(body_text),
+        issue_centric_contract.ISSUE_BODY_END,
+    ]
+    if followup_text is not None:
+        parts.extend(
+            [
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+                b64(followup_text),
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+            ]
+        )
+    parts.extend(
         [
-            "あなた:",
-            "request body",
-            "ChatGPT:",
-            issue_centric_contract.ISSUE_BODY_START,
-            b64(body_text),
-            issue_centric_contract.ISSUE_BODY_END,
             issue_centric_contract.DECISION_JSON_START,
             json.dumps(
                 {
                     "action": "issue_create",
-                    "target_issue": "none",
-                    "close_current_issue": False,
-                    "create_followup_issue": False,
+                    "target_issue": target_issue if target_issue is not None else "none",
+                    "close_current_issue": close_current_issue,
+                    "create_followup_issue": create_followup_issue,
                     "summary": "Create the next issue.",
                 },
                 ensure_ascii=True,
@@ -64,6 +90,7 @@ def build_issue_create_reply(body_text: str) -> str:
             issue_centric_contract.DECISION_JSON_END,
         ]
     )
+    return "\n".join(parts)
 
 
 class TempLogWriter:
@@ -523,7 +550,7 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
                 patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result) as exec_mock,
             ):
-                with self.assertRaisesRegex(BridgeStop, "created issue: #77"):
+                with self.assertRaisesRegex(BridgeStop, "created primary issue: #77"):
                     fetch_next_prompt.run(dict(state), [])
 
             self.assertEqual(exec_mock.call_count, 1)
@@ -584,7 +611,7 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result),
                 patch.object(fetch_next_prompt, "execute_close_current_issue") as close_mock,
             ):
-                with self.assertRaisesRegex(BridgeStop, "issue_create の最小 execution slice まで実行しました"):
+                with self.assertRaisesRegex(BridgeStop, "issue_create primary execution を完了できず停止しました"):
                     fetch_next_prompt.run(dict(state), [])
 
             saved = saved_states[0]
@@ -657,6 +684,155 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_project_item_id"], "PVT_item_88")
             self.assertEqual(saved["last_issue_centric_project_state_field"], "State")
             self.assertEqual(saved["last_issue_centric_project_state_value"], "ready")
+
+    def test_fetch_next_prompt_executes_issue_create_followup_then_close_combo(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#20",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_target_issue": "#20",
+        }
+        raw = build_issue_create_reply(
+            "# Primary issue\n\nPrimary body.\n",
+            target_issue="#20",
+            close_current_issue=True,
+            create_followup_issue=True,
+            followup_text="# Follow-up issue\n\nFollow-up body.\n",
+        )
+        saved_states: list[dict[str, object]] = []
+
+        primary_result = issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Primary issue",
+                body="Primary body.\n",
+                title_line="# Primary issue",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=90,
+                url="https://github.com/example/repo/issues/90",
+                title="Primary issue",
+                repository="example/repo",
+                node_id="ISSUE_node_90",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "primary-draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "primary-execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Primary synced.",
+            project_item_id="PVT_item_90",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            safe_stop_reason="primary issue create completed.",
+        )
+        followup_result = issue_centric_followup_issue.FollowupIssueExecutionResult(
+            status="completed",
+            followup_status="completed",
+            parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Follow-up issue",
+                body="Follow-up body.\n",
+                title_line="# Follow-up issue",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+            ),
+            created_issue=issue_centric_github.CreatedGitHubIssue(
+                number=91,
+                url="https://github.com/example/repo/issues/91",
+                title="Follow-up issue",
+                repository="example/repo",
+                node_id="ISSUE_node_91",
+            ),
+            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup-inner.json",
+            execution_log_path=REPO_ROOT / "logs" / "followup-execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Follow-up synced.",
+            project_item_id="PVT_item_91",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            close_policy="after_issue_create_followup_success_then_close",
+            safe_stop_reason="follow-up issue create completed.",
+        )
+        close_result = issue_centric_close_current_issue.IssueCloseExecutionResult(
+            status="completed",
+            close_status="closed",
+            close_order="after_issue_create_followup",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            issue_before=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Current issue",
+                repository="example/repo",
+                state="open",
+            ),
+            issue_after=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Current issue",
+                repository="example/repo",
+                state="closed",
+            ),
+            execution_log_path=REPO_ROOT / "logs" / "close-execution.json",
+            safe_stop_reason="closed current issue after primary and follow-up success.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={
+                        "github_repository": "example/repo",
+                        "github_project_url": "https://github.com/users/example/projects/1",
+                        "github_project_state_field_name": "State",
+                        "github_project_default_issue_state": "ready",
+                        "worker_repo_path": ".",
+                    },
+                ),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=followup_result) as followup_mock,
+                patch.object(fetch_next_prompt, "execute_close_current_issue", return_value=close_result) as close_mock,
+            ):
+                with self.assertRaisesRegex(
+                    BridgeStop,
+                    "primary issue create / narrow follow-up issue create / narrow close",
+                ):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(primary_mock.call_count, 1)
+            self.assertEqual(followup_mock.call_count, 1)
+            self.assertEqual(close_mock.call_count, 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_primary_issue_number"], "90")
+            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "91")
+            self.assertEqual(saved["last_issue_centric_close_order"], "after_issue_create_followup")
 
 
 if __name__ == "__main__":
