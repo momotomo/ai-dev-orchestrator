@@ -441,8 +441,32 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
 
 
 def issue_centric_route_note(final_state: dict[str, Any]) -> str:
+    recovery_status = str(final_state.get("last_issue_centric_recovery_status", "")).strip()
+    recovery_source = str(final_state.get("last_issue_centric_recovery_source", "")).strip()
     route_selected = str(final_state.get("last_issue_centric_route_selected", "")).strip()
     target_issue = str(final_state.get("last_issue_centric_next_request_target", "")).strip()
+    fallback_reason = (
+        str(final_state.get("last_issue_centric_recovery_fallback_reason", "")).strip()
+        or str(final_state.get("last_issue_centric_route_fallback_reason", "")).strip()
+        or str(final_state.get("last_issue_centric_next_request_fallback_reason", "")).strip()
+    )
+    if recovery_status == "issue_centric_recovered" and route_selected == "issue_centric" and target_issue:
+        source_note = f" ({recovery_source})" if recovery_source else ""
+        return (
+            " 保存済みの issue-centric summary から再構築した文脈を使い、"
+            f"{target_issue} を target_issue として継続します{source_note}。"
+        )
+    if recovery_status == "issue_centric_recovery_fallback":
+        if target_issue:
+            return (
+                " issue-centric recovery は今回使えず、legacy fallback で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {fallback_reason or 'issue-centric recovery fallback'}."
+            )
+        return (
+            " issue-centric recovery は今回使えず、legacy fallback で続行します。"
+            f" 理由: {fallback_reason or 'issue-centric recovery fallback'}."
+        )
     fallback_reason = (
         str(final_state.get("last_issue_centric_route_fallback_reason", "")).strip()
         or str(final_state.get("last_issue_centric_next_request_fallback_reason", "")).strip()

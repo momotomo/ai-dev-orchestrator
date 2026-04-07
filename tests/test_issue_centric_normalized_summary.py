@@ -169,6 +169,8 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
                     "need_chatgpt_next": True,
                     "need_codex_run": False,
                     "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
                 },
                 template_path=template_path,
                 next_todo="next",
@@ -227,6 +229,92 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(selection.target_issue_source, "normalized_summary")
             self.assertEqual(selection.fallback_reason, "")
 
+    def test_recovery_prefers_issue_centric_when_summary_and_dispatch_are_consistent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "codex_run_followup"}),
+                encoding="utf-8",
+            )
+
+            recovery = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(recovery)
+            self.assertEqual(recovery.recovery_status, "issue_centric_recovered")
+            self.assertEqual(recovery.route_selected, "issue_centric")
+            self.assertEqual(recovery.target_issue, "https://github.com/example/repo/issues/81")
+            self.assertEqual(
+                recovery.recovery_source,
+                "normalized_summary_then_dispatch_then_state",
+            )
+
+    def test_recovery_falls_back_when_summary_exists_but_state_support_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            recovery = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(recovery)
+            self.assertEqual(recovery.recovery_status, "issue_centric_recovery_fallback")
+            self.assertEqual(recovery.route_selected, "fallback_legacy")
+            self.assertEqual(recovery.fallback_reason, "normalized_summary_state_missing")
+
     def test_route_selector_falls_back_when_summary_is_missing(self) -> None:
         selection = issue_centric_normalized_summary.select_issue_centric_next_request_route(
             {
@@ -239,6 +327,22 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
         self.assertEqual(selection.route_selected, "fallback_legacy")
         self.assertEqual(selection.target_issue, "https://github.com/example/repo/issues/20")
         self.assertEqual(selection.fallback_reason, "normalized_summary_missing")
+
+    def test_recovery_falls_back_when_summary_is_missing(self) -> None:
+        recovery = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+            {
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_next_request_hint": "continue_on_current_issue",
+                "last_issue_centric_action": "human_review_needed",
+            },
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIsNotNone(recovery)
+        self.assertEqual(recovery.recovery_status, "issue_centric_recovery_fallback")
+        self.assertEqual(recovery.route_selected, "fallback_legacy")
+        self.assertEqual(recovery.target_issue, "https://github.com/example/repo/issues/20")
+        self.assertEqual(recovery.fallback_reason, "normalized_summary_missing")
 
     def test_resolver_falls_back_to_existing_state_when_summary_is_missing(self) -> None:
         context = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
@@ -365,6 +469,105 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
         self.assertEqual(selection.target_issue_source, "resolver_exception")
         self.assertEqual(selection.fallback_reason, "resolver_error:RuntimeError")
 
+    def test_recovery_falls_back_when_dispatch_result_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "issue_create",
+                        "final_status": "completed",
+                        "principal_issue_kind": "primary_issue",
+                        "principal_issue_candidate": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "next_request_hint": "continue_on_primary_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text("{not-json", encoding="utf-8")
+
+            recovery = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_primary_issue_number": "51",
+                    "last_issue_centric_primary_issue_url": "https://github.com/example/repo/issues/51",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(recovery)
+            self.assertEqual(recovery.recovery_status, "issue_centric_recovery_fallback")
+            self.assertEqual(recovery.route_selected, "fallback_legacy")
+            self.assertEqual(recovery.fallback_reason, "dispatch_result_missing_or_unreadable")
+
+    def test_recovery_falls_back_when_summary_is_unreadable_but_state_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text("{broken", encoding="utf-8")
+
+            recovery = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                    "last_issue_centric_action": "human_review_needed",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(recovery)
+            self.assertEqual(recovery.recovery_status, "issue_centric_recovery_fallback")
+            self.assertEqual(recovery.route_selected, "fallback_legacy")
+            self.assertEqual(recovery.fallback_reason, "normalized_summary_missing_or_unreadable")
+
+    def test_recovery_falls_back_when_dispatch_result_is_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "20",
+                            "url": "https://github.com/example/repo/issues/20",
+                            "title": "",
+                            "ref": "#20",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "failed", "matrix_path": "codex_run"}),
+                encoding="utf-8",
+            )
+
+            recovery = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(recovery)
+            self.assertEqual(recovery.recovery_status, "issue_centric_recovery_fallback")
+            self.assertEqual(recovery.fallback_reason, "dispatch_result_failed_execution")
+
     def test_handoff_builder_uses_summary_based_target_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -389,6 +592,8 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             handoff = build_chatgpt_handoff_request(
                 state={
                     "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_primary_issue_number": "51",
+                    "last_issue_centric_primary_issue_url": "https://github.com/example/repo/issues/51",
                 },
                 last_report="===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
                 next_todo="next",
@@ -396,6 +601,7 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             )
 
             self.assertIn("## issue_centric_next_request", handoff)
+            self.assertIn("- recovery_status: issue_centric_recovered", handoff)
             self.assertIn("- next_request_route: issue_centric", handoff)
             self.assertIn("- target_issue: https://github.com/example/repo/issues/51", handoff)
             self.assertIn("- next_request_hint: continue_on_primary_issue", handoff)
@@ -443,6 +649,8 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
                     {
                         "mode": "idle",
                         "last_issue_centric_normalized_summary": str(summary_path),
+                        "last_issue_centric_followup_issue_number": "81",
+                        "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
                     },
                     args,
                     "===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
@@ -454,6 +662,11 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target_source"], "normalized_summary")
             self.assertEqual(saved_states[-1]["last_issue_centric_route_selected"], "issue_centric")
             self.assertEqual(saved_states[-1]["last_issue_centric_route_fallback_reason"], "")
+            self.assertEqual(saved_states[-1]["last_issue_centric_recovery_status"], "issue_centric_recovered")
+            self.assertEqual(
+                saved_states[-1]["last_issue_centric_recovery_source"],
+                "normalized_summary_then_state",
+            )
 
 
 if __name__ == "__main__":

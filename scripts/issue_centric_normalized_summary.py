@@ -34,6 +34,22 @@ class IssueCentricRouteSelection:
     summary_path: str
 
 
+@dataclass(frozen=True)
+class IssueCentricRecoveryContext:
+    recovery_status: str
+    recovery_source: str
+    route_selected: str
+    target_issue: str
+    target_issue_source: str
+    next_request_hint: str
+    principal_issue: str
+    principal_issue_kind: str
+    used_normalized_summary: bool
+    fallback_reason: str
+    summary_path: str
+    dispatch_result_path: str
+
+
 def build_issue_centric_normalized_summary(
     *,
     matrix_path: str,
@@ -118,6 +134,25 @@ def load_issue_centric_normalized_summary(
     repo_root: Path,
 ) -> dict[str, Any] | None:
     raw_path = str(state.get("last_issue_centric_normalized_summary", "")).strip()
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = repo_root / raw_path
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def load_issue_centric_dispatch_result(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> dict[str, Any] | None:
+    raw_path = str(state.get("last_issue_centric_dispatch_result", "")).strip()
     if not raw_path:
         return None
     path = Path(raw_path)
@@ -278,37 +313,142 @@ def select_issue_centric_next_request_route(
     )
 
 
+def recover_issue_centric_next_request_context(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> IssueCentricRecoveryContext | None:
+    if not _has_issue_centric_recovery_candidate_state(state):
+        return None
+
+    summary_path = str(state.get("last_issue_centric_normalized_summary", "")).strip()
+    dispatch_result_path = str(state.get("last_issue_centric_dispatch_result", "")).strip()
+    summary = load_issue_centric_normalized_summary(state, repo_root=repo_root)
+    dispatch_result = load_issue_centric_dispatch_result(state, repo_root=repo_root)
+    route = select_issue_centric_next_request_route(state, repo_root=repo_root)
+    principal_issue = _recover_principal_issue(summary, state)
+
+    if dispatch_result_path and dispatch_result is None:
+        return IssueCentricRecoveryContext(
+            recovery_status="issue_centric_recovery_fallback",
+            recovery_source="state_fallback_only",
+            route_selected="fallback_legacy",
+            target_issue=route.target_issue,
+            target_issue_source=route.target_issue_source,
+            next_request_hint=route.next_request_hint,
+            principal_issue=principal_issue,
+            principal_issue_kind=route.principal_issue_kind,
+            used_normalized_summary=False,
+            fallback_reason="dispatch_result_missing_or_unreadable",
+            summary_path=summary_path,
+            dispatch_result_path=dispatch_result_path,
+        )
+
+    if dispatch_result is not None and _dispatch_result_is_fatal(dispatch_result):
+        return IssueCentricRecoveryContext(
+            recovery_status="issue_centric_recovery_fallback",
+            recovery_source="state_fallback_only",
+            route_selected="fallback_legacy",
+            target_issue=route.target_issue,
+            target_issue_source=route.target_issue_source,
+            next_request_hint=route.next_request_hint,
+            principal_issue=principal_issue,
+            principal_issue_kind=route.principal_issue_kind,
+            used_normalized_summary=False,
+            fallback_reason="dispatch_result_failed_execution",
+            summary_path=summary_path,
+            dispatch_result_path=dispatch_result_path,
+        )
+
+    if (
+        summary is not None
+        and route.route_selected == "issue_centric"
+        and route.target_issue
+        and principal_issue
+        and route.next_request_hint != "issue_resolution_unclear"
+        and _summary_has_supporting_state(summary, state)
+    ):
+        recovery_source = "normalized_summary_then_state"
+        if dispatch_result is not None:
+            recovery_source = "normalized_summary_then_dispatch_then_state"
+        return IssueCentricRecoveryContext(
+            recovery_status="issue_centric_recovered",
+            recovery_source=recovery_source,
+            route_selected=route.route_selected,
+            target_issue=route.target_issue,
+            target_issue_source=route.target_issue_source,
+            next_request_hint=route.next_request_hint,
+            principal_issue=principal_issue,
+            principal_issue_kind=route.principal_issue_kind,
+            used_normalized_summary=route.used_normalized_summary,
+            fallback_reason="",
+            summary_path=summary_path,
+            dispatch_result_path=dispatch_result_path,
+        )
+
+    return IssueCentricRecoveryContext(
+        recovery_status="issue_centric_recovery_fallback",
+        recovery_source="state_fallback_only",
+        route_selected="fallback_legacy",
+        target_issue=route.target_issue,
+        target_issue_source=route.target_issue_source,
+        next_request_hint=route.next_request_hint,
+        principal_issue=principal_issue,
+        principal_issue_kind=route.principal_issue_kind,
+        used_normalized_summary=False,
+        fallback_reason=(
+            route.fallback_reason
+            or _recovery_fallback_reason_for_summary(summary, state)
+            or "issue_centric_recovery_unresolved"
+        ),
+        summary_path=summary_path,
+        dispatch_result_path=dispatch_result_path,
+    )
+
+
 def render_issue_centric_next_request_section(
-    context: IssueCentricNextRequestContext | IssueCentricRouteSelection | None,
+    context: IssueCentricNextRequestContext | IssueCentricRouteSelection | IssueCentricRecoveryContext | None,
     *,
     repo_label: str,
 ) -> str:
     if context is None:
         return ""
+    recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
+    recovery_source = str(getattr(context, "recovery_source", "") or "").strip()
     route_selected = str(getattr(context, "route_selected", "") or "").strip()
     target_issue = str(getattr(context, "target_issue", "") or "").strip()
     target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
+    principal_issue = str(getattr(context, "principal_issue", "") or "").strip()
     principal_issue_kind = str(getattr(context, "principal_issue_kind", "") or "").strip()
     next_request_hint = str(getattr(context, "next_request_hint", "") or "").strip()
     summary_path = str(getattr(context, "summary_path", "") or "").strip()
+    dispatch_result_path = str(getattr(context, "dispatch_result_path", "") or "").strip()
     fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
     lines = [
         "## issue_centric_next_request",
         "",
         f"- repo: {repo_label}",
     ]
+    if recovery_status:
+        lines.append(f"- recovery_status: {recovery_status}")
+    if recovery_source:
+        lines.append(f"- recovery_source: {recovery_source}")
     if route_selected:
         lines.append(f"- next_request_route: {route_selected}")
     if target_issue:
         lines.append(f"- target_issue: {target_issue}")
     if target_issue_source:
         lines.append(f"- target_issue_source: {target_issue_source}")
+    if principal_issue:
+        lines.append(f"- principal_issue: {principal_issue}")
     if principal_issue_kind:
         lines.append(f"- principal_issue_kind: {principal_issue_kind}")
     if next_request_hint:
         lines.append(f"- next_request_hint: {next_request_hint}")
     if summary_path:
         lines.append(f"- normalized_summary: {summary_path}")
+    if dispatch_result_path:
+        lines.append(f"- dispatch_result: {dispatch_result_path}")
     if fallback_reason:
         lines.append(f"- fallback_reason: {fallback_reason}")
     return "\n".join(lines).strip() + "\n"
@@ -448,6 +588,7 @@ def _issue_label(value: object) -> str:
 
 def _resolve_next_request_target_from_state(state: Mapping[str, Any]) -> str:
     preferred = [
+        str(state.get("last_issue_centric_next_request_target", "")).strip(),
         str(state.get("last_issue_centric_principal_issue", "")).strip(),
         str(state.get("last_issue_centric_followup_issue_url", "")).strip(),
         str(state.get("last_issue_centric_primary_issue_url", "")).strip(),
@@ -470,6 +611,43 @@ def _fallback_reason_for_summary(summary: Mapping[str, Any] | None, summary_path
     return "normalized_summary_inconsistent_with_state"
 
 
+def _has_issue_centric_recovery_candidate_state(state: Mapping[str, Any]) -> bool:
+    keys = (
+        "last_issue_centric_action",
+        "last_issue_centric_normalized_summary",
+        "last_issue_centric_dispatch_result",
+        "last_issue_centric_principal_issue",
+        "last_issue_centric_next_request_target",
+        "last_issue_centric_resolved_issue",
+        "last_issue_centric_target_issue",
+    )
+    return any(str(state.get(key, "")).strip() for key in keys)
+
+
+def _recover_principal_issue(
+    summary: Mapping[str, Any] | None,
+    state: Mapping[str, Any],
+) -> str:
+    if isinstance(summary, Mapping):
+        principal = summary.get("principal_issue_candidate")
+        if isinstance(principal, Mapping):
+            recovered = (
+                str(principal.get("url", "")).strip()
+                or str(principal.get("ref", "")).strip()
+            )
+            if recovered:
+                return recovered
+    return (
+        str(state.get("last_issue_centric_principal_issue", "")).strip()
+        or str(state.get("last_issue_centric_next_request_target", "")).strip()
+        or _resolve_next_request_target_from_state(state)
+    )
+
+
+def _dispatch_result_is_fatal(dispatch_result: Mapping[str, Any]) -> bool:
+    return str(dispatch_result.get("final_status", "")).strip() == "failed"
+
+
 def _should_prefer_issue_centric_route(
     summary: Mapping[str, Any] | None,
     context: IssueCentricNextRequestContext,
@@ -485,6 +663,15 @@ def _should_prefer_issue_centric_route(
     if str(summary.get("final_status", "")).strip() == "failed":
         return False
     return True
+
+
+def _recovery_fallback_reason_for_summary(
+    summary: Mapping[str, Any] | None,
+    state: Mapping[str, Any],
+) -> str:
+    if summary is not None and not _summary_has_supporting_state(summary, state):
+        return "normalized_summary_state_missing"
+    return ""
 
 
 def _summary_matches_state(summary: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
@@ -523,6 +710,35 @@ def _summary_matches_state(summary: Mapping[str, Any], state: Mapping[str, Any])
     return False
 
 
+def _summary_has_supporting_state(summary: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    principal_kind = str(summary.get("principal_issue_kind", "")).strip()
+    if principal_kind == "followup_issue":
+        return _any_state_value(
+            state,
+            "last_issue_centric_followup_issue_url",
+            "last_issue_centric_followup_issue_number",
+            "last_issue_centric_principal_issue",
+            "last_issue_centric_next_request_target",
+        )
+    if principal_kind == "primary_issue":
+        return _any_state_value(
+            state,
+            "last_issue_centric_primary_issue_url",
+            "last_issue_centric_primary_issue_number",
+            "last_issue_centric_principal_issue",
+            "last_issue_centric_next_request_target",
+        )
+    if principal_kind == "current_issue":
+        return _any_state_value(
+            state,
+            "last_issue_centric_resolved_issue",
+            "last_issue_centric_target_issue",
+            "last_issue_centric_principal_issue",
+            "last_issue_centric_next_request_target",
+        )
+    return False
+
+
 def _matches_issue(
     candidate_url: str,
     candidate_number: str,
@@ -536,3 +752,7 @@ def _matches_issue(
     if candidate_url and state_url_or_ref and candidate_url == state_url_or_ref:
         return True
     return False
+
+
+def _any_state_value(state: Mapping[str, Any], *keys: str) -> bool:
+    return any(str(state.get(key, "")).strip() for key in keys)

@@ -16,12 +16,12 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from issue_centric_normalized_summary import (
     IssueCentricNextRequestContext,
+    IssueCentricRecoveryContext,
     IssueCentricRouteSelection,
     load_issue_centric_normalized_summary,
+    recover_issue_centric_next_request_context,
     render_issue_centric_next_request_section,
     render_issue_centric_summary_for_request,
-    resolve_issue_centric_next_request_context,
-    select_issue_centric_next_request_route,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -92,6 +92,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_next_request_fallback_reason": "",
     "last_issue_centric_route_selected": "",
     "last_issue_centric_route_fallback_reason": "",
+    "last_issue_centric_recovery_status": "",
+    "last_issue_centric_recovery_source": "",
+    "last_issue_centric_recovery_fallback_reason": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1326,6 +1329,14 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
     if state.get("last_issue_centric_route_fallback_reason"):
         fields.append(
             f"- last_issue_centric_route_fallback_reason: {state['last_issue_centric_route_fallback_reason']}"
+        )
+    if state.get("last_issue_centric_recovery_status"):
+        fields.append(f"- last_issue_centric_recovery_status: {state['last_issue_centric_recovery_status']}")
+    if state.get("last_issue_centric_recovery_source"):
+        fields.append(f"- last_issue_centric_recovery_source: {state['last_issue_centric_recovery_source']}")
+    if state.get("last_issue_centric_recovery_fallback_reason"):
+        fields.append(
+            f"- last_issue_centric_recovery_fallback_reason: {state['last_issue_centric_recovery_fallback_reason']}"
         )
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
@@ -3238,18 +3249,18 @@ def build_issue_centric_request_status(
 def prepare_issue_centric_next_request_context(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricNextRequestContext | None, str]:
-    selection, section = prepare_issue_centric_next_request_route_selection(state)
-    if selection is None:
+    recovery, section = prepare_issue_centric_next_request_recovery(state)
+    if recovery is None:
         return None, section
     return (
         IssueCentricNextRequestContext(
-            target_issue=selection.target_issue,
-            target_issue_source=selection.target_issue_source,
-            next_request_hint=selection.next_request_hint,
-            principal_issue_kind=selection.principal_issue_kind,
-            used_normalized_summary=selection.used_normalized_summary,
-            fallback_reason=selection.fallback_reason,
-            summary_path=selection.summary_path,
+            target_issue=recovery.target_issue,
+            target_issue_source=recovery.target_issue_source,
+            next_request_hint=recovery.next_request_hint,
+            principal_issue_kind=recovery.principal_issue_kind,
+            used_normalized_summary=recovery.used_normalized_summary,
+            fallback_reason=recovery.fallback_reason,
+            summary_path=recovery.summary_path,
         ),
         section,
     )
@@ -3258,10 +3269,31 @@ def prepare_issue_centric_next_request_context(
 def prepare_issue_centric_next_request_route_selection(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricRouteSelection | None, str]:
+    recovery, section = prepare_issue_centric_next_request_recovery(state)
+    if recovery is None:
+        return None, section
+    return (
+        IssueCentricRouteSelection(
+            route_selected=recovery.route_selected,
+            target_issue=recovery.target_issue,
+            target_issue_source=recovery.target_issue_source,
+            next_request_hint=recovery.next_request_hint,
+            principal_issue_kind=recovery.principal_issue_kind,
+            used_normalized_summary=recovery.used_normalized_summary,
+            fallback_reason=recovery.fallback_reason,
+            summary_path=recovery.summary_path,
+        ),
+        section,
+    )
+
+
+def prepare_issue_centric_next_request_recovery(
+    state: Mapping[str, Any],
+) -> tuple[IssueCentricRecoveryContext | None, str]:
     config = load_project_config()
     repo_label = str(config.get("github_repository", "")).strip() or str(project_repo_path(config))
-    selection = select_issue_centric_next_request_route(state, repo_root=ROOT_DIR)
-    if not selection.target_issue and not selection.summary_path and not selection.fallback_reason:
+    recovery = recover_issue_centric_next_request_context(state, repo_root=ROOT_DIR)
+    if recovery is None:
         return None, ""
-    section = render_issue_centric_next_request_section(selection, repo_label=repo_label)
-    return selection, section
+    section = render_issue_centric_next_request_section(recovery, repo_label=repo_label)
+    return recovery, section

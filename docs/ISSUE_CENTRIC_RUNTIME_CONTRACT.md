@@ -72,6 +72,10 @@ The current implementation boundary is:
   normalized summary / resolver result for the next ChatGPT request only when
   the summary is coherent, the resolved `target_issue` is stable, and the
   latest issue-centric execution did not end in fatal failure
+- implemented: narrow restart-safe recovery / rehydration layer that reloads
+  normalized summary, dispatch result, and saved issue-centric state before
+  next-request preparation, then reuses issue-centric routing only when that
+  recovered context remains coherent
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -458,6 +462,16 @@ For the current dispatcher / orchestrator boundary:
     issue-centric preference themselves
   - operator-facing status may show only a thin
     `issue_centric` / `fallback_legacy` route note until a later full cutover
+- the restart-safe recovery layer now sits one layer above the route selector:
+  - on resume / restart it reloads normalized summary first, then consults the
+    saved dispatch result when present, then reconciles both against the saved
+    issue-centric state fields
+  - if summary, dispatch, and state still agree on one principal issue and one
+    `target_issue`, the bridge records `issue_centric_recovered` and keeps the
+    preferred issue-centric route
+  - if summary is missing, broken, contradictory, `issue_resolution_unclear`,
+    or paired with an unreadable / failed dispatch result, the bridge records
+    `issue_centric_recovery_fallback` and returns to legacy fallback
 
 ## Bridge To Codex Contract
 
@@ -546,8 +560,9 @@ shape or introduce a new global state machine.
 The next-request builder may now also render a narrow
 `issue_centric_next_request` section with `repo`, resolved `target_issue`,
 resolution source, route selection, fallback reason, and
-`next_request_hint`, but that still sits on top of the existing report-based
-request format rather than replacing it.
+`next_request_hint`; it may also include recovery status and recovery source
+when restart-safe rehydration was used, but that still sits on top of the
+existing report-based request format rather than replacing it.
 
 ## State Model
 

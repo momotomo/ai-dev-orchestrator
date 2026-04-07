@@ -228,6 +228,11 @@ During this inventory phase, all of the following stay unchanged:
     when summary, resolver, and state are coherent, and otherwise keeps the
     old report-based builder path as an explicit legacy fallback instead of
     making each builder guess independently
+  - the current recovery slice goes one step farther again: it reloads the
+    saved normalized summary and dispatch result on restart, reconciles them
+    against saved issue-centric state, and only then allows the preferred
+    issue-centric next-request route to continue; otherwise it records an
+    explicit recovery fallback and keeps the legacy report path alive
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

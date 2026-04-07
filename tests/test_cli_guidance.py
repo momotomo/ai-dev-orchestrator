@@ -240,6 +240,20 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("issue-centric route", note)
         self.assertIn("https://github.com/example/repo/issues/81", note)
 
+    def test_request_prompt_from_report_note_mentions_recovered_issue_centric_route(self) -> None:
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_recovery_status": "issue_centric_recovered",
+                "last_issue_centric_recovery_source": "normalized_summary_then_state",
+                "last_issue_centric_route_selected": "issue_centric",
+                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/81",
+            }
+        )
+        self.assertIn("再構築した文脈", note)
+        self.assertIn("normalized_summary_then_state", note)
+
     def test_request_prompt_from_report_note_mentions_fallback_route(self) -> None:
         note = run_until_stop.suggested_next_note(
             {
@@ -252,6 +266,19 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertIn("legacy fallback", note)
         self.assertIn("normalized_summary_missing", note)
+
+    def test_request_prompt_from_report_note_mentions_recovery_fallback(self) -> None:
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_recovery_status": "issue_centric_recovery_fallback",
+                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_recovery_fallback_reason": "dispatch_result_missing_or_unreadable",
+            }
+        )
+        self.assertIn("issue-centric recovery", note)
+        self.assertIn("dispatch_result_missing_or_unreadable", note)
 
     def test_submitted_unconfirmed_recommends_resume_not_clear_error(self) -> None:
         args = run_until_stop.parse_args(
