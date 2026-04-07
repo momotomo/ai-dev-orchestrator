@@ -281,6 +281,47 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
             self.assertEqual(result.close_order, "blocked_codex_run")
             self.assertIn("action=codex_run", result.safe_stop_reason)
 
+    def test_close_current_issue_allows_human_review_when_opted_in(self) -> None:
+        prepared = self.prepared(
+            action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+            target_issue="#20",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="logs/review.json",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Reviewed issue",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Reviewed issue",
+                    repository=repository,
+                    state="closed",
+                ),
+                allow_human_review_close=True,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.close_status, "closed")
+            self.assertEqual(result.close_order, "after_human_review")
+            self.assertIn("after the review comment was posted", result.safe_stop_reason)
+
 
 class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
     def test_issue_create_can_close_current_issue_after_creation(self) -> None:

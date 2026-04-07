@@ -65,12 +65,16 @@ def execute_human_review_action(
     token_source = ""
 
     close_policy = (
-        "review_then_close_unimplemented"
+        "after_review_close_if_review_succeeds"
         if prepared.decision.close_current_issue
         else "review_only"
     )
 
     try:
+        if prepared.decision.create_followup_issue:
+            raise IssueCentricHumanReviewError(
+                "human_review_needed + create_followup_issue is not supported in this slice."
+            )
         if prepared.review_body is None:
             raise IssueCentricHumanReviewError(
                 "human_review_needed requires CHATGPT_REVIEW in this execution slice."
@@ -119,7 +123,7 @@ def execute_human_review_action(
         )
         if prepared.decision.close_current_issue:
             safe_stop_reason += (
-                " close_current_issue=true was recorded but not executed in this slice; close may only be evaluated after review in a later slice."
+                " close_current_issue=true may now be evaluated immediately after review in this slice."
             )
         execution_status = "completed"
     except (IssueCentricHumanReviewError, IssueCentricGitHubError) as exc:

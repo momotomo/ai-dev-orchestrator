@@ -166,8 +166,10 @@ During this inventory phase, all of the following stay unchanged:
     Project updates, and any broader cutover out of scope
   - the current review slice goes one step farther again: it wires
     `human_review_needed` to a narrow target-issue review comment mutation,
-    while keeping follow-up mutation, Project updates, and post-review close
-    automation out of scope
+    and now allows the narrow `review comment -> close` happy path for
+    `human_review_needed + close_current_issue = true`, while keeping
+    follow-up mutation, Project updates, and broader post-review automation
+    out of scope
   - the current Project slice goes one step farther again: it wires
     `issue_create` to narrow GitHub Project placement plus `State` field
     setting when explicit Project config is present, while keeping Project

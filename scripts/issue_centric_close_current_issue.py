@@ -50,6 +50,7 @@ def execute_close_current_issue(
     repo_relative: Callable[[Path], str],
     issue_fetcher: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
     issue_closer: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
+    allow_human_review_close: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> IssueCloseExecutionResult:
@@ -62,7 +63,10 @@ def execute_close_current_issue(
     issue_after: GitHubIssueSnapshot | None = None
     repository = ""
     token_source = ""
-    close_order = _determine_close_order(prepared.decision.action)
+    close_order = _determine_close_order(
+        prepared.decision.action,
+        allow_human_review_close=allow_human_review_close,
+    )
 
     try:
         repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
@@ -76,6 +80,7 @@ def execute_close_current_issue(
             prepared,
             prior_state=prior_state,
             default_repository=repository,
+            allow_human_review_close=allow_human_review_close,
         )
         if resolved_issue.repository != repository:
             raise IssueCentricCloseCurrentIssueError(
@@ -100,9 +105,14 @@ def execute_close_current_issue(
                     "GitHub issue close returned successfully but the issue state is not `closed`."
                 )
             close_status = "closed"
-            safe_stop_reason = (
-                f"close_current_issue closed issue #{issue_after.number} after the primary action completed."
-            )
+            if prepared.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED and allow_human_review_close:
+                safe_stop_reason = (
+                    f"close_current_issue closed issue #{issue_after.number} after the review comment was posted."
+                )
+            else:
+                safe_stop_reason = (
+                    f"close_current_issue closed issue #{issue_after.number} after the primary action completed."
+                )
             execution_status = "completed"
     except (IssueCentricCloseCurrentIssueError, IssueCentricGitHubError) as exc:
         close_status = "blocked"
@@ -123,6 +133,7 @@ def execute_close_current_issue(
         "source_decision_log": source_decision_log,
         "source_metadata_log": source_metadata_log,
         "source_action_execution_log": source_action_execution_log,
+        "allow_human_review_close": allow_human_review_close,
         "resolved_repository": repository,
         "token_source": token_source,
         "resolved_issue": (
@@ -181,6 +192,7 @@ def resolve_close_target_issue(
     *,
     prior_state: Mapping[str, Any],
     default_repository: str,
+    allow_human_review_close: bool = False,
 ) -> ResolvedGitHubIssue:
     decision_target = str(prepared.decision.target_issue or "").strip()
     state_resolved = str(prior_state.get("last_issue_centric_resolved_issue", "")).strip()
@@ -207,9 +219,14 @@ def resolve_close_target_issue(
             "action=codex_run cannot execute close_current_issue in this slice because the current execution unit remains active."
         )
     if prepared.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED:
-        raise IssueCentricCloseCurrentIssueError(
-            "action=human_review_needed cannot execute close_current_issue in this slice because human review is still required."
-        )
+        if prepared.decision.create_followup_issue:
+            raise IssueCentricCloseCurrentIssueError(
+                "action=human_review_needed + create_followup_issue cannot execute close_current_issue in this slice."
+            )
+        if not allow_human_review_close:
+            raise IssueCentricCloseCurrentIssueError(
+                "action=human_review_needed cannot execute close_current_issue in this slice because human review is still required."
+            )
 
     chosen = resolved_from_decision or resolved_from_state or resolved_from_state_target
     if chosen is None:
@@ -227,13 +244,13 @@ def resolve_close_target_issue(
     return chosen
 
 
-def _determine_close_order(action: IssueCentricAction) -> str:
+def _determine_close_order(action: IssueCentricAction, *, allow_human_review_close: bool = False) -> str:
     if action is IssueCentricAction.ISSUE_CREATE:
         return "after_issue_create"
     if action is IssueCentricAction.NO_ACTION:
         return "after_no_action"
     if action is IssueCentricAction.HUMAN_REVIEW_NEEDED:
-        return "blocked_human_review_needed"
+        return "after_human_review" if allow_human_review_close else "blocked_human_review_needed"
     if action is IssueCentricAction.CODEX_RUN:
         return "blocked_codex_run"
     return "not_supported"

@@ -35,12 +35,15 @@ The current implementation boundary is:
   created successfully
 - implemented: narrow `human_review_needed` execution that posts decoded
   `CHATGPT_REVIEW` as a target-issue review comment
+- implemented: narrow post-review close for
+  `human_review_needed + close_current_issue = true` after review comment
+  posting succeeds
 - implemented: narrow `no_action + create_followup_issue` execution that
   decodes `CHATGPT_FOLLOWUP_ISSUE_BODY`, creates one follow-up issue, and
   closes the current issue only after follow-up creation / Project placement
   succeeds
-- not yet implemented: follow-up mutation for other actions or post-review
-  close automation
+- not yet implemented: follow-up mutation for other actions or broader
+  post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
 
 ## Overall Assumptions
@@ -265,7 +268,8 @@ For the current bounded `close_current_issue` slice:
 - `action = codex_run` and `close_current_issue = true` is blocked in this
   slice before any `codex_run` mutation proceeds
 - `action = human_review_needed` and `close_current_issue = true` is blocked in
-  this slice because human judgment is still required
+  this slice unless the review comment step has already completed and the
+  bridge is explicitly executing the narrow post-review close path
 - if the bridge cannot safely resolve the close target issue from the decision
   target or the current issue-centric state, it must stop before mutation
 - if the issue is already closed, the bridge records a no-op close result
@@ -285,8 +289,12 @@ For the current bounded `human_review_needed` slice:
   execution slice
 - `human_review_needed` is the main action; review comment posting is attempted
   before any later close / follow-up decision is considered
-- `human_review_needed + close_current_issue = true` records that close may only
-  be considered after review, but this slice does not execute the close
+- `human_review_needed + close_current_issue = true` now uses a narrow
+  post-review close path
+- the order is fixed as `review comment -> close`
+- if review comment posting is blocked or fails, close is not attempted
+- if close fails after review succeeds, the review comment remains posted and
+  the bridge records a review-succeeded / close-failed outcome
 - `human_review_needed + create_followup_issue = true` records the flag only;
   it does not create follow-up work in this slice
 - `no_action + create_followup_issue = true` may create one follow-up issue in

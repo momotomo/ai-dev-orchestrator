@@ -593,33 +593,45 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 repo_relative=repo_relative,
             )
             apply_review_execution_state(mutable_state, review_execution=review_execution)
+            close_note = ""
             if contract_decision.close_current_issue and review_execution.status == "completed":
+                close_execution = execute_close_current_issue(
+                    materialized.prepared,
+                    prior_state=state,
+                    project_config=project_config,
+                    repo_path=project_repo_path(project_config),
+                    source_decision_log=repo_relative(decision_log),
+                    source_metadata_log=repo_relative(materialized.metadata_log_path),
+                    source_action_execution_log=repo_relative(review_execution.execution_log_path),
+                    log_writer=log_text,
+                    repo_relative=repo_relative,
+                    allow_human_review_close=True,
+                )
+                apply_close_execution_state(mutable_state, close_execution=close_execution)
+                close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
+            elif contract_decision.close_current_issue:
                 mutable_state.update(
                     {
-                        "last_issue_centric_close_status": "blocked_review_then_close_unimplemented",
-                        "last_issue_centric_close_order": "after_review_blocked",
-                        "last_issue_centric_stop_reason": (
-                            review_execution.safe_stop_reason
-                            + " close_current_issue=true was left for a later slice after review comment posting."
-                        ),
-                        "chatgpt_decision_note": (
-                            review_execution.safe_stop_reason
-                            + " close_current_issue=true was left for a later slice after review comment posting."
-                        ),
+                        "last_issue_centric_close_status": "not_attempted_review_blocked",
+                        "last_issue_centric_close_order": "after_human_review",
                     }
                 )
             save_state(mutable_state)
             review_note = ""
             if review_execution.created_comment is not None:
                 review_note = f" review comment: {review_execution.created_comment.url}"
-            close_note = ""
-            if contract_decision.close_current_issue:
-                close_note = " close_current_issue は review 後にのみ検討し、この slice では実行していません。"
-            stop_label = (
-                "issue-centric contract reply を検出し、human_review_needed の最小 review comment mutation まで実行しました。"
-                if review_execution.status == "completed"
-                else "issue-centric contract reply を検出しましたが、human_review_needed review execution を完了できず停止しました。"
-            )
+            if review_execution.status == "completed" and contract_decision.close_current_issue:
+                stop_label = (
+                    "issue-centric contract reply を検出し、human_review_needed の review comment mutation と narrow post-review close まで実行しました。"
+                )
+            elif review_execution.status == "completed":
+                stop_label = (
+                    "issue-centric contract reply を検出し、human_review_needed の最小 review comment mutation まで実行しました。"
+                )
+            else:
+                stop_label = (
+                    "issue-centric contract reply を検出しましたが、human_review_needed review execution を完了できず停止しました。"
+                )
             raise BridgeStop(
                 stop_label
                 + f" decision log: {repo_relative(decision_log)}"
@@ -632,7 +644,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 + f" review: {repo_relative(review_execution.execution_log_path)}"
                 + review_note
                 + close_note
-                + " create_followup_issue mutation / Projects update はまだ未実装です。"
+                + " human_review_needed + create_followup_issue / Projects update はまだ未実装です。"
             )
 
         if contract_decision.action.value == "no_action" and contract_decision.create_followup_issue:
