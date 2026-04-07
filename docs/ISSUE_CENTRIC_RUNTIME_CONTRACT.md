@@ -42,6 +42,9 @@ The current implementation boundary is:
   decodes `CHATGPT_FOLLOWUP_ISSUE_BODY`, creates one follow-up issue, and
   closes the current issue only after follow-up creation / Project placement
   succeeds
+- implemented: narrow `human_review_needed + create_followup_issue`
+  execution that posts the review comment first, then creates one follow-up
+  issue, and only then evaluates optional close
 - implemented: `scripts/issue_centric_execution.py` as the current execution
   dispatcher / orchestrator for the already-supported narrow execution matrix
 - not yet implemented: follow-up mutation for other actions or broader
@@ -55,6 +58,8 @@ The current dispatcher-owned execution matrix is:
 - `codex_run`
 - `human_review_needed`
 - `human_review_needed + close_current_issue = true`
+- `human_review_needed + create_followup_issue = true`
+- `human_review_needed + create_followup_issue = true + close_current_issue = true`
 - `no_action`
 - `no_action + create_followup_issue = true`
 - `no_action + create_followup_issue = true + close_current_issue = true`
@@ -64,7 +69,6 @@ The dispatcher still blocks these combinations on purpose:
 - `issue_create + create_followup_issue = true`
 - `codex_run + close_current_issue = true`
 - `codex_run + create_followup_issue = true`
-- `human_review_needed + create_followup_issue = true`
 - multi-flag combinations outside the narrow paths above
 
 ## Overall Assumptions
@@ -316,8 +320,17 @@ For the current bounded `human_review_needed` slice:
 - if review comment posting is blocked or fails, close is not attempted
 - if close fails after review succeeds, the review comment remains posted and
   the bridge records a review-succeeded / close-failed outcome
-- `human_review_needed + create_followup_issue = true` records the flag only;
-  it does not create follow-up work in this slice
+- `human_review_needed + create_followup_issue = true` now uses a narrow
+  `review comment -> follow-up issue create` path
+- `human_review_needed + create_followup_issue = true + close_current_issue =
+  true` now uses a narrow
+  `review comment -> follow-up issue create -> close` path
+- if the review comment step is blocked or fails, the bridge does not attempt
+  follow-up issue creation
+- if follow-up creation is partial, blocked, or failed after review succeeds,
+  the review comment remains posted and the current issue stays open
+- if close fails after review and follow-up succeed, those earlier successes
+  remain in place and only the close step is recorded as failed
 - `no_action + create_followup_issue = true` may create one follow-up issue in
   this slice, but broader follow-up automation remains unimplemented
 

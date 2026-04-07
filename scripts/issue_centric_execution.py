@@ -51,9 +51,9 @@ def dispatch_issue_centric_execution(
     steps: list[IssueCentricExecutionStep] = []
     decision_action = contract_decision.action.value
 
-    if contract_decision.create_followup_issue and decision_action != "no_action":
+    if contract_decision.create_followup_issue and decision_action not in {"no_action", "human_review_needed"}:
         unsupported_reason = (
-            "create_followup_issue execution is currently implemented only for action=no_action. "
+            "create_followup_issue execution is currently implemented only for action=no_action and the narrow human_review_needed combo. "
             f"The combination action={decision_action} + create_followup_issue=true is blocked in this slice."
         )
         mutable_state.update(
@@ -79,7 +79,7 @@ def dispatch_issue_centric_execution(
             log_writer=log_writer,
             repo_relative=repo_relative,
             stop_message=(
-                "issue-centric contract reply を検出しましたが、create_followup_issue の narrow execution は action=no_action にだけ対応しています。"
+                "issue-centric contract reply を検出しましたが、create_followup_issue の narrow execution は action=no_action と human_review_needed review combo にだけ対応しています。"
                 f" decision log: {source_decision_log}"
                 f" metadata: {source_metadata_log}"
                 + unsupported_reason
@@ -377,6 +377,70 @@ def dispatch_issue_centric_execution(
         )
 
     if decision_action == "human_review_needed":
+        if contract_decision.create_followup_issue and materialized.prepared.review_body is None:
+            blocked_reason = (
+                "human_review_needed + create_followup_issue requires a prepared CHATGPT_REVIEW artifact before any review mutation can run."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_review_status": "blocked_missing_review_artifact",
+                    "last_issue_centric_stop_reason": blocked_reason,
+                    "chatgpt_decision_note": blocked_reason,
+                }
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="human_review_comment",
+                    status="blocked_missing_review_artifact",
+                    log_path="",
+                    note=blocked_reason,
+                )
+            )
+            return _finalize_dispatch(
+                matrix_path="blocked_human_review_followup_missing_review",
+                final_status="blocked",
+                steps=steps,
+                mutable_state=mutable_state,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                stop_message=(
+                    "issue-centric contract reply を検出しましたが、human_review_needed + create_followup_issue の narrow combo に必要な review artifact が不足しているため停止しました。"
+                    f" decision log: {source_decision_log}"
+                    f" metadata: {source_metadata_log}"
+                ),
+            )
+        if contract_decision.create_followup_issue and materialized.prepared.followup_issue_body is None:
+            blocked_reason = (
+                "human_review_needed + create_followup_issue requires a prepared CHATGPT_FOLLOWUP_ISSUE_BODY artifact before review can safely proceed."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_followup_status": "blocked_missing_followup_artifact",
+                    "last_issue_centric_stop_reason": blocked_reason,
+                    "chatgpt_decision_note": blocked_reason,
+                }
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="followup_issue_create",
+                    status="blocked_missing_followup_artifact",
+                    log_path="",
+                    note=blocked_reason,
+                )
+            )
+            return _finalize_dispatch(
+                matrix_path="blocked_human_review_followup_missing_followup",
+                final_status="blocked",
+                steps=steps,
+                mutable_state=mutable_state,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                stop_message=(
+                    "issue-centric contract reply を検出しましたが、human_review_needed + create_followup_issue の narrow combo に必要な follow-up artifact が不足しているため停止しました。"
+                    f" decision log: {source_decision_log}"
+                    f" metadata: {source_metadata_log}"
+                ),
+            )
         review_execution = execute_human_review_action_fn(
             materialized.prepared,
             prior_state=prior_state,
@@ -387,6 +451,7 @@ def dispatch_issue_centric_execution(
             source_artifact_path=source_artifact_path,
             log_writer=log_writer,
             repo_relative=repo_relative,
+            allow_followup_combo=contract_decision.create_followup_issue,
         )
         _apply_review_execution_state(
             mutable_state,
@@ -403,7 +468,89 @@ def dispatch_issue_centric_execution(
         )
         close_note = ""
         final_status = review_execution.status
-        if contract_decision.close_current_issue and review_execution.status == "completed":
+        followup_note = ""
+        followup_execution = None
+        close_execution = None
+        if contract_decision.create_followup_issue and review_execution.status == "completed":
+            followup_execution = execute_followup_issue_action_fn(
+                materialized.prepared,
+                prior_state=prior_state,
+                project_config=project_config,
+                repo_path=repo_path,
+                source_decision_log=source_decision_log,
+                source_metadata_log=source_metadata_log,
+                source_artifact_path=source_artifact_path,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                allow_human_review_combo=True,
+            )
+            _apply_followup_execution_state(
+                mutable_state,
+                followup_execution=followup_execution,
+                repo_relative=repo_relative,
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="followup_issue_create",
+                    status=followup_execution.status,
+                    log_path=repo_relative(followup_execution.execution_log_path),
+                    note=followup_execution.safe_stop_reason,
+                )
+            )
+            if followup_execution.created_issue is not None:
+                followup_note = (
+                    f" follow-up issue: #{followup_execution.created_issue.number} "
+                    f"{followup_execution.created_issue.url}"
+                )
+            if followup_execution.status != "completed":
+                final_status = "partial"
+            if contract_decision.close_current_issue and followup_execution.status == "completed":
+                close_execution = execute_close_current_issue_fn(
+                    materialized.prepared,
+                    prior_state=prior_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(followup_execution.execution_log_path),
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                    allow_human_review_close=True,
+                    allow_human_review_followup_close=True,
+                )
+                _apply_close_execution_state(
+                    mutable_state,
+                    close_execution=close_execution,
+                    repo_relative=repo_relative,
+                )
+                steps.append(
+                    IssueCentricExecutionStep(
+                        name="close_current_issue",
+                        status=close_execution.status,
+                        log_path=repo_relative(close_execution.execution_log_path),
+                        note=close_execution.safe_stop_reason,
+                    )
+                )
+                close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
+                if close_execution.status != "completed":
+                    final_status = "partial"
+            elif contract_decision.close_current_issue:
+                mutable_state.update(
+                    {
+                        "last_issue_centric_close_status": "not_attempted_followup_blocked",
+                        "last_issue_centric_close_order": "after_human_review_followup",
+                    }
+                )
+                steps.append(
+                    IssueCentricExecutionStep(
+                        name="close_current_issue",
+                        status="not_attempted_followup_blocked",
+                        log_path="",
+                        note="close_current_issue runs only after the review-followup path and any required Project sync complete.",
+                    )
+                )
+                final_status = "partial"
+        elif contract_decision.close_current_issue and review_execution.status == "completed":
             close_execution = execute_close_current_issue_fn(
                 materialized.prepared,
                 prior_state=prior_state,
@@ -451,7 +598,28 @@ def dispatch_issue_centric_execution(
         review_note = ""
         if review_execution.created_comment is not None:
             review_note = f" review comment: {review_execution.created_comment.url}"
-        if review_execution.status == "completed" and contract_decision.close_current_issue:
+        if review_execution.status != "completed":
+            stop_label = (
+                "issue-centric contract reply を検出しましたが、human_review_needed review execution を完了できず停止しました。"
+            )
+        elif contract_decision.create_followup_issue and followup_execution is not None:
+            if (
+                contract_decision.close_current_issue
+                and close_execution is not None
+                and close_execution.status == "completed"
+            ):
+                stop_label = (
+                    "issue-centric contract reply を検出し、human_review_needed の review comment mutation / narrow follow-up issue create / narrow post-review close まで実行しました。"
+                )
+            elif followup_execution.status == "completed":
+                stop_label = (
+                    "issue-centric contract reply を検出し、human_review_needed の review comment mutation と narrow follow-up issue create まで実行しました。"
+                )
+            else:
+                stop_label = (
+                    "issue-centric contract reply を検出し、human_review_needed の review comment mutation までは完了しましたが、その後の narrow follow-up issue create で停止しました。"
+                )
+        elif review_execution.status == "completed" and contract_decision.close_current_issue:
             stop_label = (
                 "issue-centric contract reply を検出し、human_review_needed の review comment mutation と narrow post-review close まで実行しました。"
             )
@@ -459,15 +627,19 @@ def dispatch_issue_centric_execution(
             stop_label = (
                 "issue-centric contract reply を検出し、human_review_needed の最小 review comment mutation まで実行しました。"
             )
-        else:
-            stop_label = (
-                "issue-centric contract reply を検出しましたが、human_review_needed review execution を完了できず停止しました。"
-            )
         return _finalize_dispatch(
             matrix_path=(
-                "human_review_then_close"
-                if contract_decision.close_current_issue
-                else "human_review"
+                "human_review_followup_then_close"
+                if contract_decision.create_followup_issue and contract_decision.close_current_issue
+                else (
+                    "human_review_followup"
+                    if contract_decision.create_followup_issue
+                    else (
+                        "human_review_then_close"
+                        if contract_decision.close_current_issue
+                        else "human_review"
+                    )
+                )
             ),
             final_status=final_status,
             steps=steps,
@@ -481,8 +653,13 @@ def dispatch_issue_centric_execution(
                 + (f" artifact: {source_artifact_path}" if source_artifact_path else "")
                 + f" review: {repo_relative(review_execution.execution_log_path)}"
                 + review_note
+                + followup_note
                 + close_note
-                + " human_review_needed + create_followup_issue / Projects update はまだ未実装です。"
+                + (
+                    " issue_create + create_followup_issue / codex_run + create_followup_issue / Projects update の他 action 反映 はまだ未実装です。"
+                    if contract_decision.create_followup_issue
+                    else " human_review_needed + create_followup_issue / Projects update はまだ未実装です。"
+                )
             ),
         )
 

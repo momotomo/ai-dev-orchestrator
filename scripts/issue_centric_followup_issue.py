@@ -63,12 +63,17 @@ def execute_followup_issue_action(
     project_state_resolver: Callable[[str, str, str, str], object] | None = None,
     project_item_creator: Callable[[str, str, str], object] | None = None,
     project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
+    allow_human_review_combo: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> FollowupIssueExecutionResult:
-    if prepared.decision.action is not IssueCentricAction.NO_ACTION:
+    is_human_review_combo = (
+        prepared.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED
+        and allow_human_review_combo
+    )
+    if prepared.decision.action is not IssueCentricAction.NO_ACTION and not is_human_review_combo:
         raise IssueCentricFollowupIssueError(
-            "follow-up issue execution only accepts action=no_action."
+            "follow-up issue execution only accepts action=no_action unless the narrow human_review_needed combo is explicitly enabled."
         )
     if not prepared.decision.create_followup_issue:
         raise IssueCentricFollowupIssueError(
@@ -80,11 +85,14 @@ def execute_followup_issue_action(
     parent_issue: ResolvedGitHubIssue | None = None
     draft: IssueCreateDraft | None = None
     issue_create_result: IssueCreateExecutionResult | None = None
-    close_policy = (
-        "after_followup_success_only"
-        if prepared.decision.close_current_issue
-        else "followup_only"
-    )
+    if is_human_review_combo and prepared.decision.close_current_issue:
+        close_policy = "after_review_followup_success_then_close"
+    elif is_human_review_combo:
+        close_policy = "after_review_followup_success_only"
+    elif prepared.decision.close_current_issue:
+        close_policy = "after_followup_success_only"
+    else:
+        close_policy = "followup_only"
 
     try:
         if prepared.followup_issue_body is None:
@@ -108,7 +116,11 @@ def execute_followup_issue_action(
         )
         issue_create_result = execute_issue_create_draft(
             draft,
-            action_label="followup_issue_create",
+            action_label=(
+                "review_followup_issue_create"
+                if is_human_review_combo
+                else "followup_issue_create"
+            ),
             close_current_issue=prepared.decision.close_current_issue,
             create_followup_issue=True,
             project_config=project_config,
@@ -126,10 +138,17 @@ def execute_followup_issue_action(
         )
         if issue_create_result.status == "completed":
             followup_status = "completed"
-            safe_stop_reason = (
-                f"Created follow-up issue #{issue_create_result.created_issue.number} for current issue "
-                f"#{parent_issue.issue_number}. close_current_issue may run only after this follow-up creation path succeeds."
-            )
+            if is_human_review_combo:
+                safe_stop_reason = (
+                    f"Created follow-up issue #{issue_create_result.created_issue.number} for current issue "
+                    f"#{parent_issue.issue_number} after the review comment step succeeded. "
+                    "close_current_issue may run only after this follow-up creation path succeeds."
+                )
+            else:
+                safe_stop_reason = (
+                    f"Created follow-up issue #{issue_create_result.created_issue.number} for current issue "
+                    f"#{parent_issue.issue_number}. close_current_issue may run only after this follow-up creation path succeeds."
+                )
             execution_status = "completed"
         else:
             followup_status = issue_create_result.project_sync_status or "blocked"
@@ -148,7 +167,7 @@ def execute_followup_issue_action(
         execution_status = "blocked"
 
     execution_log = {
-        "action": "no_action",
+        "action": prepared.decision.action.value,
         "followup_execution": "followup_issue_create",
         "status": execution_status,
         "followup_status": followup_status,
@@ -199,6 +218,7 @@ def execute_followup_issue_action(
         ),
         "close_current_issue": prepared.decision.close_current_issue,
         "close_policy": close_policy,
+        "allow_human_review_combo": allow_human_review_combo,
         "inner_issue_create_log": (
             repo_relative(issue_create_result.execution_log_path)
             if issue_create_result is not None

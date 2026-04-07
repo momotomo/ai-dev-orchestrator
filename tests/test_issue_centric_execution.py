@@ -307,6 +307,85 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "3001")
             self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_human_review")
 
+    def test_dispatcher_runs_human_review_followup_then_close_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                review_text="## Review\n\n- Split follow-up\n",
+                followup_text="# Follow-up\n\nBody\n",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                log_path = root / "review.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_followup_then_close_if_followup_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(3101, 20),
+                    execution_log_path=log_path,
+                    safe_stop_reason="review posted",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=fake_issue(72),
+                    execution_log_path=log_path,
+                    project_sync_status="issue_only_fallback",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="follow-up created",
+                )
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_human_review_followup",
+                    execution_log_path=log_path,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed after review and follow-up",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["review", "followup", "close"])
+            self.assertEqual(result.matrix_path, "human_review_followup_then_close")
+            self.assertEqual(
+                [step.name for step in result.steps],
+                ["human_review_comment", "followup_issue_create", "close_current_issue"],
+            )
+            self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "3101")
+            self.assertEqual(result.final_state["last_issue_centric_followup_status"], "completed")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_human_review_followup")
+
     def test_dispatcher_runs_no_action_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -363,6 +442,68 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(calls, ["followup", "close"])
             self.assertEqual(result.matrix_path, "no_action_followup_then_close")
             self.assertEqual([step.name for step in result.steps], ["followup_issue_create", "close_current_issue"])
+
+    def test_dispatcher_keeps_review_success_when_review_followup_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                review_text="## Review\n\n- Split follow-up\n",
+                followup_text="# Follow-up\n\nBody\n",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                log_path = root / "review.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_followup_then_close_if_followup_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(3102, 20),
+                    execution_log_path=log_path,
+                    safe_stop_reason="review posted",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    followup_status="blocked_project_preflight",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=None,
+                    execution_log_path=log_path,
+                    project_sync_status="blocked_project_preflight",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="",
+                    project_state_field_name="State",
+                    project_state_value_name="planned",
+                    safe_stop_reason="follow-up blocked",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("close should not run")),
+            )
+
+            self.assertEqual(calls, ["review", "followup"])
+            self.assertEqual(result.matrix_path, "human_review_followup_then_close")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_review_status"], "completed")
+            self.assertEqual(result.final_state["last_issue_centric_followup_status"], "blocked_project_preflight")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "not_attempted_followup_blocked")
 
 
 if __name__ == "__main__":

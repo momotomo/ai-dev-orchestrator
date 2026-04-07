@@ -286,6 +286,50 @@ class FollowupIssueExecutionTests(unittest.TestCase):
             self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
             self.assertEqual(result.created_issue.number, 73)
 
+    def test_followup_issue_can_run_for_human_review_combo_when_opted_in(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+            target_issue="#20",
+            close_current_issue=False,
+            create_followup_issue=True,
+            summary="Create follow-up after review.",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=b64("## Review\n\n- Split follow-up\n"),
+            followup_issue_body_base64=b64("# Follow-up title\n\nBody paragraph.\n"),
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                allow_human_review_combo=True,
+                issue_creator=lambda repository, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=75,
+                    url="https://github.com/example/repo/issues/75",
+                    title=title,
+                    repository=repository,
+                    node_id="ISSUE_node_75",
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.followup_status, "completed")
+            self.assertEqual(result.close_policy, "after_review_followup_success_only")
+            self.assertEqual(result.created_issue.number, 75)
+
 
 class FetchNextPromptFollowupTests(unittest.TestCase):
     def test_fetch_executes_no_action_followup_then_close(self) -> None:
@@ -437,7 +481,10 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             ):
-                with self.assertRaisesRegex(BridgeStop, "action=no_action にだけ対応"):
+                with self.assertRaisesRegex(
+                    BridgeStop,
+                    "action=no_action と human_review_needed review combo にだけ対応しています",
+                ):
                     fetch_next_prompt.run(dict(state), [])
 
             saved = saved_states[0]

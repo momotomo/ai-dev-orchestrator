@@ -51,6 +51,7 @@ def execute_human_review_action(
     repo_relative: Callable[[Path], str],
     issue_fetcher: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
     comment_creator: Callable[[str, int, str, str], CreatedGitHubComment] | None = None,
+    allow_followup_combo: bool = False,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> HumanReviewExecutionResult:
@@ -64,14 +65,17 @@ def execute_human_review_action(
     repository = ""
     token_source = ""
 
-    close_policy = (
-        "after_review_close_if_review_succeeds"
-        if prepared.decision.close_current_issue
-        else "review_only"
-    )
+    if prepared.decision.create_followup_issue and prepared.decision.close_current_issue:
+        close_policy = "after_review_followup_then_close_if_followup_succeeds"
+    elif prepared.decision.create_followup_issue:
+        close_policy = "after_review_followup_if_review_succeeds"
+    elif prepared.decision.close_current_issue:
+        close_policy = "after_review_close_if_review_succeeds"
+    else:
+        close_policy = "review_only"
 
     try:
-        if prepared.decision.create_followup_issue:
+        if prepared.decision.create_followup_issue and not allow_followup_combo:
             raise IssueCentricHumanReviewError(
                 "human_review_needed + create_followup_issue is not supported in this slice."
             )
@@ -121,7 +125,16 @@ def execute_human_review_action(
         safe_stop_reason = (
             f"human_review_needed posted a review comment on issue #{resolved_issue.issue_number}."
         )
-        if prepared.decision.close_current_issue:
+        if prepared.decision.create_followup_issue and prepared.decision.close_current_issue:
+            safe_stop_reason += (
+                " create_followup_issue=true may now be evaluated immediately after review; "
+                "close_current_issue may run only if that follow-up path succeeds in this slice."
+            )
+        elif prepared.decision.create_followup_issue:
+            safe_stop_reason += (
+                " create_followup_issue=true may now be evaluated immediately after review in this slice."
+            )
+        elif prepared.decision.close_current_issue:
             safe_stop_reason += (
                 " close_current_issue=true may now be evaluated immediately after review in this slice."
             )
@@ -147,6 +160,7 @@ def execute_human_review_action(
         "decision_target_issue": prepared.decision.target_issue or "none",
         "close_current_issue": prepared.decision.close_current_issue,
         "create_followup_issue": prepared.decision.create_followup_issue,
+        "allow_followup_combo": allow_followup_combo,
         "repository": repository,
         "token_source": token_source,
         "resolved_issue": (

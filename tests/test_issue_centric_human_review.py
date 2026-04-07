@@ -16,8 +16,10 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import fetch_next_prompt  # noqa: E402
 import issue_centric_close_current_issue  # noqa: E402
 import issue_centric_contract  # noqa: E402
+import issue_centric_followup_issue  # noqa: E402
 import issue_centric_github  # noqa: E402
 import issue_centric_human_review  # noqa: E402
+import issue_centric_issue_create  # noqa: E402
 import issue_centric_transport  # noqa: E402
 from _bridge_common import BridgeStop  # noqa: E402
 
@@ -31,17 +33,19 @@ def build_decision(
     target_issue: str | None,
     review_text: str | None,
     close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
 ) -> issue_centric_contract.IssueCentricDecision:
     return issue_centric_contract.IssueCentricDecision(
         action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
         target_issue=target_issue,
         close_current_issue=close_current_issue,
-        create_followup_issue=False,
+        create_followup_issue=create_followup_issue,
         summary="Post review guidance.",
         issue_body_base64=None,
         codex_body_base64=None,
         review_base64=(b64(review_text) if review_text is not None else None),
-        followup_issue_body_base64=None,
+        followup_issue_body_base64=(b64(followup_text) if followup_text is not None else None),
         raw_json="{}",
         raw_segment="segment",
     )
@@ -52,6 +56,8 @@ def build_reply(
     target_issue: str | None,
     review_text: str | None,
     close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
 ) -> str:
     parts = [
         "あなた:",
@@ -66,6 +72,14 @@ def build_reply(
                 issue_centric_contract.REVIEW_BODY_END,
             ]
         )
+    if followup_text is not None:
+        parts.extend(
+            [
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+                b64(followup_text),
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+            ]
+        )
     parts.extend(
         [
             issue_centric_contract.DECISION_JSON_START,
@@ -74,7 +88,7 @@ def build_reply(
                     "action": "human_review_needed",
                     "target_issue": target_issue if target_issue is not None else "none",
                     "close_current_issue": close_current_issue,
-                    "create_followup_issue": False,
+                    "create_followup_issue": create_followup_issue,
                     "summary": "Post review guidance.",
                 },
                 ensure_ascii=True,
@@ -104,12 +118,16 @@ class HumanReviewExecutionTests(unittest.TestCase):
         target_issue: str | None,
         review_text: str | None,
         close_current_issue: bool = False,
+        create_followup_issue: bool = False,
+        followup_text: str | None = None,
     ) -> issue_centric_transport.PreparedIssueCentricDecision:
         return issue_centric_transport.decode_issue_centric_decision(
             build_decision(
                 target_issue=target_issue,
                 review_text=review_text,
                 close_current_issue=close_current_issue,
+                create_followup_issue=create_followup_issue,
+                followup_text=followup_text,
             )
         )
 
@@ -313,6 +331,48 @@ class HumanReviewExecutionTests(unittest.TestCase):
 
             self.assertEqual(result.status, "blocked")
             self.assertIn("create_followup_issue", result.safe_stop_reason)
+
+    def test_human_review_can_run_when_followup_combo_is_explicitly_enabled(self) -> None:
+        prepared = self.prepared(
+            target_issue="#20",
+            review_text="## Review\n\n- Split follow-up\n",
+            create_followup_issue=True,
+            followup_text="# Follow-up\n\nBody\n",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_human_review.execute_human_review_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/review.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                allow_followup_combo=True,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=20,
+                    url="https://github.com/example/repo/issues/20",
+                    title="Ready issue",
+                    repository=repository,
+                    state="open",
+                ),
+                comment_creator=lambda repository, issue_number, body, token: issue_centric_github.CreatedGitHubComment(
+                    comment_id=901,
+                    url="https://github.com/example/repo/issues/20#issuecomment-901",
+                    body=body,
+                    repository=repository,
+                    issue_number=issue_number,
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.close_policy, "after_review_followup_if_review_succeeds")
+            self.assertEqual(result.created_comment.comment_id, 901)
 
 
 class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
@@ -570,6 +630,146 @@ class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_review_status"], "completed")
             self.assertEqual(saved["last_issue_centric_close_status"], "blocked")
             self.assertEqual(saved["last_issue_centric_close_order"], "after_human_review")
+
+    def test_fetch_next_prompt_executes_review_followup_then_close_combo(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#20",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_target_issue": "#20",
+        }
+        raw = build_reply(
+            target_issue="#20",
+            review_text="## Review\n\n- OK\n",
+            close_current_issue=True,
+            create_followup_issue=True,
+            followup_text="# Follow-up\n\nBody\n",
+        )
+        saved_states: list[dict[str, object]] = []
+
+        fake_review = issue_centric_human_review.HumanReviewExecutionResult(
+            status="completed",
+            review_status="completed",
+            close_policy="after_review_followup_then_close_if_followup_succeeds",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            issue_before=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Ready issue",
+                repository="example/repo",
+                state="open",
+            ),
+            created_comment=issue_centric_github.CreatedGitHubComment(
+                comment_id=1001,
+                url="https://github.com/example/repo/issues/20#issuecomment-1001",
+                body="## Review\n\n- OK\n",
+                repository="example/repo",
+                issue_number=20,
+            ),
+            execution_log_path=REPO_ROOT / "logs" / "review.json",
+            safe_stop_reason="review posted",
+        )
+        fake_followup = issue_centric_github.CreatedGitHubIssue(
+            number=74,
+            url="https://github.com/example/repo/issues/74",
+            title="Follow-up",
+            repository="example/repo",
+            node_id="ISSUE_node_74",
+        )
+        fake_followup_result = issue_centric_followup_issue.FollowupIssueExecutionResult(
+            status="completed",
+            followup_status="completed",
+            parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Follow-up",
+                body="Body\n",
+                title_line="# Follow-up",
+                source_artifact_path="logs/followup.md",
+            ),
+            created_issue=fake_followup,
+            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup_inner.json",
+            execution_log_path=REPO_ROOT / "logs" / "followup.json",
+            project_url="",
+            project_sync_status="issue_only_fallback",
+            project_sync_note="No project configured.",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
+            close_policy="after_review_followup_success_then_close",
+            safe_stop_reason="follow-up created",
+        )
+        fake_close = issue_centric_close_current_issue.IssueCloseExecutionResult(
+            status="completed",
+            close_status="closed",
+            close_order="after_human_review_followup",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            issue_before=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Ready issue",
+                repository="example/repo",
+                state="open",
+            ),
+            issue_after=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Ready issue",
+                repository="example/repo",
+                state="closed",
+            ),
+            execution_log_path=REPO_ROOT / "logs" / "close.json",
+            safe_stop_reason="closed after review and follow-up",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "execute_human_review_action", return_value=fake_review) as review_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=fake_followup_result) as followup_mock,
+                patch.object(fetch_next_prompt, "execute_close_current_issue", return_value=fake_close) as close_mock,
+            ):
+                with self.assertRaisesRegex(BridgeStop, "review comment mutation / narrow follow-up issue create / narrow post-review close"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(review_mock.call_count, 1)
+            self.assertEqual(followup_mock.call_count, 1)
+            self.assertEqual(close_mock.call_count, 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_review_status"], "completed")
+            self.assertEqual(saved["last_issue_centric_followup_status"], "completed")
+            self.assertEqual(saved["last_issue_centric_close_status"], "closed")
+            self.assertEqual(saved["last_issue_centric_close_order"], "after_human_review_followup")
 
 
 if __name__ == "__main__":
