@@ -18,6 +18,8 @@ CODEX_BODY_START = "===CHATGPT_CODEX_BODY==="
 CODEX_BODY_END = "===END_CODEX_BODY==="
 REVIEW_BODY_START = "===CHATGPT_REVIEW==="
 REVIEW_BODY_END = "===END_REVIEW==="
+FOLLOWUP_ISSUE_BODY_START = "===CHATGPT_FOLLOWUP_ISSUE_BODY==="
+FOLLOWUP_ISSUE_BODY_END = "===END_FOLLOWUP_ISSUE_BODY==="
 
 CHATGPT_TURN_MARKER = "ChatGPT:"
 USER_TURN_MARKER = "あなた:"
@@ -46,6 +48,7 @@ class ExtractedIssueCentricReply:
     issue_body_base64: str | None
     codex_body_base64: str | None
     review_base64: str | None
+    followup_issue_body_base64: str | None
     raw_segment: str
 
 
@@ -59,6 +62,7 @@ class IssueCentricDecision:
     issue_body_base64: str | None
     codex_body_base64: str | None
     review_base64: str | None
+    followup_issue_body_base64: str | None
     raw_json: str
     raw_segment: str
 
@@ -72,6 +76,7 @@ class IssueCentricDecision:
             "issue_body_base64": self.issue_body_base64,
             "codex_body_base64": self.codex_body_base64,
             "review_base64": self.review_base64,
+            "followup_issue_body_base64": self.followup_issue_body_base64,
         }
 
     def render_debug_markdown(self) -> str:
@@ -79,6 +84,7 @@ class IssueCentricDecision:
             "CHATGPT_ISSUE_BODY": self.issue_body_base64,
             "CHATGPT_CODEX_BODY": self.codex_body_base64,
             "CHATGPT_REVIEW": self.review_base64,
+            "CHATGPT_FOLLOWUP_ISSUE_BODY": self.followup_issue_body_base64,
         }
         lines = [
             "# Issue-Centric Contract Decision",
@@ -288,6 +294,13 @@ def extract_issue_centric_reply(
         end_marker=REVIEW_BODY_END,
         normalize_base64=True,
     )
+    followup_issue_body = _extract_single_block(
+        segment,
+        name="CHATGPT_FOLLOWUP_ISSUE_BODY",
+        start_marker=FOLLOWUP_ISSUE_BODY_START,
+        end_marker=FOLLOWUP_ISSUE_BODY_END,
+        normalize_base64=True,
+    )
 
     raw_target_issue = _require_string(envelope, "target_issue")
     return ExtractedIssueCentricReply(
@@ -297,6 +310,7 @@ def extract_issue_centric_reply(
         issue_body_base64=issue_body,
         codex_body_base64=codex_body,
         review_base64=review_body,
+        followup_issue_body_base64=followup_issue_body,
         raw_segment=segment.strip() + "\n",
     )
 
@@ -318,6 +332,7 @@ def normalize_issue_centric_reply(extracted: ExtractedIssueCentricReply) -> Issu
         issue_body_base64=extracted.issue_body_base64,
         codex_body_base64=extracted.codex_body_base64,
         review_base64=extracted.review_base64,
+        followup_issue_body_base64=extracted.followup_issue_body_base64,
         raw_json=extracted.raw_json,
         raw_segment=extracted.raw_segment,
     )
@@ -352,6 +367,10 @@ def maybe_parse_issue_centric_reply(
 def _validate_decision(decision: IssueCentricDecision) -> None:
     if decision.target_issue is None and decision.action is IssueCentricAction.CODEX_RUN:
         raise IssueCentricContractError("target_issue=none cannot be combined with action=codex_run.")
+    if decision.create_followup_issue and decision.followup_issue_body_base64 is None:
+        raise IssueCentricContractError("create_followup_issue=true requires CHATGPT_FOLLOWUP_ISSUE_BODY.")
+    if not decision.create_followup_issue and decision.followup_issue_body_base64 is not None:
+        raise IssueCentricContractError("CHATGPT_FOLLOWUP_ISSUE_BODY is allowed only when create_followup_issue=true.")
 
     if decision.action is IssueCentricAction.ISSUE_CREATE:
         if decision.issue_body_base64 is None:

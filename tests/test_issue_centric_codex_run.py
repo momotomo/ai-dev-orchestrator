@@ -38,6 +38,7 @@ def build_codex_decision(target_issue: str, body_text: str) -> issue_centric_con
         issue_body_base64=None,
         codex_body_base64=b64(body_text),
         review_base64=None,
+        followup_issue_body_base64=None,
         raw_json="{}",
         raw_segment="segment",
     )
@@ -168,12 +169,14 @@ class CodexRunExecutionTests(unittest.TestCase):
                 issue_body_base64=None,
                 codex_body_base64=None,
                 review_base64=None,
+                followup_issue_body_base64=None,
                 raw_json="{}",
                 raw_segment="segment",
             ),
             issue_body=None,
             codex_body=None,
             review_body=None,
+            followup_issue_body=None,
         )
         with self.assertRaisesRegex(
             issue_centric_codex_run.IssueCentricCodexRunError,

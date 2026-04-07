@@ -35,7 +35,12 @@ The current implementation boundary is:
   created successfully
 - implemented: narrow `human_review_needed` execution that posts decoded
   `CHATGPT_REVIEW` as a target-issue review comment
-- not yet implemented: follow-up mutation or review-close automation
+- implemented: narrow `no_action + create_followup_issue` execution that
+  decodes `CHATGPT_FOLLOWUP_ISSUE_BODY`, creates one follow-up issue, and
+  closes the current issue only after follow-up creation / Project placement
+  succeeds
+- not yet implemented: follow-up mutation for other actions or post-review
+  close automation
 - not yet implemented: large state-machine rewrite or full contract cutover
 
 ## Overall Assumptions
@@ -128,6 +133,7 @@ Use the optional body blocks below:
 - `CHATGPT_ISSUE_BODY`
 - `CHATGPT_CODEX_BODY`
 - `CHATGPT_REVIEW`
+- `CHATGPT_FOLLOWUP_ISSUE_BODY`
 
 The current parser framing for those blocks is:
 
@@ -143,6 +149,10 @@ The current parser framing for those blocks is:
 ===CHATGPT_REVIEW===
 [BASE64 payload]
 ===END_REVIEW===
+
+===CHATGPT_FOLLOWUP_ISSUE_BODY===
+[BASE64 payload]
+===END_FOLLOWUP_ISSUE_BODY===
 ```
 
 Use them under these rules:
@@ -150,7 +160,9 @@ Use them under these rules:
 - `CHATGPT_ISSUE_BODY` appears only when `action = issue_create`
 - `CHATGPT_CODEX_BODY` appears only when `action = codex_run`
 - `CHATGPT_REVIEW` appears only when ChatGPT actually performed review
-- all three body blocks are BASE64-encoded body payloads
+- `CHATGPT_FOLLOWUP_ISSUE_BODY` appears only when
+  `create_followup_issue = true`
+- all four body blocks are BASE64-encoded body payloads
 
 For the current bounded transport implementation:
 
@@ -223,6 +235,27 @@ Apply these additional rules:
   the close itself
 - `summary` is a short explanation of what the bridge should do next
 
+For the current bounded `create_followup_issue` slice:
+
+- `CHATGPT_FOLLOWUP_ISSUE_BODY` is a narrow contract extension used only when
+  `create_followup_issue = true`
+- if `create_followup_issue = true` and the follow-up body block is missing,
+  the contract is invalid
+- if the follow-up body block is present while
+  `create_followup_issue = false`, the contract is invalid
+- execution is currently limited to
+  `action = no_action + create_followup_issue = true`
+- `issue_create + create_followup_issue = true`,
+  `codex_run + create_followup_issue = true`, and
+  `human_review_needed + create_followup_issue = true` are blocked in this
+  slice
+- the decoded follow-up body uses the same narrow `# Title` draft rule as
+  `issue_create`
+- if `close_current_issue = true`, the bridge evaluates close only after the
+  follow-up issue create path and any required Project placement succeed
+- if follow-up creation is partial, blocked, or failed, the current issue is
+  left open
+
 For the current bounded `close_current_issue` slice:
 
 - `action = issue_create` and `close_current_issue = true` runs close only
@@ -256,6 +289,8 @@ For the current bounded `human_review_needed` slice:
   be considered after review, but this slice does not execute the close
 - `human_review_needed + create_followup_issue = true` records the flag only;
   it does not create follow-up work in this slice
+- `no_action + create_followup_issue = true` may create one follow-up issue in
+  this slice, but broader follow-up automation remains unimplemented
 
 ## Bridge To Codex Contract
 

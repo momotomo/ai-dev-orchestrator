@@ -40,6 +40,7 @@ def build_decision(
         issue_body_base64=None,
         codex_body_base64=None,
         review_base64=(b64(review_text) if review_text is not None else None),
+        followup_issue_body_base64=None,
         raw_json="{}",
         raw_segment="segment",
     )

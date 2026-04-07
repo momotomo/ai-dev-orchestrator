@@ -42,6 +42,7 @@ from issue_centric_contract import (
     maybe_parse_issue_centric_reply,
 )
 from issue_centric_codex_run import execute_codex_run_action
+from issue_centric_followup_issue import execute_followup_issue_action
 from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import (
     IssueCentricTransportError,
@@ -188,6 +189,47 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 }
             )
 
+        def apply_followup_execution_state(
+            target_state: dict[str, object],
+            *,
+            followup_execution: object,
+        ) -> None:
+            target_state.update(
+                {
+                    "last_issue_centric_execution_status": followup_execution.status,
+                    "last_issue_centric_execution_log": repo_relative(followup_execution.execution_log_path),
+                    "last_issue_centric_created_issue_number": (
+                        str(followup_execution.created_issue.number)
+                        if followup_execution.created_issue is not None
+                        else ""
+                    ),
+                    "last_issue_centric_created_issue_url": (
+                        followup_execution.created_issue.url
+                        if followup_execution.created_issue is not None
+                        else ""
+                    ),
+                    "last_issue_centric_created_issue_title": (
+                        followup_execution.created_issue.title
+                        if followup_execution.created_issue is not None
+                        else ""
+                    ),
+                    "last_issue_centric_followup_status": followup_execution.followup_status,
+                    "last_issue_centric_followup_log": repo_relative(followup_execution.execution_log_path),
+                    "last_issue_centric_followup_parent_issue": (
+                        followup_execution.parent_issue.issue_url
+                        if followup_execution.parent_issue is not None
+                        else ""
+                    ),
+                    "last_issue_centric_project_sync_status": followup_execution.project_sync_status,
+                    "last_issue_centric_project_url": followup_execution.project_url,
+                    "last_issue_centric_project_item_id": followup_execution.project_item_id,
+                    "last_issue_centric_project_state_field": followup_execution.project_state_field_name,
+                    "last_issue_centric_project_state_value": followup_execution.project_state_value_name,
+                    "last_issue_centric_stop_reason": followup_execution.safe_stop_reason,
+                    "chatgpt_decision_note": followup_execution.safe_stop_reason,
+                }
+            )
+
         decision_log = log_text(
             "extracted_issue_centric_contract",
             contract_decision.render_debug_markdown(),
@@ -255,6 +297,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_project_item_id": "",
                 "last_issue_centric_project_state_field": "",
                 "last_issue_centric_project_state_value": "",
+                "last_issue_centric_followup_status": "",
+                "last_issue_centric_followup_log": "",
+                "last_issue_centric_followup_parent_issue": "",
                 "last_issue_centric_close_status": "",
                 "last_issue_centric_close_log": "",
                 "last_issue_centric_closed_issue_number": "",
@@ -269,6 +314,26 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
         )
+
+        if contract_decision.create_followup_issue and contract_decision.action.value != "no_action":
+            unsupported_reason = (
+                "create_followup_issue execution is currently implemented only for action=no_action. "
+                f"The combination action={contract_decision.action.value} + create_followup_issue=true is blocked in this slice."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_followup_status": "blocked_unsupported_action_combo",
+                    "last_issue_centric_stop_reason": unsupported_reason,
+                    "chatgpt_decision_note": unsupported_reason,
+                }
+            )
+            save_state(mutable_state)
+            raise BridgeStop(
+                "issue-centric contract reply を検出しましたが、create_followup_issue の narrow execution は action=no_action にだけ対応しています。"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + unsupported_reason
+            )
 
         if contract_decision.action.value == "issue_create":
             project_config = load_project_config()
@@ -568,6 +633,73 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 + review_note
                 + close_note
                 + " create_followup_issue mutation / Projects update はまだ未実装です。"
+            )
+
+        if contract_decision.action.value == "no_action" and contract_decision.create_followup_issue:
+            project_config = load_project_config()
+            followup_execution = execute_followup_issue_action(
+                materialized.prepared,
+                prior_state=state,
+                project_config=project_config,
+                repo_path=project_repo_path(project_config),
+                source_decision_log=repo_relative(decision_log),
+                source_metadata_log=repo_relative(materialized.metadata_log_path),
+                source_artifact_path=(
+                    repo_relative(materialized.artifact_log_path)
+                    if materialized.artifact_log_path is not None
+                    else ""
+                ),
+                log_writer=log_text,
+                repo_relative=repo_relative,
+            )
+            apply_followup_execution_state(mutable_state, followup_execution=followup_execution)
+            close_note = ""
+            if contract_decision.close_current_issue and followup_execution.status == "completed":
+                close_execution = execute_close_current_issue(
+                    materialized.prepared,
+                    prior_state=state,
+                    project_config=project_config,
+                    repo_path=project_repo_path(project_config),
+                    source_decision_log=repo_relative(decision_log),
+                    source_metadata_log=repo_relative(materialized.metadata_log_path),
+                    source_action_execution_log=repo_relative(followup_execution.execution_log_path),
+                    log_writer=log_text,
+                    repo_relative=repo_relative,
+                )
+                apply_close_execution_state(mutable_state, close_execution=close_execution)
+                close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
+            elif contract_decision.close_current_issue:
+                mutable_state.update(
+                    {
+                        "last_issue_centric_close_status": "not_attempted_followup_blocked",
+                        "last_issue_centric_close_order": "after_followup_issue_create",
+                    }
+                )
+            save_state(mutable_state)
+            followup_note = ""
+            if followup_execution.created_issue is not None:
+                followup_note = (
+                    f" created follow-up issue: #{followup_execution.created_issue.number} "
+                    f"{followup_execution.created_issue.url}"
+                )
+            raise BridgeStop(
+                "issue-centric contract reply を検出し、no_action + create_followup_issue の narrow execution slice まで実行しました。"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + (
+                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                    if materialized.artifact_log_path is not None
+                    else ""
+                )
+                + f" execution: {repo_relative(followup_execution.execution_log_path)}"
+                + followup_note
+                + (
+                    f" project item: {followup_execution.project_item_id}"
+                    if followup_execution.project_item_id
+                    else ""
+                )
+                + close_note
+                + " create_followup_issue の一般化 / 他 action との組み合わせ / Projects update の全面対応 はまだ未実装です。"
             )
 
         if contract_decision.close_current_issue and contract_decision.action.value == "no_action":

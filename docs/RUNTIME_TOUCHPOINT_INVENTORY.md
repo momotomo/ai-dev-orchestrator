@@ -173,6 +173,12 @@ During this inventory phase, all of the following stay unchanged:
     setting when explicit Project config is present, while keeping Project
     sync for other actions, follow-up mutation, and broader cutover out of
     scope
+  - the current follow-up slice goes one step farther again: it adds
+    `CHATGPT_FOLLOWUP_ISSUE_BODY` as a narrow transport block and wires
+    `no_action + create_followup_issue` to one follow-up issue create path,
+    optionally followed by `close_current_issue` only after follow-up creation
+    and any required Project placement succeed; broader follow-up automation
+    for other actions remains out of scope
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

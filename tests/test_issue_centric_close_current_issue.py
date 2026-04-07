@@ -42,6 +42,7 @@ def build_decision(
         issue_body_base64=(b64("# Next issue\n\nBody\n") if action is issue_centric_contract.IssueCentricAction.ISSUE_CREATE else None),
         codex_body_base64=(b64("Run body\n") if action is issue_centric_contract.IssueCentricAction.CODEX_RUN else None),
         review_base64=None,
+        followup_issue_body_base64=None,
         raw_json="{}",
         raw_segment="segment",
     )

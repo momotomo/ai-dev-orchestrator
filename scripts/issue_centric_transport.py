@@ -30,18 +30,21 @@ class IssueCentricArtifactKind(str, Enum):
     ISSUE_BODY = "issue_body"
     CODEX_BODY = "codex_body"
     REVIEW = "review"
+    FOLLOWUP_ISSUE_BODY = "followup_issue_body"
 
 
 _BLOCK_NAMES = {
     IssueCentricArtifactKind.ISSUE_BODY: "CHATGPT_ISSUE_BODY",
     IssueCentricArtifactKind.CODEX_BODY: "CHATGPT_CODEX_BODY",
     IssueCentricArtifactKind.REVIEW: "CHATGPT_REVIEW",
+    IssueCentricArtifactKind.FOLLOWUP_ISSUE_BODY: "CHATGPT_FOLLOWUP_ISSUE_BODY",
 }
 
 _ARTIFACT_LOG_PREFIXES = {
     IssueCentricArtifactKind.ISSUE_BODY: "prepared_issue_centric_issue_body",
     IssueCentricArtifactKind.CODEX_BODY: "prepared_issue_centric_codex_body",
     IssueCentricArtifactKind.REVIEW: "prepared_issue_centric_review_body",
+    IssueCentricArtifactKind.FOLLOWUP_ISSUE_BODY: "prepared_issue_centric_followup_issue_body",
 }
 
 
@@ -73,6 +76,7 @@ class PreparedIssueCentricDecision:
     issue_body: IssueCentricDecodedBody | None
     codex_body: IssueCentricDecodedBody | None
     review_body: IssueCentricDecodedBody | None
+    followup_issue_body: IssueCentricDecodedBody | None
 
     @property
     def primary_body(self) -> IssueCentricDecodedBody | None:
@@ -82,6 +86,8 @@ class PreparedIssueCentricDecision:
             return self.codex_body
         if self.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED:
             return self.review_body
+        if self.decision.create_followup_issue:
+            return self.followup_issue_body
         return None
 
     @property
@@ -92,6 +98,8 @@ class PreparedIssueCentricDecision:
             return "codex_run_dispatch"
         if self.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED:
             return "human_review_dispatch"
+        if self.decision.create_followup_issue:
+            return "followup_issue_dispatch"
         return "decision_finalize"
 
     @property
@@ -116,6 +124,11 @@ class PreparedIssueCentricDecision:
                 "human_review_needed review execution is available as a narrow slice, "
                 "but this decision does not include CHATGPT_REVIEW."
             )
+        if self.decision.action is IssueCentricAction.NO_ACTION and self.decision.create_followup_issue:
+            return (
+                "no_action + create_followup_issue execution is available as a narrow slice. "
+                "The decoded follow-up issue body has been prepared for the follow-up issue create step."
+            )
         return (
             "no_action has been validated and recorded. "
             "The bridge does not execute the new contract end-to-end yet, so it stops after preparing metadata."
@@ -133,6 +146,7 @@ class PreparedIssueCentricDecision:
             IssueCentricArtifactKind.ISSUE_BODY: self.issue_body,
             IssueCentricArtifactKind.CODEX_BODY: self.codex_body,
             IssueCentricArtifactKind.REVIEW: self.review_body,
+            IssueCentricArtifactKind.FOLLOWUP_ISSUE_BODY: self.followup_issue_body,
         }
         primary = self.primary_body
         for kind, block_name in _BLOCK_NAMES.items():
@@ -177,7 +191,9 @@ class PreparedIssueCentricDecision:
             return self.decision.issue_body_base64
         if kind is IssueCentricArtifactKind.CODEX_BODY:
             return self.decision.codex_body_base64
-        return self.decision.review_base64
+        if kind is IssueCentricArtifactKind.REVIEW:
+            return self.decision.review_base64
+        return self.decision.followup_issue_body_base64
 
 
 @dataclass(frozen=True)
@@ -206,11 +222,16 @@ def decode_issue_centric_decision(decision: IssueCentricDecision) -> PreparedIss
         IssueCentricArtifactKind.REVIEW,
         decision.review_base64,
     )
+    followup_issue_body = _decode_optional_body(
+        IssueCentricArtifactKind.FOLLOWUP_ISSUE_BODY,
+        decision.followup_issue_body_base64,
+    )
     return PreparedIssueCentricDecision(
         decision=decision,
         issue_body=issue_body,
         codex_body=codex_body,
         review_body=review_body,
+        followup_issue_body=followup_issue_body,
     )
 
 

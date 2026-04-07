@@ -51,6 +51,41 @@ class IssueCreateExecutionResult:
     safe_stop_reason: str
 
 
+def materialize_issue_draft_text(
+    decoded_text: str,
+    *,
+    source_artifact_path: str,
+) -> IssueCreateDraft:
+    lines = decoded_text.splitlines(keepends=True)
+    title_index = -1
+    title_line = ""
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        title_index = index
+        title_line = line.rstrip("\r\n")
+        break
+    if title_index == -1 or not title_line.startswith("# "):
+        raise IssueCentricIssueCreateError(
+            "Issue draft must start with a level-1 heading (`# Title`) on the first non-empty line."
+        )
+
+    title = title_line[2:].strip()
+    if not title:
+        raise IssueCentricIssueCreateError("Issue draft title must not be empty.")
+
+    body = "".join(lines[title_index + 1 :]).lstrip("\r\n")
+    if not body.strip():
+        raise IssueCentricIssueCreateError("Issue draft body must not be empty after the H1 title line.")
+
+    return IssueCreateDraft(
+        title=title,
+        body=body,
+        title_line=title_line,
+        source_artifact_path=source_artifact_path,
+    )
+
+
 def execute_issue_create_action(
     prepared: PreparedIssueCentricDecision,
     *,
@@ -71,8 +106,53 @@ def execute_issue_create_action(
     if prepared.decision.action is not IssueCentricAction.ISSUE_CREATE:
         raise IssueCentricIssueCreateError("issue_create execution only accepts action=issue_create.")
 
+    if prepared.issue_body is None:
+        raise IssueCentricIssueCreateError("No decoded issue body is available for issue_create.")
+    draft = materialize_issue_draft_text(
+        prepared.issue_body.decoded_text,
+        source_artifact_path=source_artifact_path,
+    )
+    return execute_issue_create_draft(
+        draft,
+        action_label="issue_create",
+        close_current_issue=prepared.decision.close_current_issue,
+        create_followup_issue=prepared.decision.create_followup_issue,
+        project_config=project_config,
+        repo_path=repo_path,
+        source_decision_log=source_decision_log,
+        source_metadata_log=source_metadata_log,
+        log_writer=log_writer,
+        repo_relative=repo_relative,
+        issue_creator=issue_creator,
+        project_state_resolver=project_state_resolver,
+        project_item_creator=project_item_creator,
+        project_state_setter=project_state_setter,
+        env=env,
+        now_fn=now_fn,
+    )
+
+
+def execute_issue_create_draft(
+    draft: IssueCreateDraft,
+    *,
+    action_label: str,
+    close_current_issue: bool,
+    create_followup_issue: bool,
+    project_config: Mapping[str, Any],
+    repo_path: Path,
+    source_decision_log: str,
+    source_metadata_log: str,
+    log_writer: Callable[[str, str, str], Path],
+    repo_relative: Callable[[Path], str],
+    issue_creator: Callable[[str, str, str, str], CreatedGitHubIssue] | None = None,
+    project_state_resolver: Callable[[str, str, str, str], ResolvedGitHubProjectState] | None = None,
+    project_item_creator: Callable[[str, str, str], CreatedGitHubProjectItem] | None = None,
+    project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
+    env: Mapping[str, str] | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> IssueCreateExecutionResult:
+
     now = (now_fn or _utcnow)()
-    draft: IssueCreateDraft | None = None
     draft_log_path: Path | None = None
     created_issue: CreatedGitHubIssue | None = None
     resolved_project: ResolvedGitHubProjectState | None = None
@@ -84,9 +164,8 @@ def execute_issue_create_action(
     token_source = ""
 
     try:
-        draft = materialize_issue_create_draft(prepared, source_artifact_path=source_artifact_path)
         draft_log_path = log_writer(
-            "prepared_issue_centric_issue_draft",
+            f"prepared_{action_label}_draft",
             _render_issue_draft_markdown(draft),
             "md",
         )
@@ -122,7 +201,7 @@ def execute_issue_create_action(
             project_sync_note = "Created the issue without Project placement because no GitHub Project was configured."
             safe_stop_reason = (
                 f"issue_create is implemented through GitHub issue creation. Created issue #{created_issue.number}. "
-                "Project placement, create_followup_issue mutation, and Codex dispatch remain unimplemented. "
+                "Broader create_followup_issue execution, other action Project sync, and Codex dispatch remain unimplemented. "
                 "close_current_issue may run as a separate follow-up mutation in the bridge."
             )
             execution_status = "completed"
@@ -211,11 +290,12 @@ def execute_issue_create_action(
 
     execution_log = {
         "action": "issue_create",
+        "execution_action": action_label,
         "status": execution_status,
         "executed_at": now.isoformat(),
         "source_decision_log": source_decision_log,
         "source_metadata_log": source_metadata_log,
-        "source_prepared_artifact": source_artifact_path,
+        "source_prepared_artifact": draft.source_artifact_path,
         "draft": (
             {
                 "title": draft.title,
@@ -239,8 +319,8 @@ def execute_issue_create_action(
             if created_issue is not None
             else None
         ),
-        "close_current_issue": prepared.decision.close_current_issue,
-        "create_followup_issue": prepared.decision.create_followup_issue,
+        "close_current_issue": close_current_issue,
+        "create_followup_issue": create_followup_issue,
         "project_sync": {
             "project_url": project_url,
             "status": project_sync_status,
@@ -252,12 +332,12 @@ def execute_issue_create_action(
             "state_option_name": resolved_project.state_option_name if resolved_project is not None else "",
         },
         "next_step": (
-            "Implement create_followup_issue, other action Project sync, and broader runtime cutover after this slice."
+            "Implement broader create_followup_issue handling, other action Project sync, and broader runtime cutover after this slice."
         ),
         "safe_stop_reason": safe_stop_reason,
     }
     execution_log_path = log_writer(
-        f"issue_centric_issue_create_{execution_status}",
+        f"{action_label}_{execution_status}",
         json.dumps(execution_log, ensure_ascii=False, indent=2) + "\n",
         "json",
     )
@@ -286,33 +366,8 @@ def materialize_issue_create_draft(
         raise IssueCentricIssueCreateError("issue draft materialization only supports action=issue_create.")
     if prepared.issue_body is None:
         raise IssueCentricIssueCreateError("No decoded issue body is available for issue_create.")
-
-    lines = prepared.issue_body.decoded_text.splitlines(keepends=True)
-    title_index = -1
-    title_line = ""
-    for index, line in enumerate(lines):
-        if not line.strip():
-            continue
-        title_index = index
-        title_line = line.rstrip("\r\n")
-        break
-    if title_index == -1 or not title_line.startswith("# "):
-        raise IssueCentricIssueCreateError(
-            "Issue draft must start with a level-1 heading (`# Title`) on the first non-empty line."
-        )
-
-    title = title_line[2:].strip()
-    if not title:
-        raise IssueCentricIssueCreateError("Issue draft title must not be empty.")
-
-    body = "".join(lines[title_index + 1 :]).lstrip("\r\n")
-    if not body.strip():
-        raise IssueCentricIssueCreateError("Issue draft body must not be empty after the H1 title line.")
-
-    return IssueCreateDraft(
-        title=title,
-        body=body,
-        title_line=title_line,
+    return materialize_issue_draft_text(
+        prepared.issue_body.decoded_text,
         source_artifact_path=source_artifact_path,
     )
 def _render_issue_draft_markdown(draft: IssueCreateDraft) -> str:

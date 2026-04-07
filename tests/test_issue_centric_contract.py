@@ -41,6 +41,10 @@ def block(name: str, payload: str) -> str:
             issue_centric_contract.REVIEW_BODY_START,
             issue_centric_contract.REVIEW_BODY_END,
         ),
+        "followup": (
+            issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+            issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+        ),
     }
     start_marker, end_marker = markers[name]
     return f"{start_marker}\n{payload}\n{end_marker}"
@@ -106,7 +110,7 @@ class IssueCentricContractParserTests(unittest.TestCase):
                 "action": "human_review_needed",
                 "target_issue": "#55",
                 "close_current_issue": False,
-                "create_followup_issue": True,
+                "create_followup_issue": False,
                 "summary": "Human review is required.",
             },
             parts=[
@@ -118,7 +122,7 @@ class IssueCentricContractParserTests(unittest.TestCase):
                             "action": "human_review_needed",
                             "target_issue": "#55",
                             "close_current_issue": False,
-                            "create_followup_issue": True,
+                            "create_followup_issue": False,
                             "summary": "Human review is required.",
                         },
                         ensure_ascii=True,
@@ -131,6 +135,39 @@ class IssueCentricContractParserTests(unittest.TestCase):
         self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED)
         self.assertEqual(decision.target_issue, "#55")
         self.assertEqual(decision.review_base64, review_payload)
+
+    def test_parses_no_action_with_followup_issue_body_when_flag_is_true(self) -> None:
+        followup_payload = b64("# Follow-up title\n\nBody\n")
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#55",
+                "close_current_issue": False,
+                "create_followup_issue": True,
+                "summary": "Create one follow-up issue.",
+            },
+            parts=[
+                block("followup", followup_payload),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "no_action",
+                            "target_issue": "#55",
+                            "close_current_issue": False,
+                            "create_followup_issue": True,
+                            "summary": "Create one follow-up issue.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.NO_ACTION)
+        self.assertEqual(decision.target_issue, "#55")
+        self.assertTrue(decision.create_followup_issue)
+        self.assertEqual(decision.followup_issue_body_base64, followup_payload)
 
     def test_parses_issue_create_with_issue_body_only(self) -> None:
         issue_payload = b64("Issue body")
@@ -280,6 +317,54 @@ class IssueCentricContractParserTests(unittest.TestCase):
         with self.assertRaisesRegex(issue_centric_contract.IssueCentricContractError, "no_action must not include body blocks"):
             issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
 
+    def test_rejects_followup_flag_without_followup_body(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#55",
+                "close_current_issue": False,
+                "create_followup_issue": True,
+                "summary": "Missing follow-up body.",
+            }
+        )
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "requires CHATGPT_FOLLOWUP_ISSUE_BODY",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+
+    def test_rejects_followup_body_when_flag_is_false(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#55",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Unexpected follow-up body.",
+            },
+            parts=[
+                block("followup", b64("# Follow-up title\n\nBody\n")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "no_action",
+                            "target_issue": "#55",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Unexpected follow-up body.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "allowed only when create_followup_issue=true",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+
     def test_rejects_human_review_needed_with_invalid_body_combination(self) -> None:
         raw = build_raw_reply(
             {
@@ -427,7 +512,7 @@ class IssueCentricContractParserTests(unittest.TestCase):
                 "action": "issue_create",
                 "target_issue": "none",
                 "close_current_issue": False,
-                "create_followup_issue": True,
+                "create_followup_issue": False,
                 "summary": "Create from shuffled contract blocks.",
             },
             parts=[
@@ -440,7 +525,7 @@ class IssueCentricContractParserTests(unittest.TestCase):
                             "action": "issue_create",
                             "target_issue": "none",
                             "close_current_issue": False,
-                            "create_followup_issue": True,
+                            "create_followup_issue": False,
                             "summary": "Create from shuffled contract blocks.",
                         },
                         ensure_ascii=True,
@@ -453,7 +538,7 @@ class IssueCentricContractParserTests(unittest.TestCase):
         )
         decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
         self.assertEqual(decision.issue_body_base64, issue_payload)
-        self.assertTrue(decision.create_followup_issue)
+        self.assertFalse(decision.create_followup_issue)
 
     def test_normalizes_multiline_base64_payload(self) -> None:
         payload = b64("Codex body payload")
@@ -527,7 +612,7 @@ class IssueCentricTransportTests(unittest.TestCase):
                     "action": "issue_create",
                     "target_issue": "none",
                     "close_current_issue": False,
-                    "create_followup_issue": True,
+                    "create_followup_issue": False,
                     "summary": "Create a new issue from the decoded body.",
                 },
                 parts=[
@@ -539,7 +624,7 @@ class IssueCentricTransportTests(unittest.TestCase):
                                 "action": "issue_create",
                                 "target_issue": "none",
                                 "close_current_issue": False,
-                                "create_followup_issue": True,
+                                "create_followup_issue": False,
                                 "summary": "Create a new issue from the decoded body.",
                             },
                             ensure_ascii=True,
@@ -570,6 +655,57 @@ class IssueCentricTransportTests(unittest.TestCase):
             self.assertEqual(
                 materialized.metadata["prepared_artifact"]["kind"],
                 "issue_body",
+            )
+
+    def test_materializes_followup_issue_body_artifact_for_no_action(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            build_raw_reply(
+                {
+                    "action": "no_action",
+                    "target_issue": "#55",
+                    "close_current_issue": False,
+                    "create_followup_issue": True,
+                    "summary": "Prepare one follow-up issue.",
+                },
+                parts=[
+                    block("followup", b64("# Follow-up title\n\nBody\n")),
+                    block(
+                        "json",
+                        json.dumps(
+                            {
+                                "action": "no_action",
+                                "target_issue": "#55",
+                                "close_current_issue": False,
+                                "create_followup_issue": True,
+                                "summary": "Prepare one follow-up issue.",
+                            },
+                            ensure_ascii=True,
+                        ),
+                    ),
+                ],
+            ),
+            after_text="request body",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materialized = issue_centric_transport.materialize_issue_centric_decision(
+                decision,
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+            )
+
+            self.assertEqual(
+                materialized.prepared.primary_body.kind,
+                issue_centric_transport.IssueCentricArtifactKind.FOLLOWUP_ISSUE_BODY,
+            )
+            self.assertEqual(
+                materialized.artifact_log_path.read_text(encoding="utf-8"),
+                "# Follow-up title\n\nBody\n",
+            )
+            self.assertEqual(
+                materialized.metadata["pending_runtime_action"],
+                "followup_issue_dispatch",
             )
 
     def test_materializes_codex_body_artifact(self) -> None:
@@ -630,7 +766,7 @@ class IssueCentricTransportTests(unittest.TestCase):
                     "action": "human_review_needed",
                     "target_issue": "#55",
                     "close_current_issue": False,
-                    "create_followup_issue": True,
+                    "create_followup_issue": False,
                     "summary": "Review notes are required.",
                 },
                 parts=[
@@ -642,7 +778,7 @@ class IssueCentricTransportTests(unittest.TestCase):
                                 "action": "human_review_needed",
                                 "target_issue": "#55",
                                 "close_current_issue": False,
-                                "create_followup_issue": True,
+                                "create_followup_issue": False,
                                 "summary": "Review notes are required.",
                             },
                             ensure_ascii=True,
@@ -724,6 +860,7 @@ class IssueCentricTransportTests(unittest.TestCase):
             issue_body_base64="!!not-base64!!",
             codex_body_base64=None,
             review_base64=None,
+            followup_issue_body_base64=None,
             raw_json="{}",
             raw_segment="segment",
         )
@@ -743,6 +880,7 @@ class IssueCentricTransportTests(unittest.TestCase):
             issue_body_base64=None,
             codex_body_base64=base64.b64encode(b"\xff").decode("ascii"),
             review_base64=None,
+            followup_issue_body_base64=None,
             raw_json="{}",
             raw_segment="segment",
         )
@@ -762,6 +900,7 @@ class IssueCentricTransportTests(unittest.TestCase):
             issue_body_base64="",
             codex_body_base64=None,
             review_base64=None,
+            followup_issue_body_base64=None,
             raw_json="{}",
             raw_segment="segment",
         )
@@ -781,6 +920,7 @@ class IssueCentricTransportTests(unittest.TestCase):
             issue_body_base64=b64("Should not decode"),
             codex_body_base64=None,
             review_base64=None,
+            followup_issue_body_base64=None,
             raw_json="{}",
             raw_segment="segment",
         )
