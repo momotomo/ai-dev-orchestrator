@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -229,28 +230,94 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("reply", note)
 
     def test_request_prompt_from_report_note_mentions_issue_centric_route(self) -> None:
-        note = run_until_stop.suggested_next_note(
-            {
-                "mode": "idle",
-                "need_chatgpt_next": True,
-                "last_issue_centric_route_selected": "issue_centric",
-                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/81",
-            }
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "action": "no_action",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/81",
+                        "principal_issue_kind": "followup_issue",
+                        "target_issue": "https://github.com/example/repo/issues/81",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_followup_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "",
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            note = run_until_stop.suggested_next_note(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                }
+            )
         self.assertIn("issue-centric route", note)
         self.assertIn("https://github.com/example/repo/issues/81", note)
 
     def test_request_prompt_from_report_note_mentions_recovered_issue_centric_route(self) -> None:
-        note = run_until_stop.suggested_next_note(
-            {
-                "mode": "idle",
-                "need_chatgpt_next": True,
-                "last_issue_centric_recovery_status": "issue_centric_recovered",
-                "last_issue_centric_recovery_source": "normalized_summary_then_state",
-                "last_issue_centric_route_selected": "issue_centric",
-                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/81",
-            }
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "recovery_rehydration",
+                        "action": "no_action",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "issue_centric_recovered",
+                        "recovery_source": "normalized_summary_then_state",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/81",
+                        "principal_issue_kind": "followup_issue",
+                        "target_issue": "https://github.com/example/repo/issues/81",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_followup_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "",
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            note = run_until_stop.suggested_next_note(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                }
+            )
         self.assertIn("再構築した文脈", note)
         self.assertIn("normalized_summary_then_state", note)
 
@@ -268,15 +335,48 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("normalized_summary_missing", note)
 
     def test_request_prompt_from_report_note_mentions_recovery_fallback(self) -> None:
-        note = run_until_stop.suggested_next_note(
-            {
-                "mode": "idle",
-                "need_chatgpt_next": True,
-                "last_issue_centric_recovery_status": "issue_centric_recovery_fallback",
-                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/20",
-                "last_issue_centric_recovery_fallback_reason": "dispatch_result_missing_or_unreadable",
-            }
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_fallback",
+                        "snapshot_source": "recovery_rehydration",
+                        "action": "codex_run",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "fallback_legacy",
+                        "route_fallback_reason": "dispatch_result_missing_or_unreadable",
+                        "recovery_status": "issue_centric_recovery_fallback",
+                        "recovery_source": "state_fallback_only",
+                        "recovery_fallback_reason": "dispatch_result_missing_or_unreadable",
+                        "fallback_reason": "dispatch_result_missing_or_unreadable",
+                        "principal_issue": "https://github.com/example/repo/issues/20",
+                        "principal_issue_kind": "current_issue",
+                        "target_issue": "https://github.com/example/repo/issues/20",
+                        "target_issue_source": "existing_state_fallback",
+                        "next_request_hint": "continue_on_current_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "",
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            note = run_until_stop.suggested_next_note(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_fallback",
+                }
+            )
         self.assertIn("issue-centric recovery", note)
         self.assertIn("dispatch_result_missing_or_unreadable", note)
 

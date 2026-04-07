@@ -105,9 +105,19 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "chatgpt_decision_note": "",
             "last_issue_centric_dispatch_result": "",
             "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
             "last_issue_centric_principal_issue": "",
             "last_issue_centric_principal_issue_kind": "",
             "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
             "last_issue_centric_close_order": "",
             "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
             "last_issue_centric_execution_status": "",
@@ -199,7 +209,7 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             source_metadata_log="logs/metadata.json",
             source_artifact_path="logs/artifact.md",
             log_writer=log_writer,
-            repo_relative=lambda path: path.name,
+            repo_relative=lambda path: str(path),
             load_state_fn=lambda: dict(saved_states[-1]) if saved_states else dict(state),
             save_state_fn=lambda s: saved_states.append(dict(s)),
             execute_issue_create_action_fn=execute_issue_create_action_fn or (lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("issue_create should not run"))),
@@ -354,6 +364,8 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_principal_issue_kind"], "followup_issue")
             self.assertEqual(result.final_state["last_issue_centric_next_request_hint"], "continue_on_followup_issue")
             self.assertTrue(str(result.final_state["last_issue_centric_normalized_summary"]).endswith(".json"))
+            self.assertTrue(str(result.final_state["last_issue_centric_runtime_snapshot"]).endswith(".json"))
+            self.assertEqual(result.final_state["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
 
     def test_dispatcher_runs_codex_followup_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

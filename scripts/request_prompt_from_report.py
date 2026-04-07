@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from _bridge_common import (
@@ -18,7 +19,7 @@ from _bridge_common import (
     guarded_main,
     load_project_config,
     log_text,
-    prepare_issue_centric_next_request_recovery,
+    prepare_issue_centric_runtime_snapshot,
     present_resume_prompt,
     promote_pending_request,
     read_pending_handoff_text,
@@ -140,7 +141,7 @@ def dispatch_request(
     request_source: str,
     prepared_prefix: str,
     sent_prefix: str,
-    issue_centric_next_request_recovery: object | None = None,
+    issue_centric_runtime_snapshot: object | None = None,
     success_updates: dict[str, object] | None = None,
 ) -> int:
     prepared_log = log_text(prepared_prefix, request_text)
@@ -148,9 +149,9 @@ def dispatch_request(
 
     prepared_state = clear_error_fields(dict(state))
     clear_pending_request_fields(prepared_state)
-    if issue_centric_next_request_recovery is not None:
+    if issue_centric_runtime_snapshot is not None:
         prepared_state.update(
-            _issue_centric_next_request_state_updates(issue_centric_next_request_recovery)
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
         )
     stage_prepared_request(
         prepared_state,
@@ -184,9 +185,9 @@ def dispatch_request(
         request_source=request_source,
         request_log=repo_relative(request_log),
     )
-    if issue_centric_next_request_recovery is not None:
+    if issue_centric_runtime_snapshot is not None:
         mutable_state.update(
-            _issue_centric_next_request_state_updates(issue_centric_next_request_recovery)
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
         )
     if success_updates:
         mutable_state.update(success_updates)
@@ -202,9 +203,10 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    issue_centric_next_request_recovery, issue_centric_next_request_section = (
-        prepare_issue_centric_next_request_recovery(state)
+    issue_centric_runtime_snapshot, issue_centric_next_request_section = (
+        prepare_issue_centric_runtime_snapshot(state)
     )
+    issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
         print("request: 前回未送信の ChatGPT request を再送します。")
@@ -239,7 +241,7 @@ def run_resume_request(
         request_source=request_source,
         prepared_prefix="prepared_prompt_request_from_report",
         sent_prefix="sent_prompt_request_from_report",
-        issue_centric_next_request_recovery=issue_centric_next_request_recovery,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
         success_updates={
             "chatgpt_decision": "",
             "chatgpt_decision_note": "",
@@ -253,9 +255,10 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    issue_centric_next_request_recovery, issue_centric_next_request_section = (
-        prepare_issue_centric_next_request_recovery(state)
+    issue_centric_runtime_snapshot, issue_centric_next_request_section = (
+        prepare_issue_centric_runtime_snapshot(state)
     )
+    issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
     request_source = build_report_request_source(state, "")
     pending_handoff_text = ""
     pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
@@ -298,9 +301,9 @@ def run_rotated_report_request(
                 "pending_handoff_log": repo_relative(handoff_received_log),
             }
         )
-        if issue_centric_next_request_recovery is not None:
+        if issue_centric_runtime_snapshot is not None:
             handoff_state.update(
-                _issue_centric_next_request_state_updates(issue_centric_next_request_recovery)
+                _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
             )
         save_state(handoff_state)
 
@@ -348,9 +351,9 @@ def run_rotated_report_request(
             "current_chat_session": rotated_chat.get("url", ""),
         }
     )
-    if issue_centric_next_request_recovery is not None:
+    if issue_centric_runtime_snapshot is not None:
         mutable_state.update(
-            _issue_centric_next_request_state_updates(issue_centric_next_request_recovery)
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
         )
     save_state(mutable_state)
 
@@ -405,6 +408,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
 
 def _issue_centric_next_request_state_updates(context: object) -> dict[str, object]:
+    snapshot_path = str(getattr(context, "snapshot_path", "") or "").strip()
+    snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
     target_issue = str(getattr(context, "target_issue", "") or "").strip()
     target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
     fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
@@ -412,6 +417,8 @@ def _issue_centric_next_request_state_updates(context: object) -> dict[str, obje
     recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
     recovery_source = str(getattr(context, "recovery_source", "") or "").strip()
     return {
+        "last_issue_centric_runtime_snapshot": snapshot_path,
+        "last_issue_centric_snapshot_status": snapshot_status,
         "last_issue_centric_next_request_target": target_issue,
         "last_issue_centric_next_request_target_source": target_issue_source,
         "last_issue_centric_next_request_fallback_reason": fallback_reason,
@@ -421,6 +428,24 @@ def _issue_centric_next_request_state_updates(context: object) -> dict[str, obje
         "last_issue_centric_recovery_source": recovery_source,
         "last_issue_centric_recovery_fallback_reason": fallback_reason,
     }
+
+
+def _persist_runtime_snapshot_if_needed(snapshot: object | None) -> object | None:
+    if snapshot is None:
+        return None
+    snapshot_path = str(getattr(snapshot, "snapshot_path", "") or "").strip()
+    if snapshot_path:
+        return snapshot
+    payload = dict(vars(snapshot))
+    payload["snapshot_path"] = ""
+    status = str(payload.get("snapshot_status", "")).strip() or "issue_centric_snapshot"
+    log_path = log_text(
+        f"issue_centric_runtime_snapshot_{status}",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        "json",
+    )
+    payload["snapshot_path"] = repo_relative(log_path)
+    return type(snapshot)(**payload)
 
 
 if __name__ == "__main__":

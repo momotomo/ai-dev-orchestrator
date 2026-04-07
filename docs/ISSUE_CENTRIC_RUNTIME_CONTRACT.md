@@ -76,6 +76,11 @@ The current implementation boundary is:
   normalized summary, dispatch result, and saved issue-centric state before
   next-request preparation, then reuses issue-centric routing only when that
   recovered context remains coherent
+- implemented: narrow issue-centric runtime snapshot / state bridge that keeps
+  writing fine-grained `last_issue_centric_*` fields but lets request
+  preparation, operator-facing status, and restart/recovery read one
+  normalized snapshot first and fall back only when that snapshot is missing
+  or inconsistent
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -101,6 +106,23 @@ The dispatcher still blocks these combinations on purpose:
 
 - `codex_run + close_current_issue = true`
 - multi-flag combinations outside the narrow paths above
+
+The current read-side bridge is intentionally layered like this:
+
+- fine-grained `last_issue_centric_*` fields remain the write-side execution
+  record
+- the normalized summary derives the next principal issue candidate and
+  next-request hint
+- the next-request resolver turns that summary into a narrow `target_issue`
+  proposal
+- route selection decides whether issue-centric or legacy fallback should own
+  the next request
+- restart-safe recovery rehydrates that decision after interruption
+- the runtime snapshot is the current read-side bridge that packages those
+  outputs into one preferred source for request preparation, operator status,
+  and resume/recovery
+
+Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
 ## Overall Assumptions
 

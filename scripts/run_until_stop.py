@@ -25,6 +25,7 @@ from _bridge_common import (
     mark_error,
     project_config_warnings,
     print_project_config_warnings,
+    prepare_issue_centric_runtime_snapshot,
     present_bridge_handoff,
     present_bridge_status,
     is_retryable_pending_handoff_error,
@@ -441,15 +442,14 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
 
 
 def issue_centric_route_note(final_state: dict[str, Any]) -> str:
-    recovery_status = str(final_state.get("last_issue_centric_recovery_status", "")).strip()
-    recovery_source = str(final_state.get("last_issue_centric_recovery_source", "")).strip()
-    route_selected = str(final_state.get("last_issue_centric_route_selected", "")).strip()
-    target_issue = str(final_state.get("last_issue_centric_next_request_target", "")).strip()
-    fallback_reason = (
-        str(final_state.get("last_issue_centric_recovery_fallback_reason", "")).strip()
-        or str(final_state.get("last_issue_centric_route_fallback_reason", "")).strip()
-        or str(final_state.get("last_issue_centric_next_request_fallback_reason", "")).strip()
-    )
+    snapshot, _ = prepare_issue_centric_runtime_snapshot(final_state)
+    if snapshot is None:
+        return ""
+    recovery_status = snapshot.recovery_status
+    recovery_source = snapshot.recovery_source
+    route_selected = snapshot.route_selected
+    target_issue = snapshot.target_issue
+    fallback_reason = snapshot.fallback_reason
     if recovery_status == "issue_centric_recovered" and route_selected == "issue_centric" and target_issue:
         source_note = f" ({recovery_source})" if recovery_source else ""
         return (

@@ -233,6 +233,11 @@ During this inventory phase, all of the following stay unchanged:
     against saved issue-centric state, and only then allows the preferred
     issue-centric next-request route to continue; otherwise it records an
     explicit recovery fallback and keeps the legacy report path alive
+  - the current runtime-snapshot slice goes one step farther again: it keeps
+    the fine-grained `last_issue_centric_*` write path intact, but rebuilds a
+    single snapshot for request preparation, operator-facing status, and
+    restart/resume so the read side no longer has to stitch every field
+    together independently
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

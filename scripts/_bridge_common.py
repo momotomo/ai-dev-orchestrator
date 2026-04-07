@@ -18,8 +18,9 @@ from issue_centric_normalized_summary import (
     IssueCentricNextRequestContext,
     IssueCentricRecoveryContext,
     IssueCentricRouteSelection,
+    IssueCentricRuntimeSnapshot,
     load_issue_centric_normalized_summary,
-    recover_issue_centric_next_request_context,
+    resolve_issue_centric_runtime_snapshot,
     render_issue_centric_next_request_section,
     render_issue_centric_summary_for_request,
 )
@@ -95,6 +96,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_recovery_status": "",
     "last_issue_centric_recovery_source": "",
     "last_issue_centric_recovery_fallback_reason": "",
+    "last_issue_centric_runtime_snapshot": "",
+    "last_issue_centric_snapshot_status": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1338,6 +1341,10 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(
             f"- last_issue_centric_recovery_fallback_reason: {state['last_issue_centric_recovery_fallback_reason']}"
         )
+    if state.get("last_issue_centric_runtime_snapshot"):
+        fields.append(f"- last_issue_centric_runtime_snapshot: {state['last_issue_centric_runtime_snapshot']}")
+    if state.get("last_issue_centric_snapshot_status"):
+        fields.append(f"- last_issue_centric_snapshot_status: {state['last_issue_centric_snapshot_status']}")
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
     if state.get("last_issue_centric_execution_status"):
@@ -3237,6 +3244,18 @@ def build_issue_centric_request_status(
     fallback_text: str | None = None,
 ) -> str:
     base = fallback_text or state_snapshot(state)
+    runtime_snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=ROOT_DIR)
+    if runtime_snapshot is not None:
+        snapshot_lines = [
+            "- issue_centric_snapshot_status: " + str(runtime_snapshot.snapshot_status).strip(),
+            "- issue_centric_snapshot_source: " + str(runtime_snapshot.snapshot_source).strip(),
+            "- issue_centric_route_selected: " + str(runtime_snapshot.route_selected).strip(),
+            "- issue_centric_principal_issue: " + str(runtime_snapshot.principal_issue).strip(),
+            "- issue_centric_next_request_target: " + str(runtime_snapshot.target_issue).strip(),
+        ]
+        rendered_snapshot = "\n".join(line for line in snapshot_lines if not line.endswith(": "))
+        if rendered_snapshot:
+            base = f"{base}\n\n## issue_centric_runtime_snapshot\n{rendered_snapshot}".strip()
     summary = load_issue_centric_normalized_summary(state, repo_root=ROOT_DIR)
     if summary is None:
         return base
@@ -3249,18 +3268,18 @@ def build_issue_centric_request_status(
 def prepare_issue_centric_next_request_context(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricNextRequestContext | None, str]:
-    recovery, section = prepare_issue_centric_next_request_recovery(state)
-    if recovery is None:
+    snapshot, section = prepare_issue_centric_runtime_snapshot(state)
+    if snapshot is None:
         return None, section
     return (
         IssueCentricNextRequestContext(
-            target_issue=recovery.target_issue,
-            target_issue_source=recovery.target_issue_source,
-            next_request_hint=recovery.next_request_hint,
-            principal_issue_kind=recovery.principal_issue_kind,
-            used_normalized_summary=recovery.used_normalized_summary,
-            fallback_reason=recovery.fallback_reason,
-            summary_path=recovery.summary_path,
+            target_issue=snapshot.target_issue,
+            target_issue_source=snapshot.target_issue_source,
+            next_request_hint=snapshot.next_request_hint,
+            principal_issue_kind=snapshot.principal_issue_kind,
+            used_normalized_summary=snapshot.route_selected == "issue_centric",
+            fallback_reason=snapshot.fallback_reason,
+            summary_path=snapshot.normalized_summary_path,
         ),
         section,
     )
@@ -3269,19 +3288,19 @@ def prepare_issue_centric_next_request_context(
 def prepare_issue_centric_next_request_route_selection(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricRouteSelection | None, str]:
-    recovery, section = prepare_issue_centric_next_request_recovery(state)
-    if recovery is None:
+    snapshot, section = prepare_issue_centric_runtime_snapshot(state)
+    if snapshot is None:
         return None, section
     return (
         IssueCentricRouteSelection(
-            route_selected=recovery.route_selected,
-            target_issue=recovery.target_issue,
-            target_issue_source=recovery.target_issue_source,
-            next_request_hint=recovery.next_request_hint,
-            principal_issue_kind=recovery.principal_issue_kind,
-            used_normalized_summary=recovery.used_normalized_summary,
-            fallback_reason=recovery.fallback_reason,
-            summary_path=recovery.summary_path,
+            route_selected=snapshot.route_selected,
+            target_issue=snapshot.target_issue,
+            target_issue_source=snapshot.target_issue_source,
+            next_request_hint=snapshot.next_request_hint,
+            principal_issue_kind=snapshot.principal_issue_kind,
+            used_normalized_summary=snapshot.route_selected == "issue_centric",
+            fallback_reason=snapshot.fallback_reason,
+            summary_path=snapshot.normalized_summary_path,
         ),
         section,
     )
@@ -3290,10 +3309,35 @@ def prepare_issue_centric_next_request_route_selection(
 def prepare_issue_centric_next_request_recovery(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricRecoveryContext | None, str]:
+    snapshot, section = prepare_issue_centric_runtime_snapshot(state)
+    if snapshot is None:
+        return None, section
+    return (
+        IssueCentricRecoveryContext(
+            recovery_status=snapshot.recovery_status,
+            recovery_source=snapshot.recovery_source,
+            route_selected=snapshot.route_selected,
+            target_issue=snapshot.target_issue,
+            target_issue_source=snapshot.target_issue_source,
+            next_request_hint=snapshot.next_request_hint,
+            principal_issue=snapshot.principal_issue,
+            principal_issue_kind=snapshot.principal_issue_kind,
+            used_normalized_summary=snapshot.route_selected == "issue_centric",
+            fallback_reason=snapshot.fallback_reason,
+            summary_path=snapshot.normalized_summary_path,
+            dispatch_result_path=snapshot.dispatch_result_path,
+        ),
+        section,
+    )
+
+
+def prepare_issue_centric_runtime_snapshot(
+    state: Mapping[str, Any],
+) -> tuple[IssueCentricRuntimeSnapshot | None, str]:
     config = load_project_config()
     repo_label = str(config.get("github_repository", "")).strip() or str(project_repo_path(config))
-    recovery = recover_issue_centric_next_request_context(state, repo_root=ROOT_DIR)
-    if recovery is None:
+    snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=ROOT_DIR)
+    if snapshot is None:
         return None, ""
-    section = render_issue_centric_next_request_section(recovery, repo_label=repo_label)
-    return recovery, section
+    section = render_issue_centric_next_request_section(snapshot, repo_label=repo_label)
+    return snapshot, section

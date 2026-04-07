@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from issue_centric_normalized_summary import build_issue_centric_normalized_summary
+from dataclasses import asdict
+
+from issue_centric_normalized_summary import (
+    build_issue_centric_normalized_summary,
+    build_issue_centric_runtime_snapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -1748,10 +1753,12 @@ def _finalize_dispatch(
     final_status: str,
     steps: Sequence[IssueCentricExecutionStep],
     mutable_state: dict[str, object],
+    repo_root: Path | None = None,
     log_writer: Callable[[str, str, str], Path],
     repo_relative: Callable[[Path], str],
     stop_message: str,
 ) -> IssueCentricDispatchResult:
+    repo_root = repo_root or Path.cwd()
     stop_reason = str(mutable_state.get("last_issue_centric_stop_reason", "")).strip()
     normalized_summary = build_issue_centric_normalized_summary(
         matrix_path=matrix_path,
@@ -1813,6 +1820,33 @@ def _finalize_dispatch(
             "chatgpt_decision_note": stop_reason,
         }
     )
+    runtime_snapshot = build_issue_centric_runtime_snapshot(
+        mutable_state,
+        repo_root=repo_root,
+        snapshot_source="execution_finalize",
+    )
+    if runtime_snapshot is not None:
+        runtime_snapshot_log_path = log_writer(
+            f"issue_centric_runtime_snapshot_{final_status}",
+            json.dumps(asdict(runtime_snapshot), ensure_ascii=False, indent=2) + "\n",
+            "json",
+        )
+        mutable_state.update(
+            {
+                "last_issue_centric_runtime_snapshot": repo_relative(runtime_snapshot_log_path),
+                "last_issue_centric_snapshot_status": runtime_snapshot.snapshot_status,
+                "last_issue_centric_route_selected": runtime_snapshot.route_selected,
+                "last_issue_centric_route_fallback_reason": runtime_snapshot.route_fallback_reason
+                or runtime_snapshot.fallback_reason,
+                "last_issue_centric_recovery_status": runtime_snapshot.recovery_status,
+                "last_issue_centric_recovery_source": runtime_snapshot.recovery_source,
+                "last_issue_centric_recovery_fallback_reason": runtime_snapshot.recovery_fallback_reason
+                or runtime_snapshot.fallback_reason,
+                "last_issue_centric_next_request_target": runtime_snapshot.target_issue,
+                "last_issue_centric_next_request_target_source": runtime_snapshot.target_issue_source,
+                "last_issue_centric_next_request_fallback_reason": runtime_snapshot.fallback_reason,
+            }
+        )
     return IssueCentricDispatchResult(
         matrix_path=matrix_path,
         final_status=final_status,
