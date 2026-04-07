@@ -840,5 +840,99 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("--ready-issue-ref", command)
 
 
+class DispatchPlanOperatorHelpersTest(unittest.TestCase):
+    """Tests for slice6 operator-facing dispatch plan helpers."""
+
+    def test_is_awaiting_user_supplement_true_for_awaiting_user_mode(self) -> None:
+        from _bridge_common import is_awaiting_user_supplement
+
+        self.assertTrue(is_awaiting_user_supplement({"mode": "awaiting_user"}))
+
+    def test_is_awaiting_user_supplement_false_for_other_modes(self) -> None:
+        from _bridge_common import is_awaiting_user_supplement
+
+        for mode in ("idle", "waiting_prompt_reply", "ready_for_codex", "codex_running", ""):
+            with self.subTest(mode=mode):
+                self.assertFalse(is_awaiting_user_supplement({"mode": mode}))
+
+    def test_format_operator_stop_note_completed(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+
+        state = {"mode": "idle", "need_chatgpt_prompt": False, "need_chatgpt_next": False, "need_codex_run": False}
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("不要", note)
+
+    def test_format_operator_stop_note_fetch_next_prompt(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "abc",
+            "pending_request_source": "source",
+            "pending_request_log": "logs/req.md",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("ChatGPT 返答を回収", note)
+
+    def test_format_operator_stop_note_awaiting_user_supplement(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+
+        state = {
+            "mode": "awaiting_user",
+            "need_chatgpt_next": True,
+            "chatgpt_decision": "human_review",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("補足入力", note)
+
+    def test_summarize_run_includes_dispatch_plan_fields(self) -> None:
+        args = run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+        state = {"mode": "waiting_prompt_reply", "pending_request_hash": "x", "pending_request_source": "s", "pending_request_log": "l"}
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test",
+            steps=1,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+        )
+        self.assertIn("next_action:", summary)
+        self.assertIn("runtime_action:", summary)
+        self.assertIn("is_fallback:", summary)
+
+    def test_summarize_run_mode_in_debug_section(self) -> None:
+        args = run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+        state = {"mode": "idle", "need_chatgpt_prompt": True}
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test",
+            steps=0,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+        )
+        # mode_compat should appear in ## debug (compatibility field)
+        self.assertIn("mode_compat:", summary)
+        debug_pos = summary.find("## debug")
+        mode_pos = summary.find("mode_compat:")
+        self.assertGreater(mode_pos, debug_pos, "mode_compat should be in ## debug section")
+
+    def test_start_bridge_mode_uses_action_view_for_awaiting_user(self) -> None:
+        state = {"mode": "awaiting_user", "need_chatgpt_next": True, "chatgpt_decision": "human_review"}
+        result = run_until_stop.start_bridge_mode(state)
+        self.assertEqual(result, "補足を入れて再開できます")
+
+
 if __name__ == "__main__":
     unittest.main()

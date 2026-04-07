@@ -16,8 +16,10 @@ from _bridge_common import (
     bridge_runtime_root,
     check_stop_conditions,
     codex_report_is_ready,
+    format_operator_stop_note,
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
+    is_awaiting_user_supplement,
     latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
@@ -60,12 +62,18 @@ DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
 
 
 def start_bridge_mode(state: dict[str, Any]) -> str:
+    """Return a short human-readable description of the bridge start posture.
+
+    Uses describe_next_action() (action-view) as the primary signal.
+    mode is only consulted via is_awaiting_user_supplement() for the
+    sub-case where user supplement input is required before proceeding.
+    """
     action = describe_next_action(state)
     if action == "request_next_prompt":
         return "ready issue 参照から始められます"
     if action == "dispatch_issue_centric_codex_run":
         return "prepared Codex body をそのまま dispatch できます"
-    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+    if action == "request_prompt_from_report" and is_awaiting_user_supplement(state):
         return "補足を入れて再開できます"
     if is_retryable_pending_handoff_error(state):
         return "同じコマンドで再試行できます"
@@ -194,7 +202,7 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
             "このあと通常は current ready issue の参照を受けて最初の依頼を組み立てます。"
             " ready issue を使えない時だけ free-form override 本文を入力し、bridge は固定の返答契約だけを足します。"
         )
-    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+    if action == "request_prompt_from_report" and is_awaiting_user_supplement(state):
         decision = str(state.get("chatgpt_decision", "")).strip()
         if decision == "human_review":
             return "このあと判断結果や方針の補足入力を求め、次の ChatGPT request に添えて送ります。"
@@ -212,8 +220,8 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "archive_codex_report":
         return "完了報告を archive して次の依頼へ進めます。"
     if action == "request_prompt_from_report":
-        # Use shared wording helper for the generic (non-awaiting_user, non-handoff-rotation)
-        # case so route context is reflected without local branching.
+        # Use shared wording helper for the generic (non-awaiting_user-supplement,
+        # non-handoff-rotation) case so route context is reflected via dispatch plan.
         return format_next_action_note(state, next_action="request_prompt_from_report", route_choice=resolve_issue_centric_route_choice(state))
     if action == "completed":
         return "追加の操作は不要です。"
@@ -258,12 +266,24 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def describe_next_action(state: dict[str, Any]) -> str:
+    """Return the concrete action key for the next runtime step.
+
+    Early exits handle Codex lifecycle states (unarchived report, pending
+    dispatch, ready_for_codex / codex_running / codex_done) as mode-driven
+    compatibility branches.  All other cases delegate to the dispatch plan —
+    making the issue-centric action-view the primary authority.
+
+    Callers that need richer context (note, is_fallback, route_choice) should
+    call resolve_runtime_dispatch_plan() directly instead of this wrapper.
+    """
     if should_prioritize_unarchived_report(state):
         return "archive_codex_report"
 
     if has_pending_issue_centric_codex_dispatch(state):
         return "dispatch_issue_centric_codex_run"
 
+    # Codex lifecycle mode branches are preserved as compatibility guards.
+    # For all other states the dispatch plan is the primary routing authority.
     mode = str(state.get("mode", "idle"))
     if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
         return "launch_codex_once"
@@ -272,7 +292,7 @@ def describe_next_action(state: dict[str, Any]) -> str:
     if mode == "codex_done":
         return "archive_codex_report"
 
-    # Issue-centric action-view is the primary authority.
+    # Issue-centric action-view (dispatch plan) is the primary authority.
     plan = resolve_runtime_dispatch_plan(state)
     return plan.next_action
 
@@ -351,6 +371,14 @@ def recommended_operator_step(
     *,
     reason: str = "",
 ) -> tuple[str, str]:
+    """Return (step_label, suggested_command) for the operator.
+
+    Primary authority: describe_next_action() (action-view / dispatch plan).
+    mode is only accessed via is_awaiting_user_supplement() for the sub-case
+    where the user-supplement resume branch must be distinguished from the
+    standard report-request path.  All other mode reads are delegated to
+    action-key branches.
+    """
     action = describe_next_action(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
 
@@ -368,7 +396,7 @@ def recommended_operator_step(
         if getattr(args, "request_body", "").strip():
             return ("override 入力で開始", format_start_bridge_command(args, mode="run"))
         return ("ready issue 参照で開始", format_start_bridge_command(args, mode="run"))
-    if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
+    if action == "request_prompt_from_report" and is_awaiting_user_supplement(final_state):
         return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
     if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
         return ("handoff 再送を再試行", format_start_bridge_command(args, mode="resume"))
@@ -380,6 +408,12 @@ def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]
 
 
 def suggested_next_note(final_state: dict[str, Any]) -> str:
+    """Return the suggested next note for the operator.
+
+    Primary vocabulary: action-view / describe_next_action().
+    is_no_codex_decision_state() handles the ChatGPT-decision terminal cases
+    before falling through to the action-key branches.
+    """
     action = describe_next_action(final_state)
     pending_request_signal = str(final_state.get("pending_request_signal", "")).strip()
     if is_no_codex_decision_state(final_state):
@@ -914,6 +948,9 @@ def summarize_run(
     )
     report_reference = handoff_report_reference(final_state)
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
+    # Dispatch plan is the primary authority for next_action / runtime_action.
+    # mode is kept in ## debug / state_snapshot as a compatibility field.
+    dispatch_plan = resolve_runtime_dispatch_plan(final_state)
     lines = [
         "# Run Until Stop Summary",
         "",
@@ -925,6 +962,9 @@ def summarize_run(
         f"- 次に見るもの: {handoff.detail}",
         f"- 次の操作: {suggested_command}",
         f"- 補足: {suggested_note}",
+        f"- next_action: {dispatch_plan.next_action}",
+        f"- runtime_action: {dispatch_plan.runtime_action}",
+        f"- is_fallback: {dispatch_plan.is_fallback}",
         "",
         "## run",
         f"- initial_user_status: {initial_status.label}",
@@ -943,12 +983,12 @@ def summarize_run(
         f"- fetch_retry_timeouts: {fetch_retry_timeouts}",
         f"- fetch_retry_recoveries: {fetch_retry_recoveries}",
         f"- safari_timeout_blocked: {safari_timeout_blocked}",
-        f"- next_action: {describe_next_action(final_state)}",
         f"- report_reference: {report_reference}",
         "",
         "## debug",
         f"- technical_reason: {reason}",
         f"- final_user_status_detail: {final_status.detail}",
+        f"- mode_compat: {str(final_state.get('mode', ''))}",
         "",
     ]
     if codex_snapshot is not None:
@@ -1227,7 +1267,7 @@ def run(argv: list[str] | None = None) -> int:
             before_status = present_bridge_status(before)
             print(f"[step {steps + 1}] status={before_status.label} action={action}")
             interactive = action == "request_next_prompt" or (
-                action == "request_prompt_from_report" and str(before.get("mode", "")).strip() == "awaiting_user"
+                action == "request_prompt_from_report" and is_awaiting_user_supplement(before)
             )
             result, elapsed_seconds = run_command_with_heartbeat(
                 command,
@@ -1298,7 +1338,7 @@ def run(argv: list[str] | None = None) -> int:
                         "Codex report 待ちのため停止しました。"
                         " bridge/outbox/codex_report.md が生成されたら再実行してください。"
                     )
-                elif action == "request_prompt_from_report" and str(before.get("mode", "")).strip() == "awaiting_user":
+                elif action == "request_prompt_from_report" and is_awaiting_user_supplement(before):
                     reason = (
                         "再開用の補足入力が空のため送信せず停止しました。"
                         " 必要な補足を入力して再実行してください。"
