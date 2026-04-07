@@ -2,14 +2,26 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 import archive_codex_report
 import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_issue_centric_route_choice, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_issue_centric_route_choice, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from issue_centric_close_current_issue import execute_close_current_issue
+from issue_centric_codex_launch import launch_issue_centric_codex_run
+from issue_centric_codex_run import execute_codex_run_action
+from issue_centric_contract import maybe_parse_issue_centric_reply
+from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
+from issue_centric_execution import dispatch_issue_centric_execution
+from issue_centric_followup_issue import execute_followup_issue_action
+from issue_centric_human_review import execute_human_review_action
+from issue_centric_issue_create import execute_issue_create_action
+from issue_centric_transport import MaterializedIssueCentricDecision, decode_issue_centric_decision
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -100,6 +112,94 @@ def build_fetch_argv(args: argparse.Namespace) -> list[str]:
     return fetch_argv
 
 
+def resolve_saved_runtime_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = (ROOT_DIR / raw_path).resolve()
+    else:
+        path = path.resolve()
+    return path
+
+
+def load_pending_issue_centric_codex_materialized(
+    state: dict[str, object],
+) -> tuple[object, MaterializedIssueCentricDecision, str, str, str]:
+    metadata_ref = str(state.get("last_issue_centric_metadata_log", "")).strip()
+    if not metadata_ref:
+        raise BridgeError("issue-centric codex dispatch に必要な metadata log がありません。")
+    metadata_path = resolve_saved_runtime_path(metadata_ref)
+    try:
+        metadata = json.loads(read_text(metadata_path).strip())
+    except json.JSONDecodeError as exc:
+        raise BridgeError(f"issue-centric metadata log を読めませんでした: {metadata_ref}") from exc
+
+    raw_log_ref = str(metadata.get("raw_response_log", "")).strip()
+    if not raw_log_ref:
+        raise BridgeError("issue-centric codex dispatch に必要な raw response log が metadata にありません。")
+    raw_log_path = resolve_saved_runtime_path(raw_log_ref)
+    raw_text = read_text(raw_log_path).strip()
+    if not raw_text:
+        raise BridgeError(f"issue-centric raw response log を読めませんでした: {raw_log_ref}")
+
+    contract_decision = maybe_parse_issue_centric_reply(raw_text)
+    if contract_decision is None or contract_decision.action.value != "codex_run":
+        raise BridgeError("pending issue-centric codex dispatch を raw response log から再構成できませんでした。")
+
+    prepared = decode_issue_centric_decision(contract_decision)
+    artifact_ref = (
+        str(state.get("last_issue_centric_artifact_file", "")).strip()
+        or str(metadata.get("prepared_artifact", {}).get("path", "")).strip()
+    )
+    artifact_path = resolve_saved_runtime_path(artifact_ref) if artifact_ref else None
+    return (
+        contract_decision,
+        MaterializedIssueCentricDecision(
+            prepared=prepared,
+            metadata_log_path=metadata_path,
+            artifact_log_path=artifact_path,
+            metadata=metadata,
+        ),
+        raw_log_ref,
+        metadata_ref,
+        artifact_ref,
+    )
+
+
+def dispatch_pending_issue_centric_codex_run(
+    state: dict[str, object],
+    *,
+    project_config: dict[str, object],
+) -> int:
+    contract_decision, materialized, raw_log_ref, metadata_ref, artifact_ref = load_pending_issue_centric_codex_materialized(state)
+    dispatch_result = dispatch_issue_centric_execution(
+        contract_decision=contract_decision,
+        materialized=materialized,
+        prior_state=state,
+        mutable_state=clear_error_fields(dict(state)),
+        project_config=project_config,
+        repo_path=project_repo_path(project_config),
+        source_raw_log=raw_log_ref,
+        source_decision_log=str(state.get("last_issue_centric_decision_log", "")).strip(),
+        source_metadata_log=metadata_ref,
+        source_artifact_path=artifact_ref,
+        log_writer=fetch_next_prompt.log_text,
+        repo_relative=fetch_next_prompt.repo_relative,
+        load_state_fn=load_state,
+        save_state_fn=save_state,
+        execute_issue_create_action_fn=execute_issue_create_action,
+        execute_codex_run_action_fn=execute_codex_run_action,
+        launch_issue_centric_codex_run_fn=launch_issue_centric_codex_run,
+        execute_human_review_action_fn=execute_human_review_action,
+        execute_close_current_issue_fn=execute_close_current_issue,
+        execute_followup_issue_action_fn=execute_followup_issue_action,
+        execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync,
+        launch_runner=launch_codex_once.run,
+    )
+    save_state(dispatch_result.final_state)
+    print(dispatch_result.stop_message)
+    return 0
+
+
 def maybe_promote_codex_done(state: dict[str, object]) -> bool:
     updated_state, recovered_report = recover_report_ready_state(state, prompt_path=runtime_prompt_path())
     if not codex_report_is_ready():
@@ -131,53 +231,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         status = present_bridge_status(state)
         print(f"{status.label}です。未退避 report を先に archive します。")
         return archive_codex_report.run(dict(state))
-    route_choice = resolve_issue_centric_route_choice(state)
-    preferred_action = route_choice.preferred_loop_action
-    preferred_reason = route_choice.preferred_loop_reason
 
-    if preferred_action == "request_next_prompt":
+    if has_pending_issue_centric_codex_dispatch(state):
         status = present_bridge_status(state)
-        print(
-            f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
-            f" lifecycle={preferred_reason or 'issue_centric_fresh_prepared'}"
-        )
-        return request_next_prompt.run(dict(state), build_initial_request_argv(args))
+        print(f"{status.label}です。prepared Codex body を issue-centric codex_run dispatch へ進めます。")
+        return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config)
 
-    if preferred_action == "request_prompt_from_report":
-        status = present_bridge_status(state)
-        print(
-            f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
-            f" lifecycle={preferred_reason or 'issue_centric_fresh_prepared'}"
-        )
-        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-
-    if preferred_action == "fetch_next_prompt":
-        status = present_bridge_status(state)
-        print(
-            f"{status.label}です。issue-centric preferred route で pending generation の reply 回収を優先します。"
-            f" lifecycle={preferred_reason or 'issue_centric_fresh_pending'}"
-        )
-        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
-
-    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
-        status = present_bridge_status(state)
-        print(
-            f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
-            " free-form 初回本文は override 用にだけ残しています。"
-        )
-        return request_next_prompt.run(dict(state), build_initial_request_argv(args))
-
-    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
-        status = present_bridge_status(state)
-        if route_choice.route_selected == "fallback_legacy":
-            print(
-                f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
-                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
-            )
-            return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
-        print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
-        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
-
+    # Preserve the existing Codex lifecycle steps as mode-driven compatibility branches.
     if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
         status = present_bridge_status(state)
         print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
@@ -203,6 +263,92 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         status = present_bridge_status(state)
         print(f"{status.label}です。完了報告を履歴へ退避します。")
         return archive_codex_report.run(dict(state))
+
+    # Issue-centric state view is the primary routing authority.
+    # mode is preserved for Codex lifecycle steps and compatibility display.
+    runtime_action, runtime_action_reason = resolve_runtime_next_action(state)
+    # route_choice is retained for informational print messages only
+    route_choice = resolve_issue_centric_route_choice(state)
+
+    if runtime_action == "pending_reply":
+        status = present_bridge_status(state)
+        print(
+            f"{status.label}です。issue-centric preferred route で pending generation の reply 回収を優先します。"
+            f" lifecycle={runtime_action_reason or 'issue_centric_fresh_pending'}"
+        )
+        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
+
+    if runtime_action == "prepared_request":
+        prepared_action = prepared_request_action(state)
+        if prepared_action == "request_next_prompt":
+            status = present_bridge_status(state)
+            print(
+                f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
+                f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
+            )
+            return request_next_prompt.run(dict(state), build_initial_request_argv(args))
+        if prepared_action == "request_prompt_from_report":
+            status = present_bridge_status(state)
+            print(
+                f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
+                f" lifecycle={runtime_action_reason or 'issue_centric_fresh_prepared'}"
+            )
+            return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
+        # builder could not be determined; fall through to need_next_generation
+        runtime_action = "need_next_generation"
+
+    if runtime_action == "need_next_generation":
+        # mode is the compatibility display used to select the concrete request builder
+        if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
+            status = present_bridge_status(state)
+            print(
+                f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
+                " free-form 初回本文は override 用にだけ残しています。"
+            )
+            return request_next_prompt.run(dict(state), build_initial_request_argv(args))
+        if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+            status = present_bridge_status(state)
+            print(f"{status.label}です。次の ChatGPT request に添える補足入力を受けて再開します。")
+            return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
+        if mode == "idle" and bool(state.get("need_chatgpt_next")):
+            status = present_bridge_status(state)
+            if route_choice.route_selected == "issue_centric":
+                print(
+                    f"{status.label}です。issue-centric preferred route で、次の ChatGPT request を準備して送ります。"
+                    f" target_issue={route_choice.target_issue or 'unresolved'}."
+                )
+            elif str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
+                print(f"{status.label}です。次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
+            else:
+                print(
+                    f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で同じチャットへ次フェーズ要求を送ります。"
+                    f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
+                )
+            return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
+        status = present_bridge_status(state)
+        print(f"{status.label}です。today no-action (need_next_generation but no matching mode). 必要なら state.json の詳細を確認してください。")
+        return 0
+
+    # fallback_legacy: Codex lifecycle states are always mode-driven; legacy request/reply
+    # path is used only for degraded / unavailable / invalidated issue-centric situations.
+    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
+        status = present_bridge_status(state)
+        print(
+            f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
+            " free-form 初回本文は override 用にだけ残しています。"
+        )
+        return request_next_prompt.run(dict(state), build_initial_request_argv(args))
+
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+        status = present_bridge_status(state)
+        if route_choice.route_selected == "fallback_legacy":
+            print(
+                f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
+                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
+            )
+            return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
+        print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
+        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
     if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
         status = present_bridge_status(state)

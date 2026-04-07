@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 import _bridge_common  # noqa: E402
 import archive_codex_report  # noqa: E402
+import bridge_orchestrator  # noqa: E402
 import fetch_next_prompt  # noqa: E402
 import issue_centric_codex_launch  # noqa: E402
 import issue_centric_codex_run  # noqa: E402
@@ -464,6 +467,7 @@ class CodexRunLaunchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             temp_root = Path(tmp)
             prompt_path = temp_root / "codex_prompt.md"
+            report_path = temp_root / "codex_report.md"
 
             def fake_save_state(state: dict[str, object]) -> None:
                 saved_states.append(dict(state))
@@ -482,6 +486,7 @@ class CodexRunLaunchTests(unittest.TestCase):
                 repo_relative=lambda path: path.name,
                 launch_runner=lambda state, argv: 0,
                 runtime_prompt_path_fn=lambda _config=None: prompt_path,
+                runtime_report_path_fn=lambda: report_path,
                 write_text_fn=lambda path, text: path.write_text(text, encoding="utf-8"),
                 save_state_fn=fake_save_state,
                 load_state_fn=fake_load_state,
@@ -493,396 +498,105 @@ class CodexRunLaunchTests(unittest.TestCase):
             self.assertEqual(result.final_mode, "codex_running")
 
 
-class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
-    def test_fetch_next_prompt_executes_codex_run_and_launches_existing_entrypoint(self) -> None:
-        state = {
-            "mode": "waiting_prompt_reply",
-            "pending_request_hash": "request-hash",
-            "pending_request_source": "ready_issue:#20",
-            "pending_request_log": "logs/request.md",
-            "pending_request_signal": "",
-            "last_processed_request_hash": "",
-            "last_processed_reply_hash": "",
-        }
+class PreparedCodexDispatchResumeTests(unittest.TestCase):
+    def build_pending_state(
+        self,
+        root: Path,
+        raw_reply: str,
+        *,
+        artifact_text: str,
+    ) -> tuple[dict[str, object], Path, Path]:
+        raw_log = root / "raw_reply.txt"
+        raw_log.write_text(raw_reply, encoding="utf-8")
+        artifact_log = root / "prepared_issue_centric_codex_body.md"
+        artifact_log.write_text(artifact_text, encoding="utf-8")
+        decision_log = root / "decision.md"
+        decision_log.write_text("# decision\n", encoding="utf-8")
+        metadata_log = root / "metadata.json"
+        metadata_log.write_text(
+            json.dumps(
+                {
+                    "raw_response_log": str(raw_log),
+                    "prepared_artifact": {
+                        "kind": "codex_body",
+                        "path": str(artifact_log),
+                    },
+                },
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        return (
+            {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": False,
+                "chatgpt_decision": "issue_centric:codex_run",
+                "chatgpt_decision_note": "prepared for later dispatch",
+                "last_issue_centric_action": "codex_run",
+                "last_issue_centric_target_issue": "#20",
+                "last_issue_centric_artifact_kind": "codex_body",
+                "last_issue_centric_artifact_file": str(artifact_log),
+                "last_issue_centric_metadata_log": str(metadata_log),
+                "last_issue_centric_decision_log": str(decision_log),
+                "last_issue_centric_execution_status": "",
+            },
+            raw_log,
+            artifact_log,
+        )
+
+    def test_bridge_orchestrator_dispatches_prepared_codex_run_from_saved_logs(self) -> None:
         raw = build_codex_run_reply("#20", "Run this body.\n")
-        saved_states: list[dict[str, object]] = []
-
-        fake_result = issue_centric_codex_run.CodexRunExecutionResult(
-            status="completed",
-            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
-                repository="example/repo",
-                issue_number=20,
-                issue_url="https://github.com/example/repo/issues/20",
-                source_ref="#20",
-            ),
-            created_comment=issue_centric_github.CreatedGitHubComment(
-                comment_id=701,
-                url="https://github.com/example/repo/issues/20#issuecomment-701",
-                body="Run this body.\n",
-                repository="example/repo",
-                issue_number=20,
-            ),
-            payload=issue_centric_codex_run.CodexRunExecutionPayload(
-                repo="/tmp/repo",
-                target_issue="https://github.com/example/repo/issues/20",
-                request="Run this body.\n",
-                trigger_comment="https://github.com/example/repo/issues/20#issuecomment-701",
-            ),
-            payload_log_path=REPO_ROOT / "logs" / "payload.json",
-            execution_log_path=REPO_ROOT / "logs" / "execution.json",
-            launch_status="not_implemented",
-            launch_note="Not implemented.",
-            safe_stop_reason="codex_run completed through trigger comment creation.",
-        )
-        fake_launch_result = issue_centric_codex_launch.IssueCentricCodexLaunchResult(
-            status="completed",
-            launch_status="launched",
-            launch_entrypoint="launch_codex_once.run",
-            prompt_path=REPO_ROOT / "bridge" / "inbox" / "codex_prompt.md",
-            prompt_log_path=REPO_ROOT / "logs" / "issue_centric_codex_prompt.md",
-            launch_log_path=REPO_ROOT / "logs" / "issue_centric_launch.json",
-            continuation_status="report_ready_for_archive",
-            continuation_log_path=REPO_ROOT / "logs" / "issue_centric_continuation.json",
-            report_status="ready_for_archive",
-            report_file="bridge/outbox/codex_report.md",
-            final_mode="codex_done",
-            safe_stop_reason="codex_run trigger comment and launch completed.",
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
-            temp_root = Path(tmp)
-            persisted_after_launch = {
-                **state,
-                "mode": "codex_done",
-                "last_issue_centric_execution_status": "completed",
-                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
-                "last_issue_centric_trigger_comment_id": "701",
-                "last_issue_centric_trigger_comment_url": "https://github.com/example/repo/issues/20#issuecomment-701",
-                "last_issue_centric_execution_payload_log": "logs/payload.json",
-            }
-
-            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
-                path = temp_root / f"{prefix}.{suffix}"
-                path.write_text(text, encoding="utf-8")
-                return path
+            root = Path(tmp)
+            state, _, _ = self.build_pending_state(root, raw, artifact_text="Run this body.\n")
+            out = io.StringIO()
 
             with (
-                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
-                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
-                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
-                patch.object(fetch_next_prompt, "load_state", return_value=dict(persisted_after_launch)),
-                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
-                patch.object(fetch_next_prompt, "execute_codex_run_action", return_value=fake_result) as exec_mock,
-                patch.object(fetch_next_prompt, "launch_issue_centric_codex_run", return_value=fake_launch_result) as launch_mock,
+                patch.object(bridge_orchestrator, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
+                patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator, "dispatch_pending_issue_centric_codex_run", return_value=0) as dispatch_mock,
+                redirect_stdout(out),
             ):
-                with self.assertRaisesRegex(BridgeStop, "narrow 接続しました"):
-                    fetch_next_prompt.run(dict(state), [])
+                rc = bridge_orchestrator.run(dict(state), [])
 
-            self.assertEqual(exec_mock.call_count, 1)
-            self.assertEqual(launch_mock.call_count, 1)
-            saved = saved_states[-1]
-            self.assertEqual(saved["last_issue_centric_execution_status"], "completed")
-            self.assertEqual(saved["last_issue_centric_resolved_issue"], "https://github.com/example/repo/issues/20")
-            self.assertEqual(saved["last_issue_centric_trigger_comment_id"], "701")
-            self.assertEqual(saved["last_issue_centric_trigger_comment_url"], "https://github.com/example/repo/issues/20#issuecomment-701")
-            self.assertEqual(saved["last_issue_centric_execution_payload_log"], "logs/payload.json")
-            self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
-            self.assertEqual(saved["last_issue_centric_launch_entrypoint"], "launch_codex_once.run")
-            self.assertEqual(saved["last_issue_centric_launch_log"], "logs/issue_centric_launch.json")
-            self.assertEqual(saved["last_issue_centric_continuation_status"], "report_ready_for_archive")
-            self.assertEqual(saved["last_issue_centric_continuation_log"], "logs/issue_centric_continuation.json")
-            self.assertEqual(saved["last_issue_centric_report_status"], "ready_for_archive")
-            self.assertEqual(saved["last_issue_centric_report_file"], "bridge/outbox/codex_report.md")
+        self.assertEqual(rc, 0)
+        dispatch_mock.assert_called_once()
+        self.assertIn("prepared Codex body", out.getvalue())
 
-    def test_fetch_next_prompt_records_blocked_codex_run_reason(self) -> None:
-        state = {
-            "mode": "waiting_prompt_reply",
-            "pending_request_hash": "request-hash",
-            "pending_request_source": "ready_issue:#20",
-            "pending_request_log": "logs/request.md",
-            "pending_request_signal": "",
-            "last_processed_request_hash": "",
-            "last_processed_reply_hash": "",
-        }
-        raw = build_codex_run_reply("bad-ref", "Run this body.\n")
-        saved_states: list[dict[str, object]] = []
-
-        fake_result = issue_centric_codex_run.CodexRunExecutionResult(
-            status="blocked",
-            resolved_issue=None,
-            created_comment=None,
-            payload=None,
-            payload_log_path=None,
-            execution_log_path=REPO_ROOT / "logs" / "execution.json",
-            launch_status="not_attempted",
-            launch_note="Not attempted.",
-            safe_stop_reason="codex_run blocked before launch.",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            temp_root = Path(tmp)
-
-            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
-                path = temp_root / f"{prefix}.{suffix}"
-                path.write_text(text, encoding="utf-8")
-                return path
-
-            with (
-                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
-                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
-                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
-                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
-                patch.object(fetch_next_prompt, "execute_codex_run_action", return_value=fake_result),
-            ):
-                with self.assertRaisesRegex(BridgeStop, "trigger comment execution まで実行しました"):
-                    fetch_next_prompt.run(dict(state), [])
-
-            saved = saved_states[0]
-            self.assertEqual(saved["last_issue_centric_execution_status"], "blocked")
-            self.assertEqual(saved["last_issue_centric_trigger_comment_id"], "")
-            self.assertEqual(saved["last_issue_centric_launch_status"], "not_attempted")
-
-    def test_fetch_next_prompt_surfaces_launch_failure_after_trigger_comment(self) -> None:
-        state = {
-            "mode": "waiting_prompt_reply",
-            "pending_request_hash": "request-hash",
-            "pending_request_source": "ready_issue:#20",
-            "pending_request_log": "logs/request.md",
-            "pending_request_signal": "",
-            "last_processed_request_hash": "",
-            "last_processed_reply_hash": "",
-        }
-        raw = build_codex_run_reply("#20", "Run this body.\n")
-        saved_states: list[dict[str, object]] = []
-
-        fake_result = issue_centric_codex_run.CodexRunExecutionResult(
-            status="completed",
-            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
-                repository="example/repo",
-                issue_number=20,
-                issue_url="https://github.com/example/repo/issues/20",
-                source_ref="#20",
-            ),
-            created_comment=issue_centric_github.CreatedGitHubComment(
-                comment_id=701,
-                url="https://github.com/example/repo/issues/20#issuecomment-701",
-                body="Run this body.\n",
-                repository="example/repo",
-                issue_number=20,
-            ),
-            payload=issue_centric_codex_run.CodexRunExecutionPayload(
-                repo="/tmp/repo",
-                target_issue="https://github.com/example/repo/issues/20",
-                request="Run this body.\n",
-                trigger_comment="https://github.com/example/repo/issues/20#issuecomment-701",
-            ),
-            payload_log_path=REPO_ROOT / "logs" / "payload.json",
-            execution_log_path=REPO_ROOT / "logs" / "execution.json",
-            launch_status="not_implemented",
-            launch_note="Not implemented.",
-            safe_stop_reason="codex_run completed through trigger comment creation.",
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            temp_root = Path(tmp)
-
-            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
-                path = temp_root / f"{prefix}.{suffix}"
-                path.write_text(text, encoding="utf-8")
-                return path
-
-            with (
-                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
-                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
-                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
-                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
-                patch.object(fetch_next_prompt, "execute_codex_run_action", return_value=fake_result),
-                patch.object(fetch_next_prompt, "launch_issue_centric_codex_run", side_effect=BridgeError("launch failed")),
-            ):
-                with self.assertRaisesRegex(BridgeError, "launch failed"):
-                    fetch_next_prompt.run(dict(state), [])
-
-    def test_fetch_next_prompt_executes_codex_run_followup_combo(self) -> None:
-        state = {
-            "mode": "waiting_prompt_reply",
-            "pending_request_hash": "request-hash",
-            "pending_request_source": "ready_issue:#20",
-            "pending_request_log": "logs/request.md",
-            "pending_request_signal": "",
-            "last_processed_request_hash": "",
-            "last_processed_reply_hash": "",
-            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
-            "last_issue_centric_target_issue": "#20",
-        }
+    def test_bridge_orchestrator_reconstructs_followup_body_for_later_codex_dispatch(self) -> None:
         raw = build_codex_run_reply(
             "#20",
             "Run this body.\n",
             create_followup_issue=True,
             followup_text="# Follow-up issue\n\nFollow-up body.\n",
         )
-        saved_states: list[dict[str, object]] = []
-
-        fake_result = issue_centric_codex_run.CodexRunExecutionResult(
-            status="completed",
-            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
-                repository="example/repo",
-                issue_number=20,
-                issue_url="https://github.com/example/repo/issues/20",
-                source_ref="#20",
-            ),
-            created_comment=issue_centric_github.CreatedGitHubComment(
-                comment_id=801,
-                url="https://github.com/example/repo/issues/20#issuecomment-801",
-                body="Run this body.\n",
-                repository="example/repo",
-                issue_number=20,
-            ),
-            payload=issue_centric_codex_run.CodexRunExecutionPayload(
-                repo="/tmp/repo",
-                target_issue="https://github.com/example/repo/issues/20",
-                request="Run this body.\n",
-                trigger_comment="https://github.com/example/repo/issues/20#issuecomment-801",
-            ),
-            payload_log_path=REPO_ROOT / "logs" / "payload.json",
-            execution_log_path=REPO_ROOT / "logs" / "execution.json",
-            launch_status="not_implemented",
-            launch_note="Not implemented.",
-            safe_stop_reason="codex_run completed through trigger comment creation.",
-        )
-        fake_launch_result = issue_centric_codex_launch.IssueCentricCodexLaunchResult(
-            status="completed",
-            launch_status="launched",
-            launch_entrypoint="launch_codex_once.run",
-            prompt_path=REPO_ROOT / "bridge" / "inbox" / "codex_prompt.md",
-            prompt_log_path=REPO_ROOT / "logs" / "issue_centric_codex_prompt.md",
-            launch_log_path=REPO_ROOT / "logs" / "issue_centric_launch.json",
-            continuation_status="delegated_to_existing_codex_wait",
-            continuation_log_path=REPO_ROOT / "logs" / "issue_centric_continuation.json",
-            report_status="waiting_for_report",
-            report_file="",
-            final_mode="codex_running",
-            safe_stop_reason="codex_run trigger comment and launch completed.",
-        )
-        fake_followup_result = issue_centric_followup_issue.FollowupIssueExecutionResult(
-            status="completed",
-            followup_status="completed",
-            parent_issue=issue_centric_github.ResolvedGitHubIssue(
-                repository="example/repo",
-                issue_number=20,
-                issue_url="https://github.com/example/repo/issues/20",
-                source_ref="#20",
-            ),
-            draft=issue_centric_issue_create.IssueCreateDraft(
-                title="Follow-up issue",
-                body="Follow-up body.\n",
-                title_line="# Follow-up issue",
-                source_artifact_path="logs/prepared_followup_issue_body.md",
-            ),
-            created_issue=issue_centric_github.CreatedGitHubIssue(
-                number=82,
-                url="https://github.com/example/repo/issues/82",
-                title="Follow-up issue",
-                repository="example/repo",
-                node_id="ISSUE_node_82",
-            ),
-            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup-inner.json",
-            execution_log_path=REPO_ROOT / "logs" / "followup-execution.json",
-            project_url="https://github.com/users/example/projects/1",
-            project_sync_status="project_state_synced",
-            project_sync_note="Follow-up synced.",
-            project_item_id="ITEM_82",
-            project_state_field_name="State",
-            project_state_value_name="ready",
-            close_policy="after_codex_followup_success_only",
-            safe_stop_reason="follow-up issue create completed after codex launch.",
-        )
-
         with tempfile.TemporaryDirectory() as tmp:
-            temp_root = Path(tmp)
-            persisted_after_launch = {
-                **state,
-                "mode": "codex_running",
-                "last_issue_centric_execution_status": "completed",
-                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
-                "last_issue_centric_trigger_comment_id": "801",
-                "last_issue_centric_trigger_comment_url": "https://github.com/example/repo/issues/20#issuecomment-801",
-                "last_issue_centric_execution_payload_log": "logs/payload.json",
-            }
+            root = Path(tmp)
+            state, _, _ = self.build_pending_state(root, raw, artifact_text="Run this body.\n")
 
-            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
-                path = temp_root / f"{prefix}.{suffix}"
-                path.write_text(text, encoding="utf-8")
-                return path
+            def fake_dispatch(**kwargs):
+                self.assertTrue(kwargs["contract_decision"].create_followup_issue)
+                self.assertEqual(
+                    kwargs["materialized"].prepared.followup_issue_body.decoded_text,
+                    "# Follow-up issue\n\nFollow-up body.\n",
+                )
+                return SimpleNamespace(
+                    final_state={**state, "mode": "codex_running"},
+                    stop_message="followup dispatch done",
+                )
 
             with (
-                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
-                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
-                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
-                patch.object(fetch_next_prompt, "load_state", return_value=dict(persisted_after_launch)),
-                patch.object(
-                    fetch_next_prompt,
-                    "load_project_config",
-                    return_value={
-                        "github_repository": "example/repo",
-                        "github_project_url": "https://github.com/users/example/projects/1",
-                        "github_project_state_field_name": "State",
-                        "github_project_default_issue_state": "ready",
-                        "worker_repo_path": ".",
-                    },
-                ),
-                patch.object(fetch_next_prompt, "execute_codex_run_action", return_value=fake_result) as exec_mock,
-                patch.object(fetch_next_prompt, "launch_issue_centric_codex_run", return_value=fake_launch_result) as launch_mock,
-                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=fake_followup_result) as followup_mock,
-                patch.object(
-                    fetch_next_prompt,
-                    "execute_current_issue_project_state_sync",
-                    return_value=SimpleNamespace(
-                        status="completed",
-                        sync_status="project_state_synced",
-                        lifecycle_stage="in_progress",
-                        resolved_issue=issue_centric_github.ResolvedGitHubIssue(
-                            repository="example/repo",
-                            issue_number=20,
-                            issue_url="https://github.com/example/repo/issues/20",
-                            source_ref="#20",
-                        ),
-                        issue_snapshot=issue_centric_github.GitHubIssueSnapshot(
-                            number=20,
-                            url="https://github.com/example/repo/issues/20",
-                            title="Current issue",
-                            repository="example/repo",
-                            state="open",
-                            node_id="ISSUE_node_20",
-                        ),
-                        execution_log_path=temp_root / "lifecycle-sync.json",
-                        project_url="https://github.com/users/example/projects/1",
-                        project_item_id="ITEM_20",
-                        project_state_field_name="State",
-                        project_state_value_name="in_progress",
-                        safe_stop_reason="current issue synced to in_progress",
-                    ),
-                ) as lifecycle_sync_mock,
+                patch.object(bridge_orchestrator, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
+                patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator, "dispatch_issue_centric_execution", side_effect=fake_dispatch) as dispatch_mock,
+                patch.object(bridge_orchestrator, "save_state"),
             ):
-                with self.assertRaisesRegex(
-                    BridgeStop,
-                    "trigger comment / launch / continuation と narrow follow-up issue create",
-                ):
-                    fetch_next_prompt.run(dict(state), [])
+                rc = bridge_orchestrator.run(dict(state), [])
 
-            self.assertEqual(exec_mock.call_count, 1)
-            self.assertEqual(launch_mock.call_count, 1)
-            self.assertEqual(followup_mock.call_count, 1)
-            self.assertEqual(lifecycle_sync_mock.call_count, 1)
-            saved = saved_states[-1]
-            self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
-            self.assertEqual(saved["last_issue_centric_continuation_status"], "delegated_to_existing_codex_wait")
-            self.assertEqual(saved["last_issue_centric_followup_status"], "completed")
-            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "82")
-            self.assertEqual(saved["last_issue_centric_lifecycle_sync_state_value"], "in_progress")
+        self.assertEqual(rc, 0)
+        dispatch_mock.assert_called_once()
 
 
 class IssueCentricContinuationArchiveTests(unittest.TestCase):

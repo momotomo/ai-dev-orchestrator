@@ -431,6 +431,12 @@ def present_bridge_status(
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
         return BridgeStatusView("人確認待ち", "まず stop summary の next step と note を確認してから再開します。")
 
+    if has_pending_issue_centric_codex_dispatch(state):
+        return BridgeStatusView(
+            "Codex実行待ち",
+            "issue-centric で prepared Codex body を保持しています。次の bridge 手で codex_run dispatch を進めます。",
+        )
+
     if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
         detail = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
         return BridgeStatusView("人確認待ち", detail)
@@ -847,6 +853,17 @@ def clear_prepared_request_fields(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def has_pending_issue_centric_codex_dispatch(state: Mapping[str, Any]) -> bool:
+    return (
+        str(state.get("mode", "")).strip() == "awaiting_user"
+        and str(state.get("chatgpt_decision", "")).strip() == "issue_centric:codex_run"
+        and str(state.get("last_issue_centric_artifact_kind", "")).strip() == "codex_body"
+        and bool(str(state.get("last_issue_centric_metadata_log", "")).strip())
+        and not bool(state.get("need_codex_run"))
+        and not bool(str(state.get("last_issue_centric_execution_status", "")).strip())
+    )
+
+
 def prepared_request_action(state: Mapping[str, Any]) -> str:
     prepared_source = str(state.get("prepared_request_source", "")).strip()
     if prepared_source.startswith(("report:", "handoff:", "human_review_continue:")):
@@ -931,6 +948,59 @@ def resolve_issue_centric_route_choice(state: Mapping[str, Any]) -> IssueCentric
 def resolve_issue_centric_preferred_loop_action(state: Mapping[str, Any]) -> tuple[str, str]:
     route_choice = resolve_issue_centric_route_choice(state)
     return route_choice.preferred_loop_action, route_choice.preferred_loop_reason
+
+
+def resolve_runtime_next_action(state: Mapping[str, Any]) -> tuple[str, str]:
+    """Return (action_key, reason) with the issue-centric state view as primary authority.
+
+    action_key is one of:
+        "prepared_request"     - fresh_prepared generation; reuse and send without rebuilding
+        "pending_reply"        - fresh_pending generation; wait for reply recovery
+        "need_next_generation" - issue_centric_ready but generation is consumed or unset;
+                                 caller uses mode as compatibility display to select the
+                                 concrete request builder
+        "fallback_legacy"      - degraded / unavailable / invalidated; caller uses the
+                                 legacy request-centric mode-driven path
+
+    Decision order follows ISSUE_CENTRIC_RUNTIME_CONTRACT rewrite boundary:
+        1. runtime snapshot
+        2. runtime readiness / health gate  (runtime_mode)
+        3. generation lifecycle
+        4. thin state-view bridge (freshness / invalidation already folded into runtime_mode)
+        5. legacy mode only when the layers above require fallback
+    """
+    runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
+    if runtime_mode is None:
+        return "fallback_legacy", "issue_centric_runtime_mode_missing"
+
+    mode_value = runtime_mode.runtime_mode
+    generation_lifecycle = runtime_mode.generation_lifecycle
+    fallback_reason = (
+        runtime_mode.fallback_reason
+        or runtime_mode.runtime_mode_reason
+        or ""
+    )
+
+    # Health gate: degraded or unavailable → legacy fallback
+    if mode_value in {"issue_centric_degraded_fallback", "issue_centric_unavailable"}:
+        return "fallback_legacy", fallback_reason or mode_value
+
+    if mode_value != "issue_centric_ready":
+        return "fallback_legacy", fallback_reason or f"issue_centric_mode_{mode_value}"
+
+    # Generation lifecycle drives the concrete next action
+    if generation_lifecycle == "fresh_pending":
+        return "pending_reply", runtime_mode.generation_lifecycle_reason or "issue_centric_fresh_pending"
+    if generation_lifecycle == "fresh_prepared":
+        return "prepared_request", runtime_mode.generation_lifecycle_reason or "issue_centric_fresh_prepared"
+    if generation_lifecycle == "issue_centric_invalidated":
+        return "fallback_legacy", runtime_mode.generation_lifecycle_reason or "issue_centric_invalidated"
+
+    # consumed / unset / other → prepare next generation
+    return (
+        "need_next_generation",
+        runtime_mode.generation_lifecycle_reason or f"issue_centric_lifecycle_{generation_lifecycle or 'unset'}",
+    )
 
 
 def stage_prepared_request(

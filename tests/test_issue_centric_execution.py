@@ -253,6 +253,55 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             launch_runner=lambda state, argv=None: 0,
         )
 
+    def test_dispatcher_blocks_codex_run_close_before_trigger_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=False,
+                summary="Run codex and close current issue.",
+                issue_body_base64=None,
+                codex_body_base64=b64("Implement the issue.\n"),
+                review_base64=None,
+                followup_issue_body_base64=None,
+                raw_json="{}",
+                raw_segment="segment",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    close_status="blocked",
+                    close_order="blocked_codex_run",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_before=None,
+                    issue_after=None,
+                    execution_log_path=log_path,
+                    safe_stop_reason="action=codex_run cannot execute close_current_issue in this slice.",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["close"])
+            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "blocked_codex_run")
+            self.assertEqual(result.final_state["last_issue_centric_execution_status"], "")
+            self.assertIn("codex_run + close_current_issue", result.stop_message)
+
     def test_dispatcher_runs_codex_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

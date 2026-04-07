@@ -96,6 +96,19 @@ class HumanFacingStatusTests(unittest.TestCase):
         self.assertEqual(view.label, "ChatGPT返答待ち")
         self.assertIn("再送せず", view.detail)
 
+    def test_prepared_issue_centric_codex_dispatch_uses_codex_wait_wording(self) -> None:
+        view = present_bridge_status(
+            {
+                "mode": "awaiting_user",
+                "chatgpt_decision": "issue_centric:codex_run",
+                "last_issue_centric_artifact_kind": "codex_body",
+                "last_issue_centric_metadata_log": "logs/metadata.json",
+                "last_issue_centric_execution_status": "",
+            }
+        )
+        self.assertEqual(view.label, "Codex実行待ち")
+        self.assertIn("prepared Codex body", view.detail)
+
     def test_issue_centric_prepared_request_uses_send_wait_wording(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / "snapshot.json"
@@ -564,19 +577,47 @@ class SummaryTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            action = run_until_stop.describe_next_action(
-                {
-                    "mode": "idle",
-                    "need_chatgpt_next": True,
-                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
-                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
-                    "last_issue_centric_pending_generation_id": "summary:logs/summary.json",
-                    "pending_request_hash": "abc",
-                    "pending_request_source": "report:1",
-                    "pending_request_log": "logs/request.md",
-                }
-            )
+            with patch.object(run_until_stop, "should_prioritize_unarchived_report", return_value=False):
+                action = run_until_stop.describe_next_action(
+                    {
+                        "mode": "idle",
+                        "need_chatgpt_next": True,
+                        "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                        "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                        "last_issue_centric_pending_generation_id": "summary:logs/summary.json",
+                        "pending_request_hash": "abc",
+                        "pending_request_source": "report:1",
+                        "pending_request_log": "logs/request.md",
+                    }
+                )
         self.assertEqual(action, "fetch_next_prompt")
+
+    def test_describe_next_action_prefers_later_codex_dispatch_when_prepared(self) -> None:
+        action = run_until_stop.describe_next_action(
+            {
+                "mode": "awaiting_user",
+                "chatgpt_decision": "issue_centric:codex_run",
+                "last_issue_centric_artifact_kind": "codex_body",
+                "last_issue_centric_metadata_log": "logs/metadata.json",
+                "last_issue_centric_execution_status": "",
+            }
+        )
+        self.assertEqual(action, "dispatch_issue_centric_codex_run")
+
+    def test_describe_next_action_keeps_ready_for_codex_mode_driven(self) -> None:
+        with patch.object(run_until_stop, "should_prioritize_unarchived_report", return_value=False):
+            with patch.object(
+                run_until_stop,
+                "resolve_runtime_next_action",
+                side_effect=AssertionError("issue-centric next-action should not override ready_for_codex"),
+            ):
+                action = run_until_stop.describe_next_action(
+                    {
+                        "mode": "ready_for_codex",
+                        "need_codex_run": True,
+                    }
+                )
+        self.assertEqual(action, "launch_codex_once")
 
     def test_request_prompt_from_report_note_mentions_fallback_route(self) -> None:
         note = run_until_stop.suggested_next_note(

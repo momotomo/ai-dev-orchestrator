@@ -16,6 +16,7 @@ from _bridge_common import (
     bridge_runtime_root,
     check_stop_conditions,
     codex_report_is_ready,
+    has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
     latest_codex_progress_snapshot,
     load_browser_config,
@@ -23,6 +24,7 @@ from _bridge_common import (
     load_project_config,
     log_text,
     mark_error,
+    prepared_request_action,
     project_config_warnings,
     print_project_config_warnings,
     prepare_issue_centric_runtime_mode,
@@ -35,6 +37,7 @@ from _bridge_common import (
     recover_codex_report,
     resolve_issue_centric_preferred_loop_action,
     resolve_issue_centric_route_choice,
+    resolve_runtime_next_action,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -59,6 +62,8 @@ def start_bridge_mode(state: dict[str, Any]) -> str:
     action = describe_next_action(state)
     if action == "request_next_prompt":
         return "ready issue 参照から始められます"
+    if action == "dispatch_issue_centric_codex_run":
+        return "prepared Codex body をそのまま dispatch できます"
     if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
         return "補足を入れて再開できます"
     if is_retryable_pending_handoff_error(state):
@@ -264,11 +269,46 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 def describe_next_action(state: dict[str, Any]) -> str:
     if should_prioritize_unarchived_report(state):
         return "archive_codex_report"
-    route_choice = resolve_issue_centric_route_choice(state)
-    preferred_action = route_choice.preferred_loop_action
-    if preferred_action:
-        return preferred_action
+
+    if has_pending_issue_centric_codex_dispatch(state):
+        return "dispatch_issue_centric_codex_run"
+
     mode = str(state.get("mode", "idle"))
+    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
+        return "launch_codex_once"
+    if mode == "codex_running":
+        return "wait_for_codex_report"
+    if mode == "codex_done":
+        return "archive_codex_report"
+
+    # Issue-centric state view is the primary authority for route choice.
+    # mode is used only as compatibility display inside each branch.
+    runtime_action, _ = resolve_runtime_next_action(state)
+
+    if runtime_action == "pending_reply":
+        return "fetch_next_prompt"
+
+    if runtime_action == "prepared_request":
+        action = prepared_request_action(state)
+        if action:
+            return action
+        # prepared_request_action could not determine builder → treat as need_next_generation
+        runtime_action = "need_next_generation"
+
+    if runtime_action == "need_next_generation":
+        # mode is the compatibility display that selects the concrete request builder
+        if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
+            return "request_next_prompt"
+        if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+            return "request_prompt_from_report"
+        if mode == "idle" and bool(state.get("need_chatgpt_next")):
+            return "request_prompt_from_report"
+        if is_completed_state(state):
+            return "completed"
+        return "no_action"
+
+    # fallback_legacy: mode-driven legacy path
+    # Codex lifecycle states (ready_for_codex, codex_running, codex_done) are always mode-driven.
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         return "request_next_prompt"
     if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
@@ -422,6 +462,11 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
                 "同じ handoff は再送せず reply を待ってから再実行してください。"
             )
         return "CHATGPT_PROMPT_REPLY が同じ current tab に出たら再実行してください。"
+    if action == "dispatch_issue_centric_codex_run":
+        note = str(final_state.get("chatgpt_decision_note", "")).strip()
+        if note:
+            return f"{note} bridge を再実行すると issue-centric codex_run dispatch を進めます。"
+        return "prepared Codex body は保存済みです。bridge を再実行すると issue-centric codex_run dispatch を進めます。"
     if action == "launch_codex_once":
         return (
             "bridge が worker を起動できる状態です。初回導線へ戻らず、"
@@ -655,6 +700,8 @@ def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
 def describe_wait_message(action: str) -> str:
     if action == "fetch_next_prompt":
         return "ChatGPT reply を待っています。"
+    if action == "dispatch_issue_centric_codex_run":
+        return "prepared Codex body の dispatch を進めています。"
     if action == "launch_codex_once":
         return "Codex worker の完了を待っています。"
     if action == "wait_for_codex_report":
