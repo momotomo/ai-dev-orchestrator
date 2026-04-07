@@ -407,6 +407,9 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
             " 通常は current ready issue の参照で始め、ready issue を使えない時だけ free-form override を入力します。"
         )
     if action == "fetch_next_prompt":
+        route_note = issue_centric_route_note(final_state)
+        if route_note and "reply 待ち" in route_note:
+            return route_note.strip()
         if pending_request_signal == "submitted_unconfirmed":
             return (
                 "新しいチャットへの送信は通った可能性が高いため、"
@@ -450,6 +453,8 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
     route_selected = runtime_mode.route_selected
     target_issue = runtime_mode.target_issue
     fallback_reason = runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason
+    generation_lifecycle = runtime_mode.generation_lifecycle
+    generation_lifecycle_reason = runtime_mode.generation_lifecycle_reason
     freshness_status = runtime_mode.freshness_status
     freshness_reason = runtime_mode.freshness_reason or fallback_reason
     if runtime_mode.runtime_mode == "issue_centric_unavailable":
@@ -484,6 +489,18 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
         return (
             " 保存済みの issue-centric summary から再構築した文脈を使い、"
             f"{target_issue} を target_issue として継続します{source_note}。"
+        )
+    if route_selected == "issue_centric" and target_issue and generation_lifecycle == "fresh_pending":
+        return (
+            " issue-centric request は送信済みで reply 待ちです。"
+            f" {target_issue} を target_issue とする generation を pending のまま継続します。"
+            f" 理由: {generation_lifecycle_reason or 'pending request bound to generation'}."
+        )
+    if route_selected == "issue_centric" and target_issue and generation_lifecycle == "fresh_prepared":
+        return (
+            " issue-centric request は prepared 状態です。"
+            f" {target_issue} を target_issue とする generation を再利用できます。"
+            f" 理由: {generation_lifecycle_reason or 'prepared request bound to generation'}."
         )
     if runtime_mode.runtime_mode == "issue_centric_degraded_fallback":
         if target_issue:

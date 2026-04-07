@@ -130,6 +130,10 @@ The current read-side bridge is intentionally layered like this:
   generation already drove one next-request preparation, or has been
   explicitly invalidated because the bridge had to adopt legacy fallback for
   that generation
+- the generation-lifecycle layer now sits between request preparation and
+  freshness so the bridge can distinguish `fresh_prepared`,
+  `fresh_pending`, `consumed`, and `invalidated` generations instead of
+  treating every prepared next request as already consumed
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
@@ -518,10 +522,14 @@ For the current dispatcher / orchestrator boundary:
     should all consult that same gate before choosing the next route
 - the freshness / invalidation layer now sits alongside that gate:
   - a snapshot is only considered fresh when its generation still matches the
-    latest issue-centric execution context and has not already been consumed
-    by one prepared next request
-  - a consumed generation is treated as stale and forces legacy fallback until
-    a newer execution writes a newer issue-centric generation
+    latest issue-centric execution context and its generation lifecycle is
+    still `fresh_available`, `fresh_prepared`, or `fresh_pending`
+  - request generation alone does not consume a generation; it remains
+    `fresh_prepared` until send succeeds, then becomes `fresh_pending` while
+    reply recovery is still outstanding
+  - a generation becomes `consumed` only after reply recovery closes that
+    request lifecycle, and consumed generations are then treated as stale
+    until a newer execution writes a newer issue-centric generation
   - a generation that was explicitly sent through legacy fallback is treated
     as invalidated and is not reused by recovery or request preparation
 

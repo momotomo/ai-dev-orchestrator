@@ -85,6 +85,9 @@ class IssueCentricRuntimeMode:
     runtime_mode: str
     runtime_mode_reason: str
     runtime_mode_source: str
+    generation_lifecycle: str
+    generation_lifecycle_reason: str
+    generation_lifecycle_source: str
     freshness_status: str
     freshness_reason: str
     freshness_source: str
@@ -114,6 +117,14 @@ class IssueCentricFreshness:
     freshness_source: str
     invalidation_status: str
     invalidation_reason: str
+    generation_id: str
+
+
+@dataclass(frozen=True)
+class IssueCentricGenerationLifecycle:
+    generation_lifecycle: str
+    generation_lifecycle_reason: str
+    generation_lifecycle_source: str
     generation_id: str
 
 
@@ -655,12 +666,12 @@ def resolve_issue_centric_runtime_snapshot(
     )
 
 
-def resolve_issue_centric_freshness(
+def resolve_issue_centric_generation_lifecycle(
     state: Mapping[str, Any],
     *,
     repo_root: Path,
     snapshot: IssueCentricRuntimeSnapshot | None = None,
-) -> IssueCentricFreshness | None:
+) -> IssueCentricGenerationLifecycle | None:
     if snapshot is None:
         snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=repo_root)
     if snapshot is None:
@@ -674,47 +685,137 @@ def resolve_issue_centric_freshness(
         target_issue=snapshot.target_issue,
         next_request_hint=snapshot.next_request_hint,
     )
+    if not generation_id:
+        return IssueCentricGenerationLifecycle(
+            generation_lifecycle="issue_centric_invalidated",
+            generation_lifecycle_reason="runtime_snapshot_generation_unresolved",
+            generation_lifecycle_source="runtime_snapshot_generation",
+            generation_id="",
+        )
+
     invalidated_generation_id = str(state.get("last_issue_centric_invalidated_generation_id", "")).strip()
-    invalidation_status = str(state.get("last_issue_centric_invalidation_status", "")).strip()
     invalidation_reason = str(state.get("last_issue_centric_invalidation_reason", "")).strip()
-    if generation_id and invalidated_generation_id and invalidated_generation_id == generation_id:
-        return IssueCentricFreshness(
-            freshness_status="issue_centric_invalidated",
-            freshness_reason=invalidation_reason or "issue_centric_snapshot_invalidated",
-            freshness_source="invalidation_state",
-            invalidation_status=invalidation_status or "issue_centric_invalidated",
-            invalidation_reason=invalidation_reason or "issue_centric_snapshot_invalidated",
+    if invalidated_generation_id and invalidated_generation_id == generation_id:
+        return IssueCentricGenerationLifecycle(
+            generation_lifecycle="issue_centric_invalidated",
+            generation_lifecycle_reason=invalidation_reason or "issue_centric_generation_invalidated",
+            generation_lifecycle_source="invalidation_state",
             generation_id=generation_id,
         )
 
     consumed_generation_id = str(state.get("last_issue_centric_consumed_generation_id", "")).strip()
-    if generation_id and consumed_generation_id and consumed_generation_id == generation_id:
-        return IssueCentricFreshness(
-            freshness_status="issue_centric_stale",
-            freshness_reason="snapshot_generation_consumed_by_next_request",
-            freshness_source="consumed_generation_state",
-            invalidation_status=invalidation_status,
-            invalidation_reason=invalidation_reason,
+    if consumed_generation_id and consumed_generation_id == generation_id:
+        return IssueCentricGenerationLifecycle(
+            generation_lifecycle="issue_centric_consumed",
+            generation_lifecycle_reason="chatgpt_reply_recovered_for_generation",
+            generation_lifecycle_source="reply_recovery_state",
             generation_id=generation_id,
         )
 
-    if not generation_id:
+    pending_generation_id = str(state.get("last_issue_centric_pending_generation_id", "")).strip()
+    if pending_generation_id:
+        if pending_generation_id != generation_id:
+            return IssueCentricGenerationLifecycle(
+                generation_lifecycle="issue_centric_invalidated",
+                generation_lifecycle_reason="pending_generation_mismatch",
+                generation_lifecycle_source="pending_request_state",
+                generation_id=generation_id,
+            )
+        if not (
+            str(state.get("pending_request_hash", "")).strip()
+            and str(state.get("pending_request_source", "")).strip()
+            and str(state.get("pending_request_log", "")).strip()
+        ):
+            return IssueCentricGenerationLifecycle(
+                generation_lifecycle="issue_centric_invalidated",
+                generation_lifecycle_reason="pending_generation_missing_pending_request",
+                generation_lifecycle_source="pending_request_state",
+                generation_id=generation_id,
+            )
+        return IssueCentricGenerationLifecycle(
+            generation_lifecycle="fresh_pending",
+            generation_lifecycle_reason="pending_request_bound_to_generation",
+            generation_lifecycle_source="pending_request_state",
+            generation_id=generation_id,
+        )
+
+    prepared_generation_id = str(state.get("last_issue_centric_prepared_generation_id", "")).strip()
+    if prepared_generation_id:
+        if prepared_generation_id != generation_id:
+            return IssueCentricGenerationLifecycle(
+                generation_lifecycle="issue_centric_invalidated",
+                generation_lifecycle_reason="prepared_generation_mismatch",
+                generation_lifecycle_source="prepared_request_state",
+                generation_id=generation_id,
+            )
+        if not (
+            str(state.get("prepared_request_hash", "")).strip()
+            and str(state.get("prepared_request_source", "")).strip()
+            and str(state.get("prepared_request_log", "")).strip()
+        ):
+            return IssueCentricGenerationLifecycle(
+                generation_lifecycle="issue_centric_invalidated",
+                generation_lifecycle_reason="prepared_generation_missing_prepared_request",
+                generation_lifecycle_source="prepared_request_state",
+                generation_id=generation_id,
+            )
+        return IssueCentricGenerationLifecycle(
+            generation_lifecycle="fresh_prepared",
+            generation_lifecycle_reason="prepared_request_bound_to_generation",
+            generation_lifecycle_source="prepared_request_state",
+            generation_id=generation_id,
+        )
+
+    return IssueCentricGenerationLifecycle(
+        generation_lifecycle="fresh_available",
+        generation_lifecycle_reason="latest_issue_centric_generation_available",
+        generation_lifecycle_source="runtime_snapshot_generation",
+        generation_id=generation_id,
+    )
+
+
+def resolve_issue_centric_freshness(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    snapshot: IssueCentricRuntimeSnapshot | None = None,
+) -> IssueCentricFreshness | None:
+    if snapshot is None:
+        snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=repo_root)
+    if snapshot is None:
+        return None
+
+    lifecycle = resolve_issue_centric_generation_lifecycle(state, repo_root=repo_root, snapshot=snapshot)
+    if lifecycle is None:
+        return None
+    invalidation_status = str(state.get("last_issue_centric_invalidation_status", "")).strip()
+    invalidation_reason = str(state.get("last_issue_centric_invalidation_reason", "")).strip()
+    if lifecycle.generation_lifecycle == "issue_centric_invalidated":
+        return IssueCentricFreshness(
+            freshness_status="issue_centric_invalidated",
+            freshness_reason=lifecycle.generation_lifecycle_reason,
+            freshness_source=lifecycle.generation_lifecycle_source,
+            invalidation_status=invalidation_status or "issue_centric_invalidated",
+            invalidation_reason=invalidation_reason or lifecycle.generation_lifecycle_reason,
+            generation_id=lifecycle.generation_id,
+        )
+    if lifecycle.generation_lifecycle == "issue_centric_consumed":
         return IssueCentricFreshness(
             freshness_status="issue_centric_stale",
-            freshness_reason="runtime_snapshot_generation_unresolved",
-            freshness_source="runtime_snapshot_generation",
+            freshness_reason=lifecycle.generation_lifecycle_reason,
+            freshness_source=lifecycle.generation_lifecycle_source,
             invalidation_status=invalidation_status,
             invalidation_reason=invalidation_reason,
-            generation_id="",
+            generation_id=lifecycle.generation_id,
         )
 
     return IssueCentricFreshness(
         freshness_status="issue_centric_fresh",
-        freshness_reason="issue_centric_snapshot_fresh",
-        freshness_source="runtime_snapshot_generation",
+        freshness_reason=lifecycle.generation_lifecycle_reason,
+        freshness_source=lifecycle.generation_lifecycle_source,
         invalidation_status=invalidation_status,
         invalidation_reason=invalidation_reason,
-        generation_id=generation_id,
+        generation_id=lifecycle.generation_id,
     )
 
 
@@ -732,6 +833,9 @@ def resolve_issue_centric_runtime_mode(
             runtime_mode="issue_centric_unavailable",
             runtime_mode_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
             runtime_mode_source="runtime_snapshot_exception",
+            generation_lifecycle="issue_centric_invalidated",
+            generation_lifecycle_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
+            generation_lifecycle_source="runtime_snapshot_exception",
             freshness_status="issue_centric_unavailable",
             freshness_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
             freshness_source="runtime_snapshot_exception",
@@ -758,6 +862,9 @@ def resolve_issue_centric_runtime_mode(
             runtime_mode="issue_centric_unavailable",
             runtime_mode_reason="runtime_snapshot_missing_or_unreadable",
             runtime_mode_source="runtime_snapshot_missing",
+            generation_lifecycle="issue_centric_invalidated",
+            generation_lifecycle_reason="runtime_snapshot_missing_or_unreadable",
+            generation_lifecycle_source="runtime_snapshot_missing",
             freshness_status="issue_centric_unavailable",
             freshness_reason="runtime_snapshot_missing_or_unreadable",
             freshness_source="runtime_snapshot_missing",
@@ -780,6 +887,7 @@ def resolve_issue_centric_runtime_mode(
             snapshot_path=str(state.get("last_issue_centric_runtime_snapshot", "")).strip(),
         )
 
+    lifecycle = resolve_issue_centric_generation_lifecycle(state, repo_root=repo_root, snapshot=snapshot)
     freshness = resolve_issue_centric_freshness(state, repo_root=repo_root, snapshot=snapshot)
     runtime_mode = "issue_centric_ready"
     runtime_mode_reason = "issue_centric_snapshot_ready"
@@ -811,6 +919,15 @@ def resolve_issue_centric_runtime_mode(
         runtime_mode=runtime_mode,
         runtime_mode_reason=runtime_mode_reason,
         runtime_mode_source=runtime_mode_source,
+        generation_lifecycle=(
+            lifecycle.generation_lifecycle if lifecycle is not None else "issue_centric_invalidated"
+        ),
+        generation_lifecycle_reason=(
+            lifecycle.generation_lifecycle_reason if lifecycle is not None else "runtime_snapshot_missing_or_unreadable"
+        ),
+        generation_lifecycle_source=(
+            lifecycle.generation_lifecycle_source if lifecycle is not None else "runtime_snapshot_missing"
+        ),
         freshness_status=(
             freshness.freshness_status if freshness is not None else "issue_centric_unavailable"
         ),
@@ -850,6 +967,9 @@ def render_issue_centric_next_request_section(
     runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
     runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
     runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
+    generation_lifecycle = str(getattr(context, "generation_lifecycle", "") or "").strip()
+    generation_lifecycle_reason = str(getattr(context, "generation_lifecycle_reason", "") or "").strip()
+    generation_lifecycle_source = str(getattr(context, "generation_lifecycle_source", "") or "").strip()
     freshness_status = str(getattr(context, "freshness_status", "") or "").strip()
     freshness_reason = str(getattr(context, "freshness_reason", "") or "").strip()
     freshness_source = str(getattr(context, "freshness_source", "") or "").strip()
@@ -882,6 +1002,12 @@ def render_issue_centric_next_request_section(
         lines.append(f"- runtime_mode_reason: {runtime_mode_reason}")
     if runtime_mode_source:
         lines.append(f"- runtime_mode_source: {runtime_mode_source}")
+    if generation_lifecycle:
+        lines.append(f"- generation_lifecycle: {generation_lifecycle}")
+    if generation_lifecycle_reason:
+        lines.append(f"- generation_lifecycle_reason: {generation_lifecycle_reason}")
+    if generation_lifecycle_source:
+        lines.append(f"- generation_lifecycle_source: {generation_lifecycle_source}")
     if freshness_status:
         lines.append(f"- freshness_status: {freshness_status}")
     if freshness_reason:
@@ -1098,6 +1224,7 @@ def _has_issue_centric_runtime_mode_candidate_state(state: Mapping[str, Any]) ->
         "last_issue_centric_runtime_snapshot",
         "last_issue_centric_snapshot_status",
         "last_issue_centric_runtime_generation_id",
+        "last_issue_centric_generation_lifecycle",
         "last_issue_centric_normalized_summary",
         "last_issue_centric_dispatch_result",
         "last_issue_centric_principal_issue",
@@ -1106,6 +1233,8 @@ def _has_issue_centric_runtime_mode_candidate_state(state: Mapping[str, Any]) ->
         "last_issue_centric_recovery_status",
         "last_issue_centric_freshness_status",
         "last_issue_centric_invalidation_status",
+        "last_issue_centric_prepared_generation_id",
+        "last_issue_centric_pending_generation_id",
     )
     return any(str(state.get(key, "")).strip() for key in keys) or _has_issue_centric_recovery_candidate_state(state)
 

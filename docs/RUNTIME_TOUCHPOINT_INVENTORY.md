@@ -249,6 +249,11 @@ During this inventory phase, all of the following stay unchanged:
     previously good issue-centric context stops counting as ready once the
     same generation has already driven one next-request preparation or has
     been explicitly invalidated by legacy fallback
+  - the current generation-lifecycle slice goes one step farther again: it
+    aligns that freshness logic with the existing request lifecycle so an
+    issue-centric generation is only `fresh_prepared` after request creation,
+    `fresh_pending` after send / pending request handoff, and `consumed` only
+    after reply recovery closes that request lifecycle
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

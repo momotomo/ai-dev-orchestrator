@@ -332,6 +332,150 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(runtime_mode.runtime_mode, "issue_centric_ready")
             self.assertEqual(runtime_mode.target_issue, "https://github.com/example/repo/issues/51")
 
+    def test_generation_lifecycle_is_fresh_prepared_when_prepared_request_matches_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "issue_create",
+                        "final_status": "completed",
+                        "principal_issue_kind": "primary_issue",
+                        "principal_issue_candidate": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "next_request_hint": "continue_on_primary_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "issue_create"}),
+                encoding="utf-8",
+            )
+            generation_id = f"summary:{summary_path}"
+
+            lifecycle = issue_centric_normalized_summary.resolve_issue_centric_generation_lifecycle(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_primary_issue_number": "51",
+                    "last_issue_centric_primary_issue_url": "https://github.com/example/repo/issues/51",
+                    "last_issue_centric_prepared_generation_id": generation_id,
+                    "prepared_request_hash": "abc",
+                    "prepared_request_source": "report:1",
+                    "prepared_request_log": "logs/request.md",
+                    "prepared_request_status": "prepared",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(lifecycle)
+            assert lifecycle is not None
+            self.assertEqual(lifecycle.generation_lifecycle, "fresh_prepared")
+            self.assertEqual(lifecycle.generation_id, generation_id)
+
+    def test_generation_lifecycle_is_fresh_pending_when_pending_request_matches_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "no_action_followup"}),
+                encoding="utf-8",
+            )
+            generation_id = f"summary:{summary_path}"
+
+            lifecycle = issue_centric_normalized_summary.resolve_issue_centric_generation_lifecycle(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                    "last_issue_centric_pending_generation_id": generation_id,
+                    "pending_request_hash": "abc",
+                    "pending_request_source": "report:1",
+                    "pending_request_log": "logs/request.md",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(lifecycle)
+            assert lifecycle is not None
+            self.assertEqual(lifecycle.generation_lifecycle, "fresh_pending")
+            self.assertEqual(lifecycle.generation_id, generation_id)
+
+    def test_generation_lifecycle_is_consumed_after_reply_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "20",
+                            "url": "https://github.com/example/repo/issues/20",
+                            "title": "",
+                            "ref": "#20",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "codex_run"}),
+                encoding="utf-8",
+            )
+            generation_id = f"summary:{summary_path}"
+
+            lifecycle = issue_centric_normalized_summary.resolve_issue_centric_generation_lifecycle(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                    "last_issue_centric_consumed_generation_id": generation_id,
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(lifecycle)
+            assert lifecycle is not None
+            self.assertEqual(lifecycle.generation_lifecycle, "issue_centric_consumed")
+            self.assertEqual(lifecycle.generation_lifecycle_reason, "chatgpt_reply_recovered_for_generation")
+
     def test_runtime_mode_is_degraded_when_resolution_is_unclear(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -415,7 +559,7 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             assert runtime_mode is not None
             self.assertEqual(runtime_mode.runtime_mode, "issue_centric_degraded_fallback")
             self.assertEqual(runtime_mode.freshness_status, "issue_centric_stale")
-            self.assertEqual(runtime_mode.runtime_mode_reason, "snapshot_generation_consumed_by_next_request")
+            self.assertEqual(runtime_mode.runtime_mode_reason, "chatgpt_reply_recovered_for_generation")
 
     def test_runtime_mode_is_degraded_when_snapshot_generation_was_invalidated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1070,27 +1214,20 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target"], "https://github.com/example/repo/issues/81")
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target_source"], "normalized_summary")
-            self.assertEqual(saved_states[-1]["last_issue_centric_route_selected"], "fallback_legacy")
-            self.assertEqual(
-                saved_states[-1]["last_issue_centric_route_fallback_reason"],
-                "snapshot_generation_consumed_by_next_request",
-            )
+            self.assertEqual(saved_states[-1]["last_issue_centric_route_selected"], "issue_centric")
+            self.assertEqual(saved_states[-1]["last_issue_centric_route_fallback_reason"], "")
             self.assertEqual(saved_states[-1]["last_issue_centric_recovery_status"], "issue_centric_recovered")
             self.assertEqual(
                 saved_states[-1]["last_issue_centric_recovery_source"],
                 "normalized_summary_then_state",
             )
-            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode"], "issue_centric_degraded_fallback")
-            self.assertEqual(
-                saved_states[-1]["last_issue_centric_runtime_mode_reason"],
-                "snapshot_generation_consumed_by_next_request",
-            )
-            self.assertEqual(saved_states[-1]["last_issue_centric_freshness_status"], "issue_centric_stale")
-            self.assertEqual(
-                saved_states[-1]["last_issue_centric_freshness_reason"],
-                "snapshot_generation_consumed_by_next_request",
-            )
-            self.assertTrue(str(saved_states[-1]["last_issue_centric_consumed_generation_id"]).startswith("summary:"))
+            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode"], "issue_centric_ready")
+            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode_reason"], "issue_centric_snapshot_ready")
+            self.assertEqual(saved_states[-1]["last_issue_centric_generation_lifecycle"], "fresh_pending")
+            self.assertEqual(saved_states[-1]["last_issue_centric_freshness_status"], "issue_centric_fresh")
+            self.assertEqual(saved_states[-1]["last_issue_centric_freshness_reason"], "pending_request_bound_to_generation")
+            self.assertTrue(str(saved_states[-1]["last_issue_centric_pending_generation_id"]).startswith("summary:"))
+            self.assertEqual(saved_states[-1]["last_issue_centric_consumed_generation_id"], "")
             self.assertTrue(str(saved_states[-1]["last_issue_centric_runtime_snapshot"]).endswith(".json"))
             self.assertEqual(saved_states[-1]["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
 

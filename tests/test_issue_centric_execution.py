@@ -108,6 +108,11 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "last_issue_centric_runtime_snapshot": "",
             "last_issue_centric_snapshot_status": "",
             "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
             "last_issue_centric_principal_issue": "",
             "last_issue_centric_principal_issue_kind": "",
             "last_issue_centric_next_request_hint": "",
@@ -380,6 +385,7 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_runtime_mode"], "issue_centric_ready")
             self.assertEqual(result.final_state["last_issue_centric_runtime_mode_reason"], "issue_centric_snapshot_ready")
             self.assertTrue(str(result.final_state["last_issue_centric_runtime_generation_id"]).startswith("summary:"))
+            self.assertEqual(result.final_state["last_issue_centric_generation_lifecycle"], "fresh_available")
             self.assertEqual(result.final_state["last_issue_centric_freshness_status"], "issue_centric_fresh")
 
     def test_dispatcher_runs_codex_followup_in_order(self) -> None:

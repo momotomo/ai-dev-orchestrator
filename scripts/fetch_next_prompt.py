@@ -73,6 +73,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     pending_request_hash = str(state.get("pending_request_hash", "")).strip()
     pending_request_source = str(state.get("pending_request_source", "")).strip()
     pending_request_signal = str(state.get("pending_request_signal", "")).strip()
+    pending_generation_id = str(state.get("last_issue_centric_pending_generation_id", "")).strip()
     request_text = read_pending_request_text(state)
     if not (pending_request_hash and pending_request_source and request_text):
         raise BridgeError(
@@ -138,6 +139,25 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         reply_hash = stable_text_hash(contract_decision.raw_segment.strip())
         mutable_state = clear_error_fields(dict(state))
         clear_pending_request_fields(mutable_state)
+        if pending_generation_id:
+            mutable_state.update(
+                {
+                    "last_issue_centric_generation_lifecycle": "issue_centric_consumed",
+                    "last_issue_centric_generation_lifecycle_reason": "chatgpt_reply_recovered_for_generation",
+                    "last_issue_centric_generation_lifecycle_source": "fetch_next_prompt",
+                    "last_issue_centric_pending_generation_id": "",
+                    "last_issue_centric_prepared_generation_id": "",
+                    "last_issue_centric_consumed_generation_id": pending_generation_id,
+                    "last_issue_centric_route_selected": "fallback_legacy",
+                    "last_issue_centric_route_fallback_reason": "chatgpt_reply_recovered_for_generation",
+                    "last_issue_centric_runtime_mode": "issue_centric_degraded_fallback",
+                    "last_issue_centric_runtime_mode_reason": "chatgpt_reply_recovered_for_generation",
+                    "last_issue_centric_runtime_mode_source": "fetch_next_prompt",
+                    "last_issue_centric_freshness_status": "issue_centric_stale",
+                    "last_issue_centric_freshness_reason": "chatgpt_reply_recovered_for_generation",
+                    "last_issue_centric_freshness_source": "reply_recovery_state",
+                }
+            )
         mutable_state.update(
             {
                 "mode": "awaiting_user",
@@ -175,6 +195,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_runtime_snapshot": "",
                 "last_issue_centric_snapshot_status": "",
                 "last_issue_centric_runtime_generation_id": "",
+                "last_issue_centric_generation_lifecycle": "",
+                "last_issue_centric_generation_lifecycle_reason": "",
+                "last_issue_centric_generation_lifecycle_source": "",
+                "last_issue_centric_prepared_generation_id": "",
+                "last_issue_centric_pending_generation_id": "",
                 "last_issue_centric_runtime_mode": "",
                 "last_issue_centric_runtime_mode_reason": "",
                 "last_issue_centric_runtime_mode_source": "",
@@ -296,6 +321,25 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     )
     mutable_state = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable_state)
+    if pending_generation_id:
+        mutable_state.update(
+            {
+                "last_issue_centric_generation_lifecycle": "issue_centric_consumed",
+                "last_issue_centric_generation_lifecycle_reason": "chatgpt_reply_recovered_for_generation",
+                "last_issue_centric_generation_lifecycle_source": "fetch_next_prompt",
+                "last_issue_centric_pending_generation_id": "",
+                "last_issue_centric_prepared_generation_id": "",
+                "last_issue_centric_consumed_generation_id": pending_generation_id,
+                "last_issue_centric_route_selected": "fallback_legacy",
+                "last_issue_centric_route_fallback_reason": "chatgpt_reply_recovered_for_generation",
+                "last_issue_centric_runtime_mode": "issue_centric_degraded_fallback",
+                "last_issue_centric_runtime_mode_reason": "chatgpt_reply_recovered_for_generation",
+                "last_issue_centric_runtime_mode_source": "fetch_next_prompt",
+                "last_issue_centric_freshness_status": "issue_centric_stale",
+                "last_issue_centric_freshness_reason": "chatgpt_reply_recovered_for_generation",
+                "last_issue_centric_freshness_source": "reply_recovery_state",
+            }
+        )
     mutable_state["last_processed_request_hash"] = pending_request_hash or str(state.get("last_processed_request_hash", "")).strip()
     mutable_state["last_processed_reply_hash"] = reply_hash
 

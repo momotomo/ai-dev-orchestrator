@@ -101,6 +101,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_runtime_snapshot": "",
     "last_issue_centric_snapshot_status": "",
     "last_issue_centric_runtime_generation_id": "",
+    "last_issue_centric_generation_lifecycle": "",
+    "last_issue_centric_generation_lifecycle_reason": "",
+    "last_issue_centric_generation_lifecycle_source": "",
+    "last_issue_centric_prepared_generation_id": "",
+    "last_issue_centric_pending_generation_id": "",
     "last_issue_centric_runtime_mode": "",
     "last_issue_centric_runtime_mode_reason": "",
     "last_issue_centric_runtime_mode_source": "",
@@ -1362,6 +1367,24 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(
             f"- last_issue_centric_runtime_generation_id: {state['last_issue_centric_runtime_generation_id']}"
         )
+    if state.get("last_issue_centric_generation_lifecycle"):
+        fields.append(f"- last_issue_centric_generation_lifecycle: {state['last_issue_centric_generation_lifecycle']}")
+    if state.get("last_issue_centric_generation_lifecycle_reason"):
+        fields.append(
+            f"- last_issue_centric_generation_lifecycle_reason: {state['last_issue_centric_generation_lifecycle_reason']}"
+        )
+    if state.get("last_issue_centric_generation_lifecycle_source"):
+        fields.append(
+            f"- last_issue_centric_generation_lifecycle_source: {state['last_issue_centric_generation_lifecycle_source']}"
+        )
+    if state.get("last_issue_centric_prepared_generation_id"):
+        fields.append(
+            f"- last_issue_centric_prepared_generation_id: {state['last_issue_centric_prepared_generation_id']}"
+        )
+    if state.get("last_issue_centric_pending_generation_id"):
+        fields.append(
+            f"- last_issue_centric_pending_generation_id: {state['last_issue_centric_pending_generation_id']}"
+        )
     if state.get("last_issue_centric_runtime_mode"):
         fields.append(f"- last_issue_centric_runtime_mode: {state['last_issue_centric_runtime_mode']}")
     if state.get("last_issue_centric_runtime_mode_reason"):
@@ -1810,6 +1833,7 @@ def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, 
     prepared_source = str(current_state.get("prepared_request_source", "")).strip()
     prepared_log = str(current_state.get("prepared_request_log", "")).strip()
     prepared_status = str(current_state.get("prepared_request_status", "")).strip()
+    prepared_generation_id = str(current_state.get("last_issue_centric_prepared_generation_id", "")).strip()
 
     if pending_source:
         return current_state, False
@@ -1831,6 +1855,20 @@ def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, 
             "pending_request_log": prepared_log,
         }
     )
+    if prepared_generation_id:
+        updated.update(
+            {
+                "last_issue_centric_generation_lifecycle": "fresh_pending",
+                "last_issue_centric_generation_lifecycle_reason": "prepared_request_recovered_as_pending",
+                "last_issue_centric_generation_lifecycle_source": "recover_prepared_request_state",
+                "last_issue_centric_pending_generation_id": prepared_generation_id,
+                "last_issue_centric_prepared_generation_id": "",
+                "last_issue_centric_freshness_status": "issue_centric_fresh",
+                "last_issue_centric_freshness_reason": "pending_request_bound_to_generation",
+                "last_issue_centric_freshness_source": "pending_request_state",
+                "last_issue_centric_consumed_generation_id": "",
+            }
+        )
     clear_prepared_request_fields(updated)
     save_state(updated)
     return updated, True
@@ -3295,6 +3333,9 @@ def build_issue_centric_request_status(
             "- issue_centric_runtime_mode: " + str(runtime_mode.runtime_mode).strip(),
             "- issue_centric_runtime_mode_reason: " + str(runtime_mode.runtime_mode_reason).strip(),
             "- issue_centric_runtime_mode_source: " + str(runtime_mode.runtime_mode_source).strip(),
+            "- issue_centric_generation_lifecycle: " + str(runtime_mode.generation_lifecycle).strip(),
+            "- issue_centric_generation_lifecycle_reason: " + str(runtime_mode.generation_lifecycle_reason).strip(),
+            "- issue_centric_generation_lifecycle_source: " + str(runtime_mode.generation_lifecycle_source).strip(),
             "- issue_centric_freshness_status: " + str(runtime_mode.freshness_status).strip(),
             "- issue_centric_freshness_reason: " + str(runtime_mode.freshness_reason).strip(),
             "- issue_centric_freshness_source: " + str(runtime_mode.freshness_source).strip(),
