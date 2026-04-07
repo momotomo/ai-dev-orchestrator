@@ -48,6 +48,9 @@ The current implementation boundary is:
 - implemented: narrow `issue_create + create_followup_issue` execution that
   creates the primary issue first, then creates one follow-up issue, and only
   then evaluates optional close
+- implemented: narrow `codex_run + create_followup_issue` execution that
+  completes trigger comment registration, Codex launch / continuation handoff,
+  and only then creates one follow-up issue
 - implemented: `scripts/issue_centric_execution.py` as the current execution
   dispatcher / orchestrator for the already-supported narrow execution matrix
 - not yet implemented: follow-up mutation for other actions or broader
@@ -61,6 +64,7 @@ The current dispatcher-owned execution matrix is:
 - `issue_create + create_followup_issue = true`
 - `issue_create + create_followup_issue = true + close_current_issue = true`
 - `codex_run`
+- `codex_run + create_followup_issue = true`
 - `human_review_needed`
 - `human_review_needed + close_current_issue = true`
 - `human_review_needed + create_followup_issue = true`
@@ -72,7 +76,7 @@ The current dispatcher-owned execution matrix is:
 The dispatcher still blocks these combinations on purpose:
 
 - `codex_run + close_current_issue = true`
-- `codex_run + create_followup_issue = true`
+- `codex_run + create_followup_issue = true + close_current_issue = true`
 - multi-flag combinations outside the narrow paths above
 
 ## Overall Assumptions
@@ -278,9 +282,11 @@ For the current bounded `create_followup_issue` slice:
 - execution is currently limited to
   `action = no_action + create_followup_issue = true`,
   `action = human_review_needed + create_followup_issue = true`, and
-  `action = issue_create + create_followup_issue = true`
-- `codex_run + create_followup_issue = true` and broader multi-flag
-  combinations outside those narrow paths remain blocked in this slice
+  `action = issue_create + create_followup_issue = true`, and
+  `action = codex_run + create_followup_issue = true`
+- `codex_run + create_followup_issue = true + close_current_issue = true`
+  and broader multi-flag combinations outside those narrow paths remain
+  blocked in this slice
 - the decoded follow-up body uses the same narrow `# Title` draft rule as
   `issue_create`
 - if `close_current_issue = true`, the bridge evaluates close only after the
@@ -334,15 +340,22 @@ For the current bounded `human_review_needed` slice:
 - `issue_create + create_followup_issue = true + close_current_issue = true`
   now uses a narrow
   `primary issue create -> follow-up issue create -> close` path
+- `codex_run + create_followup_issue = true` now uses a narrow
+  `trigger comment -> launch -> continuation -> follow-up issue create` path
 - if the review comment step is blocked or fails, the bridge does not attempt
   follow-up issue creation
 - if the primary issue create step is blocked or fails, the bridge does not
   attempt follow-up issue creation
+- if trigger comment registration, launch, or continuation handoff is blocked
+  or fails, the bridge does not attempt follow-up issue creation
 - if the primary issue create step succeeds but follow-up creation is partial,
   blocked, or failed, the primary issue remains created and the current issue
   stays open
 - if follow-up creation is partial, blocked, or failed after review succeeds,
   the review comment remains posted and the current issue stays open
+- if follow-up creation is partial, blocked, or failed after codex launch /
+  continuation succeed, the Codex execution remains launched and only the
+  follow-up path is recorded as incomplete
 - if close fails after review and follow-up succeed, those earlier successes
   remain in place and only the close step is recorded as failed
 - if close fails after primary and follow-up issue creation succeed, those

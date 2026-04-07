@@ -115,6 +115,11 @@ class PreparedIssueCentricDecision:
                 "The decoded issue body has been prepared for the future GitHub issue-create step."
             )
         if self.decision.action is IssueCentricAction.CODEX_RUN:
+            if self.decision.create_followup_issue:
+                return (
+                    "codex_run + create_followup_issue execution is available as a narrow slice. "
+                    "The decoded Codex body and follow-up issue body have been prepared for trigger comment, launch, continuation, and follow-up issue creation."
+                )
             return (
                 "codex_run execution is not implemented yet. "
                 "The decoded Codex body has been prepared for the future issue comment registration / Codex launch step."

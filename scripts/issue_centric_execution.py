@@ -55,9 +55,10 @@ def dispatch_issue_centric_execution(
         "no_action",
         "human_review_needed",
         "issue_create",
+        "codex_run",
     }:
         unsupported_reason = (
-            "create_followup_issue execution is currently implemented only for action=no_action, action=issue_create, and the narrow human_review_needed combo. "
+            "create_followup_issue execution is currently implemented only for action=no_action, action=issue_create, action=codex_run, and the narrow human_review_needed combo. "
             f"The combination action={decision_action} + create_followup_issue=true is blocked in this slice."
         )
         mutable_state.update(
@@ -84,7 +85,7 @@ def dispatch_issue_centric_execution(
             repo_relative=repo_relative,
             stop_message=(
                 "issue-centric contract reply を検出しましたが、create_followup_issue の narrow execution は action=no_action と human_review_needed review combo にだけ対応しています。"
-                " issue_create combo は narrow happy path のみ対応しています。"
+                " issue_create / codex_run combo は narrow happy path のみ対応しています。"
                 f" decision log: {source_decision_log}"
                 f" metadata: {source_metadata_log}"
                 + unsupported_reason
@@ -427,6 +428,70 @@ def dispatch_issue_centric_execution(
         )
 
     if decision_action == "codex_run":
+        if contract_decision.create_followup_issue and materialized.prepared.codex_body is None:
+            blocked_reason = (
+                "codex_run + create_followup_issue requires a prepared CHATGPT_CODEX_BODY artifact before trigger comment mutation can run."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_execution_status": "blocked_missing_codex_artifact",
+                    "last_issue_centric_stop_reason": blocked_reason,
+                    "chatgpt_decision_note": blocked_reason,
+                }
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="codex_trigger_comment",
+                    status="blocked_missing_codex_artifact",
+                    log_path="",
+                    note=blocked_reason,
+                )
+            )
+            return _finalize_dispatch(
+                matrix_path="blocked_codex_run_followup_missing_codex",
+                final_status="blocked",
+                steps=steps,
+                mutable_state=mutable_state,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                stop_message=(
+                    "issue-centric contract reply を検出しましたが、codex_run + create_followup_issue の narrow combo に必要な Codex artifact が不足しているため停止しました。"
+                    f" decision log: {source_decision_log}"
+                    f" metadata: {source_metadata_log}"
+                ),
+            )
+        if contract_decision.create_followup_issue and materialized.prepared.followup_issue_body is None:
+            blocked_reason = (
+                "codex_run + create_followup_issue requires a prepared CHATGPT_FOLLOWUP_ISSUE_BODY artifact before follow-up issue creation can run."
+            )
+            mutable_state.update(
+                {
+                    "last_issue_centric_followup_status": "blocked_missing_followup_artifact",
+                    "last_issue_centric_stop_reason": blocked_reason,
+                    "chatgpt_decision_note": blocked_reason,
+                }
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="followup_issue_create",
+                    status="blocked_missing_followup_artifact",
+                    log_path="",
+                    note=blocked_reason,
+                )
+            )
+            return _finalize_dispatch(
+                matrix_path="blocked_codex_run_followup_missing_followup",
+                final_status="blocked",
+                steps=steps,
+                mutable_state=mutable_state,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                stop_message=(
+                    "issue-centric contract reply を検出しましたが、codex_run + create_followup_issue の narrow combo に必要な follow-up artifact が不足しているため停止しました。"
+                    f" decision log: {source_decision_log}"
+                    f" metadata: {source_metadata_log}"
+                ),
+            )
         execution = execute_codex_run_action_fn(
             materialized.prepared,
             project_config=project_config,
@@ -473,7 +538,11 @@ def dispatch_issue_centric_execution(
                         else ""
                     )
                     + trigger_note
-                    + " issue-centric Codex launch はまだ進めませんでした。"
+                    + (
+                        " issue-centric Codex launch はまだ進めませんでした。"
+                        if not contract_decision.create_followup_issue
+                        else " issue-centric Codex launch とその後の follow-up issue create には進めませんでした。"
+                    )
                 ),
             )
 
@@ -542,19 +611,70 @@ def dispatch_issue_centric_execution(
                 note=launch_result.safe_stop_reason,
             )
         )
+        followup_note = ""
+        followup_execution = None
+        final_status = launch_result.status
+        post_followup_state = post_launch_state
+        if contract_decision.create_followup_issue and launch_result.status == "completed":
+            followup_execution = execute_followup_issue_action_fn(
+                materialized.prepared,
+                prior_state=post_launch_state,
+                project_config=project_config,
+                repo_path=repo_path,
+                source_decision_log=source_decision_log,
+                source_metadata_log=source_metadata_log,
+                source_artifact_path=source_artifact_path,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                allow_codex_run_combo=True,
+            )
+            _apply_followup_execution_state(
+                post_launch_state,
+                followup_execution=followup_execution,
+                repo_relative=repo_relative,
+            )
+            steps.append(
+                IssueCentricExecutionStep(
+                    name="followup_issue_create",
+                    status=followup_execution.status,
+                    log_path=repo_relative(followup_execution.execution_log_path),
+                    note=followup_execution.safe_stop_reason,
+                )
+            )
+            if followup_execution.created_issue is not None:
+                followup_note = (
+                    f" follow-up issue: #{followup_execution.created_issue.number} "
+                    f"{followup_execution.created_issue.url}"
+                )
+            if followup_execution.status != "completed":
+                final_status = "partial"
         trigger_note = ""
         if execution.created_comment is not None:
             trigger_note = f" trigger comment: {execution.created_comment.url}"
-        stop_label = (
-            "issue-centric contract reply を検出し、codex_run を既存 Codex launch 入口へ narrow 接続しました。"
-            if launch_result.status == "completed"
-            else "issue-centric contract reply を検出し、codex_run launch 後の continuation handoff で停止しました。"
-        )
+        if launch_result.status != "completed":
+            stop_label = "issue-centric contract reply を検出し、codex_run launch 後の continuation handoff で停止しました。"
+        elif contract_decision.create_followup_issue and followup_execution is not None:
+            if followup_execution.status == "completed":
+                stop_label = (
+                    "issue-centric contract reply を検出し、codex_run の trigger comment / launch / continuation と narrow follow-up issue create まで実行しました。"
+                )
+            else:
+                stop_label = (
+                    "issue-centric contract reply を検出し、codex_run の trigger comment / launch / continuation までは完了しましたが、その後の narrow follow-up issue create で停止しました。"
+                )
+        else:
+            stop_label = (
+                "issue-centric contract reply を検出し、codex_run を既存 Codex launch 入口へ narrow 接続しました。"
+            )
         return _finalize_dispatch(
-            matrix_path="codex_run_launch_and_continuation",
-            final_status=launch_result.status,
+            matrix_path=(
+                "codex_run_followup"
+                if contract_decision.create_followup_issue
+                else "codex_run_launch_and_continuation"
+            ),
+            final_status=final_status,
             steps=steps,
-            mutable_state=post_launch_state,
+            mutable_state=post_followup_state,
             log_writer=log_writer,
             repo_relative=repo_relative,
             stop_message=(
@@ -572,9 +692,14 @@ def dispatch_issue_centric_execution(
                 + f" launch: {repo_relative(launch_result.launch_log_path)}"
                 + f" continuation: {repo_relative(launch_result.continuation_log_path)}"
                 + trigger_note
+                + followup_note
                 + f" final mode: {launch_result.final_mode or 'unknown'}"
                 + f" continuation status: {launch_result.continuation_status}"
-                + " close_current_issue for codex_run / follow-up mutation / post-codex review automation はまだ未実装です。"
+                + (
+                    " close_current_issue for codex_run / post-codex review automation はまだ未実装です。"
+                    if contract_decision.create_followup_issue
+                    else " close_current_issue for codex_run / follow-up mutation / post-codex review automation はまだ未実装です。"
+                )
             ),
         )
 

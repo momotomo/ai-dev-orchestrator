@@ -383,6 +383,50 @@ class FollowupIssueExecutionTests(unittest.TestCase):
             self.assertEqual(result.close_policy, "after_issue_create_followup_success_only")
             self.assertEqual(result.created_issue.number, 76)
 
+    def test_followup_issue_can_run_for_codex_run_combo_when_opted_in(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue="#20",
+            close_current_issue=False,
+            create_followup_issue=True,
+            summary="Run codex and create follow-up.",
+            issue_body_base64=None,
+            codex_body_base64=b64("Implement the issue.\n"),
+            review_base64=None,
+            followup_issue_body_base64=b64("# Follow-up title\n\nBody paragraph.\n"),
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                allow_codex_run_combo=True,
+                issue_creator=lambda repository, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=77,
+                    url="https://github.com/example/repo/issues/77",
+                    title=title,
+                    repository=repository,
+                    node_id="ISSUE_node_77",
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.followup_status, "completed")
+            self.assertEqual(result.close_policy, "after_codex_followup_success_only")
+            self.assertEqual(result.created_issue.number, 77)
+
 
 class FetchNextPromptFollowupTests(unittest.TestCase):
     def test_fetch_executes_no_action_followup_then_close(self) -> None:
@@ -500,7 +544,7 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_created_issue_number"], "74")
             self.assertEqual(saved["last_issue_centric_close_status"], "closed")
 
-    def test_fetch_blocks_followup_for_unsupported_codex_combo(self) -> None:
+    def test_fetch_blocks_followup_for_codex_close_combo(self) -> None:
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "request-hash",
@@ -513,7 +557,7 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
         raw = build_raw_reply(
             action="codex_run",
             target_issue="#20",
-            close_current_issue=False,
+            close_current_issue=True,
             create_followup_issue=True,
             codex_text="Implement the issue.\n",
             followup_text="# Follow-up title\n\nBody\n",
@@ -533,15 +577,32 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "execute_close_current_issue",
+                    return_value=issue_centric_close_current_issue.IssueCloseExecutionResult(
+                        status="blocked",
+                        close_status="blocked",
+                        close_order="blocked_codex_run",
+                        resolved_issue=None,
+                        issue_before=None,
+                        issue_after=None,
+                        execution_log_path=temp_root / "close.json",
+                        safe_stop_reason="codex_run + close_current_issue is blocked in this slice.",
+                    ),
+                ) as close_mock,
+                patch.object(fetch_next_prompt, "execute_codex_run_action") as codex_mock,
             ):
                 with self.assertRaisesRegex(
                     BridgeStop,
-                    "action=no_action, action=issue_create, and the narrow human_review_needed combo",
+                    "codex_run \\+ close_current_issue はこの slice では安全に実行できない",
                 ):
                     fetch_next_prompt.run(dict(state), [])
 
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(codex_mock.call_count, 0)
             saved = saved_states[0]
-            self.assertEqual(saved["last_issue_centric_followup_status"], "blocked_unsupported_action_combo")
+            self.assertEqual(saved["last_issue_centric_close_status"], "blocked")
 
     def test_fetch_does_not_close_when_followup_is_blocked(self) -> None:
         state = {

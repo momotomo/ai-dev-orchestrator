@@ -18,8 +18,10 @@ import archive_codex_report  # noqa: E402
 import fetch_next_prompt  # noqa: E402
 import issue_centric_codex_launch  # noqa: E402
 import issue_centric_codex_run  # noqa: E402
+import issue_centric_followup_issue  # noqa: E402
 import issue_centric_contract  # noqa: E402
 import issue_centric_github  # noqa: E402
+import issue_centric_issue_create  # noqa: E402
 import issue_centric_transport  # noqa: E402
 from _bridge_common import BridgeError, BridgeStop  # noqa: E402
 
@@ -28,38 +30,62 @@ def b64(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def build_codex_decision(target_issue: str, body_text: str) -> issue_centric_contract.IssueCentricDecision:
+def build_codex_decision(
+    target_issue: str,
+    body_text: str,
+    *,
+    close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
+) -> issue_centric_contract.IssueCentricDecision:
     return issue_centric_contract.IssueCentricDecision(
         action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
         target_issue=target_issue,
-        close_current_issue=False,
-        create_followup_issue=False,
+        close_current_issue=close_current_issue,
+        create_followup_issue=create_followup_issue,
         summary="Run Codex for the target issue.",
         issue_body_base64=None,
         codex_body_base64=b64(body_text),
         review_base64=None,
-        followup_issue_body_base64=None,
+        followup_issue_body_base64=(b64(followup_text) if followup_text is not None else None),
         raw_json="{}",
         raw_segment="segment",
     )
 
 
-def build_codex_run_reply(target_issue: str, body_text: str) -> str:
-    return "\n".join(
+def build_codex_run_reply(
+    target_issue: str,
+    body_text: str,
+    *,
+    close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
+) -> str:
+    parts = [
+        "あなた:",
+        "request body",
+        "ChatGPT:",
+        issue_centric_contract.CODEX_BODY_START,
+        b64(body_text),
+        issue_centric_contract.CODEX_BODY_END,
+    ]
+    if followup_text is not None:
+        parts.extend(
+            [
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+                b64(followup_text),
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+            ]
+        )
+    parts.extend(
         [
-            "あなた:",
-            "request body",
-            "ChatGPT:",
-            issue_centric_contract.CODEX_BODY_START,
-            b64(body_text),
-            issue_centric_contract.CODEX_BODY_END,
             issue_centric_contract.DECISION_JSON_START,
             json.dumps(
                 {
                     "action": "codex_run",
                     "target_issue": target_issue,
-                    "close_current_issue": False,
-                    "create_followup_issue": False,
+                    "close_current_issue": close_current_issue,
+                    "create_followup_issue": create_followup_issue,
                     "summary": "Run Codex for the existing issue.",
                 },
                 ensure_ascii=True,
@@ -67,6 +93,7 @@ def build_codex_run_reply(target_issue: str, body_text: str) -> str:
             issue_centric_contract.DECISION_JSON_END,
         ]
     )
+    return "\n".join(parts)
 
 
 class TempLogWriter:
@@ -676,6 +703,154 @@ class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(BridgeError, "launch failed"):
                     fetch_next_prompt.run(dict(state), [])
+
+    def test_fetch_next_prompt_executes_codex_run_followup_combo(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#20",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_target_issue": "#20",
+        }
+        raw = build_codex_run_reply(
+            "#20",
+            "Run this body.\n",
+            create_followup_issue=True,
+            followup_text="# Follow-up issue\n\nFollow-up body.\n",
+        )
+        saved_states: list[dict[str, object]] = []
+
+        fake_result = issue_centric_codex_run.CodexRunExecutionResult(
+            status="completed",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            created_comment=issue_centric_github.CreatedGitHubComment(
+                comment_id=801,
+                url="https://github.com/example/repo/issues/20#issuecomment-801",
+                body="Run this body.\n",
+                repository="example/repo",
+                issue_number=20,
+            ),
+            payload=issue_centric_codex_run.CodexRunExecutionPayload(
+                repo="/tmp/repo",
+                target_issue="https://github.com/example/repo/issues/20",
+                request="Run this body.\n",
+                trigger_comment="https://github.com/example/repo/issues/20#issuecomment-801",
+            ),
+            payload_log_path=REPO_ROOT / "logs" / "payload.json",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            launch_status="not_implemented",
+            launch_note="Not implemented.",
+            safe_stop_reason="codex_run completed through trigger comment creation.",
+        )
+        fake_launch_result = issue_centric_codex_launch.IssueCentricCodexLaunchResult(
+            status="completed",
+            launch_status="launched",
+            launch_entrypoint="launch_codex_once.run",
+            prompt_path=REPO_ROOT / "bridge" / "inbox" / "codex_prompt.md",
+            prompt_log_path=REPO_ROOT / "logs" / "issue_centric_codex_prompt.md",
+            launch_log_path=REPO_ROOT / "logs" / "issue_centric_launch.json",
+            continuation_status="delegated_to_existing_codex_wait",
+            continuation_log_path=REPO_ROOT / "logs" / "issue_centric_continuation.json",
+            report_status="waiting_for_report",
+            report_file="",
+            final_mode="codex_running",
+            safe_stop_reason="codex_run trigger comment and launch completed.",
+        )
+        fake_followup_result = issue_centric_followup_issue.FollowupIssueExecutionResult(
+            status="completed",
+            followup_status="completed",
+            parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Follow-up issue",
+                body="Follow-up body.\n",
+                title_line="# Follow-up issue",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+            ),
+            created_issue=issue_centric_github.CreatedGitHubIssue(
+                number=82,
+                url="https://github.com/example/repo/issues/82",
+                title="Follow-up issue",
+                repository="example/repo",
+                node_id="ISSUE_node_82",
+            ),
+            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup-inner.json",
+            execution_log_path=REPO_ROOT / "logs" / "followup-execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Follow-up synced.",
+            project_item_id="ITEM_82",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            close_policy="after_codex_followup_success_only",
+            safe_stop_reason="follow-up issue create completed after codex launch.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            persisted_after_launch = {
+                **state,
+                "mode": "codex_running",
+                "last_issue_centric_execution_status": "completed",
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_trigger_comment_id": "801",
+                "last_issue_centric_trigger_comment_url": "https://github.com/example/repo/issues/20#issuecomment-801",
+                "last_issue_centric_execution_payload_log": "logs/payload.json",
+            }
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_state", return_value=dict(persisted_after_launch)),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={
+                        "github_repository": "example/repo",
+                        "github_project_url": "https://github.com/users/example/projects/1",
+                        "github_project_state_field_name": "State",
+                        "github_project_default_issue_state": "ready",
+                        "worker_repo_path": ".",
+                    },
+                ),
+                patch.object(fetch_next_prompt, "execute_codex_run_action", return_value=fake_result) as exec_mock,
+                patch.object(fetch_next_prompt, "launch_issue_centric_codex_run", return_value=fake_launch_result) as launch_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=fake_followup_result) as followup_mock,
+            ):
+                with self.assertRaisesRegex(
+                    BridgeStop,
+                    "trigger comment / launch / continuation と narrow follow-up issue create",
+                ):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(exec_mock.call_count, 1)
+            self.assertEqual(launch_mock.call_count, 1)
+            self.assertEqual(followup_mock.call_count, 1)
+            saved = saved_states[-1]
+            self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
+            self.assertEqual(saved["last_issue_centric_continuation_status"], "delegated_to_existing_codex_wait")
+            self.assertEqual(saved["last_issue_centric_followup_status"], "completed")
+            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "82")
 
 
 class IssueCentricContinuationArchiveTests(unittest.TestCase):

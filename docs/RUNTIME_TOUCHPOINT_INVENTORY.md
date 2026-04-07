@@ -192,6 +192,11 @@ During this inventory phase, all of the following stay unchanged:
     path, reusing the same Project placement / `State` sync rules for both
     issues; broader `codex_run + create_followup_issue` automation remains
     out of scope
+  - the current codex-run-followup combo slice goes one step farther again:
+    it wires `codex_run + create_followup_issue` to a narrow
+    `trigger comment -> Codex launch -> continuation handoff -> follow-up
+    issue create` path, while keeping
+    `codex_run + create_followup_issue + close_current_issue` out of scope
   - the current dispatcher slice goes one step farther again: it moves the
     already-implemented issue-centric execution matrix out of
     `fetch_next_prompt.py` and into `scripts/issue_centric_execution.py`,
