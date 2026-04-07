@@ -68,6 +68,10 @@ The current implementation boundary is:
 - implemented: narrow next-request target resolver that uses the normalized
   summary to choose the next ChatGPT `target_issue` context before falling
   back to older state-based hints
+- implemented: narrow route-selection layer that prefers the issue-centric
+  normalized summary / resolver result for the next ChatGPT request only when
+  the summary is coherent, the resolved `target_issue` is stable, and the
+  latest issue-centric execution did not end in fatal failure
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -445,6 +449,15 @@ For the current dispatcher / orchestrator boundary:
     to older state-based issue hints
   - missing or stale summary data does not block the old report-based request
     path
+- the next-request route selector now sits one layer above that resolver:
+  - issue-centric is preferred only when normalized summary, resolver output,
+    and state agree on one `target_issue`
+  - `issue_resolution_unclear`, stale / inconsistent summary data, resolver
+    fallback, or fatal execution failure all force legacy fallback
+  - request builders consume the selector result instead of deciding
+    issue-centric preference themselves
+  - operator-facing status may show only a thin
+    `issue_centric` / `fallback_legacy` route note until a later full cutover
 
 ## Bridge To Codex Contract
 
@@ -532,8 +545,9 @@ summary / hint layer and the existing request builder appends that layer to
 shape or introduce a new global state machine.
 The next-request builder may now also render a narrow
 `issue_centric_next_request` section with `repo`, resolved `target_issue`,
-resolution source, and `next_request_hint`, but that still sits on top of the
-existing report-based request format rather than replacing it.
+resolution source, route selection, fallback reason, and
+`next_request_hint`, but that still sits on top of the existing report-based
+request format rather than replacing it.
 
 ## State Model
 

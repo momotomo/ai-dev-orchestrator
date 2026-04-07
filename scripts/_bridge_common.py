@@ -16,10 +16,12 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from issue_centric_normalized_summary import (
     IssueCentricNextRequestContext,
+    IssueCentricRouteSelection,
     load_issue_centric_normalized_summary,
     render_issue_centric_next_request_section,
     render_issue_centric_summary_for_request,
     resolve_issue_centric_next_request_context,
+    select_issue_centric_next_request_route,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -88,6 +90,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_next_request_target": "",
     "last_issue_centric_next_request_target_source": "",
     "last_issue_centric_next_request_fallback_reason": "",
+    "last_issue_centric_route_selected": "",
+    "last_issue_centric_route_fallback_reason": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1316,6 +1320,12 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
     if state.get("last_issue_centric_next_request_fallback_reason"):
         fields.append(
             f"- last_issue_centric_next_request_fallback_reason: {state['last_issue_centric_next_request_fallback_reason']}"
+        )
+    if state.get("last_issue_centric_route_selected"):
+        fields.append(f"- last_issue_centric_route_selected: {state['last_issue_centric_route_selected']}")
+    if state.get("last_issue_centric_route_fallback_reason"):
+        fields.append(
+            f"- last_issue_centric_route_fallback_reason: {state['last_issue_centric_route_fallback_reason']}"
         )
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
@@ -3127,7 +3137,7 @@ def build_chatgpt_handoff_request(
     )
     next_request_section = issue_centric_next_request_section
     if next_request_section is None:
-        _, next_request_section = prepare_issue_centric_next_request_context(state)
+        _, next_request_section = prepare_issue_centric_next_request_route_selection(state)
     return (
         "次チャットへそのまま貼る完成済みの最初のメッセージだけを書いてください。\n"
         "これは要約メモではありません。新しいチャットの最初の 1 通として、そのまま送れる本文だけを返してください。\n"
@@ -3198,7 +3208,7 @@ def build_chatgpt_request(
 
     next_request_section = issue_centric_next_request_section
     if next_request_section is None:
-        _, next_request_section = prepare_issue_centric_next_request_context(state)
+        _, next_request_section = prepare_issue_centric_next_request_route_selection(state)
     values = {
         "CURRENT_STATUS": current_status or build_issue_centric_request_status(state),
         "LAST_REPORT": compact_last_report_text(last_report or read_last_report_text(state)),
@@ -3228,8 +3238,30 @@ def build_issue_centric_request_status(
 def prepare_issue_centric_next_request_context(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricNextRequestContext | None, str]:
-    context = resolve_issue_centric_next_request_context(state, repo_root=ROOT_DIR)
+    selection, section = prepare_issue_centric_next_request_route_selection(state)
+    if selection is None:
+        return None, section
+    return (
+        IssueCentricNextRequestContext(
+            target_issue=selection.target_issue,
+            target_issue_source=selection.target_issue_source,
+            next_request_hint=selection.next_request_hint,
+            principal_issue_kind=selection.principal_issue_kind,
+            used_normalized_summary=selection.used_normalized_summary,
+            fallback_reason=selection.fallback_reason,
+            summary_path=selection.summary_path,
+        ),
+        section,
+    )
+
+
+def prepare_issue_centric_next_request_route_selection(
+    state: Mapping[str, Any],
+) -> tuple[IssueCentricRouteSelection | None, str]:
     config = load_project_config()
     repo_label = str(config.get("github_repository", "")).strip() or str(project_repo_path(config))
-    section = render_issue_centric_next_request_section(context, repo_label=repo_label)
-    return context, section
+    selection = select_issue_centric_next_request_route(state, repo_root=ROOT_DIR)
+    if not selection.target_issue and not selection.summary_path and not selection.fallback_reason:
+        return None, ""
+    section = render_issue_centric_next_request_section(selection, repo_label=repo_label)
+    return selection, section

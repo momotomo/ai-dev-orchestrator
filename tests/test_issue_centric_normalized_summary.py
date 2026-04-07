@@ -181,8 +181,64 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertIn("issue_centric_next_request_hint: continue_on_followup_issue", request)
             self.assertIn("issue_centric_principal_issue: #81 https://github.com/example/repo/issues/81 (Follow-up issue)", request)
             self.assertIn("## issue_centric_next_request", request)
+            self.assertIn("- next_request_route: issue_centric", request)
             self.assertIn("- target_issue: https://github.com/example/repo/issues/81", request)
             self.assertIn("- target_issue_source: normalized_summary", request)
+
+    def test_route_selector_prefers_issue_centric_when_summary_is_consistent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            selection = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertEqual(selection.route_selected, "issue_centric")
+            self.assertEqual(selection.target_issue, "https://github.com/example/repo/issues/81")
+            self.assertEqual(selection.target_issue_source, "normalized_summary")
+            self.assertEqual(selection.fallback_reason, "")
+
+    def test_route_selector_falls_back_when_summary_is_missing(self) -> None:
+        selection = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+            {
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            },
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertEqual(selection.route_selected, "fallback_legacy")
+        self.assertEqual(selection.target_issue, "https://github.com/example/repo/issues/20")
+        self.assertEqual(selection.fallback_reason, "normalized_summary_missing")
 
     def test_resolver_falls_back_to_existing_state_when_summary_is_missing(self) -> None:
         context = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
@@ -259,6 +315,56 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(context.target_issue_source, "existing_state_fallback")
             self.assertEqual(context.fallback_reason, "normalized_summary_inconsistent_with_state")
 
+    def test_route_selector_falls_back_when_summary_conflicts_with_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "88",
+                            "url": "https://github.com/example/repo/issues/88",
+                            "title": "Conflicting issue",
+                            "ref": "#88",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            selection = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertEqual(selection.route_selected, "fallback_legacy")
+            self.assertEqual(selection.target_issue, "https://github.com/example/repo/issues/81")
+            self.assertEqual(selection.fallback_reason, "normalized_summary_inconsistent_with_state")
+
+    def test_route_selector_falls_back_when_resolver_raises(self) -> None:
+        with patch.object(
+            issue_centric_normalized_summary,
+            "resolve_issue_centric_next_request_context",
+            side_effect=RuntimeError("boom"),
+        ):
+            selection = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+                {},
+                repo_root=REPO_ROOT,
+            )
+
+        self.assertEqual(selection.route_selected, "fallback_legacy")
+        self.assertEqual(selection.target_issue_source, "resolver_exception")
+        self.assertEqual(selection.fallback_reason, "resolver_error:RuntimeError")
+
     def test_handoff_builder_uses_summary_based_target_issue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -290,6 +396,7 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             )
 
             self.assertIn("## issue_centric_next_request", handoff)
+            self.assertIn("- next_request_route: issue_centric", handoff)
             self.assertIn("- target_issue: https://github.com/example/repo/issues/51", handoff)
             self.assertIn("- next_request_hint: continue_on_primary_issue", handoff)
 
@@ -345,6 +452,8 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target"], "https://github.com/example/repo/issues/81")
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target_source"], "normalized_summary")
+            self.assertEqual(saved_states[-1]["last_issue_centric_route_selected"], "issue_centric")
+            self.assertEqual(saved_states[-1]["last_issue_centric_route_fallback_reason"], "")
 
 
 if __name__ == "__main__":

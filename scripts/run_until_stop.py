@@ -424,16 +424,43 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         return "report はそろっているので、archive と次 request へ進めるため再実行してください。"
     if action == "request_prompt_from_report":
         if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
-            return (
+            base = (
                 "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
                 " project ページの composer と送信可否を確認したまま再実行してください。"
             )
-        return "Safari の current tab を対象チャットに合わせたまま再実行してください。"
+            route_note = issue_centric_route_note(final_state)
+            return f"{base}{route_note}"
+        base = "Safari の current tab を対象チャットに合わせたまま再実行してください。"
+        route_note = issue_centric_route_note(final_state)
+        return f"{base}{route_note}"
     if action == "completed":
         return "追加の操作は不要です。"
     if action == "no_action":
         return "summary と doctor を確認し、必要なら原因を解消してから再開してください。"
     return "summary と doctor を確認してから再実行してください。"
+
+
+def issue_centric_route_note(final_state: dict[str, Any]) -> str:
+    route_selected = str(final_state.get("last_issue_centric_route_selected", "")).strip()
+    target_issue = str(final_state.get("last_issue_centric_next_request_target", "")).strip()
+    fallback_reason = (
+        str(final_state.get("last_issue_centric_route_fallback_reason", "")).strip()
+        or str(final_state.get("last_issue_centric_next_request_fallback_reason", "")).strip()
+    )
+    if route_selected == "issue_centric" and target_issue:
+        return f" 次回 request は issue-centric route を優先し、{target_issue} を target_issue として扱います。"
+    if route_selected == "fallback_legacy":
+        if target_issue:
+            return (
+                " issue-centric route は今回使わず、legacy fallback で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {fallback_reason or 'route selection fallback'}."
+            )
+        return (
+            " issue-centric route は今回使わず、legacy fallback で続行します。"
+            f" 理由: {fallback_reason or 'route selection fallback'}."
+        )
+    return ""
 
 
 def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None:

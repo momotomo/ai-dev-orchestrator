@@ -167,6 +167,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_next_request_target": "",
                 "last_issue_centric_next_request_target_source": "",
                 "last_issue_centric_next_request_fallback_reason": "",
+                "last_issue_centric_route_selected": "",
+                "last_issue_centric_route_fallback_reason": "",
                 "last_issue_centric_artifact_kind": (
                     materialized.prepared.primary_body.kind.value
                     if materialized.prepared.primary_body is not None

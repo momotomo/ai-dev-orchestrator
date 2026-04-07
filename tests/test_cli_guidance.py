@@ -228,6 +228,31 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("再送せず", note)
         self.assertIn("reply", note)
 
+    def test_request_prompt_from_report_note_mentions_issue_centric_route(self) -> None:
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_route_selected": "issue_centric",
+                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/81",
+            }
+        )
+        self.assertIn("issue-centric route", note)
+        self.assertIn("https://github.com/example/repo/issues/81", note)
+
+    def test_request_prompt_from_report_note_mentions_fallback_route(self) -> None:
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_route_selected": "fallback_legacy",
+                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_route_fallback_reason": "normalized_summary_missing",
+            }
+        )
+        self.assertIn("legacy fallback", note)
+        self.assertIn("normalized_summary_missing", note)
+
     def test_submitted_unconfirmed_recommends_resume_not_clear_error(self) -> None:
         args = run_until_stop.parse_args(
             [

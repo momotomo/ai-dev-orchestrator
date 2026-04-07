@@ -22,6 +22,18 @@ class IssueCentricNextRequestContext:
     summary_path: str
 
 
+@dataclass(frozen=True)
+class IssueCentricRouteSelection:
+    route_selected: str
+    target_issue: str
+    target_issue_source: str
+    next_request_hint: str
+    principal_issue_kind: str
+    used_normalized_summary: bool
+    fallback_reason: str
+    summary_path: str
+
+
 def build_issue_centric_normalized_summary(
     *,
     matrix_path: str,
@@ -206,26 +218,99 @@ def resolve_issue_centric_next_request_context(
     return None
 
 
+def select_issue_centric_next_request_route(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> IssueCentricRouteSelection:
+    summary_path = str(state.get("last_issue_centric_normalized_summary", "")).strip()
+    summary = load_issue_centric_normalized_summary(state, repo_root=repo_root)
+    try:
+        context = resolve_issue_centric_next_request_context(state, repo_root=repo_root)
+    except Exception as exc:
+        return IssueCentricRouteSelection(
+            route_selected="fallback_legacy",
+            target_issue="",
+            target_issue_source="resolver_exception",
+            next_request_hint="issue_resolution_unclear",
+            principal_issue_kind="unresolved",
+            used_normalized_summary=False,
+            fallback_reason=f"resolver_error:{exc.__class__.__name__}",
+            summary_path=summary_path,
+        )
+
+    if context is None:
+        return IssueCentricRouteSelection(
+            route_selected="fallback_legacy",
+            target_issue="",
+            target_issue_source="legacy_unresolved",
+            next_request_hint="issue_resolution_unclear",
+            principal_issue_kind="unresolved",
+            used_normalized_summary=False,
+            fallback_reason=_fallback_reason_for_summary(summary, summary_path)
+            or "legacy_resolver_required",
+            summary_path=summary_path,
+        )
+
+    if _should_prefer_issue_centric_route(summary, context):
+        return IssueCentricRouteSelection(
+            route_selected="issue_centric",
+            target_issue=context.target_issue,
+            target_issue_source=context.target_issue_source,
+            next_request_hint=context.next_request_hint,
+            principal_issue_kind=context.principal_issue_kind,
+            used_normalized_summary=context.used_normalized_summary,
+            fallback_reason="",
+            summary_path=context.summary_path,
+        )
+
+    return IssueCentricRouteSelection(
+        route_selected="fallback_legacy",
+        target_issue=context.target_issue,
+        target_issue_source=context.target_issue_source,
+        next_request_hint=context.next_request_hint,
+        principal_issue_kind=context.principal_issue_kind,
+        used_normalized_summary=context.used_normalized_summary,
+        fallback_reason=context.fallback_reason
+        or _fallback_reason_for_summary(summary, summary_path)
+        or "legacy_resolver_required",
+        summary_path=context.summary_path,
+    )
+
+
 def render_issue_centric_next_request_section(
-    context: IssueCentricNextRequestContext | None,
+    context: IssueCentricNextRequestContext | IssueCentricRouteSelection | None,
     *,
     repo_label: str,
 ) -> str:
     if context is None:
         return ""
+    route_selected = str(getattr(context, "route_selected", "") or "").strip()
+    target_issue = str(getattr(context, "target_issue", "") or "").strip()
+    target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
+    principal_issue_kind = str(getattr(context, "principal_issue_kind", "") or "").strip()
+    next_request_hint = str(getattr(context, "next_request_hint", "") or "").strip()
+    summary_path = str(getattr(context, "summary_path", "") or "").strip()
+    fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
     lines = [
         "## issue_centric_next_request",
         "",
         f"- repo: {repo_label}",
-        f"- target_issue: {context.target_issue}",
-        f"- target_issue_source: {context.target_issue_source}",
-        f"- principal_issue_kind: {context.principal_issue_kind}",
-        f"- next_request_hint: {context.next_request_hint}",
     ]
-    if context.summary_path:
-        lines.append(f"- normalized_summary: {context.summary_path}")
-    if context.fallback_reason:
-        lines.append(f"- fallback_reason: {context.fallback_reason}")
+    if route_selected:
+        lines.append(f"- next_request_route: {route_selected}")
+    if target_issue:
+        lines.append(f"- target_issue: {target_issue}")
+    if target_issue_source:
+        lines.append(f"- target_issue_source: {target_issue_source}")
+    if principal_issue_kind:
+        lines.append(f"- principal_issue_kind: {principal_issue_kind}")
+    if next_request_hint:
+        lines.append(f"- next_request_hint: {next_request_hint}")
+    if summary_path:
+        lines.append(f"- normalized_summary: {summary_path}")
+    if fallback_reason:
+        lines.append(f"- fallback_reason: {fallback_reason}")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -380,7 +465,26 @@ def _fallback_reason_for_summary(summary: Mapping[str, Any] | None, summary_path
         return "normalized_summary_missing_or_unreadable" if summary_path else "normalized_summary_missing"
     if str(summary.get("next_request_hint", "")).strip() == "issue_resolution_unclear":
         return "normalized_summary_requested_fallback"
+    if str(summary.get("final_status", "")).strip() == "failed":
+        return "normalized_summary_failed_execution"
     return "normalized_summary_inconsistent_with_state"
+
+
+def _should_prefer_issue_centric_route(
+    summary: Mapping[str, Any] | None,
+    context: IssueCentricNextRequestContext,
+) -> bool:
+    if summary is None:
+        return False
+    if context.target_issue_source != "normalized_summary":
+        return False
+    if context.fallback_reason:
+        return False
+    if context.next_request_hint == "issue_resolution_unclear":
+        return False
+    if str(summary.get("final_status", "")).strip() == "failed":
+        return False
+    return True
 
 
 def _summary_matches_state(summary: Mapping[str, Any], state: Mapping[str, Any]) -> bool:

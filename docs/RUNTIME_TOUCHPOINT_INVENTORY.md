@@ -223,6 +223,11 @@ During this inventory phase, all of the following stay unchanged:
     lets the report-based request builders prefer the normalized summary when
     resolving the next `target_issue`, while still falling back to older
     state-based hints if the summary is missing, stale, or unclear
+  - the current route-selection slice goes one step farther again: it treats
+    that normalized-summary resolver as the preferred next-request route only
+    when summary, resolver, and state are coherent, and otherwise keeps the
+    old report-based builder path as an explicit legacy fallback instead of
+    making each builder guess independently
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A
