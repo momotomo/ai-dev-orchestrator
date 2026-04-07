@@ -9,7 +9,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_issue_centric_preferred_loop_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, load_browser_config, load_project_config, present_bridge_status, print_project_config_warnings, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_issue_centric_route_choice, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -131,12 +131,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         status = present_bridge_status(state)
         print(f"{status.label}です。未退避 report を先に archive します。")
         return archive_codex_report.run(dict(state))
-    preferred_action, preferred_reason = resolve_issue_centric_preferred_loop_action(state)
+    route_choice = resolve_issue_centric_route_choice(state)
+    preferred_action = route_choice.preferred_loop_action
+    preferred_reason = route_choice.preferred_loop_reason
 
     if preferred_action == "request_next_prompt":
         status = present_bridge_status(state)
         print(
-            f"{status.label}です。issue-centric prepared request を再生成せず、そのまま送信します。"
+            f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
             f" lifecycle={preferred_reason or 'issue_centric_fresh_prepared'}"
         )
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
@@ -144,7 +146,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if preferred_action == "request_prompt_from_report":
         status = present_bridge_status(state)
         print(
-            f"{status.label}です。issue-centric prepared request を再生成せず、そのまま送信します。"
+            f"{status.label}です。issue-centric preferred route で prepared request を再生成せず、そのまま送信します。"
             f" lifecycle={preferred_reason or 'issue_centric_fresh_prepared'}"
         )
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
@@ -152,7 +154,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if preferred_action == "fetch_next_prompt":
         status = present_bridge_status(state)
         print(
-            f"{status.label}です。issue-centric pending generation の reply 回収を優先します。"
+            f"{status.label}です。issue-centric preferred route で pending generation の reply 回収を優先します。"
             f" lifecycle={preferred_reason or 'issue_centric_fresh_pending'}"
         )
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
@@ -167,6 +169,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
         status = present_bridge_status(state)
+        if route_choice.route_selected == "fallback_legacy":
+            print(
+                f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
+                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
+            )
+            return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
         print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
@@ -203,10 +211,18 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         status = present_bridge_status(state)
-        if str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
+        if route_choice.route_selected == "issue_centric":
+            print(
+                f"{status.label}です。issue-centric preferred route で、次の ChatGPT request を準備して送ります。"
+                f" target_issue={route_choice.target_issue or 'unresolved'}."
+            )
+        elif str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
             print(f"{status.label}です。次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
         else:
-            print(f"{status.label}です。完了報告をもとに、同じチャットへ次フェーズ要求を送ります。")
+            print(
+                f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で同じチャットへ次フェーズ要求を送ります。"
+                f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
+            )
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
 
     status = present_bridge_status(state)

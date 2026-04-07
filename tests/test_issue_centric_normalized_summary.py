@@ -646,6 +646,91 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
         self.assertEqual(runtime_mode.runtime_mode, "issue_centric_unavailable")
         self.assertEqual(runtime_mode.runtime_mode_reason, "runtime_snapshot_missing_or_unreadable")
 
+    def test_route_choice_prefers_issue_centric_when_runtime_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "issue_create",
+                        "final_status": "completed",
+                        "principal_issue_kind": "primary_issue",
+                        "principal_issue_candidate": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "next_request_hint": "continue_on_primary_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "issue_create"}),
+                encoding="utf-8",
+            )
+
+            choice = _bridge_common.resolve_issue_centric_route_choice(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_primary_issue_number": "51",
+                    "last_issue_centric_primary_issue_url": "https://github.com/example/repo/issues/51",
+                }
+            )
+
+            self.assertEqual(choice.route_selected, "issue_centric")
+            self.assertEqual(choice.target_issue, "https://github.com/example/repo/issues/51")
+            self.assertEqual(choice.preferred_loop_action, "")
+
+    def test_route_choice_falls_back_when_issue_centric_generation_is_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "human_review_needed",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "20",
+                            "url": "https://github.com/example/repo/issues/20",
+                            "title": "",
+                            "ref": "#20",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "human_review_needed"}),
+                encoding="utf-8",
+            )
+
+            choice = _bridge_common.resolve_issue_centric_route_choice(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                    "last_issue_centric_invalidated_generation_id": f"summary:{summary_path}",
+                    "last_issue_centric_invalidation_status": "issue_centric_invalidated",
+                    "last_issue_centric_invalidation_reason": "legacy_fallback_selected",
+                }
+            )
+
+            self.assertEqual(choice.route_selected, "fallback_legacy")
+            self.assertEqual(choice.route_reason, "legacy_fallback_selected")
+
     def test_state_bridge_marks_prepared_generation_as_send_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

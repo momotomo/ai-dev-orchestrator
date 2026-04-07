@@ -266,6 +266,11 @@ During this inventory phase, all of the following stay unchanged:
     `last_issue_centric_wait_kind`) so `state.json`, CLI/operator wording,
     and request-side summaries can describe prepared / pending / consumed /
     invalidated states without a full state-machine rewrite
+  - the current route-role normalization slice goes one step farther again:
+    it keeps the legacy request-centric path in place, but now treats it as
+    an explicit fallback path for degraded / unavailable / invalidated
+    issue-centric states instead of as a peer default alongside the
+    issue-centric preferred route
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

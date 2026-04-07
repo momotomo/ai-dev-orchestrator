@@ -334,6 +334,20 @@ class BridgeStatusView:
 
 
 @dataclass(frozen=True)
+class IssueCentricRouteChoice:
+    route_selected: str
+    route_reason: str
+    route_reason_source: str
+    runtime_mode: str
+    generation_lifecycle: str
+    target_issue: str
+    target_issue_source: str
+    next_request_hint: str
+    preferred_loop_action: str
+    preferred_loop_reason: str
+
+
+@dataclass(frozen=True)
 class BridgeHandoffView:
     title: str
     detail: str
@@ -485,6 +499,17 @@ def present_bridge_status(
             return BridgeStatusView(
                 "ChatGPTへ依頼準備中",
                 "前の issue-centric generation は consumed 済みです。次の generation を準備します。",
+            )
+        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_ready_next":
+            target_issue = issue_centric_bridge.target_issue
+            if target_issue:
+                return BridgeStatusView(
+                    "ChatGPTへ依頼準備中",
+                    f"issue-centric preferred route で次の依頼を準備します。target_issue は {target_issue} です。",
+                )
+            return BridgeStatusView(
+                "ChatGPTへ依頼準備中",
+                "issue-centric preferred route で次の依頼を準備します。",
             )
         return BridgeStatusView("ChatGPTへ依頼準備中", "完了報告をもとに、次の依頼を送る準備ができています。")
 
@@ -848,34 +873,64 @@ def can_reuse_prepared_request(state: Mapping[str, Any]) -> bool:
     return str(state.get("last_issue_centric_generation_lifecycle", "")).strip() == "fresh_prepared"
 
 
-def resolve_issue_centric_preferred_loop_action(state: Mapping[str, Any]) -> tuple[str, str]:
+def resolve_issue_centric_route_choice(state: Mapping[str, Any]) -> IssueCentricRouteChoice:
     runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
     if runtime_mode is None:
-        return "", ""
-    if runtime_mode.runtime_mode != "issue_centric_ready":
-        return "", ""
+        return IssueCentricRouteChoice(
+            route_selected="fallback_legacy",
+            route_reason="issue_centric_runtime_mode_missing",
+            route_reason_source="runtime_mode_missing",
+            runtime_mode="",
+            generation_lifecycle="",
+            target_issue="",
+            target_issue_source="legacy_unresolved",
+            next_request_hint="",
+            preferred_loop_action="",
+            preferred_loop_reason="",
+        )
 
+    route_selected = "fallback_legacy"
+    route_reason = runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason or "issue_centric_fallback_required"
+    route_reason_source = runtime_mode.runtime_mode_source or "runtime_mode"
+    preferred_loop_action = ""
+    preferred_loop_reason = ""
     mode = str(state.get("mode", "")).strip()
     generation_lifecycle = str(runtime_mode.generation_lifecycle).strip()
-    if generation_lifecycle == "fresh_pending":
-        if str(state.get("pending_request_source", "")).strip() and mode in {
-            "idle",
-            "waiting_prompt_reply",
-            "extended_wait",
-            "await_late_completion",
-        }:
-            return "fetch_next_prompt", "issue_centric_fresh_pending"
-        return "", ""
 
-    if generation_lifecycle == "fresh_prepared":
-        if mode not in {"idle", "awaiting_user"}:
-            return "", ""
-        if not can_reuse_prepared_request(state):
-            return "", ""
-        action = prepared_request_action(state)
-        if action:
-            return action, "issue_centric_fresh_prepared"
-    return "", ""
+    if runtime_mode.runtime_mode == "issue_centric_ready":
+        route_selected = "issue_centric"
+        route_reason = runtime_mode.runtime_mode_reason or "issue_centric_ready"
+        if generation_lifecycle == "fresh_pending":
+            if str(state.get("pending_request_source", "")).strip() and mode in {
+                "idle",
+                "waiting_prompt_reply",
+                "extended_wait",
+                "await_late_completion",
+            }:
+                preferred_loop_action = "fetch_next_prompt"
+                preferred_loop_reason = "issue_centric_fresh_pending"
+        elif generation_lifecycle == "fresh_prepared":
+            if mode in {"idle", "awaiting_user"} and can_reuse_prepared_request(state):
+                preferred_loop_action = prepared_request_action(state)
+                preferred_loop_reason = "issue_centric_fresh_prepared"
+
+    return IssueCentricRouteChoice(
+        route_selected=route_selected,
+        route_reason=route_reason,
+        route_reason_source=route_reason_source,
+        runtime_mode=runtime_mode.runtime_mode,
+        generation_lifecycle=generation_lifecycle,
+        target_issue=runtime_mode.target_issue,
+        target_issue_source=runtime_mode.target_issue_source,
+        next_request_hint=runtime_mode.next_request_hint,
+        preferred_loop_action=preferred_loop_action,
+        preferred_loop_reason=preferred_loop_reason,
+    )
+
+
+def resolve_issue_centric_preferred_loop_action(state: Mapping[str, Any]) -> tuple[str, str]:
+    route_choice = resolve_issue_centric_route_choice(state)
+    return route_choice.preferred_loop_action, route_choice.preferred_loop_reason
 
 
 def stage_prepared_request(

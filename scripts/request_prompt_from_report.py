@@ -28,6 +28,7 @@ from _bridge_common import (
     read_prepared_request_text,
     read_last_report_text,
     repo_relative,
+    resolve_issue_centric_route_choice,
     rotate_chat_with_handoff,
     send_to_chatgpt,
     save_state,
@@ -224,13 +225,17 @@ def run_resume_request(
     issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
         runtime_mode_state
     )
+    route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
     if retryable_request is None:
         retryable_request = load_retryable_prepared_request(state)
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
         prepared_status = str(state.get("prepared_request_status", "")).strip()
         if prepared_status == "prepared":
-            print("request: prepared の ChatGPT request を再生成せず送信します。")
+            if route_choice.route_selected == "issue_centric":
+                print("request: issue-centric preferred route の prepared ChatGPT request を再生成せず送信します。")
+            else:
+                print("request: legacy fallback へ寄せた prepared の ChatGPT request を再生成せず送信します。")
         else:
             print("request: 前回未送信の ChatGPT request を再送します。")
     else:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -166,6 +168,128 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         fetch_run.assert_called_once()
         report_run.assert_not_called()
+
+    def test_run_uses_issue_centric_preferred_route_for_next_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "generation_id": "summary:logs/summary.json",
+                        "action": "issue_create",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/51",
+                        "principal_issue_kind": "primary_issue",
+                        "target_issue": "https://github.com/example/repo/issues/51",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_primary_issue",
+                        "current_issue": None,
+                        "created_primary_issue": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "",
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+            }
+            out = io.StringIO()
+            with (
+                patch.object(bridge_orchestrator, "load_project_config", return_value={}),
+                patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator.request_prompt_from_report, "run", return_value=0) as report_run,
+                redirect_stdout(out),
+            ):
+                rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        report_run.assert_called_once()
+        self.assertIn("issue-centric preferred route", out.getvalue())
+        self.assertIn("https://github.com/example/repo/issues/51", out.getvalue())
+
+    def test_run_uses_legacy_fallback_for_next_request_when_issue_centric_is_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            snapshot_path = root / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "generation_id": "summary:logs/summary.json",
+                        "action": "human_review_needed",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/20",
+                        "principal_issue_kind": "current_issue",
+                        "target_issue": "https://github.com/example/repo/issues/20",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_current_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "",
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                "last_issue_centric_invalidated_generation_id": "summary:logs/summary.json",
+                "last_issue_centric_invalidation_status": "issue_centric_invalidated",
+                "last_issue_centric_invalidation_reason": "legacy_fallback_selected",
+            }
+            out = io.StringIO()
+            with (
+                patch.object(bridge_orchestrator, "load_project_config", return_value={}),
+                patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator.request_prompt_from_report, "run", return_value=0) as report_run,
+                redirect_stdout(out),
+            ):
+                rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        report_run.assert_called_once()
+        self.assertIn("legacy fallback", out.getvalue())
+        self.assertIn("legacy_fallback_selected", out.getvalue())
 
 
 if __name__ == "__main__":

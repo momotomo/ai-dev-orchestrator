@@ -34,6 +34,7 @@ from _bridge_common import (
     recover_report_ready_state,
     recover_codex_report,
     resolve_issue_centric_preferred_loop_action,
+    resolve_issue_centric_route_choice,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -263,7 +264,8 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 def describe_next_action(state: dict[str, Any]) -> str:
     if should_prioritize_unarchived_report(state):
         return "archive_codex_report"
-    preferred_action, _ = resolve_issue_centric_preferred_loop_action(state)
+    route_choice = resolve_issue_centric_route_choice(state)
+    preferred_action = route_choice.preferred_loop_action
     if preferred_action:
         return preferred_action
     mode = str(state.get("mode", "idle"))
@@ -452,6 +454,7 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
     runtime_mode, _ = prepare_issue_centric_runtime_mode(final_state)
     if runtime_mode is None:
         return ""
+    route_choice = resolve_issue_centric_route_choice(final_state)
     recovery_status = runtime_mode.recovery_status
     recovery_source = runtime_mode.recovery_source
     route_selected = runtime_mode.route_selected
@@ -532,18 +535,21 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
         str(final_state.get("last_issue_centric_route_fallback_reason", "")).strip()
         or str(final_state.get("last_issue_centric_next_request_fallback_reason", "")).strip()
     )
-    if route_selected == "issue_centric" and target_issue:
-        return f" 次回 request は issue-centric route を優先し、{target_issue} を target_issue として扱います。"
-    if route_selected == "fallback_legacy":
+    if route_choice.route_selected == "issue_centric" and target_issue:
+        return (
+            " 次回 request は issue-centric preferred route を既定で使い、"
+            f"{target_issue} を target_issue として扱います。"
+        )
+    if route_choice.route_selected == "fallback_legacy":
         if target_issue:
             return (
-                " issue-centric route は今回使わず、legacy fallback で "
+                " issue-centric preferred route は今回 ready 条件を満たさないため、legacy fallback で "
                 f"{target_issue} を target_issue 候補として扱います。"
-                f" 理由: {fallback_reason or 'route selection fallback'}."
+                f" 理由: {route_choice.route_reason or fallback_reason or 'route selection fallback'}."
             )
         return (
-            " issue-centric route は今回使わず、legacy fallback で続行します。"
-            f" 理由: {fallback_reason or 'route selection fallback'}."
+            " issue-centric preferred route は今回 ready 条件を満たさないため、legacy fallback で続行します。"
+            f" 理由: {route_choice.route_reason or fallback_reason or 'route selection fallback'}."
         )
     return ""
 

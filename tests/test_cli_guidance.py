@@ -148,6 +148,59 @@ class HumanFacingStatusTests(unittest.TestCase):
         self.assertEqual(view.label, "ChatGPT送信待ち")
         self.assertIn("prepared request", view.detail)
 
+    def test_issue_centric_ready_next_status_mentions_preferred_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "generation_id": "summary:logs/summary.json",
+                        "action": "issue_create",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/51",
+                        "principal_issue_kind": "primary_issue",
+                        "target_issue": "https://github.com/example/repo/issues/51",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_primary_issue",
+                        "current_issue": None,
+                        "created_primary_issue": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "",
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            view = present_bridge_status(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                }
+            )
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("issue-centric preferred route", view.detail)
+        self.assertIn("https://github.com/example/repo/issues/51", view.detail)
+
     def test_issue_centric_invalidated_status_mentions_fallback_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / "snapshot.json"
@@ -375,7 +428,7 @@ class SummaryTests(unittest.TestCase):
                     "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
                 }
             )
-        self.assertIn("issue-centric route", note)
+        self.assertIn("issue-centric preferred route", note)
         self.assertIn("https://github.com/example/repo/issues/81", note)
 
     def test_request_prompt_from_report_note_mentions_recovered_issue_centric_route(self) -> None:

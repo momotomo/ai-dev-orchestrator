@@ -92,6 +92,11 @@ The current implementation boundary is:
   `last_issue_centric_wait_kind`, so `state.json`, CLI status, and request
   summaries can say "prepared request", "pending reply", "consumed", or
   "invalidated" without rewriting the whole state machine
+- implemented: narrow route-role normalization that now treats the
+  issue-centric path as the default read-side route whenever the runtime is
+  `issue_centric_ready`, while keeping the older request-centric path as an
+  explicit legacy fallback only for degraded / unavailable / invalidated
+  situations
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -155,6 +160,11 @@ The current read-side bridge is intentionally layered like this:
   `state.json`, operator status, and request-side summaries one normalized
   vocabulary for "prepared request", "pending reply", "consumed", and
   "invalidated"
+- the route-choice layer now also gives those same read-side consumers one
+  shared answer to "preferred or fallback?": if the runtime is
+  `issue_centric_ready`, issue-centric is the first choice for prepare /
+  send / fetch / next-action resolution; otherwise the older request-centric
+  path is preserved only as an explicit conditional fallback
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
