@@ -1063,6 +1063,35 @@ def is_awaiting_user_supplement(state: Mapping[str, Any]) -> bool:
     return str(state.get("mode", "")).strip() == "awaiting_user"
 
 
+def is_fetch_extended_wait_state(state: Mapping[str, Any]) -> bool:
+    """Return True when fetch_next_prompt is in extended-wait substate.
+
+    mode == "extended_wait" is the compatibility signal for this sub-state of
+    the fetch_next_prompt action, set by fetch_next_prompt.py when the ChatGPT
+    tab enters an extended-wait phase.  This helper centralises that read so
+    operator-facing callers avoid scattering direct mode reads.
+
+    Callers only see this state while action == "fetch_next_prompt" is in flight;
+    the dispatch plan next_action remains "fetch_next_prompt" throughout.
+    """
+    return str(state.get("mode", "")).strip() == "extended_wait"
+
+
+def is_fetch_late_completion_state(state: Mapping[str, Any]) -> bool:
+    """Return True when fetch_next_prompt is in late-completion substate.
+
+    mode == "await_late_completion" is the compatibility signal for this
+    sub-state of the fetch_next_prompt action, set by fetch_next_prompt.py when
+    the ChatGPT tab reaches the late-completion detection phase.  This helper
+    centralises that read so operator-facing callers avoid scattering direct
+    mode reads.
+
+    Callers only see this state while action == "fetch_next_prompt" is in flight;
+    the dispatch plan next_action remains "fetch_next_prompt" throughout.
+    """
+    return str(state.get("mode", "")).strip() == "await_late_completion"
+
+
 def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
     """Return action key when the runtime action is 'need_next_generation'.
 

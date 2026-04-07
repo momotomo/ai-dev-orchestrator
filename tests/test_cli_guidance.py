@@ -933,6 +933,52 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
         result = run_until_stop.start_bridge_mode(state)
         self.assertEqual(result, "補足を入れて再開できます")
 
+    def test_is_fetch_extended_wait_state_true(self) -> None:
+        from _bridge_common import is_fetch_extended_wait_state
+
+        self.assertTrue(is_fetch_extended_wait_state({"mode": "extended_wait"}))
+
+    def test_is_fetch_extended_wait_state_false_for_other_modes(self) -> None:
+        from _bridge_common import is_fetch_extended_wait_state
+
+        for mode in ("idle", "waiting_prompt_reply", "await_late_completion", "codex_running", ""):
+            with self.subTest(mode=mode):
+                self.assertFalse(is_fetch_extended_wait_state({"mode": mode}))
+
+    def test_is_fetch_late_completion_state_true(self) -> None:
+        from _bridge_common import is_fetch_late_completion_state
+
+        self.assertTrue(is_fetch_late_completion_state({"mode": "await_late_completion"}))
+
+    def test_is_fetch_late_completion_state_false_for_other_modes(self) -> None:
+        from _bridge_common import is_fetch_late_completion_state
+
+        for mode in ("idle", "waiting_prompt_reply", "extended_wait", "codex_running", ""):
+            with self.subTest(mode=mode):
+                self.assertFalse(is_fetch_late_completion_state({"mode": mode}))
+
+    def test_summarize_run_includes_action_stop_note(self) -> None:
+        args = run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "x",
+            "pending_request_source": "s",
+            "pending_request_log": "l",
+        }
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test",
+            steps=1,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+        )
+        self.assertIn("action_stop_note:", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

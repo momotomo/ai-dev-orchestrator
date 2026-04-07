@@ -20,6 +20,8 @@ from _bridge_common import (
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
     is_awaiting_user_supplement,
+    is_fetch_extended_wait_state,
+    is_fetch_late_completion_state,
     latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
@@ -84,6 +86,18 @@ def start_bridge_mode(state: dict[str, Any]) -> str:
 
 
 def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]) -> tuple[str, str, str]:
+    """Return (status_label, guidance, note) for the initial bridge startup display.
+
+    Routing priority (action-view primary):
+    1. Unarchived report in outbox — route to archive/report flow before any handoff
+    2. Pending handoff not yet sent — resume handoff rotation
+    3. Blocked conditions — operator must resolve before proceeding
+    4. Default — suggested_next_note() based on dispatch plan action
+
+    mode reads are not used here directly; all routing flows through action-view
+    helpers (should_prioritize_unarchived_report, should_rotate_before_next_chat_request,
+    blocked_next_guidance) that encapsulate any required mode compatibility.
+    """
     blocked_guidance = blocked_next_guidance(state)
     stale_codex_running = is_stale_codex_running_candidate("", state)
     status = present_bridge_status(state, blocked=bool(blocked_guidance), stale_codex_running=stale_codex_running)
@@ -658,24 +672,41 @@ def is_stale_codex_running_candidate(reason: str, final_state: dict[str, Any]) -
 
 def stale_codex_running_note() -> str:
     return (
-        "state=codex_running のまま report が無いため、実 worker 継続中か stale runtime かを先に確認してください。"
+        "action=wait_for_codex_report (state=codex_running 互換) のまま report が無いため、"
+        "実 worker 継続中か stale runtime かを先に確認してください。"
         " bridge/outbox/codex_report.md、state.error、state.pause、bridge/STOP を見て、"
         "どれも無く worker も動いていないなら stale です。"
-        " 同じ prompt をやり直すなら ready_for_codex + need_codex_run=true、"
-        "最初から request をやり直すなら idle + need_chatgpt_prompt=true に戻してから再実行してください。"
+        " 同じ prompt をやり直すなら action=launch_codex_once 相当の state"
+        " (ready_for_codex + need_codex_run=true) へ戻してから再実行してください。"
+        " 最初から request をやり直すなら action=request_next_prompt 相当の state"
+        " (idle + need_chatgpt_prompt=true) へ戻してから再実行してください。"
     )
 
 
 def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
+    """Return True when an unarchived report exists in a state that should not have one.
+
+    Returns True only when:
+    - bridge/outbox/codex_report.md is present as an output artifact, AND
+    - the state is waiting for a ChatGPT reply (waiting_prompt_reply /
+      extended_wait / await_late_completion) rather than expecting a report.
+
+    All Codex lifecycle modes (codex_done, codex_running) and idle modes are
+    handled by should_prioritize_unarchived_report(), which returns True —
+    causing this function to return False (i.e., no conflict: the report
+    belongs to the current Codex lifecycle flow).
+
+    mode reads here are limited to Codex lifecycle compatibility guards:
+    codex_done / codex_running are kept as explicit early exits for clarity.
+    """
     if not codex_report_is_ready(runtime_report_path()):
         return False
     if should_prioritize_unarchived_report(state):
         return False
 
+    # Codex lifecycle guard: report is expected and handled by the Codex flow.
     mode = str(state.get("mode", "idle"))
     if mode in {"codex_done", "codex_running"}:
-        return False
-    if mode == "idle" and bool(state.get("need_chatgpt_next")):
         return False
     return True
 
@@ -697,6 +728,14 @@ def describe_wait_message(action: str) -> str:
 
 
 def should_include_codex_progress(final_state: dict[str, Any], history: list[str]) -> bool:
+    """Return True when a Codex progress snapshot should appear in the stop summary.
+
+    The mode reads here (ready_for_codex / codex_running / codex_done) are
+    intentional Codex lifecycle compatibility guards — they identify states where
+    a Codex session is active.  They are NOT general-purpose routing decisions.
+    The history fallback resolves cases where the loop completed a Codex step but
+    the final state has already transitioned away from Codex lifecycle modes.
+    """
     mode = str(final_state.get("mode", "")).strip()
     if mode in {"ready_for_codex", "codex_running", "codex_done"}:
         return True
@@ -873,10 +912,10 @@ def run_command_with_heartbeat(
             if next_heartbeat_at is not None and now >= next_heartbeat_at:
                 wait_suffix = ""
                 if action == "fetch_next_prompt":
-                    current_mode = str(load_state().get("mode", "")).strip()
-                    if current_mode == "extended_wait":
+                    live_state = load_state()
+                    if is_fetch_extended_wait_state(live_state):
                         wait_suffix = " stage=extended_wait"
-                    elif current_mode == "await_late_completion":
+                    elif is_fetch_late_completion_state(live_state):
                         wait_suffix = " stage=late_completion_mode"
                 print(
                     f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
@@ -965,6 +1004,7 @@ def summarize_run(
         f"- next_action: {dispatch_plan.next_action}",
         f"- runtime_action: {dispatch_plan.runtime_action}",
         f"- is_fallback: {dispatch_plan.is_fallback}",
+        f"- action_stop_note: {format_operator_stop_note(final_state, plan=dispatch_plan)}",
         "",
         "## run",
         f"- initial_user_status: {initial_status.label}",
