@@ -18,7 +18,6 @@ from _bridge_common import (
     codex_report_is_ready,
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
-    is_completed_state,
     latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
@@ -37,12 +36,9 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
-    resolve_fallback_legacy_transition,
     resolve_issue_centric_preferred_loop_action,
     resolve_issue_centric_route_choice,
-    resolve_next_generation_transition,
-    resolve_prepared_request_transition,
-    resolve_runtime_next_action,
+    resolve_runtime_dispatch_plan,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -276,26 +272,9 @@ def describe_next_action(state: dict[str, Any]) -> str:
     if mode == "codex_done":
         return "archive_codex_report"
 
-    # Issue-centric state view is the primary authority for route choice.
-    # mode is kept as compatibility display; concrete action selection is
-    # delegated to shared spine helpers in _bridge_common.
-    runtime_action, _ = resolve_runtime_next_action(state)
-
-    if runtime_action == "pending_reply":
-        return "fetch_next_prompt"
-
-    if runtime_action == "prepared_request":
-        next_action = resolve_prepared_request_transition(state)
-        if next_action != "need_next_generation":
-            return next_action
-        # builder could not be determined → treat as need_next_generation
-        runtime_action = "need_next_generation"
-
-    if runtime_action == "need_next_generation":
-        return resolve_next_generation_transition(state)
-
-    # fallback_legacy: mode-driven legacy path
-    return resolve_fallback_legacy_transition(state)
+    # Issue-centric action-view is the primary authority.
+    plan = resolve_runtime_dispatch_plan(state)
+    return plan.next_action
 
 
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
@@ -1123,7 +1102,7 @@ def run(argv: list[str] | None = None) -> int:
             history=history,
         )
 
-    if is_completed_state(initial_state):
+    if describe_next_action(initial_state) == "completed":
         reason = "completed 相当の状態です。追加の 1 手はありません。"
         if is_no_codex_decision_state(initial_state):
             reason = no_codex_decision_reason(initial_state)
@@ -1192,7 +1171,7 @@ def run(argv: list[str] | None = None) -> int:
                     history=history,
                 )
 
-            if is_completed_state(before):
+            if describe_next_action(before) == "completed":
                 reason = "completed 相当の状態に到達しました。"
                 if is_no_codex_decision_state(before):
                     reason = no_codex_decision_reason(before)

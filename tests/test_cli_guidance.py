@@ -608,7 +608,7 @@ class SummaryTests(unittest.TestCase):
         with patch.object(run_until_stop, "should_prioritize_unarchived_report", return_value=False):
             with patch.object(
                 run_until_stop,
-                "resolve_runtime_next_action",
+                "resolve_runtime_dispatch_plan",
                 side_effect=AssertionError("issue-centric next-action should not override ready_for_codex"),
             ):
                 action = run_until_stop.describe_next_action(

@@ -348,6 +348,37 @@ class IssueCentricRouteChoice:
 
 
 @dataclass(frozen=True)
+class RuntimeDispatchPlan:
+    """Consolidated action-view of what the runtime should do next.
+
+    Produced by resolve_runtime_dispatch_plan().  Runners read this instead of
+    calling resolve_runtime_next_action() + transition helpers individually.
+
+    Fields:
+        runtime_action:  high-level action key from resolve_runtime_next_action()
+                         ("prepared_request" | "pending_reply" | "need_next_generation"
+                          | "fallback_legacy")
+        next_action:     concrete action key after transition resolution
+                         ("request_next_prompt" | "request_prompt_from_report" |
+                          "fetch_next_prompt" | "completed" | "no_action" | …)
+        note:            human-facing dispatch note from format_next_action_note()
+        route_choice:    IssueCentricRouteChoice used for wording context
+        runtime_action_reason: reason string from resolve_runtime_next_action()
+        is_terminal:     True when next_action is "completed" or "no_action" —
+                         no further dispatching is needed
+        is_fallback:     True when runtime_action is "fallback_legacy"
+    """
+
+    runtime_action: str
+    next_action: str
+    note: str
+    route_choice: "IssueCentricRouteChoice"
+    runtime_action_reason: str
+    is_terminal: bool
+    is_fallback: bool
+
+
+@dataclass(frozen=True)
 class BridgeHandoffView:
     title: str
     detail: str
@@ -1170,6 +1201,62 @@ def format_next_action_note(
     if next_action == "completed":
         return "追加の操作は不要です。"
     return "今回の 1 手はありません。必要なら state.json の詳細を確認してください。"
+
+
+def resolve_runtime_dispatch_plan(state: Mapping[str, Any]) -> RuntimeDispatchPlan:
+    """Return a consolidated action-view of what the runtime should do next.
+
+    This is the single entry point for runners that need to know:
+      - runtime_action  (high-level state from resolve_runtime_next_action)
+      - next_action     (concrete action key after transition helpers)
+      - note            (human-facing wording from format_next_action_note)
+      - route_choice    (routing context for further use)
+      - is_terminal     (True for completed / no_action — no dispatch needed)
+      - is_fallback     (True when runtime is degraded / unavailable / invalidated)
+
+    Decision order follows ISSUE_CENTRIC_RUNTIME_CONTRACT:
+        runtime snapshot → health gate → generation lifecycle → transition helpers
+
+    Callers that handled early-exit branches (unarchived report, pending Codex
+    dispatch, Codex lifecycle mode) before reaching this function will never see
+    those action keys in next_action.
+    """
+    runtime_action, runtime_action_reason = resolve_runtime_next_action(state)
+    route_choice = resolve_issue_centric_route_choice(state)
+
+    # Resolve concrete next_action from transition helpers.
+    if runtime_action == "pending_reply":
+        next_action: str = "fetch_next_prompt"
+    elif runtime_action == "prepared_request":
+        next_action = resolve_prepared_request_transition(state)
+        if next_action == "need_next_generation":
+            # builder could not be determined; fall through to need_next_generation
+            next_action = resolve_next_generation_transition(state)
+    elif runtime_action == "need_next_generation":
+        next_action = resolve_next_generation_transition(state)
+    else:
+        # fallback_legacy: degraded / unavailable / invalidated.
+        next_action = resolve_fallback_legacy_transition(state)
+
+    note = format_next_action_note(
+        state,
+        next_action=next_action,
+        runtime_action=runtime_action,
+        runtime_action_reason=runtime_action_reason,
+        route_choice=route_choice,
+    )
+    is_terminal = next_action in {"completed", "no_action"}
+    is_fallback = runtime_action == "fallback_legacy"
+
+    return RuntimeDispatchPlan(
+        runtime_action=runtime_action,
+        next_action=next_action,
+        note=note,
+        route_choice=route_choice,
+        runtime_action_reason=runtime_action_reason,
+        is_terminal=is_terminal,
+        is_fallback=is_fallback,
+    )
 
 
 def stage_prepared_request(
