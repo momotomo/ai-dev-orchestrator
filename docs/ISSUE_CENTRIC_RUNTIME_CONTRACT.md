@@ -178,6 +178,54 @@ The current read-side bridge is intentionally layered like this:
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
+## Rewrite Boundary Before State-Machine Work
+
+Treat the current runtime read path like this before any broader
+state-machine rewrite:
+
+- the normal prepare / send / fetch / recovery / next-request loop is now the
+  issue-centric spine whenever the runtime is `issue_centric_ready`
+- the older request-centric route remains intentionally present, but only as
+  the explicit fallback path for `issue_centric_degraded_fallback`,
+  `issue_centric_unavailable`, or `issue_centric_invalidated` situations
+- the legacy `mode` enum still matters for compatibility and downstream
+  callers, but it is no longer the preferred read-side source when the
+  issue-centric bridge is coherent
+
+Read-side consumers should prefer this order:
+
+1. runtime snapshot
+2. runtime readiness / health gate
+3. generation lifecycle
+4. thin state-view bridge (`last_issue_centric_state_view`,
+   `last_issue_centric_wait_kind`, related runtime-mode fields)
+5. legacy `mode` and older request-centric recovery hints only when the
+   layers above require fallback
+
+Rewrite work should preserve these current semantics:
+
+- `fresh_prepared` means a request was prepared for the current generation and
+  should be reused / sent, not rebuilt or marked consumed
+- `fresh_pending` means the request was sent and the runtime should prefer
+  reply recovery instead of re-prepare or re-dispatch
+- `issue_centric_consumed` means reply recovery closed that request lifecycle
+  and the next generation may now be prepared
+- `issue_centric_invalidated` means fallback / reset / inconsistency made that
+  generation unfit for issue-centric reuse
+- `last_issue_centric_*` fields remain the fine-grained write-side execution
+  record, while the runtime snapshot and thin state bridge are the current
+  read-side bridge
+
+Rewrite work may replace these implementation details later, but should not
+change the semantics above without an explicit contract update:
+
+- ad-hoc legacy `mode` branching that still exists for compatibility
+- older request-centric helper ownership of prepare / fetch / next-step paths
+- thin read-side bridge composition, as long as one coherent issue-centric
+  snapshot-first source remains available
+- operator wording details, as long as prepared / pending / consumed /
+  invalidated and preferred / fallback meanings stay visible
+
 ## Overall Assumptions
 
 Use these assumptions consistently:

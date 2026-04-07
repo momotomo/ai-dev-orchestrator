@@ -330,16 +330,33 @@ During this inventory phase, all of the following stay unchanged:
   - `scripts/_bridge_common.py`
   - `bridge/state_flow.md`
 - current behavior:
-  - routing is driven by `mode`, `need_chatgpt_prompt`, `need_chatgpt_next`,
-    `need_codex_run`, and related recovery fields
-  - no issue identifier is currently persisted as a first-class runtime field
+  - write-side compatibility still keeps `mode`, `need_chatgpt_prompt`,
+    `need_chatgpt_next`, `need_codex_run`, and related recovery fields alive
+  - read-side consumers now prefer the issue-centric runtime snapshot,
+    readiness gate, generation lifecycle, and thin state-view bridge instead
+    of reading only the legacy `mode` branches
+  - issue-aware identity is now persisted narrowly through fields such as
+    principal issue, next-request target, runtime snapshot, and route /
+    recovery metadata
+  - the ordinary prepare / send / fetch / recovery / next-request loop now
+    treats the issue-centric spine as the mainline path and uses the older
+    request-centric route only as an explicit fallback
 - why this matters later:
-  - full issue-number-based orchestration would eventually want more explicit
-    issue-aware routing
+  - the rewrite phase should preserve the current issue-centric read-side
+    semantics even if it reshapes the older write-side `mode` branches
+  - full issue-number-based orchestration may still simplify or replace some
+    of these compatibility fields later, but should not demote the
+    issue-centric spine back to a peer route
 - inventory conclusion:
-  - this is explicitly **not** a target for the current phase
-  - first runtime-ready slices should avoid state-machine expansion unless the
-    inventory proves it is unavoidable
+  - the current read-side source of truth is now snapshot-first and
+    issue-centric-first
+  - the next rewrite should keep these semantics stable:
+    `fresh_prepared` means send/reuse, `fresh_pending` means wait/recover,
+    `issue_centric_consumed` means the lifecycle closed, and
+    `issue_centric_invalidated` means fallback/reset/inconsistency
+  - legacy `mode` and related request-centric branches remain compatibility
+    and fallback surfaces, not the preferred read-side source
+  - this section is now a rewrite boundary, not a pre-runtime placeholder
 
 ## Boundary Between Docs Work And Runtime Work
 
