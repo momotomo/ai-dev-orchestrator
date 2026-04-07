@@ -107,6 +107,7 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "last_issue_centric_normalized_summary": "",
             "last_issue_centric_runtime_snapshot": "",
             "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
             "last_issue_centric_principal_issue": "",
             "last_issue_centric_principal_issue_kind": "",
             "last_issue_centric_next_request_hint": "",
@@ -118,6 +119,16 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "last_issue_centric_recovery_status": "",
             "last_issue_centric_recovery_source": "",
             "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
             "last_issue_centric_close_order": "",
             "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
             "last_issue_centric_execution_status": "",
@@ -368,6 +379,8 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
             self.assertEqual(result.final_state["last_issue_centric_runtime_mode"], "issue_centric_ready")
             self.assertEqual(result.final_state["last_issue_centric_runtime_mode_reason"], "issue_centric_snapshot_ready")
+            self.assertTrue(str(result.final_state["last_issue_centric_runtime_generation_id"]).startswith("summary:"))
+            self.assertEqual(result.final_state["last_issue_centric_freshness_status"], "issue_centric_fresh")
 
     def test_dispatcher_runs_codex_followup_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -125,6 +125,11 @@ The current read-side bridge is intentionally layered like this:
   snapshot is `issue_centric_ready`, `issue_centric_degraded_fallback`, or
   `issue_centric_unavailable` before request builders and operator-facing
   status consume it
+- the freshness / invalidation helper now decides whether that snapshot is
+  still fresh enough to count as ready, has gone stale because the same
+  generation already drove one next-request preparation, or has been
+  explicitly invalidated because the bridge had to adopt legacy fallback for
+  that generation
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
@@ -501,15 +506,24 @@ For the current dispatcher / orchestrator boundary:
 - the runtime readiness / health gate now sits one layer above recovery:
   - `issue_centric_ready` requires a coherent runtime snapshot, one stable
     principal issue, one stable `target_issue`, and a non-unclear
-    next-request hint
+    next-request hint, plus a fresh issue-centric generation that has not
+    already been consumed or invalidated
   - `issue_centric_degraded_fallback` is used when issue-centric artifacts
-    still exist but route selection or target resolution is not strong enough
-    to trust as the primary request path
+    still exist but route selection, target resolution, or snapshot freshness
+    is not strong enough to trust as the primary request path
   - `issue_centric_unavailable` is used when snapshot / summary / recovery
     data is missing or broken enough that request preparation should skip
     issue-centric reuse entirely
   - request preparation, operator-facing status, and doctor-style summaries
     should all consult that same gate before choosing the next route
+- the freshness / invalidation layer now sits alongside that gate:
+  - a snapshot is only considered fresh when its generation still matches the
+    latest issue-centric execution context and has not already been consumed
+    by one prepared next request
+  - a consumed generation is treated as stale and forces legacy fallback until
+    a newer execution writes a newer issue-centric generation
+  - a generation that was explicitly sent through legacy fallback is treated
+    as invalidated and is not reused by recovery or request preparation
 
 ## Bridge To Codex Contract
 

@@ -450,10 +450,34 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
     route_selected = runtime_mode.route_selected
     target_issue = runtime_mode.target_issue
     fallback_reason = runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason
+    freshness_status = runtime_mode.freshness_status
+    freshness_reason = runtime_mode.freshness_reason or fallback_reason
     if runtime_mode.runtime_mode == "issue_centric_unavailable":
         return (
             " issue-centric runtime は今回 unavailable のため、legacy fallback で続行します。"
             f" 理由: {fallback_reason or 'issue-centric runtime unavailable'}."
+        )
+    if freshness_status == "issue_centric_invalidated":
+        if target_issue:
+            return (
+                " issue-centric runtime は invalidated のため、legacy fallback で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {freshness_reason or 'issue-centric context invalidated'}."
+            )
+        return (
+            " issue-centric runtime は invalidated のため、legacy fallback で続行します。"
+            f" 理由: {freshness_reason or 'issue-centric context invalidated'}."
+        )
+    if freshness_status == "issue_centric_stale":
+        if target_issue:
+            return (
+                " issue-centric runtime は stale fallback のため、legacy fallback で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {freshness_reason or 'issue-centric context is stale'}."
+            )
+        return (
+            " issue-centric runtime は stale fallback のため、legacy fallback で続行します。"
+            f" 理由: {freshness_reason or 'issue-centric context is stale'}."
         )
     if recovery_status == "issue_centric_recovered" and route_selected == "issue_centric" and target_issue:
         source_note = f" ({recovery_source})" if recovery_source else ""

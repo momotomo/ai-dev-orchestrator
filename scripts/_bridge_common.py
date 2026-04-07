@@ -100,9 +100,17 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_recovery_fallback_reason": "",
     "last_issue_centric_runtime_snapshot": "",
     "last_issue_centric_snapshot_status": "",
+    "last_issue_centric_runtime_generation_id": "",
     "last_issue_centric_runtime_mode": "",
     "last_issue_centric_runtime_mode_reason": "",
     "last_issue_centric_runtime_mode_source": "",
+    "last_issue_centric_freshness_status": "",
+    "last_issue_centric_freshness_reason": "",
+    "last_issue_centric_freshness_source": "",
+    "last_issue_centric_invalidation_status": "",
+    "last_issue_centric_invalidation_reason": "",
+    "last_issue_centric_invalidated_generation_id": "",
+    "last_issue_centric_consumed_generation_id": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1350,12 +1358,38 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_runtime_snapshot: {state['last_issue_centric_runtime_snapshot']}")
     if state.get("last_issue_centric_snapshot_status"):
         fields.append(f"- last_issue_centric_snapshot_status: {state['last_issue_centric_snapshot_status']}")
+    if state.get("last_issue_centric_runtime_generation_id"):
+        fields.append(
+            f"- last_issue_centric_runtime_generation_id: {state['last_issue_centric_runtime_generation_id']}"
+        )
     if state.get("last_issue_centric_runtime_mode"):
         fields.append(f"- last_issue_centric_runtime_mode: {state['last_issue_centric_runtime_mode']}")
     if state.get("last_issue_centric_runtime_mode_reason"):
         fields.append(f"- last_issue_centric_runtime_mode_reason: {state['last_issue_centric_runtime_mode_reason']}")
     if state.get("last_issue_centric_runtime_mode_source"):
         fields.append(f"- last_issue_centric_runtime_mode_source: {state['last_issue_centric_runtime_mode_source']}")
+    if state.get("last_issue_centric_freshness_status"):
+        fields.append(f"- last_issue_centric_freshness_status: {state['last_issue_centric_freshness_status']}")
+    if state.get("last_issue_centric_freshness_reason"):
+        fields.append(f"- last_issue_centric_freshness_reason: {state['last_issue_centric_freshness_reason']}")
+    if state.get("last_issue_centric_freshness_source"):
+        fields.append(f"- last_issue_centric_freshness_source: {state['last_issue_centric_freshness_source']}")
+    if state.get("last_issue_centric_invalidation_status"):
+        fields.append(
+            f"- last_issue_centric_invalidation_status: {state['last_issue_centric_invalidation_status']}"
+        )
+    if state.get("last_issue_centric_invalidation_reason"):
+        fields.append(
+            f"- last_issue_centric_invalidation_reason: {state['last_issue_centric_invalidation_reason']}"
+        )
+    if state.get("last_issue_centric_invalidated_generation_id"):
+        fields.append(
+            f"- last_issue_centric_invalidated_generation_id: {state['last_issue_centric_invalidated_generation_id']}"
+        )
+    if state.get("last_issue_centric_consumed_generation_id"):
+        fields.append(
+            f"- last_issue_centric_consumed_generation_id: {state['last_issue_centric_consumed_generation_id']}"
+        )
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
     if state.get("last_issue_centric_execution_status"):
@@ -3261,6 +3295,12 @@ def build_issue_centric_request_status(
             "- issue_centric_runtime_mode: " + str(runtime_mode.runtime_mode).strip(),
             "- issue_centric_runtime_mode_reason: " + str(runtime_mode.runtime_mode_reason).strip(),
             "- issue_centric_runtime_mode_source: " + str(runtime_mode.runtime_mode_source).strip(),
+            "- issue_centric_freshness_status: " + str(runtime_mode.freshness_status).strip(),
+            "- issue_centric_freshness_reason: " + str(runtime_mode.freshness_reason).strip(),
+            "- issue_centric_freshness_source: " + str(runtime_mode.freshness_source).strip(),
+            "- issue_centric_invalidation_status: " + str(runtime_mode.invalidation_status).strip(),
+            "- issue_centric_invalidation_reason: " + str(runtime_mode.invalidation_reason).strip(),
+            "- issue_centric_runtime_generation_id: " + str(runtime_mode.generation_id).strip(),
             "- issue_centric_next_request_target: " + str(runtime_mode.target_issue).strip(),
         ]
         rendered_mode = "\n".join(line for line in mode_lines if not line.endswith(": "))

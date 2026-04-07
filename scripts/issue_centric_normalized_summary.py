@@ -54,6 +54,7 @@ class IssueCentricRecoveryContext:
 class IssueCentricRuntimeSnapshot:
     snapshot_status: str
     snapshot_source: str
+    generation_id: str
     action: str
     dispatch_final_status: str
     route_selected: str
@@ -84,8 +85,14 @@ class IssueCentricRuntimeMode:
     runtime_mode: str
     runtime_mode_reason: str
     runtime_mode_source: str
+    freshness_status: str
+    freshness_reason: str
+    freshness_source: str
+    invalidation_status: str
+    invalidation_reason: str
     snapshot_status: str
     snapshot_source: str
+    generation_id: str
     route_selected: str
     recovery_status: str
     recovery_source: str
@@ -98,6 +105,16 @@ class IssueCentricRuntimeMode:
     normalized_summary_path: str
     dispatch_result_path: str
     snapshot_path: str
+
+
+@dataclass(frozen=True)
+class IssueCentricFreshness:
+    freshness_status: str
+    freshness_reason: str
+    freshness_source: str
+    invalidation_status: str
+    invalidation_reason: str
+    generation_id: str
 
 
 def build_issue_centric_normalized_summary(
@@ -237,6 +254,15 @@ def load_issue_centric_runtime_snapshot(
         return None
     if not str(payload.get("snapshot_path", "")).strip():
         payload["snapshot_path"] = raw_path
+    if not str(payload.get("generation_id", "")).strip():
+        payload["generation_id"] = _derive_runtime_generation_id(
+            normalized_summary_path=str(payload.get("normalized_summary_path", "")).strip(),
+            dispatch_result_path=str(payload.get("dispatch_result_path", "")).strip(),
+            snapshot_path=str(payload.get("snapshot_path", "")).strip() or raw_path,
+            action=str(payload.get("action", "")).strip(),
+            target_issue=str(payload.get("target_issue", "")).strip(),
+            next_request_hint=str(payload.get("next_request_hint", "")).strip(),
+        )
     return payload
 
 
@@ -566,6 +592,14 @@ def build_issue_centric_runtime_snapshot(
         or route_fallback_reason
         or str(state.get("last_issue_centric_next_request_fallback_reason", "")).strip()
     )
+    generation_id = _derive_runtime_generation_id(
+        normalized_summary_path=summary_path,
+        dispatch_result_path=dispatch_result_path,
+        snapshot_path="",
+        action=action,
+        target_issue=target_issue,
+        next_request_hint=next_request_hint,
+    )
     snapshot_status = _runtime_snapshot_status(
         route_selected=route_selected,
         target_issue=target_issue,
@@ -579,6 +613,7 @@ def build_issue_centric_runtime_snapshot(
     return IssueCentricRuntimeSnapshot(
         snapshot_status=snapshot_status,
         snapshot_source=snapshot_source,
+        generation_id=generation_id,
         action=action,
         dispatch_final_status=dispatch_final_status,
         route_selected=route_selected,
@@ -620,6 +655,69 @@ def resolve_issue_centric_runtime_snapshot(
     )
 
 
+def resolve_issue_centric_freshness(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+    snapshot: IssueCentricRuntimeSnapshot | None = None,
+) -> IssueCentricFreshness | None:
+    if snapshot is None:
+        snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=repo_root)
+    if snapshot is None:
+        return None
+
+    generation_id = snapshot.generation_id or _derive_runtime_generation_id(
+        normalized_summary_path=snapshot.normalized_summary_path,
+        dispatch_result_path=snapshot.dispatch_result_path,
+        snapshot_path=snapshot.snapshot_path,
+        action=snapshot.action,
+        target_issue=snapshot.target_issue,
+        next_request_hint=snapshot.next_request_hint,
+    )
+    invalidated_generation_id = str(state.get("last_issue_centric_invalidated_generation_id", "")).strip()
+    invalidation_status = str(state.get("last_issue_centric_invalidation_status", "")).strip()
+    invalidation_reason = str(state.get("last_issue_centric_invalidation_reason", "")).strip()
+    if generation_id and invalidated_generation_id and invalidated_generation_id == generation_id:
+        return IssueCentricFreshness(
+            freshness_status="issue_centric_invalidated",
+            freshness_reason=invalidation_reason or "issue_centric_snapshot_invalidated",
+            freshness_source="invalidation_state",
+            invalidation_status=invalidation_status or "issue_centric_invalidated",
+            invalidation_reason=invalidation_reason or "issue_centric_snapshot_invalidated",
+            generation_id=generation_id,
+        )
+
+    consumed_generation_id = str(state.get("last_issue_centric_consumed_generation_id", "")).strip()
+    if generation_id and consumed_generation_id and consumed_generation_id == generation_id:
+        return IssueCentricFreshness(
+            freshness_status="issue_centric_stale",
+            freshness_reason="snapshot_generation_consumed_by_next_request",
+            freshness_source="consumed_generation_state",
+            invalidation_status=invalidation_status,
+            invalidation_reason=invalidation_reason,
+            generation_id=generation_id,
+        )
+
+    if not generation_id:
+        return IssueCentricFreshness(
+            freshness_status="issue_centric_stale",
+            freshness_reason="runtime_snapshot_generation_unresolved",
+            freshness_source="runtime_snapshot_generation",
+            invalidation_status=invalidation_status,
+            invalidation_reason=invalidation_reason,
+            generation_id="",
+        )
+
+    return IssueCentricFreshness(
+        freshness_status="issue_centric_fresh",
+        freshness_reason="issue_centric_snapshot_fresh",
+        freshness_source="runtime_snapshot_generation",
+        invalidation_status=invalidation_status,
+        invalidation_reason=invalidation_reason,
+        generation_id=generation_id,
+    )
+
+
 def resolve_issue_centric_runtime_mode(
     state: Mapping[str, Any],
     *,
@@ -634,8 +732,14 @@ def resolve_issue_centric_runtime_mode(
             runtime_mode="issue_centric_unavailable",
             runtime_mode_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
             runtime_mode_source="runtime_snapshot_exception",
+            freshness_status="issue_centric_unavailable",
+            freshness_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
+            freshness_source="runtime_snapshot_exception",
+            invalidation_status="",
+            invalidation_reason="",
             snapshot_status="",
             snapshot_source="",
+            generation_id="",
             route_selected="fallback_legacy",
             recovery_status="",
             recovery_source="",
@@ -654,8 +758,14 @@ def resolve_issue_centric_runtime_mode(
             runtime_mode="issue_centric_unavailable",
             runtime_mode_reason="runtime_snapshot_missing_or_unreadable",
             runtime_mode_source="runtime_snapshot_missing",
+            freshness_status="issue_centric_unavailable",
+            freshness_reason="runtime_snapshot_missing_or_unreadable",
+            freshness_source="runtime_snapshot_missing",
+            invalidation_status="",
+            invalidation_reason="",
             snapshot_status="",
             snapshot_source="",
+            generation_id="",
             route_selected="fallback_legacy",
             recovery_status="",
             recovery_source="",
@@ -670,10 +780,19 @@ def resolve_issue_centric_runtime_mode(
             snapshot_path=str(state.get("last_issue_centric_runtime_snapshot", "")).strip(),
         )
 
+    freshness = resolve_issue_centric_freshness(state, repo_root=repo_root, snapshot=snapshot)
     runtime_mode = "issue_centric_ready"
     runtime_mode_reason = "issue_centric_snapshot_ready"
     runtime_mode_source = snapshot.snapshot_source or "runtime_snapshot"
-    if snapshot.next_request_hint == "issue_resolution_unclear":
+    if freshness is not None and freshness.freshness_status == "issue_centric_invalidated":
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = freshness.invalidation_reason or freshness.freshness_reason
+        runtime_mode_source = freshness.freshness_source or runtime_mode_source
+    elif freshness is not None and freshness.freshness_status == "issue_centric_stale":
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = freshness.freshness_reason or "issue_centric_snapshot_stale"
+        runtime_mode_source = freshness.freshness_source or runtime_mode_source
+    elif snapshot.next_request_hint == "issue_resolution_unclear":
         runtime_mode = "issue_centric_degraded_fallback"
         runtime_mode_reason = "issue_resolution_unclear"
     elif snapshot.snapshot_status != "issue_centric_snapshot_ready":
@@ -686,13 +805,27 @@ def resolve_issue_centric_runtime_mode(
         runtime_mode = "issue_centric_degraded_fallback"
         runtime_mode_reason = snapshot.fallback_reason or "principal_or_target_unresolved"
 
+    runtime_route_selected = "issue_centric" if runtime_mode == "issue_centric_ready" else "fallback_legacy"
+
     return IssueCentricRuntimeMode(
         runtime_mode=runtime_mode,
         runtime_mode_reason=runtime_mode_reason,
         runtime_mode_source=runtime_mode_source,
+        freshness_status=(
+            freshness.freshness_status if freshness is not None else "issue_centric_unavailable"
+        ),
+        freshness_reason=(
+            freshness.freshness_reason if freshness is not None else "runtime_snapshot_missing_or_unreadable"
+        ),
+        freshness_source=(
+            freshness.freshness_source if freshness is not None else "runtime_snapshot_missing"
+        ),
+        invalidation_status=(freshness.invalidation_status if freshness is not None else ""),
+        invalidation_reason=(freshness.invalidation_reason if freshness is not None else ""),
         snapshot_status=snapshot.snapshot_status,
         snapshot_source=snapshot.snapshot_source,
-        route_selected=snapshot.route_selected,
+        generation_id=snapshot.generation_id,
+        route_selected=runtime_route_selected,
         recovery_status=snapshot.recovery_status,
         recovery_source=snapshot.recovery_source,
         fallback_reason=snapshot.fallback_reason,
@@ -717,8 +850,14 @@ def render_issue_centric_next_request_section(
     runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
     runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
     runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
+    freshness_status = str(getattr(context, "freshness_status", "") or "").strip()
+    freshness_reason = str(getattr(context, "freshness_reason", "") or "").strip()
+    freshness_source = str(getattr(context, "freshness_source", "") or "").strip()
+    invalidation_status = str(getattr(context, "invalidation_status", "") or "").strip()
+    invalidation_reason = str(getattr(context, "invalidation_reason", "") or "").strip()
     snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
     snapshot_source = str(getattr(context, "snapshot_source", "") or "").strip()
+    generation_id = str(getattr(context, "generation_id", "") or "").strip()
     recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
     recovery_source = str(getattr(context, "recovery_source", "") or "").strip()
     route_selected = str(getattr(context, "route_selected", "") or "").strip()
@@ -743,10 +882,22 @@ def render_issue_centric_next_request_section(
         lines.append(f"- runtime_mode_reason: {runtime_mode_reason}")
     if runtime_mode_source:
         lines.append(f"- runtime_mode_source: {runtime_mode_source}")
+    if freshness_status:
+        lines.append(f"- freshness_status: {freshness_status}")
+    if freshness_reason:
+        lines.append(f"- freshness_reason: {freshness_reason}")
+    if freshness_source:
+        lines.append(f"- freshness_source: {freshness_source}")
+    if invalidation_status:
+        lines.append(f"- invalidation_status: {invalidation_status}")
+    if invalidation_reason:
+        lines.append(f"- invalidation_reason: {invalidation_reason}")
     if snapshot_status:
         lines.append(f"- snapshot_status: {snapshot_status}")
     if snapshot_source:
         lines.append(f"- snapshot_source: {snapshot_source}")
+    if generation_id:
+        lines.append(f"- generation_id: {generation_id}")
     if recovery_status:
         lines.append(f"- recovery_status: {recovery_status}")
     if recovery_source:
@@ -946,12 +1097,15 @@ def _has_issue_centric_runtime_mode_candidate_state(state: Mapping[str, Any]) ->
     keys = (
         "last_issue_centric_runtime_snapshot",
         "last_issue_centric_snapshot_status",
+        "last_issue_centric_runtime_generation_id",
         "last_issue_centric_normalized_summary",
         "last_issue_centric_dispatch_result",
         "last_issue_centric_principal_issue",
         "last_issue_centric_next_request_target",
         "last_issue_centric_route_selected",
         "last_issue_centric_recovery_status",
+        "last_issue_centric_freshness_status",
+        "last_issue_centric_invalidation_status",
     )
     return any(str(state.get(key, "")).strip() for key in keys) or _has_issue_centric_recovery_candidate_state(state)
 
@@ -1065,6 +1219,15 @@ def _runtime_snapshot_from_mapping(payload: Mapping[str, Any]) -> IssueCentricRu
     return IssueCentricRuntimeSnapshot(
         snapshot_status=str(payload.get("snapshot_status", "")).strip(),
         snapshot_source=str(payload.get("snapshot_source", "")).strip(),
+        generation_id=str(payload.get("generation_id", "")).strip()
+        or _derive_runtime_generation_id(
+            normalized_summary_path=str(payload.get("normalized_summary_path", "")).strip(),
+            dispatch_result_path=str(payload.get("dispatch_result_path", "")).strip(),
+            snapshot_path=str(payload.get("snapshot_path", "")).strip(),
+            action=str(payload.get("action", "")).strip(),
+            target_issue=str(payload.get("target_issue", "")).strip(),
+            next_request_hint=str(payload.get("next_request_hint", "")).strip(),
+        ),
         action=str(payload.get("action", "")).strip(),
         dispatch_final_status=str(payload.get("dispatch_final_status", "")).strip(),
         route_selected=str(payload.get("route_selected", "")).strip(),
@@ -1116,6 +1279,32 @@ def _runtime_snapshot_matches_state(
     if principal_issue and state_principal and principal_issue != state_principal:
         return False
     return True
+
+
+def _derive_runtime_generation_id(
+    *,
+    normalized_summary_path: str,
+    dispatch_result_path: str,
+    snapshot_path: str,
+    action: str,
+    target_issue: str,
+    next_request_hint: str,
+) -> str:
+    normalized_summary_path = str(normalized_summary_path).strip()
+    dispatch_result_path = str(dispatch_result_path).strip()
+    snapshot_path = str(snapshot_path).strip()
+    action = str(action).strip()
+    target_issue = str(target_issue).strip()
+    next_request_hint = str(next_request_hint).strip()
+    if normalized_summary_path:
+        return f"summary:{normalized_summary_path}"
+    if dispatch_result_path:
+        return f"dispatch:{dispatch_result_path}"
+    if snapshot_path:
+        return f"snapshot:{snapshot_path}"
+    if action or target_issue or next_request_hint:
+        return f"derived:{action}|{target_issue}|{next_request_hint}"
+    return ""
 
 
 def _mapping_issue_or_state(

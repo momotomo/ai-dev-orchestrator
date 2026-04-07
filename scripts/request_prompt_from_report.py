@@ -167,6 +167,10 @@ def dispatch_request(
     except Exception:
         retry_state = clear_error_fields(dict(state))
         clear_pending_request_fields(retry_state)
+        if issue_centric_runtime_snapshot is not None:
+            retry_state.update(
+                _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
+            )
         stage_prepared_request(
             retry_state,
             request_hash=request_hash,
@@ -437,21 +441,56 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 def _issue_centric_next_request_state_updates(context: object) -> dict[str, object]:
     snapshot_path = str(getattr(context, "snapshot_path", "") or "").strip()
     snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
+    generation_id = str(getattr(context, "generation_id", "") or "").strip()
     runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
     runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
     runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
+    freshness_status = str(getattr(context, "freshness_status", "") or "").strip()
+    freshness_reason = str(getattr(context, "freshness_reason", "") or "").strip()
+    freshness_source = str(getattr(context, "freshness_source", "") or "").strip()
+    invalidation_status = str(getattr(context, "invalidation_status", "") or "").strip()
+    invalidation_reason = str(getattr(context, "invalidation_reason", "") or "").strip()
     target_issue = str(getattr(context, "target_issue", "") or "").strip()
     target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
     fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
     route_selected = str(getattr(context, "route_selected", "") or "").strip()
     recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
     recovery_source = str(getattr(context, "recovery_source", "") or "").strip()
+    consumed_generation_id = ""
+    if generation_id and runtime_mode == "issue_centric_ready":
+        freshness_status = "issue_centric_stale"
+        freshness_reason = "snapshot_generation_consumed_by_next_request"
+        freshness_source = "next_request_preparation"
+        invalidation_status = ""
+        invalidation_reason = ""
+        consumed_generation_id = generation_id
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = freshness_reason
+        runtime_mode_source = freshness_source
+        route_selected = "fallback_legacy"
+        fallback_reason = freshness_reason
+    elif generation_id and runtime_mode in {"issue_centric_degraded_fallback", "issue_centric_unavailable"}:
+        freshness_status = "issue_centric_invalidated"
+        freshness_reason = runtime_mode_reason or fallback_reason or "issue_centric_context_invalidated"
+        freshness_source = "legacy_fallback_selection"
+        invalidation_status = "issue_centric_invalidated"
+        invalidation_reason = runtime_mode_reason or fallback_reason or "issue_centric_context_invalidated"
+        route_selected = "fallback_legacy"
+        fallback_reason = invalidation_reason
     return {
         "last_issue_centric_runtime_snapshot": snapshot_path,
         "last_issue_centric_snapshot_status": snapshot_status,
+        "last_issue_centric_runtime_generation_id": generation_id,
         "last_issue_centric_runtime_mode": runtime_mode,
         "last_issue_centric_runtime_mode_reason": runtime_mode_reason,
         "last_issue_centric_runtime_mode_source": runtime_mode_source,
+        "last_issue_centric_freshness_status": freshness_status,
+        "last_issue_centric_freshness_reason": freshness_reason,
+        "last_issue_centric_freshness_source": freshness_source,
+        "last_issue_centric_invalidation_status": invalidation_status,
+        "last_issue_centric_invalidation_reason": invalidation_reason,
+        "last_issue_centric_invalidated_generation_id": generation_id if invalidation_status else "",
+        "last_issue_centric_consumed_generation_id": consumed_generation_id,
         "last_issue_centric_next_request_target": target_issue,
         "last_issue_centric_next_request_target_source": target_issue_source,
         "last_issue_centric_next_request_fallback_reason": fallback_reason,

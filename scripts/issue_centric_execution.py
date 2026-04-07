@@ -1836,6 +1836,7 @@ def _finalize_dispatch(
             {
                 "last_issue_centric_runtime_snapshot": repo_relative(runtime_snapshot_log_path),
                 "last_issue_centric_snapshot_status": runtime_snapshot.snapshot_status,
+                "last_issue_centric_runtime_generation_id": runtime_snapshot.generation_id,
                 "last_issue_centric_route_selected": runtime_snapshot.route_selected,
                 "last_issue_centric_route_fallback_reason": runtime_snapshot.route_fallback_reason
                 or runtime_snapshot.fallback_reason,
@@ -1855,6 +1856,17 @@ def _finalize_dispatch(
                     "last_issue_centric_runtime_mode": runtime_mode.runtime_mode,
                     "last_issue_centric_runtime_mode_reason": runtime_mode.runtime_mode_reason,
                     "last_issue_centric_runtime_mode_source": runtime_mode.runtime_mode_source,
+                    "last_issue_centric_freshness_status": runtime_mode.freshness_status,
+                    "last_issue_centric_freshness_reason": runtime_mode.freshness_reason,
+                    "last_issue_centric_freshness_source": runtime_mode.freshness_source,
+                    "last_issue_centric_invalidation_status": runtime_mode.invalidation_status,
+                    "last_issue_centric_invalidation_reason": runtime_mode.invalidation_reason,
+                    "last_issue_centric_invalidated_generation_id": (
+                        runtime_mode.generation_id
+                        if runtime_mode.invalidation_status
+                        else ""
+                    ),
+                    "last_issue_centric_consumed_generation_id": "",
                 }
             )
     return IssueCentricDispatchResult(

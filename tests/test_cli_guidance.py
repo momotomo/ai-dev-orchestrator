@@ -392,6 +392,106 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("issue-centric runtime", note)
         self.assertIn("unavailable", note)
 
+    def test_request_prompt_from_report_note_mentions_stale_runtime_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "generation_id": "summary:logs/summary.json",
+                        "action": "no_action",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/81",
+                        "principal_issue_kind": "followup_issue",
+                        "target_issue": "https://github.com/example/repo/issues/81",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_followup_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "logs/summary.json",
+                        "dispatch_result_path": "logs/dispatch.json",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            note = run_until_stop.suggested_next_note(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                    "last_issue_centric_consumed_generation_id": "summary:logs/summary.json",
+                }
+            )
+
+        self.assertIn("stale fallback", note)
+        self.assertIn("snapshot_generation_consumed_by_next_request", note)
+
+    def test_request_prompt_from_report_note_mentions_invalidated_runtime_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "generation_id": "summary:logs/summary.json",
+                        "action": "human_review_needed",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/20",
+                        "principal_issue_kind": "current_issue",
+                        "target_issue": "https://github.com/example/repo/issues/20",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_current_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": None,
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": "logs/summary.json",
+                        "dispatch_result_path": "logs/dispatch.json",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            note = run_until_stop.suggested_next_note(
+                {
+                    "mode": "idle",
+                    "need_chatgpt_next": True,
+                    "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                    "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                    "last_issue_centric_invalidated_generation_id": "summary:logs/summary.json",
+                    "last_issue_centric_invalidation_status": "issue_centric_invalidated",
+                    "last_issue_centric_invalidation_reason": "legacy_fallback_selected",
+                }
+            )
+
+        self.assertIn("invalidated", note)
+        self.assertIn("legacy_fallback_selected", note)
+
     def test_submitted_unconfirmed_recommends_resume_not_clear_error(self) -> None:
         args = run_until_stop.parse_args(
             [

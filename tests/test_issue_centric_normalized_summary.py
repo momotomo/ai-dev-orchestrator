@@ -194,6 +194,60 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertIn("- target_issue: https://github.com/example/repo/issues/81", request)
             self.assertIn("- target_issue_source: normalized_summary", request)
 
+    def test_request_builder_falls_back_when_snapshot_generation_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            template_path = root / "request_template.md"
+            template_path.write_text(
+                "STATE\n{CURRENT_STATUS}\n\n{ISSUE_CENTRIC_NEXT_REQUEST_SECTION}\n",
+                encoding="utf-8",
+            )
+
+            request = build_chatgpt_request(
+                state={
+                    "mode": "idle",
+                    "need_chatgpt_prompt": False,
+                    "need_chatgpt_next": True,
+                    "need_codex_run": False,
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                    "last_issue_centric_consumed_generation_id": f"summary:{summary_path}",
+                },
+                template_path=template_path,
+                next_todo="next",
+                open_questions="none",
+                last_report="===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+            )
+
+            self.assertIn("- runtime_mode: issue_centric_degraded_fallback", request)
+            self.assertIn("- freshness_status: issue_centric_stale", request)
+            self.assertIn("- next_request_route: fallback_legacy", request)
+
     def test_route_selector_prefers_issue_centric_when_summary_is_consistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -312,6 +366,101 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             assert runtime_mode is not None
             self.assertEqual(runtime_mode.runtime_mode, "issue_centric_degraded_fallback")
             self.assertEqual(runtime_mode.runtime_mode_reason, "issue_resolution_unclear")
+
+    def test_runtime_mode_is_degraded_when_snapshot_generation_was_consumed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "no_action_followup"}),
+                encoding="utf-8",
+            )
+
+            runtime_mode = issue_centric_normalized_summary.resolve_issue_centric_runtime_mode(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_followup_issue_number": "81",
+                    "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                    "last_issue_centric_consumed_generation_id": f"summary:{summary_path}",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(runtime_mode)
+            assert runtime_mode is not None
+            self.assertEqual(runtime_mode.runtime_mode, "issue_centric_degraded_fallback")
+            self.assertEqual(runtime_mode.freshness_status, "issue_centric_stale")
+            self.assertEqual(runtime_mode.runtime_mode_reason, "snapshot_generation_consumed_by_next_request")
+
+    def test_runtime_mode_is_degraded_when_snapshot_generation_was_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "human_review_needed",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "20",
+                            "url": "https://github.com/example/repo/issues/20",
+                            "title": "",
+                            "ref": "#20",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "human_review_needed"}),
+                encoding="utf-8",
+            )
+
+            runtime_mode = issue_centric_normalized_summary.resolve_issue_centric_runtime_mode(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                    "last_issue_centric_invalidated_generation_id": f"summary:{summary_path}",
+                    "last_issue_centric_invalidation_status": "issue_centric_invalidated",
+                    "last_issue_centric_invalidation_reason": "legacy_fallback_selected",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(runtime_mode)
+            assert runtime_mode is not None
+            self.assertEqual(runtime_mode.runtime_mode, "issue_centric_degraded_fallback")
+            self.assertEqual(runtime_mode.freshness_status, "issue_centric_invalidated")
+            self.assertEqual(runtime_mode.invalidation_reason, "legacy_fallback_selected")
 
     def test_runtime_mode_is_unavailable_when_snapshot_sources_are_missing(self) -> None:
         runtime_mode = issue_centric_normalized_summary.resolve_issue_centric_runtime_mode(
@@ -921,15 +1070,27 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target"], "https://github.com/example/repo/issues/81")
             self.assertEqual(saved_states[-1]["last_issue_centric_next_request_target_source"], "normalized_summary")
-            self.assertEqual(saved_states[-1]["last_issue_centric_route_selected"], "issue_centric")
-            self.assertEqual(saved_states[-1]["last_issue_centric_route_fallback_reason"], "")
+            self.assertEqual(saved_states[-1]["last_issue_centric_route_selected"], "fallback_legacy")
+            self.assertEqual(
+                saved_states[-1]["last_issue_centric_route_fallback_reason"],
+                "snapshot_generation_consumed_by_next_request",
+            )
             self.assertEqual(saved_states[-1]["last_issue_centric_recovery_status"], "issue_centric_recovered")
             self.assertEqual(
                 saved_states[-1]["last_issue_centric_recovery_source"],
                 "normalized_summary_then_state",
             )
-            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode"], "issue_centric_ready")
-            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode_reason"], "issue_centric_snapshot_ready")
+            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode"], "issue_centric_degraded_fallback")
+            self.assertEqual(
+                saved_states[-1]["last_issue_centric_runtime_mode_reason"],
+                "snapshot_generation_consumed_by_next_request",
+            )
+            self.assertEqual(saved_states[-1]["last_issue_centric_freshness_status"], "issue_centric_stale")
+            self.assertEqual(
+                saved_states[-1]["last_issue_centric_freshness_reason"],
+                "snapshot_generation_consumed_by_next_request",
+            )
+            self.assertTrue(str(saved_states[-1]["last_issue_centric_consumed_generation_id"]).startswith("summary:"))
             self.assertTrue(str(saved_states[-1]["last_issue_centric_runtime_snapshot"]).endswith(".json"))
             self.assertEqual(saved_states[-1]["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
 

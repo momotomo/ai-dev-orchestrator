@@ -244,6 +244,11 @@ During this inventory phase, all of the following stay unchanged:
     (`issue_centric_ready` / `issue_centric_degraded_fallback` /
     `issue_centric_unavailable`) for request preparation and operator-facing
     status
+  - the current freshness slice goes one step farther again: it gives that
+    runtime snapshot one generation-aware freshness / invalidation layer so a
+    previously good issue-centric context stops counting as ready once the
+    same generation has already driven one next-request preparation or has
+    been explicitly invalidated by legacy fallback
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A
