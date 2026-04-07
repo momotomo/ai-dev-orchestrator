@@ -1050,6 +1050,19 @@ def is_completed_state(state: Mapping[str, Any]) -> bool:
     )
 
 
+def is_awaiting_user_supplement(state: Mapping[str, Any]) -> bool:
+    """Return True when the runtime is paused for operator-supplied supplement input.
+
+    mode == "awaiting_user" is the compatibility signal for this sub-state.
+    This helper centralises that read so operator-facing callers do not scatter
+    direct mode reads when distinguishing the user-supplement sub-case from the
+    standard report-request path.
+    The next_action in this state is "request_prompt_from_report"; the helper
+    narrows it to the branch that needs additional user input before proceeding.
+    """
+    return str(state.get("mode", "")).strip() == "awaiting_user"
+
+
 def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
     """Return action key when the runtime action is 'need_next_generation'.
 
@@ -1257,6 +1270,37 @@ def resolve_runtime_dispatch_plan(state: Mapping[str, Any]) -> RuntimeDispatchPl
         is_terminal=is_terminal,
         is_fallback=is_fallback,
     )
+
+
+def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatchPlan) -> str:
+    """Return a concise operator-facing stop note derived from the dispatch plan.
+
+    Use this in stop summaries and guidance banners where plan.note (the dispatch
+    wording) is too terse or too dispatch-specific for human readers.
+
+    Primary vocabulary: plan.next_action, plan.runtime_action, plan.is_fallback,
+    plan.is_terminal.
+    mode is only consulted via is_awaiting_user_supplement() rather than read
+    directly, keeping mode as a compatibility signal in the background.
+    """
+    if plan.next_action == "completed":
+        return "追加の Codex 実行・ChatGPT 依頼は不要です。"
+    if plan.next_action == "no_action":
+        return "次の 1 手が見つかりません。state と doctor を確認してください。"
+    if plan.next_action == "request_next_prompt":
+        return "次の ChatGPT 依頼を送る新規入口へ進めます。"
+    if plan.next_action == "request_prompt_from_report":
+        if is_awaiting_user_supplement(state):
+            return "補足入力を受けて次の ChatGPT 依頼へ進めます。"
+        if plan.is_fallback:
+            return "legacy fallback route で次の ChatGPT 依頼を送ります。"
+        return "issue-centric route で次の ChatGPT 依頼を送ります。"
+    if plan.next_action == "fetch_next_prompt":
+        if plan.is_fallback:
+            return "legacy fallback route で ChatGPT 返答を回収します。"
+        return "ChatGPT 返答を回収します。"
+    # For less common next_action values, delegate to the dispatch note.
+    return plan.note
 
 
 def stage_prepared_request(
