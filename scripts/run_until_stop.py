@@ -18,6 +18,7 @@ from _bridge_common import (
     codex_report_is_ready,
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
+    is_completed_state,
     latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
@@ -35,8 +36,10 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
+    resolve_fallback_legacy_transition,
     resolve_issue_centric_preferred_loop_action,
     resolve_issue_centric_route_choice,
+    resolve_next_generation_transition,
     resolve_runtime_next_action,
     repo_relative,
     runtime_prompt_path,
@@ -227,18 +230,6 @@ def print_entry_banner(state: dict[str, Any], args: argparse.Namespace) -> None:
     print(f"- このあと: {entry_guidance(state, args)}")
 
 
-def is_completed_state(state: dict[str, Any]) -> bool:
-    mode = str(state.get("mode", "idle"))
-    if mode == "completed":
-        return True
-    return (
-        mode == "idle"
-        and not bool(state.get("need_chatgpt_prompt"))
-        and not bool(state.get("need_chatgpt_next"))
-        and not bool(state.get("need_codex_run"))
-    )
-
-
 def is_no_codex_decision_state(state: dict[str, Any]) -> bool:
     return str(state.get("chatgpt_decision", "")).strip() in {"completed", "human_review", "need_info"}
 
@@ -296,36 +287,10 @@ def describe_next_action(state: dict[str, Any]) -> str:
         runtime_action = "need_next_generation"
 
     if runtime_action == "need_next_generation":
-        # mode is the compatibility display that selects the concrete request builder
-        if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
-            return "request_next_prompt"
-        if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
-            return "request_prompt_from_report"
-        if mode == "idle" and bool(state.get("need_chatgpt_next")):
-            return "request_prompt_from_report"
-        if is_completed_state(state):
-            return "completed"
-        return "no_action"
+        return resolve_next_generation_transition(state)
 
     # fallback_legacy: mode-driven legacy path
-    # Codex lifecycle states (ready_for_codex, codex_running, codex_done) are always mode-driven.
-    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
-        return "request_next_prompt"
-    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
-        return "fetch_next_prompt"
-    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
-        return "request_prompt_from_report"
-    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-        return "launch_codex_once"
-    if mode == "codex_running":
-        return "wait_for_codex_report"
-    if mode == "codex_done":
-        return "archive_codex_report"
-    if mode == "idle" and bool(state.get("need_chatgpt_next")):
-        return "request_prompt_from_report"
-    if is_completed_state(state):
-        return "completed"
-    return "no_action"
+    return resolve_fallback_legacy_transition(state)
 
 
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:

@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_issue_centric_route_choice, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_fallback_legacy_transition, resolve_issue_centric_route_choice, resolve_next_generation_transition, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -298,40 +298,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         runtime_action = "need_next_generation"
 
     if runtime_action == "need_next_generation":
-        # mode is the compatibility display used to select the concrete request builder
-        if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
-            status = present_bridge_status(state)
-            print(
-                f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
-                " free-form 初回本文は override 用にだけ残しています。"
-            )
-            return request_next_prompt.run(dict(state), build_initial_request_argv(args))
-        if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
-            status = present_bridge_status(state)
-            print(f"{status.label}です。次の ChatGPT request に添える補足入力を受けて再開します。")
-            return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-        if mode == "idle" and bool(state.get("need_chatgpt_next")):
-            status = present_bridge_status(state)
-            if route_choice.route_selected == "issue_centric":
-                print(
-                    f"{status.label}です。issue-centric preferred route で、次の ChatGPT request を準備して送ります。"
-                    f" target_issue={route_choice.target_issue or 'unresolved'}."
-                )
-            elif str(state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(state):
-                print(f"{status.label}です。次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。")
-            else:
-                print(
-                    f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で同じチャットへ次フェーズ要求を送ります。"
-                    f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
-                )
-            return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-        status = present_bridge_status(state)
-        print(f"{status.label}です。today no-action (need_next_generation but no matching mode). 必要なら state.json の詳細を確認してください。")
-        return 0
+        next_action = resolve_next_generation_transition(state)
+    else:
+        # fallback_legacy: degraded / unavailable / invalidated issue-centric situations.
+        # Codex lifecycle branches (ready_for_codex, codex_running, codex_done) are handled
+        # earlier in this function and are never reached here.
+        next_action = resolve_fallback_legacy_transition(state)
 
-    # fallback_legacy: Codex lifecycle states are always mode-driven; legacy request/reply
-    # path is used only for degraded / unavailable / invalidated issue-centric situations.
-    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
+    if next_action == "request_next_prompt":
         status = present_bridge_status(state)
         print(
             f"{status.label}です。通常は current ready issue の参照から最初の request を組み立てます。"
@@ -339,25 +313,23 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
 
-    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+    if next_action == "fetch_next_prompt":
+        # Only reachable from fallback_legacy (waiting_prompt_reply / extended_wait / await_late_completion).
         status = present_bridge_status(state)
         if route_choice.route_selected == "fallback_legacy":
             print(
                 f"{status.label}です。issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
                 f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
             )
-            return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
-        print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
+        else:
+            print(f"{status.label}です。ChatGPT 返答から次の prompt または停止判断を回収します。")
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
 
-    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+    if next_action == "request_prompt_from_report":
         status = present_bridge_status(state)
-        print(f"{status.label}です。次の ChatGPT request に添える補足入力を受けて再開します。")
-        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-
-    if mode == "idle" and bool(state.get("need_chatgpt_next")):
-        status = present_bridge_status(state)
-        if route_choice.route_selected == "issue_centric":
+        if str(state.get("mode", "")).strip() == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+            print(f"{status.label}です。次の ChatGPT request に添える補足入力を受けて再開します。")
+        elif route_choice.route_selected == "issue_centric":
             print(
                 f"{status.label}です。issue-centric preferred route で、次の ChatGPT request を準備して送ります。"
                 f" target_issue={route_choice.target_issue or 'unresolved'}."

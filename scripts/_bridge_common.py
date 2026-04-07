@@ -1003,6 +1003,83 @@ def resolve_runtime_next_action(state: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
+def is_completed_state(state: Mapping[str, Any]) -> bool:
+    """Return True when the state represents a fully completed session.
+
+    Extracted from run_until_stop.py so all transition helpers can use it.
+    """
+    mode = str(state.get("mode", "idle"))
+    if mode == "completed":
+        return True
+    return (
+        mode == "idle"
+        and not bool(state.get("need_chatgpt_prompt"))
+        and not bool(state.get("need_chatgpt_next"))
+        and not bool(state.get("need_codex_run"))
+    )
+
+
+def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
+    """Return action key when the runtime action is 'need_next_generation'.
+
+    mode is used as the compatibility display to select the concrete request builder.
+
+    Returns one of:
+        "request_next_prompt"       - idle initial request path
+        "request_prompt_from_report" - awaiting_user or next-phase report path
+        "completed"                 - session already finished
+        "no_action"                 - no matching condition
+    """
+    mode = str(state.get("mode", "idle")).strip()
+    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
+        return "request_next_prompt"
+    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+        return "request_prompt_from_report"
+    if mode == "idle" and bool(state.get("need_chatgpt_next")):
+        return "request_prompt_from_report"
+    if is_completed_state(state):
+        return "completed"
+    return "no_action"
+
+
+def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
+    """Return action key for the fallback_legacy path (degraded / unavailable / invalidated).
+
+    Full legacy mode-driven chain.  The Codex lifecycle branches (ready_for_codex,
+    codex_running, codex_done) are included so that this helper is self-contained;
+    callers that already handle those modes before reaching this point will never
+    receive those keys in practice.
+
+    Returns one of:
+        "request_next_prompt"        - idle initial request path
+        "fetch_next_prompt"          - reply waiting modes
+        "request_prompt_from_report" - awaiting_user / next-phase report path
+        "launch_codex_once"          - ready_for_codex with need_codex_run
+        "wait_for_codex_report"      - codex_running
+        "archive_codex_report"       - codex_done
+        "completed"                  - session already finished
+        "no_action"                  - no matching condition
+    """
+    mode = str(state.get("mode", "idle")).strip()
+    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
+        return "request_next_prompt"
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+        return "fetch_next_prompt"
+    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+        return "request_prompt_from_report"
+    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
+        return "launch_codex_once"
+    if mode == "codex_running":
+        return "wait_for_codex_report"
+    if mode == "codex_done":
+        return "archive_codex_report"
+    if mode == "idle" and bool(state.get("need_chatgpt_next")):
+        return "request_prompt_from_report"
+    if is_completed_state(state):
+        return "completed"
+    return "no_action"
+
+
 def stage_prepared_request(
     state: dict[str, Any],
     *,
