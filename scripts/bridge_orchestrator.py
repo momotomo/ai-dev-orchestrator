@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, format_next_action_note, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_fallback_legacy_transition, resolve_issue_centric_route_choice, resolve_next_generation_transition, resolve_prepared_request_transition, resolve_runtime_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_runtime_dispatch_plan, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -264,53 +264,18 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。完了報告を履歴へ退避します。")
         return archive_codex_report.run(dict(state))
 
-    # Issue-centric state view is the primary routing authority.
+    # Issue-centric action-view is the primary routing authority.
     # mode is preserved for Codex lifecycle steps and compatibility display.
-    runtime_action, runtime_action_reason = resolve_runtime_next_action(state)
-    # route_choice provides routing context for wording and informational notes.
-    route_choice = resolve_issue_centric_route_choice(state)
-
-    if runtime_action == "pending_reply":
-        # Wording layer: shared dispatch note for pending_reply.
-        note = format_next_action_note(state, next_action="pending_reply", runtime_action_reason=runtime_action_reason)
-        status = present_bridge_status(state)
-        print(f"{status.label}です。{note}")
-        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
-
-    # Action-key resolution via shared spine helpers.
-    # prepared_request → resolve_prepared_request_transition (may fall back to need_next_generation)
-    # need_next_generation → resolve_next_generation_transition
-    # fallback_legacy      → resolve_fallback_legacy_transition
-    if runtime_action == "prepared_request":
-        next_action = resolve_prepared_request_transition(state)
-        if next_action == "need_next_generation":
-            # builder could not be determined; treat as need_next_generation
-            next_action = resolve_next_generation_transition(state)
-    elif runtime_action == "need_next_generation":
-        next_action = resolve_next_generation_transition(state)
-    else:
-        # fallback_legacy: runtime is degraded / unavailable / invalidated.
-        # Codex lifecycle branches (ready_for_codex, codex_running, codex_done) are
-        # handled earlier in this function and will not appear as next_action here.
-        next_action = resolve_fallback_legacy_transition(state)
-
-    # Wording layer: shared dispatch note (action key + routing context).
-    note = format_next_action_note(
-        state,
-        next_action=next_action,
-        runtime_action=runtime_action,
-        runtime_action_reason=runtime_action_reason,
-        route_choice=route_choice,
-    )
+    plan = resolve_runtime_dispatch_plan(state)
     status = present_bridge_status(state)
-    print(f"{status.label}です。{note}")
+    print(f"{status.label}です。{plan.note}")
 
     # Dispatch layer: route to the appropriate script.
-    if next_action == "request_next_prompt":
+    if plan.next_action == "request_next_prompt":
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
-    if next_action == "request_prompt_from_report":
+    if plan.next_action == "request_prompt_from_report":
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
-    if next_action == "fetch_next_prompt":
+    if plan.next_action == "fetch_next_prompt":
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
     return 0
 

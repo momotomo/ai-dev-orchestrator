@@ -303,7 +303,7 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
             patch.object(bridge_orchestrator, "maybe_promote_codex_done", return_value=False),
             patch.object(
                 bridge_orchestrator,
-                "resolve_runtime_next_action",
+                "resolve_runtime_dispatch_plan",
                 side_effect=AssertionError("issue-centric next-action should not override codex_running"),
             ),
             redirect_stdout(out),
