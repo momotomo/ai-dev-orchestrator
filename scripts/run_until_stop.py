@@ -33,6 +33,7 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
+    resolve_issue_centric_preferred_loop_action,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -260,9 +261,12 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def describe_next_action(state: dict[str, Any]) -> str:
-    mode = str(state.get("mode", "idle"))
     if should_prioritize_unarchived_report(state):
         return "archive_codex_report"
+    preferred_action, _ = resolve_issue_centric_preferred_loop_action(state)
+    if preferred_action:
+        return preferred_action
+    mode = str(state.get("mode", "idle"))
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
         return "request_next_prompt"
     if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
@@ -1077,7 +1081,7 @@ def run(argv: list[str] | None = None) -> int:
     if recovered_report is not None:
         history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
     if recovered_prepared:
-        history.append("- preflight: 送信済み request を waiting 状態へ復旧しました")
+        history.append("- preflight: prepared request を再送可能な状態へ復旧しました")
     if recovered_handoff:
         history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
     print_entry_banner(initial_state, args)

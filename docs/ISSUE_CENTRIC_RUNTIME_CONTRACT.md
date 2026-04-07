@@ -81,6 +81,11 @@ The current implementation boundary is:
   preparation, operator-facing status, and restart/recovery read one
   normalized snapshot first and fall back only when that snapshot is missing
   or inconsistent
+- implemented: narrow run-loop alignment that now treats issue-centric
+  `fresh_prepared` and `fresh_pending` generations as first-class state when
+  choosing the next runtime action, so prepared requests are reused instead of
+  being rebuilt, pending generations stay in reply-wait, and degraded /
+  unavailable modes fall back explicitly
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -134,6 +139,11 @@ The current read-side bridge is intentionally layered like this:
   freshness so the bridge can distinguish `fresh_prepared`,
   `fresh_pending`, `consumed`, and `invalidated` generations instead of
   treating every prepared next request as already consumed
+- the run loop now uses that same runtime mode plus generation lifecycle when
+  choosing the next step: `fresh_prepared` means reuse and send the prepared
+  request, `fresh_pending` means wait for reply recovery, and only
+  `consumed` / `invalidated` / degraded states fall back to the older
+  request-centric branches
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 

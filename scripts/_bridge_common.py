@@ -767,6 +767,62 @@ def clear_prepared_request_fields(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def prepared_request_action(state: Mapping[str, Any]) -> str:
+    prepared_source = str(state.get("prepared_request_source", "")).strip()
+    if prepared_source.startswith(("report:", "handoff:", "human_review_continue:")):
+        return "request_prompt_from_report"
+    if prepared_source.startswith(("ready_issue:", "override:", "initial:")):
+        return "request_next_prompt"
+    return ""
+
+
+def can_reuse_prepared_request(state: Mapping[str, Any]) -> bool:
+    prepared_hash = str(state.get("prepared_request_hash", "")).strip()
+    prepared_source = str(state.get("prepared_request_source", "")).strip()
+    prepared_log = str(state.get("prepared_request_log", "")).strip()
+    prepared_status = str(state.get("prepared_request_status", "")).strip()
+    if not (prepared_hash and prepared_source and prepared_log):
+        return False
+    if prepared_status == "retry_send":
+        return True
+    if prepared_status != "prepared":
+        return False
+    generation_id = str(state.get("last_issue_centric_runtime_generation_id", "")).strip()
+    if not generation_id:
+        return True
+    return str(state.get("last_issue_centric_generation_lifecycle", "")).strip() == "fresh_prepared"
+
+
+def resolve_issue_centric_preferred_loop_action(state: Mapping[str, Any]) -> tuple[str, str]:
+    runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
+    if runtime_mode is None:
+        return "", ""
+    if runtime_mode.runtime_mode != "issue_centric_ready":
+        return "", ""
+
+    mode = str(state.get("mode", "")).strip()
+    generation_lifecycle = str(runtime_mode.generation_lifecycle).strip()
+    if generation_lifecycle == "fresh_pending":
+        if str(state.get("pending_request_source", "")).strip() and mode in {
+            "idle",
+            "waiting_prompt_reply",
+            "extended_wait",
+            "await_late_completion",
+        }:
+            return "fetch_next_prompt", "issue_centric_fresh_pending"
+        return "", ""
+
+    if generation_lifecycle == "fresh_prepared":
+        if mode not in {"idle", "awaiting_user"}:
+            return "", ""
+        if not can_reuse_prepared_request(state):
+            return "", ""
+        action = prepared_request_action(state)
+        if action:
+            return action, "issue_centric_fresh_prepared"
+    return "", ""
+
+
 def stage_prepared_request(
     state: dict[str, Any],
     *,
@@ -1843,34 +1899,22 @@ def recover_prepared_request_state(state: Mapping[str, Any]) -> tuple[dict[str, 
         return current_state, False
 
     updated = clear_error_fields(dict(current_state))
-    clear_pending_request_fields(updated)
-    updated.update(
-        {
-            "mode": "waiting_prompt_reply",
-            "need_chatgpt_prompt": False,
-            "need_chatgpt_next": False,
-            "need_codex_run": False,
-            "pending_request_hash": prepared_hash,
-            "pending_request_source": prepared_source,
-            "pending_request_log": prepared_log,
-        }
-    )
     if prepared_generation_id:
         updated.update(
             {
-                "last_issue_centric_generation_lifecycle": "fresh_pending",
-                "last_issue_centric_generation_lifecycle_reason": "prepared_request_recovered_as_pending",
+                "last_issue_centric_generation_lifecycle": "fresh_prepared",
+                "last_issue_centric_generation_lifecycle_reason": "prepared_request_recovered_without_send",
                 "last_issue_centric_generation_lifecycle_source": "recover_prepared_request_state",
-                "last_issue_centric_pending_generation_id": prepared_generation_id,
-                "last_issue_centric_prepared_generation_id": "",
+                "last_issue_centric_pending_generation_id": "",
+                "last_issue_centric_prepared_generation_id": prepared_generation_id,
                 "last_issue_centric_freshness_status": "issue_centric_fresh",
-                "last_issue_centric_freshness_reason": "pending_request_bound_to_generation",
-                "last_issue_centric_freshness_source": "pending_request_state",
+                "last_issue_centric_freshness_reason": "prepared_request_bound_to_generation",
+                "last_issue_centric_freshness_source": "prepared_request_state",
                 "last_issue_centric_consumed_generation_id": "",
             }
         )
-    clear_prepared_request_fields(updated)
-    save_state(updated)
+    if updated != current_state:
+        save_state(updated)
     return updated, True
 
 

@@ -14,11 +14,13 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import issue_centric_normalized_summary  # noqa: E402
+import _bridge_common  # noqa: E402
 import request_prompt_from_report  # noqa: E402
 from _bridge_common import (  # noqa: E402
     build_chatgpt_handoff_request,
     build_chatgpt_request,
     build_issue_centric_request_status,
+    recover_prepared_request_state,
 )
 
 
@@ -475,6 +477,29 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             assert lifecycle is not None
             self.assertEqual(lifecycle.generation_lifecycle, "issue_centric_consumed")
             self.assertEqual(lifecycle.generation_lifecycle_reason, "chatgpt_reply_recovered_for_generation")
+
+    def test_recover_prepared_request_state_keeps_issue_centric_generation_prepared(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "prepared_request_hash": "hash123",
+            "prepared_request_source": "report:1",
+            "prepared_request_log": "logs/request.md",
+            "prepared_request_status": "prepared",
+            "last_issue_centric_prepared_generation_id": "summary:logs/summary.json",
+        }
+        saved_states: list[dict[str, object]] = []
+
+        with patch.object(_bridge_common, "save_state", side_effect=lambda payload: saved_states.append(dict(payload))):
+            updated, recovered = recover_prepared_request_state(state)
+
+        self.assertTrue(recovered)
+        self.assertEqual(updated["prepared_request_status"], "prepared")
+        self.assertEqual(updated.get("pending_request_source", ""), "")
+        self.assertEqual(updated["last_issue_centric_generation_lifecycle"], "fresh_prepared")
+        self.assertEqual(updated["last_issue_centric_generation_lifecycle_reason"], "prepared_request_recovered_without_send")
+        self.assertEqual(updated["last_issue_centric_prepared_generation_id"], "summary:logs/summary.json")
+        self.assertEqual(updated["last_issue_centric_pending_generation_id"], "")
 
     def test_runtime_mode_is_degraded_when_resolution_is_unclear(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1230,6 +1255,72 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(saved_states[-1]["last_issue_centric_consumed_generation_id"], "")
             self.assertTrue(str(saved_states[-1]["last_issue_centric_runtime_snapshot"]).endswith(".json"))
             self.assertEqual(saved_states[-1]["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
+
+    def test_run_resume_request_reuses_prepared_issue_centric_request_when_fresh_prepared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            saved_states: list[dict[str, object]] = []
+
+            def fake_log_text(prefix: str, content: str, suffix: str = "md") -> Path:
+                path = root / f"{prefix}.{suffix}"
+                path.write_text(content, encoding="utf-8")
+                return path
+
+            args = SimpleNamespace(
+                next_todo="next",
+                open_questions="none",
+                current_status="",
+                resume_note="",
+            )
+            state = {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "prepared_request_hash": "hash123",
+                "prepared_request_source": "report:1",
+                "prepared_request_log": "logs/prepared.md",
+                "prepared_request_status": "prepared",
+                "last_issue_centric_normalized_summary": str(summary_path),
+                "last_issue_centric_followup_issue_number": "81",
+                "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                "last_issue_centric_runtime_generation_id": f"summary:{summary_path}",
+                "last_issue_centric_generation_lifecycle": "fresh_prepared",
+            }
+            with (
+                patch.object(request_prompt_from_report, "log_text", side_effect=fake_log_text),
+                patch.object(request_prompt_from_report, "read_prepared_request_text", return_value="prepared request body"),
+                patch.object(request_prompt_from_report, "save_state", side_effect=lambda payload: saved_states.append(dict(payload))),
+                patch.object(request_prompt_from_report, "send_to_chatgpt", return_value=None) as send_mock,
+                patch.object(request_prompt_from_report, "build_chatgpt_request", side_effect=AssertionError("should not rebuild request")),
+            ):
+                rc = request_prompt_from_report.run_resume_request(
+                    state,
+                    args,
+                    "===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+                    "",
+                )
+
+            self.assertEqual(rc, 0)
+            send_mock.assert_called_once_with("prepared request body")
+            self.assertEqual(saved_states[-1]["last_issue_centric_generation_lifecycle"], "fresh_pending")
+            self.assertTrue(str(saved_states[-1]["last_issue_centric_pending_generation_id"]).startswith("summary:"))
 
 
 if __name__ == "__main__":

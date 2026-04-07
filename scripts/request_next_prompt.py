@@ -8,6 +8,7 @@ from pathlib import Path
 from _bridge_common import (
     BridgeError,
     build_chatgpt_reply_contract_section,
+    can_reuse_prepared_request,
     clear_error_fields,
     clear_pending_request_fields,
     clear_prepared_request_fields,
@@ -252,10 +253,9 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str]:
 def load_retryable_initial_request(state: dict[str, object]) -> tuple[str, str, str] | None:
     if str(state.get("pending_request_source", "")).strip():
         return None
-    prepared_status = str(state.get("prepared_request_status", "")).strip()
     prepared_source = str(state.get("prepared_request_source", "")).strip()
     prepared_hash = str(state.get("prepared_request_hash", "")).strip()
-    if prepared_status != "retry_send" or not prepared_source.startswith(("ready_issue:", "override:", "initial:")):
+    if not can_reuse_prepared_request(state) or not prepared_source.startswith(("ready_issue:", "override:", "initial:")):
         return None
     prepared_text = read_prepared_request_text(state)
     if not prepared_text:
@@ -268,7 +268,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     retryable_request = None if (args.request_body.strip() or args.ready_issue_ref.strip()) else load_retryable_initial_request(state)
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
-        print(f"request: 前回未送信の {request_source_label(request_source)} entry request を再送します。")
+        prepared_status = str(state.get("prepared_request_status", "")).strip()
+        if prepared_status == "prepared":
+            print(f"request: prepared の {request_source_label(request_source)} entry request を再生成せず送信します。")
+        else:
+            print(f"request: 前回未送信の {request_source_label(request_source)} entry request を再送します。")
     else:
         request_text, request_hash, request_source = build_initial_request(args)
 

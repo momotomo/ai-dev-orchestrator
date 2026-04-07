@@ -254,6 +254,12 @@ During this inventory phase, all of the following stay unchanged:
     issue-centric generation is only `fresh_prepared` after request creation,
     `fresh_pending` after send / pending request handoff, and `consumed` only
     after reply recovery closes that request lifecycle
+  - the current run-loop alignment slice goes one step farther again: it lets
+    `run_until_stop.py` and the one-step orchestrator treat
+    `fresh_prepared` as "send the prepared request without rebuilding it",
+    `fresh_pending` as "wait for reply recovery", and degraded / unavailable
+    issue-centric mode as explicit fallback instead of relying only on the
+    older ad-hoc mode branches
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A
