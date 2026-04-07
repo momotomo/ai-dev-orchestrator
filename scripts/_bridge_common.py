@@ -72,6 +72,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_decision_log": "",
     "last_issue_centric_metadata_log": "",
     "last_issue_centric_artifact_file": "",
+    "last_issue_centric_dispatch_result": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",

@@ -42,9 +42,30 @@ The current implementation boundary is:
   decodes `CHATGPT_FOLLOWUP_ISSUE_BODY`, creates one follow-up issue, and
   closes the current issue only after follow-up creation / Project placement
   succeeds
+- implemented: `scripts/issue_centric_execution.py` as the current execution
+  dispatcher / orchestrator for the already-supported narrow execution matrix
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
+
+The current dispatcher-owned execution matrix is:
+
+- `issue_create`
+- `issue_create + close_current_issue = true`
+- `codex_run`
+- `human_review_needed`
+- `human_review_needed + close_current_issue = true`
+- `no_action`
+- `no_action + create_followup_issue = true`
+- `no_action + create_followup_issue = true + close_current_issue = true`
+
+The dispatcher still blocks these combinations on purpose:
+
+- `issue_create + create_followup_issue = true`
+- `codex_run + close_current_issue = true`
+- `codex_run + create_followup_issue = true`
+- `human_review_needed + create_followup_issue = true`
+- multi-flag combinations outside the narrow paths above
 
 ## Overall Assumptions
 
@@ -300,6 +321,22 @@ For the current bounded `human_review_needed` slice:
 - `no_action + create_followup_issue = true` may create one follow-up issue in
   this slice, but broader follow-up automation remains unimplemented
 
+For the current dispatcher / orchestrator boundary:
+
+- `fetch_next_prompt.py` now stays narrow around contract extraction,
+  transport materialization, dispatcher call, and final state persistence
+- `scripts/issue_centric_execution.py` owns the current execution matrix,
+  step ordering, blocked-combination policy, and final status aggregation
+- step implementations remain in their existing narrow helpers:
+  `issue_centric_issue_create.py`,
+  `issue_centric_codex_run.py`,
+  `issue_centric_codex_launch.py`,
+  `issue_centric_human_review.py`,
+  `issue_centric_close_current_issue.py`, and
+  `issue_centric_followup_issue.py`
+- the dispatcher records a thin `last_issue_centric_dispatch_result` summary
+  so the chosen matrix path, step order, and final status can be audited
+
 ## Bridge To Codex Contract
 
 ### Bridge To Codex Input
@@ -440,10 +477,10 @@ contract below.
 In particular, this document does **not** claim that the following are already
 finished:
 
-- parser / dispatcher execution wiring beyond extraction, validation, and
-  internal decision normalization
 - bridge-side follow-up mutation, full close automation for every action, and
   Projects-aware close / state sync
+- dispatcher support for broader action / helper-flag combinations beyond the
+  current narrow matrix
 - BODY-base64 transport execution beyond the bounded `issue_create`,
   `codex_run`, `close_current_issue`, and `human_review_needed` slices
 - large state-machine redesign

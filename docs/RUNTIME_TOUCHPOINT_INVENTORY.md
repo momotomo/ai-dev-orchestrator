@@ -181,6 +181,11 @@ During this inventory phase, all of the following stay unchanged:
     optionally followed by `close_current_issue` only after follow-up creation
     and any required Project placement succeed; broader follow-up automation
     for other actions remains out of scope
+  - the current dispatcher slice goes one step farther again: it moves the
+    already-implemented issue-centric execution matrix out of
+    `fetch_next_prompt.py` and into `scripts/issue_centric_execution.py`,
+    keeping behavior stable while making path selection, step order, blocked
+    combinations, and final-status aggregation explicit in one place
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A
@@ -265,6 +270,7 @@ ready-issue-first:
   continuation
 - extending request provenance beyond `ready_issue:` / `override:` /
   `report:` / `handoff:`
+- broadening the dispatcher matrix beyond the current narrow execution paths
 - updating operator-facing runtime wording so it matches the new behavior
 
 The following should stay deferred until later runtime phases:
