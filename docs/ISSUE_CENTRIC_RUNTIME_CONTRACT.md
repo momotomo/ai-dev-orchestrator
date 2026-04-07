@@ -61,6 +61,10 @@ The current implementation boundary is:
   project-configured repos after successful `codex_run`
   (`in_progress`), `human_review_needed` (`review`), and
   `close_current_issue` (`done`) steps
+- implemented: narrow normalized issue-centric continuation summary that
+  records the current issue, created issues, closed issue, lifecycle-sync
+  result, principal issue candidate, and next-request hint for the next
+  ChatGPT request layer
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -401,6 +405,8 @@ For the current dispatcher / orchestrator boundary:
   step ordering, blocked-combination policy, and final status aggregation
 - the dispatcher also owns the narrow current-issue Project `State` lifecycle
   sync policy for already-supported actions
+- the dispatcher now also owns the normalized execution-summary writeout used
+  by the next-request preparation layer
 - step implementations remain in their existing narrow helpers:
   `issue_centric_issue_create.py`,
   `issue_centric_codex_run.py`,
@@ -410,12 +416,24 @@ For the current dispatcher / orchestrator boundary:
   `issue_centric_followup_issue.py`
 - the dispatcher records a thin `last_issue_centric_dispatch_result` summary
   so the chosen matrix path, step order, and final status can be audited
+- it also records a thin normalized continuation summary and next-request hint
+  so the next ChatGPT request can read one stable issue-centric view instead of
+  re-deriving intent from many scattered `last_issue_centric_*` fields
 - current-issue lifecycle sync remains narrow:
   - `codex_run` success may sync the current issue to `in_progress`
   - `human_review_needed` success may sync the current issue to `review`
   - `close_current_issue` success may sync the current issue to `done`
   - if the current issue cannot be matched to an existing Project item, this
     slice records partial / blocked sync instead of auto-creating one
+- the normalized continuation summary currently uses a narrow principal-issue
+  rule:
+  - a created follow-up issue wins when the current issue was closed, and also
+    for the current `no_action + create_followup_issue` path
+  - an `issue_create` primary issue wins when no closer follow-up handoff was
+    created
+  - an open current issue wins for the narrow `codex_run` and
+    `human_review_needed` continuation paths
+  - anything ambiguous falls back to `issue_resolution_unclear`
 
 ## Bridge To Codex Contract
 
@@ -497,6 +515,10 @@ In the current bounded implementation, close mutation is only wired for
 `no_action` and for the post-success `issue_create` path.
 Current-issue Project `State` sync is wired only for already-supported narrow
 `codex_run`, `human_review_needed`, and `close_current_issue` outcomes.
+Next-request issue context is also still narrow: the bridge writes a normalized
+summary / hint layer and the existing request builder appends that layer to
+`CURRENT_STATUS`, but it does not yet replace the full report-based request
+shape or introduce a new global state machine.
 
 ## State Model
 

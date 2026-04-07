@@ -104,6 +104,10 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "last_issue_centric_stop_reason": "",
             "chatgpt_decision_note": "",
             "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
             "last_issue_centric_close_order": "",
             "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
             "last_issue_centric_execution_status": "",
@@ -343,6 +347,13 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             )
             self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "81")
             self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run_followup")
+            self.assertEqual(
+                result.final_state["last_issue_centric_principal_issue"],
+                "https://github.com/example/repo/issues/81",
+            )
+            self.assertEqual(result.final_state["last_issue_centric_principal_issue_kind"], "followup_issue")
+            self.assertEqual(result.final_state["last_issue_centric_next_request_hint"], "continue_on_followup_issue")
+            self.assertTrue(str(result.final_state["last_issue_centric_normalized_summary"]).endswith(".json"))
 
     def test_dispatcher_runs_codex_followup_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -547,6 +558,8 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_status, "completed")
             self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "project_state_synced")
             self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "in_progress")
+            self.assertEqual(result.final_state["last_issue_centric_principal_issue_kind"], "current_issue")
+            self.assertEqual(result.final_state["last_issue_centric_next_request_hint"], "continue_on_current_issue")
 
     def test_dispatcher_keeps_codex_success_when_codex_followup_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

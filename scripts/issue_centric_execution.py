@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from issue_centric_normalized_summary import build_issue_centric_normalized_summary
+
 
 @dataclass(frozen=True)
 class IssueCentricExecutionStep:
@@ -1751,6 +1753,11 @@ def _finalize_dispatch(
     stop_message: str,
 ) -> IssueCentricDispatchResult:
     stop_reason = str(mutable_state.get("last_issue_centric_stop_reason", "")).strip()
+    normalized_summary = build_issue_centric_normalized_summary(
+        matrix_path=matrix_path,
+        final_status=final_status,
+        state=mutable_state,
+    )
     summary = {
         "matrix_path": matrix_path,
         "action": str(mutable_state.get("last_issue_centric_action", "")).strip(),
@@ -1780,9 +1787,28 @@ def _finalize_dispatch(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         "json",
     )
+    normalized_summary_log_path = log_writer(
+        f"issue_centric_normalized_summary_{final_status}",
+        json.dumps(normalized_summary, ensure_ascii=False, indent=2) + "\n",
+        "json",
+    )
+    principal_issue = normalized_summary.get("principal_issue_candidate")
+    principal_issue_ref = ""
+    principal_issue_kind = str(normalized_summary.get("principal_issue_kind", "")).strip()
+    if isinstance(principal_issue, Mapping):
+        principal_issue_ref = (
+            str(principal_issue.get("url", "")).strip()
+            or str(principal_issue.get("ref", "")).strip()
+        )
     mutable_state.update(
         {
             "last_issue_centric_dispatch_result": repo_relative(summary_log_path),
+            "last_issue_centric_normalized_summary": repo_relative(normalized_summary_log_path),
+            "last_issue_centric_principal_issue": principal_issue_ref,
+            "last_issue_centric_principal_issue_kind": principal_issue_kind,
+            "last_issue_centric_next_request_hint": str(
+                normalized_summary.get("next_request_hint", "")
+            ).strip(),
             "last_issue_centric_stop_reason": stop_reason,
             "chatgpt_decision_note": stop_reason,
         }

@@ -14,6 +14,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from issue_centric_normalized_summary import (
+    load_issue_centric_normalized_summary,
+    render_issue_centric_summary_for_request,
+)
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BRIDGE_DIR = ROOT_DIR / "bridge"
 INBOX_DIR = BRIDGE_DIR / "inbox"
@@ -73,6 +78,10 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_metadata_log": "",
     "last_issue_centric_artifact_file": "",
     "last_issue_centric_dispatch_result": "",
+    "last_issue_centric_normalized_summary": "",
+    "last_issue_centric_principal_issue": "",
+    "last_issue_centric_principal_issue_kind": "",
+    "last_issue_centric_next_request_hint": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1282,6 +1291,16 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_metadata_log: {state['last_issue_centric_metadata_log']}")
     if state.get("last_issue_centric_artifact_file"):
         fields.append(f"- last_issue_centric_artifact_file: {state['last_issue_centric_artifact_file']}")
+    if state.get("last_issue_centric_normalized_summary"):
+        fields.append(f"- last_issue_centric_normalized_summary: {state['last_issue_centric_normalized_summary']}")
+    if state.get("last_issue_centric_principal_issue"):
+        fields.append(f"- last_issue_centric_principal_issue: {state['last_issue_centric_principal_issue']}")
+    if state.get("last_issue_centric_principal_issue_kind"):
+        fields.append(
+            f"- last_issue_centric_principal_issue_kind: {state['last_issue_centric_principal_issue_kind']}"
+        )
+    if state.get("last_issue_centric_next_request_hint"):
+        fields.append(f"- last_issue_centric_next_request_hint: {state['last_issue_centric_next_request_hint']}")
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
     if state.get("last_issue_centric_execution_status"):
@@ -3085,7 +3104,10 @@ def build_chatgpt_handoff_request(
     summary = compact_last_report_text(last_report)
     contract = build_chatgpt_reply_contract_section()
     status_view = present_bridge_status(state)
-    status_text = current_status or f"{status_view.label}: {status_view.detail}"
+    status_text = current_status or build_issue_centric_request_status(
+        state,
+        fallback_text=f"{status_view.label}: {status_view.detail}",
+    )
     return (
         "次チャットへそのまま貼る完成済みの最初のメッセージだけを書いてください。\n"
         "これは要約メモではありません。新しいチャットの最初の 1 通として、そのまま送れる本文だけを返してください。\n"
@@ -3153,10 +3175,25 @@ def build_chatgpt_request(
         resume_section = "\n".join(lines).strip() + "\n"
 
     values = {
-        "CURRENT_STATUS": current_status or state_snapshot(state),
+        "CURRENT_STATUS": current_status or build_issue_centric_request_status(state),
         "LAST_REPORT": compact_last_report_text(last_report or read_last_report_text(state)),
         "NEXT_TODO": next_todo,
         "OPEN_QUESTIONS": open_questions,
         "RESUME_CONTEXT_SECTION": resume_section,
     }
     return render_template(template_text, values).strip() + "\n"
+
+
+def build_issue_centric_request_status(
+    state: Mapping[str, Any],
+    *,
+    fallback_text: str | None = None,
+) -> str:
+    base = fallback_text or state_snapshot(state)
+    summary = load_issue_centric_normalized_summary(state, repo_root=ROOT_DIR)
+    if summary is None:
+        return base
+    rendered = render_issue_centric_summary_for_request(summary)
+    if not rendered.strip():
+        return base
+    return f"{base}\n\n## issue_centric_summary\n{rendered}".strip()

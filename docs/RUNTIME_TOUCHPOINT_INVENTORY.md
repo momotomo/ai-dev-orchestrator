@@ -213,6 +213,12 @@ During this inventory phase, all of the following stay unchanged:
     `human_review_needed` (`review`), and `close_current_issue` (`done`)
     steps, while still refusing to auto-add a missing current-issue Project
     item or broaden Projects handling for other action families
+  - the current continuation-summary slice goes one step farther again: it
+    normalizes the latest issue-centric execution result into one summary with
+    a principal issue candidate and next-request hint, then lets the existing
+    report-based request builder append that summary to `CURRENT_STATUS`
+    instead of forcing the next-request layer to inspect many scattered
+    execution fields directly
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

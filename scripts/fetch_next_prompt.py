@@ -160,6 +160,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     else ""
                 ),
                 "last_issue_centric_dispatch_result": "",
+                "last_issue_centric_normalized_summary": "",
+                "last_issue_centric_principal_issue": "",
+                "last_issue_centric_principal_issue_kind": "",
+                "last_issue_centric_next_request_hint": "",
                 "last_issue_centric_artifact_kind": (
                     materialized.prepared.primary_body.kind.value
                     if materialized.prepared.primary_body is not None
