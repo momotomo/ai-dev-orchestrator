@@ -207,6 +207,12 @@ During this inventory phase, all of the following stay unchanged:
     `fetch_next_prompt.py` and into `scripts/issue_centric_execution.py`,
     keeping behavior stable while making path selection, step order, blocked
     combinations, and final-status aggregation explicit in one place
+  - the current Project lifecycle slice goes one step farther again: it keeps
+    created-issue Project placement as-is and now adds narrow current-issue
+    `State` sync after successful `codex_run` (`in_progress`),
+    `human_review_needed` (`review`), and `close_current_issue` (`done`)
+    steps, while still refusing to auto-add a missing current-issue Project
+    item or broaden Projects handling for other action families
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

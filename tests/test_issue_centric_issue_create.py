@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -819,6 +820,35 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
                 patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=followup_result) as followup_mock,
                 patch.object(fetch_next_prompt, "execute_close_current_issue", return_value=close_result) as close_mock,
+                patch.object(
+                    fetch_next_prompt,
+                    "execute_current_issue_project_state_sync",
+                    return_value=SimpleNamespace(
+                        status="completed",
+                        sync_status="project_state_synced",
+                        lifecycle_stage="done",
+                        resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                            repository="example/repo",
+                            issue_number=20,
+                            issue_url="https://github.com/example/repo/issues/20",
+                            source_ref="#20",
+                        ),
+                        issue_snapshot=issue_centric_github.GitHubIssueSnapshot(
+                            number=20,
+                            url="https://github.com/example/repo/issues/20",
+                            title="Current issue",
+                            repository="example/repo",
+                            state="closed",
+                            node_id="ISSUE_node_20",
+                        ),
+                        execution_log_path=temp_root / "lifecycle-sync.json",
+                        project_url="https://github.com/users/example/projects/1",
+                        project_item_id="ITEM_20",
+                        project_state_field_name="State",
+                        project_state_value_name="done",
+                        safe_stop_reason="current issue synced to done",
+                    ),
+                ) as lifecycle_sync_mock,
             ):
                 with self.assertRaisesRegex(
                     BridgeStop,
@@ -829,10 +859,12 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             self.assertEqual(primary_mock.call_count, 1)
             self.assertEqual(followup_mock.call_count, 1)
             self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(lifecycle_sync_mock.call_count, 1)
             saved = saved_states[0]
             self.assertEqual(saved["last_issue_centric_primary_issue_number"], "90")
             self.assertEqual(saved["last_issue_centric_followup_issue_number"], "91")
             self.assertEqual(saved["last_issue_centric_close_order"], "after_issue_create_followup")
+            self.assertEqual(saved["last_issue_centric_lifecycle_sync_state_value"], "done")
 
 
 if __name__ == "__main__":

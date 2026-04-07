@@ -57,6 +57,10 @@ The current implementation boundary is:
   launch / continuation handoff, and follow-up issue create all succeed
 - implemented: `scripts/issue_centric_execution.py` as the current execution
   dispatcher / orchestrator for the already-supported narrow execution matrix
+- implemented: narrow current-issue GitHub Project `State` lifecycle sync for
+  project-configured repos after successful `codex_run`
+  (`in_progress`), `human_review_needed` (`review`), and
+  `close_current_issue` (`done`) steps
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -318,8 +322,10 @@ For the current bounded `close_current_issue` slice:
   target or the current issue-centric state, it must stop before mutation
 - if the issue is already closed, the bridge records a no-op close result
   instead of sending another close mutation
-- if `github_project_url` is configured, this slice stops before close mutation
-  because Project state sync is not implemented yet
+- if `github_project_url` is configured, this slice may attempt a narrow
+  current-issue Project `State` sync only after the close mutation succeeds
+- if that `done` sync fails, the close success remains in place and the bridge
+  records a partial lifecycle-sync outcome instead of rolling the close back
 
 For the current bounded `human_review_needed` slice:
 
@@ -339,6 +345,13 @@ For the current bounded `human_review_needed` slice:
 - if review comment posting is blocked or fails, close is not attempted
 - if close fails after review succeeds, the review comment remains posted and
   the bridge records a review-succeeded / close-failed outcome
+- when `github_project_url` is configured, the bridge may attempt a narrow
+  current-issue Project `State` sync to the configured review state after the
+  review comment step succeeds
+- when the same path also closes the current issue successfully, the bridge may
+  then attempt a second narrow sync to the configured done state
+- if either sync fails, the earlier review / close success remains in place and
+  only the lifecycle-sync portion is recorded as partial
 - `human_review_needed + create_followup_issue = true` now uses a narrow
   `review comment -> follow-up issue create` path
 - `human_review_needed + create_followup_issue = true + close_current_issue =
@@ -386,6 +399,8 @@ For the current dispatcher / orchestrator boundary:
   transport materialization, dispatcher call, and final state persistence
 - `scripts/issue_centric_execution.py` owns the current execution matrix,
   step ordering, blocked-combination policy, and final status aggregation
+- the dispatcher also owns the narrow current-issue Project `State` lifecycle
+  sync policy for already-supported actions
 - step implementations remain in their existing narrow helpers:
   `issue_centric_issue_create.py`,
   `issue_centric_codex_run.py`,
@@ -395,6 +410,12 @@ For the current dispatcher / orchestrator boundary:
   `issue_centric_followup_issue.py`
 - the dispatcher records a thin `last_issue_centric_dispatch_result` summary
   so the chosen matrix path, step order, and final status can be audited
+- current-issue lifecycle sync remains narrow:
+  - `codex_run` success may sync the current issue to `in_progress`
+  - `human_review_needed` success may sync the current issue to `review`
+  - `close_current_issue` success may sync the current issue to `done`
+  - if the current issue cannot be matched to an existing Project item, this
+    slice records partial / blocked sync instead of auto-creating one
 
 ## Bridge To Codex Contract
 
@@ -474,6 +495,8 @@ After review, the intended outcomes are:
 
 In the current bounded implementation, close mutation is only wired for
 `no_action` and for the post-success `issue_create` path.
+Current-issue Project `State` sync is wired only for already-supported narrow
+`codex_run`, `human_review_needed`, and `close_current_issue` outcomes.
 
 ## State Model
 
@@ -506,6 +529,14 @@ When Projects are used:
 - `State` is the mandatory canonical state field
 - `Kind` and `Track` may be useful, but they are recommended fields, not
   required fields
+- the current narrow runtime sync also expects these config values when
+  current-issue lifecycle sync is desired:
+  - `github_project_in_progress_state`
+  - `github_project_review_state`
+  - `github_project_done_state`
+- current-issue lifecycle sync only updates `State`
+- if the current issue does not already have a Project item, this bounded slice
+  records a partial / blocked sync result instead of auto-adding the item
 
 When Projects are not used:
 

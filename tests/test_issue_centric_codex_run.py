@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -836,6 +837,35 @@ class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "execute_codex_run_action", return_value=fake_result) as exec_mock,
                 patch.object(fetch_next_prompt, "launch_issue_centric_codex_run", return_value=fake_launch_result) as launch_mock,
                 patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=fake_followup_result) as followup_mock,
+                patch.object(
+                    fetch_next_prompt,
+                    "execute_current_issue_project_state_sync",
+                    return_value=SimpleNamespace(
+                        status="completed",
+                        sync_status="project_state_synced",
+                        lifecycle_stage="in_progress",
+                        resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                            repository="example/repo",
+                            issue_number=20,
+                            issue_url="https://github.com/example/repo/issues/20",
+                            source_ref="#20",
+                        ),
+                        issue_snapshot=issue_centric_github.GitHubIssueSnapshot(
+                            number=20,
+                            url="https://github.com/example/repo/issues/20",
+                            title="Current issue",
+                            repository="example/repo",
+                            state="open",
+                            node_id="ISSUE_node_20",
+                        ),
+                        execution_log_path=temp_root / "lifecycle-sync.json",
+                        project_url="https://github.com/users/example/projects/1",
+                        project_item_id="ITEM_20",
+                        project_state_field_name="State",
+                        project_state_value_name="in_progress",
+                        safe_stop_reason="current issue synced to in_progress",
+                    ),
+                ) as lifecycle_sync_mock,
             ):
                 with self.assertRaisesRegex(
                     BridgeStop,
@@ -846,11 +876,13 @@ class FetchNextPromptCodexRunIntegrationTests(unittest.TestCase):
             self.assertEqual(exec_mock.call_count, 1)
             self.assertEqual(launch_mock.call_count, 1)
             self.assertEqual(followup_mock.call_count, 1)
+            self.assertEqual(lifecycle_sync_mock.call_count, 1)
             saved = saved_states[-1]
             self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
             self.assertEqual(saved["last_issue_centric_continuation_status"], "delegated_to_existing_codex_wait")
             self.assertEqual(saved["last_issue_centric_followup_status"], "completed")
             self.assertEqual(saved["last_issue_centric_followup_issue_number"], "82")
+            self.assertEqual(saved["last_issue_centric_lifecycle_sync_state_value"], "in_progress")
 
 
 class IssueCentricContinuationArchiveTests(unittest.TestCase):

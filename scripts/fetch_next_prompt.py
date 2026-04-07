@@ -36,6 +36,7 @@ from _bridge_common import (
 )
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_close_current_issue import execute_close_current_issue
+from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
     IssueCentricContractError,
@@ -205,6 +206,16 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_followup_project_item_id": "",
                 "last_issue_centric_followup_project_state_field": "",
                 "last_issue_centric_followup_project_state_value": "",
+                "last_issue_centric_current_project_item_id": "",
+                "last_issue_centric_current_project_url": "",
+                "last_issue_centric_lifecycle_sync_status": "",
+                "last_issue_centric_lifecycle_sync_log": "",
+                "last_issue_centric_lifecycle_sync_issue": "",
+                "last_issue_centric_lifecycle_sync_stage": "",
+                "last_issue_centric_lifecycle_sync_project_url": "",
+                "last_issue_centric_lifecycle_sync_project_item_id": "",
+                "last_issue_centric_lifecycle_sync_state_field": "",
+                "last_issue_centric_lifecycle_sync_state_value": "",
                 "last_issue_centric_close_status": "",
                 "last_issue_centric_close_log": "",
                 "last_issue_centric_closed_issue_number": "",
@@ -245,6 +256,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             execute_human_review_action_fn=execute_human_review_action,
             execute_close_current_issue_fn=execute_close_current_issue,
             execute_followup_issue_action_fn=execute_followup_issue_action,
+            execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync,
             launch_runner=launch_codex_once.run,
         )
         save_state(dispatch_result.final_state)

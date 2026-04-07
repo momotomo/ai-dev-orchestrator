@@ -70,6 +70,15 @@ class CreatedGitHubProjectItem:
     project_id: str
 
 
+@dataclass(frozen=True)
+class ResolvedGitHubProjectItem:
+    item_id: str
+    project_id: str
+    issue_node_id: str
+    issue_number: int
+    repository: str
+
+
 def resolve_github_repository(
     *,
     project_config: Mapping[str, Any],
@@ -443,6 +452,101 @@ def set_github_project_item_state(
         raise IssueCentricGitHubError(
             "GitHub Project State set response is missing project item id."
         )
+
+
+def resolve_github_project_item_for_issue(
+    *,
+    project_id: str,
+    issue_node_id: str,
+    token: str,
+) -> ResolvedGitHubProjectItem:
+    after: str | None = None
+    while True:
+        payload_obj = _github_graphql_request(
+            token=token,
+            query=(
+                "query($projectId: ID!, $after: String) {"
+                "  node(id: $projectId) {"
+                "    ... on ProjectV2 {"
+                "      items(first: 100, after: $after) {"
+                "        pageInfo { hasNextPage endCursor }"
+                "        nodes {"
+                "          id"
+                "          content {"
+                "            __typename"
+                "            ... on Issue {"
+                "              id"
+                "              number"
+                "              repository { nameWithOwner }"
+                "            }"
+                "          }"
+                "        }"
+                "      }"
+                "    }"
+                "  }"
+                "}"
+            ),
+            variables={"projectId": project_id, "after": after},
+            context="GitHub Project item resolve",
+        )
+        node = payload_obj.get("node")
+        if not isinstance(node, dict):
+            raise IssueCentricGitHubError(
+                "GitHub Project item resolve response is missing the project node."
+            )
+        items = node.get("items")
+        if not isinstance(items, dict):
+            raise IssueCentricGitHubError(
+                "GitHub Project item resolve response is missing project items."
+            )
+        item_nodes = items.get("nodes")
+        page_info = items.get("pageInfo")
+        if not isinstance(item_nodes, list) or not isinstance(page_info, dict):
+            raise IssueCentricGitHubError(
+                "GitHub Project item resolve response is missing item nodes or pageInfo."
+            )
+        for item in item_nodes:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            content = item.get("content")
+            if not isinstance(item_id, str) or not isinstance(content, dict):
+                continue
+            if content.get("__typename") != "Issue":
+                continue
+            content_id = content.get("id")
+            issue_number = content.get("number")
+            repository = (
+                (content.get("repository") or {}).get("nameWithOwner")
+                if isinstance(content.get("repository"), dict)
+                else None
+            )
+            if (
+                isinstance(content_id, str)
+                and content_id == issue_node_id
+                and isinstance(issue_number, int)
+                and isinstance(repository, str)
+            ):
+                return ResolvedGitHubProjectItem(
+                    item_id=item_id,
+                    project_id=project_id,
+                    issue_node_id=content_id,
+                    issue_number=issue_number,
+                    repository=repository,
+                )
+        has_next_page = bool(page_info.get("hasNextPage"))
+        end_cursor = page_info.get("endCursor")
+        if not has_next_page:
+            break
+        if end_cursor is not None and not isinstance(end_cursor, str):
+            raise IssueCentricGitHubError(
+                "GitHub Project item resolve response returned an invalid endCursor."
+            )
+        after = end_cursor
+
+    raise IssueCentricGitHubError(
+        "GitHub Project item for the current issue could not be resolved from the configured Project."
+    )
 
 
 def _github_api_request(

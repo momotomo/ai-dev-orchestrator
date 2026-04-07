@@ -135,6 +135,16 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             "last_issue_centric_followup_project_item_id": "",
             "last_issue_centric_followup_project_state_field": "",
             "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
             "last_issue_centric_close_status": "",
             "last_issue_centric_close_log": "",
             "last_issue_centric_closed_issue_number": "",
@@ -154,12 +164,14 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
         materialized: SimpleNamespace,
         root: Path,
         mutable_state: dict[str, object] | None = None,
+        project_config: dict[str, object] | None = None,
         execute_issue_create_action_fn=None,
         execute_codex_run_action_fn=None,
         launch_issue_centric_codex_run_fn=None,
         execute_human_review_action_fn=None,
         execute_close_current_issue_fn=None,
         execute_followup_issue_action_fn=None,
+        execute_current_issue_project_state_sync_fn=None,
     ) -> issue_centric_execution.IssueCentricDispatchResult:
         saved_states: list[dict[str, object]] = []
         log_writer = TempLogWriter(root)
@@ -175,7 +187,8 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             materialized=materialized,
             prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
             mutable_state=state,
-            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            project_config=project_config
+            or {"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
             repo_path=REPO_ROOT,
             source_raw_log="logs/raw.txt",
             source_decision_log="logs/decision.md",
@@ -191,6 +204,22 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             execute_human_review_action_fn=execute_human_review_action_fn or (lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("review should not run"))),
             execute_close_current_issue_fn=execute_close_current_issue_fn or (lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("close should not run"))),
             execute_followup_issue_action_fn=execute_followup_issue_action_fn or (lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("followup should not run"))),
+            execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn
+            or (
+                lambda *args, **kwargs: SimpleNamespace(
+                    status="not_requested",
+                    sync_status="not_requested_no_project",
+                    lifecycle_stage=kwargs.get("lifecycle_stage", ""),
+                    resolved_issue=None,
+                    issue_snapshot=None,
+                    execution_log_path=root / "no-project-sync.json",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="No GitHub Project is configured for current-issue lifecycle state sync.",
+                )
+            ),
             launch_runner=lambda state, argv=None: 0,
         )
 
@@ -415,6 +444,109 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_status, "completed")
             self.assertEqual(result.final_state["last_issue_centric_followup_status"], "completed")
             self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "81")
+
+    def test_dispatcher_syncs_codex_run_current_issue_to_in_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=False,
+                create_followup_issue=False,
+                summary="Run codex and sync current issue state.",
+                issue_body_base64=None,
+                codex_body_base64=b64("Implement the issue.\n"),
+                review_base64=None,
+                followup_issue_body_base64=None,
+                raw_json="{}",
+                raw_segment="segment",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_codex_run(*args, **kwargs):
+                calls.append("trigger")
+                log_path = root / "codex-trigger.json"
+                log_path.write_text("{}", encoding="utf-8")
+                payload_path = root / "payload.json"
+                payload_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(706, 20),
+                    payload=SimpleNamespace(
+                        repo=str(REPO_ROOT),
+                        target_issue="https://github.com/example/repo/issues/20",
+                        request="Implement the issue.\n",
+                        trigger_comment="https://github.com/example/repo/issues/20#issuecomment-706",
+                    ),
+                    payload_log_path=payload_path,
+                    execution_log_path=log_path,
+                    launch_status="not_implemented",
+                    launch_note="not implemented",
+                    safe_stop_reason="trigger comment created",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                prompt_log = root / "prompt.md"
+                prompt_log.write_text("prompt", encoding="utf-8")
+                launch_log = root / "launch.json"
+                launch_log.write_text("{}", encoding="utf-8")
+                cont_log = root / "continuation.json"
+                cont_log.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="launched",
+                    launch_entrypoint="launch_codex_once.run",
+                    prompt_log_path=prompt_log,
+                    launch_log_path=launch_log,
+                    continuation_status="delegated_to_existing_codex_wait",
+                    continuation_log_path=cont_log,
+                    report_status="waiting_for_report",
+                    report_file="",
+                    final_mode="codex_running",
+                    safe_stop_reason="launch and continuation delegated",
+                )
+
+            def fake_sync(*args, **kwargs):
+                calls.append(f"sync:{kwargs['lifecycle_stage']}")
+                log_path = root / "project-sync.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs["lifecycle_stage"],
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=SimpleNamespace(number=20, url="https://github.com/example/repo/issues/20", title="Current issue"),
+                    execution_log_path=log_path,
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="in_progress",
+                    safe_stop_reason="current issue synced to in_progress",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_in_progress_state": "in_progress",
+                    "worker_repo_path": ".",
+                },
+                execute_codex_run_action_fn=fake_codex_run,
+                launch_issue_centric_codex_run_fn=fake_launch,
+                execute_current_issue_project_state_sync_fn=fake_sync,
+            )
+
+            self.assertEqual(calls, ["trigger", "launch", "sync:in_progress"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "project_state_synced")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "in_progress")
 
     def test_dispatcher_keeps_codex_success_when_codex_followup_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -723,6 +855,145 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "83")
             self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run_followup")
 
+    def test_dispatcher_syncs_done_after_codex_followup_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                summary="Run codex, create follow-up, close current issue, and sync lifecycle state.",
+                issue_body_base64=None,
+                codex_body_base64=b64("Implement the issue.\n"),
+                review_base64=None,
+                followup_issue_body_base64=b64("# Follow-up\n\nBody\n"),
+                raw_json="{}",
+                raw_segment="segment",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_codex_run(*args, **kwargs):
+                calls.append("trigger")
+                log_path = root / "codex-trigger.json"
+                log_path.write_text("{}", encoding="utf-8")
+                payload_path = root / "payload.json"
+                payload_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(706, 20),
+                    payload=SimpleNamespace(
+                        repo=str(REPO_ROOT),
+                        target_issue="https://github.com/example/repo/issues/20",
+                        request="Implement the issue.\n",
+                        trigger_comment="https://github.com/example/repo/issues/20#issuecomment-706",
+                    ),
+                    payload_log_path=payload_path,
+                    execution_log_path=log_path,
+                    launch_status="not_implemented",
+                    launch_note="not implemented",
+                    safe_stop_reason="trigger comment created",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                prompt_log = root / "prompt.md"
+                prompt_log.write_text("prompt", encoding="utf-8")
+                launch_log = root / "launch.json"
+                launch_log.write_text("{}", encoding="utf-8")
+                cont_log = root / "continuation.json"
+                cont_log.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="launched",
+                    launch_entrypoint="launch_codex_once.run",
+                    prompt_log_path=prompt_log,
+                    launch_log_path=launch_log,
+                    continuation_status="delegated_to_existing_codex_wait",
+                    continuation_log_path=cont_log,
+                    report_status="waiting_for_report",
+                    report_file="",
+                    final_mode="codex_running",
+                    safe_stop_reason="launch and continuation delegated",
+                )
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                log_path = root / "followup.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=fake_issue(85),
+                    execution_log_path=log_path,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_85",
+                    project_state_field_name="State",
+                    project_state_value_name="ready",
+                    safe_stop_reason="follow-up created after codex handoff",
+                )
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_codex_run_followup",
+                    execution_log_path=log_path,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed current issue after codex continuation and follow-up",
+                )
+
+            def fake_sync(*args, **kwargs):
+                calls.append(f"sync:{kwargs['lifecycle_stage']}")
+                stage = kwargs["lifecycle_stage"]
+                log_path = root / f"sync-{stage}.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=stage,
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=SimpleNamespace(number=20, url="https://github.com/example/repo/issues/20", title="Current issue"),
+                    execution_log_path=log_path,
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="done" if stage == "done" else "in_progress",
+                    safe_stop_reason=f"current issue synced to {stage}",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_in_progress_state": "in_progress",
+                    "github_project_done_state": "done",
+                    "worker_repo_path": ".",
+                },
+                execute_codex_run_action_fn=fake_codex_run,
+                launch_issue_centric_codex_run_fn=fake_launch,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+                execute_current_issue_project_state_sync_fn=fake_sync,
+            )
+
+            self.assertEqual(calls, ["trigger", "launch", "sync:in_progress", "followup", "close", "sync:done"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "done")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "done")
+
     def test_dispatcher_runs_issue_create_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -975,6 +1246,69 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "3001")
             self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_human_review")
 
+    def test_dispatcher_syncs_current_issue_to_review_after_human_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                target_issue="#20",
+                review_text="## Review\n\n- OK\n",
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                log_path = root / "review.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="review_only",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(3201, 20),
+                    execution_log_path=log_path,
+                    safe_stop_reason="review posted",
+                )
+
+            def fake_sync(*args, **kwargs):
+                calls.append(f"sync:{kwargs['lifecycle_stage']}")
+                log_path = root / "review-sync.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs["lifecycle_stage"],
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=SimpleNamespace(number=20, url="https://github.com/example/repo/issues/20", title="Current issue"),
+                    execution_log_path=log_path,
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="review",
+                    safe_stop_reason="current issue synced to review",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_review_state": "review",
+                    "worker_repo_path": ".",
+                },
+                execute_human_review_action_fn=fake_review,
+                execute_current_issue_project_state_sync_fn=fake_sync,
+            )
+
+            self.assertEqual(calls, ["review", "sync:review"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "review")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "review")
+
     def test_dispatcher_runs_human_review_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1110,6 +1444,69 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(calls, ["followup", "close"])
             self.assertEqual(result.matrix_path, "no_action_followup_then_close")
             self.assertEqual([step.name for step in result.steps], ["followup_issue_create", "close_current_issue"])
+
+    def test_dispatcher_syncs_done_after_no_action_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                close_current_issue=True,
+            )
+            materialized = materialized_from_decision(decision, root=root)
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                log_path = root / "close.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_no_action",
+                    execution_log_path=log_path,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed current issue",
+                )
+
+            def fake_sync(*args, **kwargs):
+                calls.append(f"sync:{kwargs['lifecycle_stage']}")
+                log_path = root / "done-sync.json"
+                log_path.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs["lifecycle_stage"],
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=SimpleNamespace(number=20, url="https://github.com/example/repo/issues/20", title="Current issue"),
+                    execution_log_path=log_path,
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="done",
+                    safe_stop_reason="current issue synced to done",
+                )
+
+            result = self.dispatch(
+                decision=decision,
+                materialized=materialized,
+                root=root,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_done_state": "done",
+                    "worker_repo_path": ".",
+                },
+                execute_close_current_issue_fn=fake_close,
+                execute_current_issue_project_state_sync_fn=fake_sync,
+            )
+
+            self.assertEqual(calls, ["close", "sync:done"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "done")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "done")
 
     def test_dispatcher_keeps_review_success_when_review_followup_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

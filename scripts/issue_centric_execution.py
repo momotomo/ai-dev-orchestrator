@@ -46,6 +46,7 @@ def dispatch_issue_centric_execution(
     execute_human_review_action_fn: Callable[..., object],
     execute_close_current_issue_fn: Callable[..., object],
     execute_followup_issue_action_fn: Callable[..., object],
+    execute_current_issue_project_state_sync_fn: Callable[..., object],
     launch_runner: Callable[[dict[str, object], list[str] | None], int],
 ) -> IssueCentricDispatchResult:
     steps: list[IssueCentricExecutionStep] = []
@@ -186,6 +187,7 @@ def dispatch_issue_centric_execution(
         followup_note = ""
         followup_execution = None
         close_execution = None
+        done_sync_execution = None
         if contract_decision.create_followup_issue and execution.status == "completed":
             followup_execution = execute_followup_issue_action_fn(
                 materialized.prepared,
@@ -248,6 +250,25 @@ def dispatch_issue_centric_execution(
                 close_note = f" close log: {repo_relative(close_execution.execution_log_path)}"
                 if close_execution.status != "completed":
                     final_status = "partial"
+                else:
+                    done_sync_execution = _run_current_issue_project_state_sync(
+                        lifecycle_stage="done",
+                        prepared=materialized.prepared,
+                        prior_state=mutable_state,
+                        target_state=mutable_state,
+                        project_config=project_config,
+                        repo_path=repo_path,
+                        source_decision_log=source_decision_log,
+                        source_metadata_log=source_metadata_log,
+                        source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                        step_name="current_issue_project_state_sync_done",
+                        steps=steps,
+                        log_writer=log_writer,
+                        repo_relative=repo_relative,
+                        execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                    )
+                    if done_sync_execution.status not in {"completed", "not_requested"}:
+                        final_status = "partial"
             elif contract_decision.close_current_issue:
                 mutable_state.update(
                     {
@@ -293,6 +314,25 @@ def dispatch_issue_centric_execution(
                 close_note = f" close log: {repo_relative(close_execution.execution_log_path)}"
                 if close_execution.status != "completed":
                     final_status = "partial"
+                else:
+                    done_sync_execution = _run_current_issue_project_state_sync(
+                        lifecycle_stage="done",
+                        prepared=materialized.prepared,
+                        prior_state=mutable_state,
+                        target_state=mutable_state,
+                        project_config=project_config,
+                        repo_path=repo_path,
+                        source_decision_log=source_decision_log,
+                        source_metadata_log=source_metadata_log,
+                        source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                        step_name="current_issue_project_state_sync_done",
+                        steps=steps,
+                        log_writer=log_writer,
+                        repo_relative=repo_relative,
+                        execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                    )
+                    if done_sync_execution.status not in {"completed", "not_requested"}:
+                        final_status = "partial"
         elif contract_decision.close_current_issue:
             mutable_state.update(
                 {
@@ -639,6 +679,8 @@ def dispatch_issue_centric_execution(
         close_note = ""
         followup_execution = None
         close_execution = None
+        lifecycle_sync_execution = None
+        done_sync_execution = None
         final_status = launch_result.status
         post_followup_state = post_launch_state
         if contract_decision.close_current_issue and launch_result.status != "completed":
@@ -656,6 +698,25 @@ def dispatch_issue_centric_execution(
                     note="close_current_issue runs only after launch / continuation and follow-up issue create complete.",
                 )
             )
+        if launch_result.status == "completed":
+            lifecycle_sync_execution = _run_current_issue_project_state_sync(
+                lifecycle_stage="in_progress",
+                prepared=materialized.prepared,
+                prior_state=prior_state,
+                target_state=post_launch_state,
+                project_config=project_config,
+                repo_path=repo_path,
+                source_decision_log=source_decision_log,
+                source_metadata_log=source_metadata_log,
+                source_action_execution_log=repo_relative(launch_result.continuation_log_path),
+                step_name="current_issue_project_state_sync_in_progress",
+                steps=steps,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+            )
+            if lifecycle_sync_execution.status not in {"completed", "not_requested"}:
+                final_status = "partial"
         if contract_decision.create_followup_issue and launch_result.status == "completed":
             followup_execution = execute_followup_issue_action_fn(
                 materialized.prepared,
@@ -718,6 +779,25 @@ def dispatch_issue_centric_execution(
                 close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
                 if close_execution.status != "completed":
                     final_status = "partial"
+                else:
+                    done_sync_execution = _run_current_issue_project_state_sync(
+                        lifecycle_stage="done",
+                        prepared=materialized.prepared,
+                        prior_state=post_followup_state,
+                        target_state=post_followup_state,
+                        project_config=project_config,
+                        repo_path=repo_path,
+                        source_decision_log=source_decision_log,
+                        source_metadata_log=source_metadata_log,
+                        source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                        step_name="current_issue_project_state_sync_done",
+                        steps=steps,
+                        log_writer=log_writer,
+                        repo_relative=repo_relative,
+                        execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                    )
+                    if done_sync_execution.status not in {"completed", "not_requested"}:
+                        final_status = "partial"
             elif contract_decision.close_current_issue:
                 post_followup_state.update(
                     {
@@ -901,10 +981,32 @@ def dispatch_issue_centric_execution(
         followup_note = ""
         followup_execution = None
         close_execution = None
+        review_sync_execution = None
+        done_sync_execution = None
+        post_review_state = mutable_state
+        if review_execution.status == "completed":
+            review_sync_execution = _run_current_issue_project_state_sync(
+                lifecycle_stage="review",
+                prepared=materialized.prepared,
+                prior_state=prior_state,
+                target_state=post_review_state,
+                project_config=project_config,
+                repo_path=repo_path,
+                source_decision_log=source_decision_log,
+                source_metadata_log=source_metadata_log,
+                source_action_execution_log=repo_relative(review_execution.execution_log_path),
+                step_name="current_issue_project_state_sync_review",
+                steps=steps,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+            )
+            if review_sync_execution.status not in {"completed", "not_requested"}:
+                final_status = "partial"
         if contract_decision.create_followup_issue and review_execution.status == "completed":
             followup_execution = execute_followup_issue_action_fn(
                 materialized.prepared,
-                prior_state=prior_state,
+                prior_state=post_review_state,
                 project_config=project_config,
                 repo_path=repo_path,
                 source_decision_log=source_decision_log,
@@ -964,6 +1066,25 @@ def dispatch_issue_centric_execution(
                 close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
                 if close_execution.status != "completed":
                     final_status = "partial"
+                else:
+                    done_sync_execution = _run_current_issue_project_state_sync(
+                        lifecycle_stage="done",
+                        prepared=materialized.prepared,
+                        prior_state=mutable_state,
+                        target_state=mutable_state,
+                        project_config=project_config,
+                        repo_path=repo_path,
+                        source_decision_log=source_decision_log,
+                        source_metadata_log=source_metadata_log,
+                        source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                        step_name="current_issue_project_state_sync_done",
+                        steps=steps,
+                        log_writer=log_writer,
+                        repo_relative=repo_relative,
+                        execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                    )
+                    if done_sync_execution.status not in {"completed", "not_requested"}:
+                        final_status = "partial"
             elif contract_decision.close_current_issue:
                 mutable_state.update(
                     {
@@ -1009,6 +1130,25 @@ def dispatch_issue_centric_execution(
             close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
             if close_execution.status != "completed":
                 final_status = "partial"
+            else:
+                done_sync_execution = _run_current_issue_project_state_sync(
+                    lifecycle_stage="done",
+                    prepared=materialized.prepared,
+                    prior_state=mutable_state,
+                    target_state=mutable_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                    step_name="current_issue_project_state_sync_done",
+                    steps=steps,
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                    execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                )
+                if done_sync_execution.status not in {"completed", "not_requested"}:
+                    final_status = "partial"
         elif contract_decision.close_current_issue:
             mutable_state.update(
                 {
@@ -1120,6 +1260,7 @@ def dispatch_issue_centric_execution(
         )
         close_note = ""
         final_status = followup_execution.status
+        done_sync_execution = None
         if contract_decision.close_current_issue and followup_execution.status == "completed":
             close_execution = execute_close_current_issue_fn(
                 materialized.prepared,
@@ -1148,6 +1289,25 @@ def dispatch_issue_centric_execution(
             close_note = f" close: {repo_relative(close_execution.execution_log_path)}"
             if close_execution.status != "completed":
                 final_status = "partial"
+            else:
+                done_sync_execution = _run_current_issue_project_state_sync(
+                    lifecycle_stage="done",
+                    prepared=materialized.prepared,
+                    prior_state=mutable_state,
+                    target_state=mutable_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                    step_name="current_issue_project_state_sync_done",
+                    steps=steps,
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                    execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                )
+                if done_sync_execution.status not in {"completed", "not_requested"}:
+                    final_status = "partial"
         elif contract_decision.close_current_issue:
             mutable_state.update(
                 {
@@ -1223,9 +1383,29 @@ def dispatch_issue_centric_execution(
                 note=close_execution.safe_stop_reason,
             )
         )
+        final_status = close_execution.status
+        if close_execution.status == "completed":
+            done_sync_execution = _run_current_issue_project_state_sync(
+                lifecycle_stage="done",
+                prepared=materialized.prepared,
+                prior_state=mutable_state,
+                target_state=mutable_state,
+                project_config=project_config,
+                repo_path=repo_path,
+                source_decision_log=source_decision_log,
+                source_metadata_log=source_metadata_log,
+                source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                step_name="current_issue_project_state_sync_done",
+                steps=steps,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+            )
+            if done_sync_execution.status not in {"completed", "not_requested"}:
+                final_status = "partial"
         return _finalize_dispatch(
             matrix_path="no_action_close",
-            final_status=close_execution.status,
+            final_status=final_status,
             steps=steps,
             mutable_state=mutable_state,
             log_writer=log_writer,
@@ -1482,6 +1662,84 @@ def _apply_followup_execution_state(
     )
 
 
+def _apply_current_issue_project_state_sync_state(
+    target_state: dict[str, object],
+    *,
+    sync_execution: object,
+    repo_relative: Callable[[Path], str],
+) -> None:
+    if sync_execution.status == "not_requested":
+        return
+    current_item_id = str(target_state.get("last_issue_centric_current_project_item_id", "")).strip()
+    current_project_url = str(target_state.get("last_issue_centric_current_project_url", "")).strip()
+    target_state.update(
+        {
+            "last_issue_centric_current_project_item_id": sync_execution.project_item_id or current_item_id,
+            "last_issue_centric_current_project_url": sync_execution.project_url or current_project_url,
+            "last_issue_centric_lifecycle_sync_status": sync_execution.sync_status,
+            "last_issue_centric_lifecycle_sync_log": repo_relative(sync_execution.execution_log_path),
+            "last_issue_centric_lifecycle_sync_issue": (
+                sync_execution.resolved_issue.issue_url
+                if sync_execution.resolved_issue is not None
+                else str(target_state.get("last_issue_centric_lifecycle_sync_issue", "")).strip()
+            ),
+            "last_issue_centric_lifecycle_sync_stage": sync_execution.lifecycle_stage,
+            "last_issue_centric_lifecycle_sync_project_url": sync_execution.project_url,
+            "last_issue_centric_lifecycle_sync_project_item_id": sync_execution.project_item_id,
+            "last_issue_centric_lifecycle_sync_state_field": sync_execution.project_state_field_name,
+            "last_issue_centric_lifecycle_sync_state_value": sync_execution.project_state_value_name,
+            "last_issue_centric_stop_reason": sync_execution.safe_stop_reason,
+            "chatgpt_decision_note": sync_execution.safe_stop_reason,
+        }
+    )
+
+
+def _run_current_issue_project_state_sync(
+    *,
+    lifecycle_stage: str,
+    prepared: object,
+    prior_state: Mapping[str, Any],
+    target_state: dict[str, object],
+    project_config: Mapping[str, Any],
+    repo_path: Path,
+    source_decision_log: str,
+    source_metadata_log: str,
+    source_action_execution_log: str,
+    step_name: str,
+    steps: list[IssueCentricExecutionStep],
+    log_writer: Callable[[str, str, str], Path],
+    repo_relative: Callable[[Path], str],
+    execute_current_issue_project_state_sync_fn: Callable[..., object],
+) -> object:
+    sync_execution = execute_current_issue_project_state_sync_fn(
+        prepared,
+        lifecycle_stage=lifecycle_stage,
+        prior_state=target_state,
+        project_config=project_config,
+        repo_path=repo_path,
+        source_decision_log=source_decision_log,
+        source_metadata_log=source_metadata_log,
+        source_action_execution_log=source_action_execution_log,
+        log_writer=log_writer,
+        repo_relative=repo_relative,
+    )
+    if sync_execution.status != "not_requested":
+        _apply_current_issue_project_state_sync_state(
+            target_state,
+            sync_execution=sync_execution,
+            repo_relative=repo_relative,
+        )
+        steps.append(
+            IssueCentricExecutionStep(
+                name=step_name,
+                status=sync_execution.status,
+                log_path=repo_relative(sync_execution.execution_log_path),
+                note=sync_execution.safe_stop_reason,
+            )
+        )
+    return sync_execution
+
+
 def _finalize_dispatch(
     *,
     matrix_path: str,
@@ -1498,6 +1756,12 @@ def _finalize_dispatch(
         "action": str(mutable_state.get("last_issue_centric_action", "")).strip(),
         "target_issue": str(mutable_state.get("last_issue_centric_target_issue", "")).strip(),
         "close_current_issue": bool(str(mutable_state.get("last_issue_centric_close_order", "")).strip()),
+        "current_issue_lifecycle_sync_status": str(
+            mutable_state.get("last_issue_centric_lifecycle_sync_status", "")
+        ).strip(),
+        "current_issue_lifecycle_sync_stage": str(
+            mutable_state.get("last_issue_centric_lifecycle_sync_stage", "")
+        ).strip(),
         "final_status": final_status,
         "final_stop_reason": stop_reason,
         "step_sequence": [step.name for step in steps],
