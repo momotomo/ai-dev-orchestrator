@@ -160,6 +160,7 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
             with (
                 patch.object(bridge_orchestrator, "load_project_config", return_value={}),
                 patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator, "should_prioritize_unarchived_report", return_value=False),
                 patch.object(bridge_orchestrator.fetch_next_prompt, "run", return_value=0) as fetch_run,
                 patch.object(bridge_orchestrator.request_prompt_from_report, "run", return_value=0) as report_run,
             ):
@@ -221,6 +222,7 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
             with (
                 patch.object(bridge_orchestrator, "load_project_config", return_value={}),
                 patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator, "should_prioritize_unarchived_report", return_value=False),
                 patch.object(bridge_orchestrator.request_prompt_from_report, "run", return_value=0) as report_run,
                 redirect_stdout(out),
             ):
@@ -281,6 +283,7 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
             with (
                 patch.object(bridge_orchestrator, "load_project_config", return_value={}),
                 patch.object(bridge_orchestrator, "print_project_config_warnings"),
+                patch.object(bridge_orchestrator, "should_prioritize_unarchived_report", return_value=False),
                 patch.object(bridge_orchestrator.request_prompt_from_report, "run", return_value=0) as report_run,
                 redirect_stdout(out),
             ):
@@ -290,6 +293,25 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
         report_run.assert_called_once()
         self.assertIn("legacy fallback", out.getvalue())
         self.assertIn("legacy_fallback_selected", out.getvalue())
+
+    def test_run_keeps_codex_running_mode_driven_before_issue_centric_routing(self) -> None:
+        out = io.StringIO()
+        with (
+            patch.object(bridge_orchestrator, "load_project_config", return_value={}),
+            patch.object(bridge_orchestrator, "print_project_config_warnings"),
+            patch.object(bridge_orchestrator, "should_prioritize_unarchived_report", return_value=False),
+            patch.object(bridge_orchestrator, "maybe_promote_codex_done", return_value=False),
+            patch.object(
+                bridge_orchestrator,
+                "resolve_runtime_next_action",
+                side_effect=AssertionError("issue-centric next-action should not override codex_running"),
+            ),
+            redirect_stdout(out),
+        ):
+            rc = bridge_orchestrator.run({"mode": "codex_running", "need_codex_run": True}, [])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("Codex worker の完了待ち", out.getvalue())
 
 
 if __name__ == "__main__":

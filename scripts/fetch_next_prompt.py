@@ -39,6 +39,7 @@ from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
+    IssueCentricAction,
     IssueCentricContractError,
     maybe_parse_issue_centric_reply,
 )
@@ -280,6 +281,20 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
             }
         )
+        if contract_decision.action is IssueCentricAction.CODEX_RUN:
+            save_state(mutable_state)
+            raise BridgeStop(
+                "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"
+                " prepared Codex body は次の bridge 手で codex_run dispatch に渡します。"
+                f" raw dump: {repo_relative(raw_log)}"
+                f" decision log: {repo_relative(decision_log)}"
+                f" metadata: {repo_relative(materialized.metadata_log_path)}"
+                + (
+                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
+                    if materialized.artifact_log_path is not None
+                    else ""
+                )
+            )
         project_config = load_project_config()
         dispatch_result = dispatch_issue_centric_execution(
             contract_decision=contract_decision,

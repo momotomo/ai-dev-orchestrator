@@ -642,7 +642,7 @@ class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_close_status"], "closed")
             self.assertEqual(saved["last_issue_centric_closed_issue_url"], "https://github.com/example/repo/issues/20")
 
-    def test_codex_run_with_close_current_issue_blocks_before_execution(self) -> None:
+    def test_codex_run_with_close_current_issue_is_staged_for_later_dispatch(self) -> None:
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "request-hash",
@@ -710,14 +710,19 @@ class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "execute_close_current_issue", return_value=fake_close) as close_mock,
                 patch.object(fetch_next_prompt, "execute_codex_run_action") as codex_mock,
             ):
-                with self.assertRaisesRegex(BridgeStop, "codex_run \\+ close_current_issue"):
+                with self.assertRaisesRegex(BridgeStop, "prepared Codex body は次の bridge 手で codex_run dispatch に渡します"):
                     fetch_next_prompt.run(dict(state), [])
 
-            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(close_mock.call_count, 0)
             self.assertEqual(codex_mock.call_count, 0)
             saved = saved_states[0]
-            self.assertEqual(saved["last_issue_centric_close_status"], "blocked")
-            self.assertEqual(saved["last_issue_centric_close_order"], "blocked_codex_run")
+            self.assertEqual(saved["chatgpt_decision"], "issue_centric:codex_run")
+            self.assertEqual(saved["last_issue_centric_artifact_kind"], "codex_body")
+            self.assertTrue(saved["last_issue_centric_metadata_log"])
+            self.assertTrue(saved["last_issue_centric_artifact_file"])
+            self.assertEqual(saved["last_issue_centric_execution_status"], "")
+            self.assertEqual(saved["last_issue_centric_close_status"], "")
+            self.assertEqual(saved["last_issue_centric_close_order"], "")
 
 
 if __name__ == "__main__":

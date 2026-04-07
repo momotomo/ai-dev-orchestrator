@@ -590,7 +590,7 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_created_issue_number"], "74")
             self.assertEqual(saved["last_issue_centric_close_status"], "closed")
 
-    def test_fetch_executes_codex_followup_close_combo(self) -> None:
+    def test_fetch_stages_codex_followup_close_combo_for_later_dispatch(self) -> None:
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "request-hash",
@@ -765,18 +765,22 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     BridgeStop,
-                    "trigger comment / launch / continuation / narrow follow-up issue create / narrow close",
+                    "prepared Codex body は次の bridge 手で codex_run dispatch に渡します",
                 ):
                     fetch_next_prompt.run(dict(state), [])
 
-            self.assertEqual(close_mock.call_count, 1)
-            self.assertEqual(codex_mock.call_count, 1)
-            self.assertEqual(launch_mock.call_count, 1)
-            self.assertEqual(followup_mock.call_count, 1)
+            self.assertEqual(close_mock.call_count, 0)
+            self.assertEqual(codex_mock.call_count, 0)
+            self.assertEqual(launch_mock.call_count, 0)
+            self.assertEqual(followup_mock.call_count, 0)
             saved = saved_states[-1]
-            self.assertEqual(saved["last_issue_centric_launch_status"], "launched")
-            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "84")
-            self.assertEqual(saved["last_issue_centric_close_order"], "after_codex_run_followup")
+            self.assertEqual(saved["chatgpt_decision"], "issue_centric:codex_run")
+            self.assertEqual(saved["last_issue_centric_artifact_kind"], "codex_body")
+            self.assertTrue(saved["last_issue_centric_metadata_log"])
+            self.assertTrue(saved["last_issue_centric_artifact_file"])
+            self.assertEqual(saved["last_issue_centric_launch_status"], "")
+            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "")
+            self.assertEqual(saved["last_issue_centric_close_order"], "")
 
     def test_fetch_does_not_close_when_followup_is_blocked(self) -> None:
         state = {
