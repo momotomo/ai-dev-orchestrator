@@ -10,6 +10,7 @@ from dataclasses import asdict
 from issue_centric_normalized_summary import (
     build_issue_centric_normalized_summary,
     build_issue_centric_runtime_snapshot,
+    resolve_issue_centric_runtime_mode,
 )
 
 
@@ -1847,6 +1848,15 @@ def _finalize_dispatch(
                 "last_issue_centric_next_request_fallback_reason": runtime_snapshot.fallback_reason,
             }
         )
+        runtime_mode = resolve_issue_centric_runtime_mode(mutable_state, repo_root=repo_root)
+        if runtime_mode is not None:
+            mutable_state.update(
+                {
+                    "last_issue_centric_runtime_mode": runtime_mode.runtime_mode,
+                    "last_issue_centric_runtime_mode_reason": runtime_mode.runtime_mode_reason,
+                    "last_issue_centric_runtime_mode_source": runtime_mode.runtime_mode_source,
+                }
+            )
     return IssueCentricDispatchResult(
         matrix_path=matrix_path,
         final_status=final_status,

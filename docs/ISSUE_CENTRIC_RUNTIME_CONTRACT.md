@@ -121,6 +121,10 @@ The current read-side bridge is intentionally layered like this:
 - the runtime snapshot is the current read-side bridge that packages those
   outputs into one preferred source for request preparation, operator status,
   and resume/recovery
+- the runtime readiness / health gate now decides whether that recovered
+  snapshot is `issue_centric_ready`, `issue_centric_degraded_fallback`, or
+  `issue_centric_unavailable` before request builders and operator-facing
+  status consume it
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
@@ -494,6 +498,18 @@ For the current dispatcher / orchestrator boundary:
   - if summary is missing, broken, contradictory, `issue_resolution_unclear`,
     or paired with an unreadable / failed dispatch result, the bridge records
     `issue_centric_recovery_fallback` and returns to legacy fallback
+- the runtime readiness / health gate now sits one layer above recovery:
+  - `issue_centric_ready` requires a coherent runtime snapshot, one stable
+    principal issue, one stable `target_issue`, and a non-unclear
+    next-request hint
+  - `issue_centric_degraded_fallback` is used when issue-centric artifacts
+    still exist but route selection or target resolution is not strong enough
+    to trust as the primary request path
+  - `issue_centric_unavailable` is used when snapshot / summary / recovery
+    data is missing or broken enough that request preparation should skip
+    issue-centric reuse entirely
+  - request preparation, operator-facing status, and doctor-style summaries
+    should all consult that same gate before choosing the next route
 
 ## Bridge To Codex Contract
 

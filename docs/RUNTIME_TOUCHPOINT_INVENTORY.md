@@ -238,6 +238,12 @@ During this inventory phase, all of the following stay unchanged:
     single snapshot for request preparation, operator-facing status, and
     restart/resume so the read side no longer has to stitch every field
     together independently
+  - the current runtime-mode slice goes one step farther again: it evaluates
+    that snapshot, recovery result, resolver output, and route-selection
+    result together, then exposes one shared readiness gate
+    (`issue_centric_ready` / `issue_centric_degraded_fallback` /
+    `issue_centric_unavailable`) for request preparation and operator-facing
+    status
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

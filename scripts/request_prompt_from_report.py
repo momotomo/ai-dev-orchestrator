@@ -19,6 +19,7 @@ from _bridge_common import (
     guarded_main,
     load_project_config,
     log_text,
+    prepare_issue_centric_runtime_mode,
     prepare_issue_centric_runtime_snapshot,
     present_resume_prompt,
     promote_pending_request,
@@ -203,10 +204,21 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    issue_centric_runtime_snapshot, issue_centric_next_request_section = (
+    issue_centric_runtime_snapshot, _ = (
         prepare_issue_centric_runtime_snapshot(state)
     )
     issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
+    runtime_mode_state = dict(state)
+    if issue_centric_runtime_snapshot is not None:
+        runtime_mode_state.update(
+            {
+                "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
+                "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
+            }
+        )
+    issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
+        runtime_mode_state
+    )
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
         print("request: 前回未送信の ChatGPT request を再送します。")
@@ -241,7 +253,7 @@ def run_resume_request(
         request_source=request_source,
         prepared_prefix="prepared_prompt_request_from_report",
         sent_prefix="sent_prompt_request_from_report",
-        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        issue_centric_runtime_snapshot=issue_centric_runtime_mode or issue_centric_runtime_snapshot,
         success_updates={
             "chatgpt_decision": "",
             "chatgpt_decision_note": "",
@@ -255,10 +267,21 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    issue_centric_runtime_snapshot, issue_centric_next_request_section = (
+    issue_centric_runtime_snapshot, _ = (
         prepare_issue_centric_runtime_snapshot(state)
     )
     issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
+    runtime_mode_state = dict(state)
+    if issue_centric_runtime_snapshot is not None:
+        runtime_mode_state.update(
+            {
+                "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
+                "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
+            }
+        )
+    issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
+        runtime_mode_state
+    )
     request_source = build_report_request_source(state, "")
     pending_handoff_text = ""
     pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
@@ -303,7 +326,9 @@ def run_rotated_report_request(
         )
         if issue_centric_runtime_snapshot is not None:
             handoff_state.update(
-                _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
+                _issue_centric_next_request_state_updates(
+                    issue_centric_runtime_mode or issue_centric_runtime_snapshot
+                )
             )
         save_state(handoff_state)
 
@@ -353,7 +378,9 @@ def run_rotated_report_request(
     )
     if issue_centric_runtime_snapshot is not None:
         mutable_state.update(
-            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot)
+            _issue_centric_next_request_state_updates(
+                issue_centric_runtime_mode or issue_centric_runtime_snapshot
+            )
         )
     save_state(mutable_state)
 
@@ -410,6 +437,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 def _issue_centric_next_request_state_updates(context: object) -> dict[str, object]:
     snapshot_path = str(getattr(context, "snapshot_path", "") or "").strip()
     snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
+    runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
+    runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
+    runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
     target_issue = str(getattr(context, "target_issue", "") or "").strip()
     target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
     fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
@@ -419,6 +449,9 @@ def _issue_centric_next_request_state_updates(context: object) -> dict[str, obje
     return {
         "last_issue_centric_runtime_snapshot": snapshot_path,
         "last_issue_centric_snapshot_status": snapshot_status,
+        "last_issue_centric_runtime_mode": runtime_mode,
+        "last_issue_centric_runtime_mode_reason": runtime_mode_reason,
+        "last_issue_centric_runtime_mode_source": runtime_mode_source,
         "last_issue_centric_next_request_target": target_issue,
         "last_issue_centric_next_request_target_source": target_issue_source,
         "last_issue_centric_next_request_fallback_reason": fallback_reason,

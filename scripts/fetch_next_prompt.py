@@ -174,6 +174,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_recovery_fallback_reason": "",
                 "last_issue_centric_runtime_snapshot": "",
                 "last_issue_centric_snapshot_status": "",
+                "last_issue_centric_runtime_mode": "",
+                "last_issue_centric_runtime_mode_reason": "",
+                "last_issue_centric_runtime_mode_source": "",
                 "last_issue_centric_artifact_kind": (
                     materialized.prepared.primary_body.kind.value
                     if materialized.prepared.primary_body is not None

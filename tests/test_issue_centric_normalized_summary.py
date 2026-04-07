@@ -183,6 +183,7 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             )
 
             self.assertIn("## issue_centric_summary", request)
+            self.assertIn("- runtime_mode: issue_centric_ready", request)
             self.assertIn("## issue_centric_runtime_snapshot", request)
             self.assertIn("issue_centric_snapshot_status: issue_centric_snapshot_ready", request)
             self.assertIn("issue_centric_principal_issue_kind: followup_issue", request)
@@ -234,6 +235,96 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(selection.target_issue, "https://github.com/example/repo/issues/81")
             self.assertEqual(selection.target_issue_source, "normalized_summary")
             self.assertEqual(selection.fallback_reason, "")
+
+    def test_runtime_mode_is_ready_when_snapshot_and_route_are_coherent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "issue_create",
+                        "final_status": "completed",
+                        "principal_issue_kind": "primary_issue",
+                        "principal_issue_candidate": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "next_request_hint": "continue_on_primary_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "issue_create"}),
+                encoding="utf-8",
+            )
+
+            runtime_mode = issue_centric_normalized_summary.resolve_issue_centric_runtime_mode(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_primary_issue_number": "51",
+                    "last_issue_centric_primary_issue_url": "https://github.com/example/repo/issues/51",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(runtime_mode)
+            assert runtime_mode is not None
+            self.assertEqual(runtime_mode.runtime_mode, "issue_centric_ready")
+            self.assertEqual(runtime_mode.target_issue, "https://github.com/example/repo/issues/51")
+
+    def test_runtime_mode_is_degraded_when_resolution_is_unclear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "human_review_needed",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "20",
+                            "url": "https://github.com/example/repo/issues/20",
+                            "title": "",
+                            "ref": "example/repo#20",
+                        },
+                        "next_request_hint": "issue_resolution_unclear",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_mode = issue_centric_normalized_summary.resolve_issue_centric_runtime_mode(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(runtime_mode)
+            assert runtime_mode is not None
+            self.assertEqual(runtime_mode.runtime_mode, "issue_centric_degraded_fallback")
+            self.assertEqual(runtime_mode.runtime_mode_reason, "issue_resolution_unclear")
+
+    def test_runtime_mode_is_unavailable_when_snapshot_sources_are_missing(self) -> None:
+        runtime_mode = issue_centric_normalized_summary.resolve_issue_centric_runtime_mode(
+            {
+                "last_issue_centric_runtime_snapshot": "logs/missing.json",
+            },
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIsNotNone(runtime_mode)
+        assert runtime_mode is not None
+        self.assertEqual(runtime_mode.runtime_mode, "issue_centric_unavailable")
+        self.assertEqual(runtime_mode.runtime_mode_reason, "runtime_snapshot_missing_or_unreadable")
 
     def test_recovery_prefers_issue_centric_when_summary_and_dispatch_are_consistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -837,6 +928,8 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
                 saved_states[-1]["last_issue_centric_recovery_source"],
                 "normalized_summary_then_state",
             )
+            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode"], "issue_centric_ready")
+            self.assertEqual(saved_states[-1]["last_issue_centric_runtime_mode_reason"], "issue_centric_snapshot_ready")
             self.assertTrue(str(saved_states[-1]["last_issue_centric_runtime_snapshot"]).endswith(".json"))
             self.assertEqual(saved_states[-1]["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
 

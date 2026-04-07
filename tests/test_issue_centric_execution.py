@@ -366,6 +366,8 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             self.assertTrue(str(result.final_state["last_issue_centric_normalized_summary"]).endswith(".json"))
             self.assertTrue(str(result.final_state["last_issue_centric_runtime_snapshot"]).endswith(".json"))
             self.assertEqual(result.final_state["last_issue_centric_snapshot_status"], "issue_centric_snapshot_ready")
+            self.assertEqual(result.final_state["last_issue_centric_runtime_mode"], "issue_centric_ready")
+            self.assertEqual(result.final_state["last_issue_centric_runtime_mode_reason"], "issue_centric_snapshot_ready")
 
     def test_dispatcher_runs_codex_followup_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

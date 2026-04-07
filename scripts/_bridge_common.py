@@ -18,9 +18,11 @@ from issue_centric_normalized_summary import (
     IssueCentricNextRequestContext,
     IssueCentricRecoveryContext,
     IssueCentricRouteSelection,
+    IssueCentricRuntimeMode,
     IssueCentricRuntimeSnapshot,
     load_issue_centric_normalized_summary,
     resolve_issue_centric_runtime_snapshot,
+    resolve_issue_centric_runtime_mode,
     render_issue_centric_next_request_section,
     render_issue_centric_summary_for_request,
 )
@@ -98,6 +100,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_recovery_fallback_reason": "",
     "last_issue_centric_runtime_snapshot": "",
     "last_issue_centric_snapshot_status": "",
+    "last_issue_centric_runtime_mode": "",
+    "last_issue_centric_runtime_mode_reason": "",
+    "last_issue_centric_runtime_mode_source": "",
     "last_issue_centric_artifact_kind": "",
     "last_issue_centric_execution_status": "",
     "last_issue_centric_execution_log": "",
@@ -1345,6 +1350,12 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_runtime_snapshot: {state['last_issue_centric_runtime_snapshot']}")
     if state.get("last_issue_centric_snapshot_status"):
         fields.append(f"- last_issue_centric_snapshot_status: {state['last_issue_centric_snapshot_status']}")
+    if state.get("last_issue_centric_runtime_mode"):
+        fields.append(f"- last_issue_centric_runtime_mode: {state['last_issue_centric_runtime_mode']}")
+    if state.get("last_issue_centric_runtime_mode_reason"):
+        fields.append(f"- last_issue_centric_runtime_mode_reason: {state['last_issue_centric_runtime_mode_reason']}")
+    if state.get("last_issue_centric_runtime_mode_source"):
+        fields.append(f"- last_issue_centric_runtime_mode_source: {state['last_issue_centric_runtime_mode_source']}")
     if state.get("last_issue_centric_artifact_kind"):
         fields.append(f"- last_issue_centric_artifact_kind: {state['last_issue_centric_artifact_kind']}")
     if state.get("last_issue_centric_execution_status"):
@@ -3155,7 +3166,7 @@ def build_chatgpt_handoff_request(
     )
     next_request_section = issue_centric_next_request_section
     if next_request_section is None:
-        _, next_request_section = prepare_issue_centric_next_request_route_selection(state)
+        _, next_request_section = prepare_issue_centric_runtime_mode(state)
     return (
         "次チャットへそのまま貼る完成済みの最初のメッセージだけを書いてください。\n"
         "これは要約メモではありません。新しいチャットの最初の 1 通として、そのまま送れる本文だけを返してください。\n"
@@ -3226,7 +3237,7 @@ def build_chatgpt_request(
 
     next_request_section = issue_centric_next_request_section
     if next_request_section is None:
-        _, next_request_section = prepare_issue_centric_next_request_route_selection(state)
+        _, next_request_section = prepare_issue_centric_runtime_mode(state)
     values = {
         "CURRENT_STATUS": current_status or build_issue_centric_request_status(state),
         "LAST_REPORT": compact_last_report_text(last_report or read_last_report_text(state)),
@@ -3244,6 +3255,17 @@ def build_issue_centric_request_status(
     fallback_text: str | None = None,
 ) -> str:
     base = fallback_text or state_snapshot(state)
+    runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
+    if runtime_mode is not None:
+        mode_lines = [
+            "- issue_centric_runtime_mode: " + str(runtime_mode.runtime_mode).strip(),
+            "- issue_centric_runtime_mode_reason: " + str(runtime_mode.runtime_mode_reason).strip(),
+            "- issue_centric_runtime_mode_source: " + str(runtime_mode.runtime_mode_source).strip(),
+            "- issue_centric_next_request_target: " + str(runtime_mode.target_issue).strip(),
+        ]
+        rendered_mode = "\n".join(line for line in mode_lines if not line.endswith(": "))
+        if rendered_mode:
+            base = f"{base}\n\n## issue_centric_runtime_mode\n{rendered_mode}".strip()
     runtime_snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=ROOT_DIR)
     if runtime_snapshot is not None:
         snapshot_lines = [
@@ -3268,18 +3290,18 @@ def build_issue_centric_request_status(
 def prepare_issue_centric_next_request_context(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricNextRequestContext | None, str]:
-    snapshot, section = prepare_issue_centric_runtime_snapshot(state)
-    if snapshot is None:
+    runtime_mode, section = prepare_issue_centric_runtime_mode(state)
+    if runtime_mode is None:
         return None, section
     return (
         IssueCentricNextRequestContext(
-            target_issue=snapshot.target_issue,
-            target_issue_source=snapshot.target_issue_source,
-            next_request_hint=snapshot.next_request_hint,
-            principal_issue_kind=snapshot.principal_issue_kind,
-            used_normalized_summary=snapshot.route_selected == "issue_centric",
-            fallback_reason=snapshot.fallback_reason,
-            summary_path=snapshot.normalized_summary_path,
+            target_issue=runtime_mode.target_issue,
+            target_issue_source=runtime_mode.target_issue_source,
+            next_request_hint=runtime_mode.next_request_hint,
+            principal_issue_kind=runtime_mode.principal_issue_kind,
+            used_normalized_summary=runtime_mode.runtime_mode == "issue_centric_ready",
+            fallback_reason=runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason,
+            summary_path=runtime_mode.normalized_summary_path,
         ),
         section,
     )
@@ -3288,19 +3310,19 @@ def prepare_issue_centric_next_request_context(
 def prepare_issue_centric_next_request_route_selection(
     state: Mapping[str, Any],
 ) -> tuple[IssueCentricRouteSelection | None, str]:
-    snapshot, section = prepare_issue_centric_runtime_snapshot(state)
-    if snapshot is None:
+    runtime_mode, section = prepare_issue_centric_runtime_mode(state)
+    if runtime_mode is None:
         return None, section
     return (
         IssueCentricRouteSelection(
-            route_selected=snapshot.route_selected,
-            target_issue=snapshot.target_issue,
-            target_issue_source=snapshot.target_issue_source,
-            next_request_hint=snapshot.next_request_hint,
-            principal_issue_kind=snapshot.principal_issue_kind,
-            used_normalized_summary=snapshot.route_selected == "issue_centric",
-            fallback_reason=snapshot.fallback_reason,
-            summary_path=snapshot.normalized_summary_path,
+            route_selected="issue_centric" if runtime_mode.runtime_mode == "issue_centric_ready" else "fallback_legacy",
+            target_issue=runtime_mode.target_issue,
+            target_issue_source=runtime_mode.target_issue_source,
+            next_request_hint=runtime_mode.next_request_hint,
+            principal_issue_kind=runtime_mode.principal_issue_kind,
+            used_normalized_summary=runtime_mode.runtime_mode == "issue_centric_ready",
+            fallback_reason=runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason,
+            summary_path=runtime_mode.normalized_summary_path,
         ),
         section,
     )
@@ -3341,3 +3363,15 @@ def prepare_issue_centric_runtime_snapshot(
         return None, ""
     section = render_issue_centric_next_request_section(snapshot, repo_label=repo_label)
     return snapshot, section
+
+
+def prepare_issue_centric_runtime_mode(
+    state: Mapping[str, Any],
+) -> tuple[IssueCentricRuntimeMode | None, str]:
+    config = load_project_config()
+    repo_label = str(config.get("github_repository", "")).strip() or str(project_repo_path(config))
+    runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
+    if runtime_mode is None:
+        return None, ""
+    section = render_issue_centric_next_request_section(runtime_mode, repo_label=repo_label)
+    return runtime_mode, section

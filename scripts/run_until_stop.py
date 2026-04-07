@@ -25,7 +25,7 @@ from _bridge_common import (
     mark_error,
     project_config_warnings,
     print_project_config_warnings,
-    prepare_issue_centric_runtime_snapshot,
+    prepare_issue_centric_runtime_mode,
     present_bridge_handoff,
     present_bridge_status,
     is_retryable_pending_handoff_error,
@@ -442,19 +442,35 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
 
 
 def issue_centric_route_note(final_state: dict[str, Any]) -> str:
-    snapshot, _ = prepare_issue_centric_runtime_snapshot(final_state)
-    if snapshot is None:
+    runtime_mode, _ = prepare_issue_centric_runtime_mode(final_state)
+    if runtime_mode is None:
         return ""
-    recovery_status = snapshot.recovery_status
-    recovery_source = snapshot.recovery_source
-    route_selected = snapshot.route_selected
-    target_issue = snapshot.target_issue
-    fallback_reason = snapshot.fallback_reason
+    recovery_status = runtime_mode.recovery_status
+    recovery_source = runtime_mode.recovery_source
+    route_selected = runtime_mode.route_selected
+    target_issue = runtime_mode.target_issue
+    fallback_reason = runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason
+    if runtime_mode.runtime_mode == "issue_centric_unavailable":
+        return (
+            " issue-centric runtime は今回 unavailable のため、legacy fallback で続行します。"
+            f" 理由: {fallback_reason or 'issue-centric runtime unavailable'}."
+        )
     if recovery_status == "issue_centric_recovered" and route_selected == "issue_centric" and target_issue:
         source_note = f" ({recovery_source})" if recovery_source else ""
         return (
             " 保存済みの issue-centric summary から再構築した文脈を使い、"
             f"{target_issue} を target_issue として継続します{source_note}。"
+        )
+    if runtime_mode.runtime_mode == "issue_centric_degraded_fallback":
+        if target_issue:
+            return (
+                " issue-centric runtime は degraded fallback のため、legacy fallback で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {fallback_reason or 'issue-centric degraded fallback'}."
+            )
+        return (
+            " issue-centric runtime は degraded fallback のため、legacy fallback で続行します。"
+            f" 理由: {fallback_reason or 'issue-centric degraded fallback'}."
         )
     if recovery_status == "issue_centric_recovery_fallback":
         if target_issue:

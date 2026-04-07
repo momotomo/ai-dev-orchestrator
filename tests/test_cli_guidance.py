@@ -377,8 +377,20 @@ class SummaryTests(unittest.TestCase):
                     "last_issue_centric_snapshot_status": "issue_centric_snapshot_fallback",
                 }
             )
-        self.assertIn("issue-centric recovery", note)
+        self.assertIn("degraded fallback", note)
         self.assertIn("dispatch_result_missing_or_unreadable", note)
+
+    def test_request_prompt_from_report_note_mentions_unavailable_runtime_mode(self) -> None:
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_runtime_snapshot": "logs/missing.json",
+                "last_issue_centric_snapshot_status": "issue_centric_snapshot_missing",
+            }
+        )
+        self.assertIn("issue-centric runtime", note)
+        self.assertIn("unavailable", note)
 
     def test_submitted_unconfirmed_recommends_resume_not_clear_error(self) -> None:
         args = run_until_stop.parse_args(

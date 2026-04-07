@@ -79,6 +79,27 @@ class IssueCentricRuntimeSnapshot:
     snapshot_path: str
 
 
+@dataclass(frozen=True)
+class IssueCentricRuntimeMode:
+    runtime_mode: str
+    runtime_mode_reason: str
+    runtime_mode_source: str
+    snapshot_status: str
+    snapshot_source: str
+    route_selected: str
+    recovery_status: str
+    recovery_source: str
+    fallback_reason: str
+    principal_issue: str
+    principal_issue_kind: str
+    target_issue: str
+    target_issue_source: str
+    next_request_hint: str
+    normalized_summary_path: str
+    dispatch_result_path: str
+    snapshot_path: str
+
+
 def build_issue_centric_normalized_summary(
     *,
     matrix_path: str,
@@ -214,7 +235,8 @@ def load_issue_centric_runtime_snapshot(
         return None
     if not isinstance(payload, dict):
         return None
-    payload.setdefault("snapshot_path", raw_path)
+    if not str(payload.get("snapshot_path", "")).strip():
+        payload["snapshot_path"] = raw_path
     return payload
 
 
@@ -598,13 +620,103 @@ def resolve_issue_centric_runtime_snapshot(
     )
 
 
+def resolve_issue_centric_runtime_mode(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> IssueCentricRuntimeMode | None:
+    if not _has_issue_centric_runtime_mode_candidate_state(state):
+        return None
+    try:
+        snapshot = resolve_issue_centric_runtime_snapshot(state, repo_root=repo_root)
+    except Exception as exc:
+        return IssueCentricRuntimeMode(
+            runtime_mode="issue_centric_unavailable",
+            runtime_mode_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
+            runtime_mode_source="runtime_snapshot_exception",
+            snapshot_status="",
+            snapshot_source="",
+            route_selected="fallback_legacy",
+            recovery_status="",
+            recovery_source="",
+            fallback_reason=f"runtime_snapshot_error:{exc.__class__.__name__}",
+            principal_issue="",
+            principal_issue_kind="unresolved",
+            target_issue="",
+            target_issue_source="legacy_unresolved",
+            next_request_hint="issue_resolution_unclear",
+            normalized_summary_path=str(state.get("last_issue_centric_normalized_summary", "")).strip(),
+            dispatch_result_path=str(state.get("last_issue_centric_dispatch_result", "")).strip(),
+            snapshot_path=str(state.get("last_issue_centric_runtime_snapshot", "")).strip(),
+        )
+    if snapshot is None:
+        return IssueCentricRuntimeMode(
+            runtime_mode="issue_centric_unavailable",
+            runtime_mode_reason="runtime_snapshot_missing_or_unreadable",
+            runtime_mode_source="runtime_snapshot_missing",
+            snapshot_status="",
+            snapshot_source="",
+            route_selected="fallback_legacy",
+            recovery_status="",
+            recovery_source="",
+            fallback_reason="runtime_snapshot_missing_or_unreadable",
+            principal_issue="",
+            principal_issue_kind="unresolved",
+            target_issue="",
+            target_issue_source="legacy_unresolved",
+            next_request_hint="issue_resolution_unclear",
+            normalized_summary_path=str(state.get("last_issue_centric_normalized_summary", "")).strip(),
+            dispatch_result_path=str(state.get("last_issue_centric_dispatch_result", "")).strip(),
+            snapshot_path=str(state.get("last_issue_centric_runtime_snapshot", "")).strip(),
+        )
+
+    runtime_mode = "issue_centric_ready"
+    runtime_mode_reason = "issue_centric_snapshot_ready"
+    runtime_mode_source = snapshot.snapshot_source or "runtime_snapshot"
+    if snapshot.next_request_hint == "issue_resolution_unclear":
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = "issue_resolution_unclear"
+    elif snapshot.snapshot_status != "issue_centric_snapshot_ready":
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = snapshot.fallback_reason or "runtime_snapshot_not_ready"
+    elif snapshot.route_selected != "issue_centric":
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = snapshot.fallback_reason or "route_selected_fallback"
+    elif not snapshot.principal_issue or not snapshot.target_issue:
+        runtime_mode = "issue_centric_degraded_fallback"
+        runtime_mode_reason = snapshot.fallback_reason or "principal_or_target_unresolved"
+
+    return IssueCentricRuntimeMode(
+        runtime_mode=runtime_mode,
+        runtime_mode_reason=runtime_mode_reason,
+        runtime_mode_source=runtime_mode_source,
+        snapshot_status=snapshot.snapshot_status,
+        snapshot_source=snapshot.snapshot_source,
+        route_selected=snapshot.route_selected,
+        recovery_status=snapshot.recovery_status,
+        recovery_source=snapshot.recovery_source,
+        fallback_reason=snapshot.fallback_reason,
+        principal_issue=snapshot.principal_issue,
+        principal_issue_kind=snapshot.principal_issue_kind,
+        target_issue=snapshot.target_issue,
+        target_issue_source=snapshot.target_issue_source,
+        next_request_hint=snapshot.next_request_hint,
+        normalized_summary_path=snapshot.normalized_summary_path,
+        dispatch_result_path=snapshot.dispatch_result_path,
+        snapshot_path=snapshot.snapshot_path,
+    )
+
+
 def render_issue_centric_next_request_section(
-    context: IssueCentricNextRequestContext | IssueCentricRouteSelection | IssueCentricRecoveryContext | IssueCentricRuntimeSnapshot | None,
+    context: IssueCentricNextRequestContext | IssueCentricRouteSelection | IssueCentricRecoveryContext | IssueCentricRuntimeSnapshot | IssueCentricRuntimeMode | None,
     *,
     repo_label: str,
 ) -> str:
     if context is None:
         return ""
+    runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
+    runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
+    runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
     snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
     snapshot_source = str(getattr(context, "snapshot_source", "") or "").strip()
     recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
@@ -625,6 +737,12 @@ def render_issue_centric_next_request_section(
         "",
         f"- repo: {repo_label}",
     ]
+    if runtime_mode:
+        lines.append(f"- runtime_mode: {runtime_mode}")
+    if runtime_mode_reason:
+        lines.append(f"- runtime_mode_reason: {runtime_mode_reason}")
+    if runtime_mode_source:
+        lines.append(f"- runtime_mode_source: {runtime_mode_source}")
     if snapshot_status:
         lines.append(f"- snapshot_status: {snapshot_status}")
     if snapshot_source:
@@ -822,6 +940,20 @@ def _has_issue_centric_recovery_candidate_state(state: Mapping[str, Any]) -> boo
         "last_issue_centric_target_issue",
     )
     return any(str(state.get(key, "")).strip() for key in keys)
+
+
+def _has_issue_centric_runtime_mode_candidate_state(state: Mapping[str, Any]) -> bool:
+    keys = (
+        "last_issue_centric_runtime_snapshot",
+        "last_issue_centric_snapshot_status",
+        "last_issue_centric_normalized_summary",
+        "last_issue_centric_dispatch_result",
+        "last_issue_centric_principal_issue",
+        "last_issue_centric_next_request_target",
+        "last_issue_centric_route_selected",
+        "last_issue_centric_recovery_status",
+    )
+    return any(str(state.get(key, "")).strip() for key in keys) or _has_issue_centric_recovery_candidate_state(state)
 
 
 def _recover_principal_issue(
