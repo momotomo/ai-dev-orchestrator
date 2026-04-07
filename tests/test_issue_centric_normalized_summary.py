@@ -195,6 +195,8 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertIn("- next_request_route: issue_centric", request)
             self.assertIn("- target_issue: https://github.com/example/repo/issues/81", request)
             self.assertIn("- target_issue_source: normalized_summary", request)
+            self.assertIn("## issue_centric_state_bridge", request)
+            self.assertIn("issue_centric_state_view", request)
 
     def test_request_builder_falls_back_when_snapshot_generation_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -643,6 +645,96 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
         assert runtime_mode is not None
         self.assertEqual(runtime_mode.runtime_mode, "issue_centric_unavailable")
         self.assertEqual(runtime_mode.runtime_mode_reason, "runtime_snapshot_missing_or_unreadable")
+
+    def test_state_bridge_marks_prepared_generation_as_send_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "issue_create",
+                        "final_status": "completed",
+                        "principal_issue_kind": "primary_issue",
+                        "principal_issue_candidate": {
+                            "number": "51",
+                            "url": "https://github.com/example/repo/issues/51",
+                            "title": "Primary issue",
+                            "ref": "#51",
+                        },
+                        "next_request_hint": "continue_on_primary_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "issue_create"}),
+                encoding="utf-8",
+            )
+            bridge = issue_centric_normalized_summary.resolve_issue_centric_state_bridge(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_primary_issue_number": "51",
+                    "last_issue_centric_primary_issue_url": "https://github.com/example/repo/issues/51",
+                    "last_issue_centric_prepared_generation_id": f"summary:{summary_path}",
+                    "prepared_request_hash": "abc",
+                    "prepared_request_source": "report:1",
+                    "prepared_request_log": "logs/request.md",
+                    "prepared_request_status": "prepared",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(bridge)
+            assert bridge is not None
+            self.assertEqual(bridge.state_view, "issue_centric_prepared_request")
+            self.assertEqual(bridge.wait_kind, "send_prepared_request")
+
+    def test_state_bridge_marks_invalidated_generation_as_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            dispatch_path = root / "dispatch.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "human_review_needed",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "20",
+                            "url": "https://github.com/example/repo/issues/20",
+                            "title": "",
+                            "ref": "#20",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dispatch_path.write_text(
+                json.dumps({"final_status": "completed", "matrix_path": "human_review_needed"}),
+                encoding="utf-8",
+            )
+            bridge = issue_centric_normalized_summary.resolve_issue_centric_state_bridge(
+                {
+                    "last_issue_centric_normalized_summary": str(summary_path),
+                    "last_issue_centric_dispatch_result": str(dispatch_path),
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                    "last_issue_centric_invalidated_generation_id": f"summary:{summary_path}",
+                    "last_issue_centric_invalidation_status": "issue_centric_invalidated",
+                    "last_issue_centric_invalidation_reason": "legacy_fallback_selected",
+                },
+                repo_root=REPO_ROOT,
+            )
+
+            self.assertIsNotNone(bridge)
+            assert bridge is not None
+            self.assertEqual(bridge.state_view, "issue_centric_invalidated")
+            self.assertEqual(bridge.wait_kind, "legacy_fallback")
+            self.assertEqual(bridge.wait_reason, "legacy_fallback_selected")
 
     def test_recovery_prefers_issue_centric_when_summary_and_dispatch_are_consistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1321,6 +1413,95 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             send_mock.assert_called_once_with("prepared request body")
             self.assertEqual(saved_states[-1]["last_issue_centric_generation_lifecycle"], "fresh_pending")
             self.assertTrue(str(saved_states[-1]["last_issue_centric_pending_generation_id"]).startswith("summary:"))
+
+    def test_save_state_persists_issue_centric_state_bridge_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            snapshot_path = root / "snapshot.json"
+            state_path = root / "state.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "final_status": "completed",
+                        "principal_issue_kind": "followup_issue",
+                        "principal_issue_candidate": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "next_request_hint": "continue_on_followup_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot_path.write_text(
+                json.dumps(
+                    {
+                        "snapshot_status": "issue_centric_snapshot_ready",
+                        "snapshot_source": "execution_finalize",
+                        "generation_id": f"summary:{summary_path}",
+                        "action": "no_action",
+                        "dispatch_final_status": "completed",
+                        "route_selected": "issue_centric",
+                        "route_fallback_reason": "",
+                        "recovery_status": "",
+                        "recovery_source": "",
+                        "recovery_fallback_reason": "",
+                        "fallback_reason": "",
+                        "principal_issue": "https://github.com/example/repo/issues/81",
+                        "principal_issue_kind": "followup_issue",
+                        "target_issue": "https://github.com/example/repo/issues/81",
+                        "target_issue_source": "normalized_summary",
+                        "next_request_hint": "continue_on_followup_issue",
+                        "current_issue": None,
+                        "created_primary_issue": None,
+                        "created_followup_issue": {
+                            "number": "81",
+                            "url": "https://github.com/example/repo/issues/81",
+                            "title": "Follow-up issue",
+                            "ref": "#81",
+                        },
+                        "closed_issue": None,
+                        "codex_target_issue": None,
+                        "review_target_issue": None,
+                        "project_lifecycle_sync": {},
+                        "normalized_summary_path": str(summary_path),
+                        "dispatch_result_path": "",
+                        "snapshot_path": str(snapshot_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(_bridge_common, "ensure_runtime_dirs"),
+                patch.object(_bridge_common, "runtime_state_path", return_value=state_path),
+            ):
+                _bridge_common.save_state(
+                    {
+                        "last_issue_centric_normalized_summary": str(summary_path),
+                        "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                        "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                        "last_issue_centric_followup_issue_number": "81",
+                        "last_issue_centric_followup_issue_url": "https://github.com/example/repo/issues/81",
+                        "last_issue_centric_prepared_generation_id": f"summary:{summary_path}",
+                        "prepared_request_hash": "abc",
+                        "prepared_request_source": "report:1",
+                        "prepared_request_log": "logs/request.md",
+                        "prepared_request_status": "prepared",
+                    }
+                )
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["last_issue_centric_state_view"], "issue_centric_prepared_request")
+            self.assertEqual(saved["last_issue_centric_wait_kind"], "send_prepared_request")
 
 
 if __name__ == "__main__":

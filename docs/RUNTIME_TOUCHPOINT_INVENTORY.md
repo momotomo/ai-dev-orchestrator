@@ -260,6 +260,12 @@ During this inventory phase, all of the following stay unchanged:
     `fresh_pending` as "wait for reply recovery", and degraded / unavailable
     issue-centric mode as explicit fallback instead of relying only on the
     older ad-hoc mode branches
+  - the current state-view normalization slice goes one step farther again:
+    it keeps the legacy `mode` enum for compatibility, but now writes a thin
+    issue-centric read-side overlay (`last_issue_centric_state_view`,
+    `last_issue_centric_wait_kind`) so `state.json`, CLI/operator wording,
+    and request-side summaries can describe prepared / pending / consumed /
+    invalidated states without a full state-machine rewrite
   - current evidence is strong enough to say visible-text extraction is lossy,
     but not strong enough to promote the UI copy path as the primary transport
   - the next implementation slice should therefore prefer Plan A

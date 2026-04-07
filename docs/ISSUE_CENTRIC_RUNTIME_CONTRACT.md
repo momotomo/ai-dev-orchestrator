@@ -86,6 +86,12 @@ The current implementation boundary is:
   choosing the next runtime action, so prepared requests are reused instead of
   being rebuilt, pending generations stay in reply-wait, and degraded /
   unavailable modes fall back explicitly
+- implemented: narrow issue-centric state-view bridge that keeps the legacy
+  `mode` field for compatibility but now also writes read-side helper fields
+  such as `last_issue_centric_state_view` and
+  `last_issue_centric_wait_kind`, so `state.json`, CLI status, and request
+  summaries can say "prepared request", "pending reply", "consumed", or
+  "invalidated" without rewriting the whole state machine
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
@@ -144,6 +150,11 @@ The current read-side bridge is intentionally layered like this:
   request, `fresh_pending` means wait for reply recovery, and only
   `consumed` / `invalidated` / degraded states fall back to the older
   request-centric branches
+- the thin state-view bridge now sits on top of those layers for read-side
+  consumers: it does not replace the legacy `mode` enum, but it gives
+  `state.json`, operator status, and request-side summaries one normalized
+  vocabulary for "prepared request", "pending reply", "consumed", and
+  "invalidated"
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 

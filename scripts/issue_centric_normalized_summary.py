@@ -128,6 +128,19 @@ class IssueCentricGenerationLifecycle:
     generation_id: str
 
 
+@dataclass(frozen=True)
+class IssueCentricStateBridge:
+    state_view: str
+    state_view_reason: str
+    state_view_source: str
+    wait_kind: str
+    wait_reason: str
+    runtime_mode: str
+    generation_lifecycle: str
+    target_issue: str
+    principal_issue: str
+
+
 def build_issue_centric_normalized_summary(
     *,
     matrix_path: str,
@@ -954,6 +967,107 @@ def resolve_issue_centric_runtime_mode(
         normalized_summary_path=snapshot.normalized_summary_path,
         dispatch_result_path=snapshot.dispatch_result_path,
         snapshot_path=snapshot.snapshot_path,
+    )
+
+
+def resolve_issue_centric_state_bridge(
+    state: Mapping[str, Any],
+    *,
+    repo_root: Path,
+) -> IssueCentricStateBridge | None:
+    runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=repo_root)
+    if runtime_mode is None:
+        return None
+
+    if runtime_mode.runtime_mode == "issue_centric_unavailable":
+        return IssueCentricStateBridge(
+            state_view="issue_centric_unavailable",
+            state_view_reason=runtime_mode.runtime_mode_reason or "runtime_snapshot_missing_or_unreadable",
+            state_view_source=runtime_mode.runtime_mode_source or "runtime_mode",
+            wait_kind="legacy_fallback",
+            wait_reason=runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason or "issue_centric_runtime_unavailable",
+            runtime_mode=runtime_mode.runtime_mode,
+            generation_lifecycle=runtime_mode.generation_lifecycle,
+            target_issue=runtime_mode.target_issue,
+            principal_issue=runtime_mode.principal_issue,
+        )
+
+    if runtime_mode.runtime_mode == "issue_centric_degraded_fallback":
+        state_view = "issue_centric_degraded_fallback"
+        if runtime_mode.generation_lifecycle == "issue_centric_invalidated":
+            state_view = "issue_centric_invalidated"
+        elif runtime_mode.generation_lifecycle == "issue_centric_consumed":
+            state_view = "issue_centric_consumed"
+        return IssueCentricStateBridge(
+            state_view=state_view,
+            state_view_reason=runtime_mode.runtime_mode_reason or runtime_mode.fallback_reason or "issue_centric_degraded_fallback",
+            state_view_source=runtime_mode.runtime_mode_source or "runtime_mode",
+            wait_kind="legacy_fallback",
+            wait_reason=runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason or "issue_centric_degraded_fallback",
+            runtime_mode=runtime_mode.runtime_mode,
+            generation_lifecycle=runtime_mode.generation_lifecycle,
+            target_issue=runtime_mode.target_issue,
+            principal_issue=runtime_mode.principal_issue,
+        )
+
+    if runtime_mode.generation_lifecycle == "fresh_prepared":
+        return IssueCentricStateBridge(
+            state_view="issue_centric_prepared_request",
+            state_view_reason=runtime_mode.generation_lifecycle_reason or "prepared_request_bound_to_generation",
+            state_view_source=runtime_mode.generation_lifecycle_source or "generation_lifecycle",
+            wait_kind="send_prepared_request",
+            wait_reason=runtime_mode.generation_lifecycle_reason or "prepared_request_bound_to_generation",
+            runtime_mode=runtime_mode.runtime_mode,
+            generation_lifecycle=runtime_mode.generation_lifecycle,
+            target_issue=runtime_mode.target_issue,
+            principal_issue=runtime_mode.principal_issue,
+        )
+    if runtime_mode.generation_lifecycle == "fresh_pending":
+        return IssueCentricStateBridge(
+            state_view="issue_centric_pending_reply",
+            state_view_reason=runtime_mode.generation_lifecycle_reason or "pending_request_bound_to_generation",
+            state_view_source=runtime_mode.generation_lifecycle_source or "generation_lifecycle",
+            wait_kind="wait_for_chatgpt_reply",
+            wait_reason=runtime_mode.generation_lifecycle_reason or "pending_request_bound_to_generation",
+            runtime_mode=runtime_mode.runtime_mode,
+            generation_lifecycle=runtime_mode.generation_lifecycle,
+            target_issue=runtime_mode.target_issue,
+            principal_issue=runtime_mode.principal_issue,
+        )
+    if runtime_mode.generation_lifecycle == "issue_centric_consumed":
+        return IssueCentricStateBridge(
+            state_view="issue_centric_consumed",
+            state_view_reason=runtime_mode.generation_lifecycle_reason or "chatgpt_reply_recovered_for_generation",
+            state_view_source=runtime_mode.generation_lifecycle_source or "generation_lifecycle",
+            wait_kind="prepare_next_generation",
+            wait_reason=runtime_mode.generation_lifecycle_reason or "chatgpt_reply_recovered_for_generation",
+            runtime_mode=runtime_mode.runtime_mode,
+            generation_lifecycle=runtime_mode.generation_lifecycle,
+            target_issue=runtime_mode.target_issue,
+            principal_issue=runtime_mode.principal_issue,
+        )
+    if runtime_mode.generation_lifecycle == "issue_centric_invalidated":
+        return IssueCentricStateBridge(
+            state_view="issue_centric_invalidated",
+            state_view_reason=runtime_mode.generation_lifecycle_reason or runtime_mode.fallback_reason or "issue_centric_context_invalidated",
+            state_view_source=runtime_mode.generation_lifecycle_source or "generation_lifecycle",
+            wait_kind="legacy_fallback",
+            wait_reason=runtime_mode.generation_lifecycle_reason or runtime_mode.fallback_reason or "issue_centric_context_invalidated",
+            runtime_mode=runtime_mode.runtime_mode,
+            generation_lifecycle=runtime_mode.generation_lifecycle,
+            target_issue=runtime_mode.target_issue,
+            principal_issue=runtime_mode.principal_issue,
+        )
+    return IssueCentricStateBridge(
+        state_view="issue_centric_ready_next",
+        state_view_reason=runtime_mode.runtime_mode_reason or "issue_centric_snapshot_ready",
+        state_view_source=runtime_mode.runtime_mode_source or "runtime_mode",
+        wait_kind="prepare_or_send_next_request",
+        wait_reason=runtime_mode.next_request_hint or runtime_mode.runtime_mode_reason or "issue_centric_snapshot_ready",
+        runtime_mode=runtime_mode.runtime_mode,
+        generation_lifecycle=runtime_mode.generation_lifecycle,
+        target_issue=runtime_mode.target_issue,
+        principal_issue=runtime_mode.principal_issue,
     )
 
 

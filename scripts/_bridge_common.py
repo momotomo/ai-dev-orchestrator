@@ -21,6 +21,7 @@ from issue_centric_normalized_summary import (
     IssueCentricRuntimeMode,
     IssueCentricRuntimeSnapshot,
     load_issue_centric_normalized_summary,
+    resolve_issue_centric_state_bridge,
     resolve_issue_centric_runtime_snapshot,
     resolve_issue_centric_runtime_mode,
     render_issue_centric_next_request_section,
@@ -109,6 +110,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_runtime_mode": "",
     "last_issue_centric_runtime_mode_reason": "",
     "last_issue_centric_runtime_mode_source": "",
+    "last_issue_centric_state_view": "",
+    "last_issue_centric_state_view_reason": "",
+    "last_issue_centric_state_view_source": "",
+    "last_issue_centric_wait_kind": "",
+    "last_issue_centric_wait_reason": "",
     "last_issue_centric_freshness_status": "",
     "last_issue_centric_freshness_reason": "",
     "last_issue_centric_freshness_source": "",
@@ -403,6 +409,7 @@ def present_bridge_status(
     pending_request_signal = str(state.get("pending_request_signal", "")).strip()
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
+    issue_centric_bridge = resolve_issue_centric_state_bridge(state, repo_root=ROOT_DIR)
 
     if bool(state.get("error")):
         return BridgeStatusView("異常", "まず stop summary と doctor を見て、必要なら詳しい error を確認してから再開します。")
@@ -414,6 +421,12 @@ def present_bridge_status(
         detail = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
         return BridgeStatusView("人確認待ち", detail)
 
+    if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_prepared_request":
+        return BridgeStatusView(
+            "ChatGPT送信待ち",
+            "issue-centric prepared request があり、再生成せずそのまま送信できます。",
+        )
+
     if mode == "idle" and need_chatgpt_prompt:
         return BridgeStatusView(
             "ready issue参照で開始待ち",
@@ -421,6 +434,11 @@ def present_bridge_status(
         )
 
     if mode == "waiting_prompt_reply":
+        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_pending_reply":
+            return BridgeStatusView(
+                "ChatGPT返答待ち",
+                "issue-centric pending generation に対する reply 回収を待っています。",
+            )
         if pending_request_signal == "submitted_unconfirmed":
             return BridgeStatusView(
                 "ChatGPT返答待ち",
@@ -448,6 +466,26 @@ def present_bridge_status(
         return BridgeStatusView("ChatGPTへ依頼準備中", "次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。")
 
     if mode == "idle" and need_chatgpt_next:
+        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_invalidated":
+            return BridgeStatusView(
+                "ChatGPTへ依頼準備中",
+                f"issue-centric runtime は invalidated のため、legacy fallback で次の依頼を準備します。理由: {issue_centric_bridge.state_view_reason or 'issue-centric context invalidated'}。",
+            )
+        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_degraded_fallback":
+            return BridgeStatusView(
+                "ChatGPTへ依頼準備中",
+                f"issue-centric runtime は degraded fallback のため、legacy fallback で次の依頼を準備します。理由: {issue_centric_bridge.state_view_reason or 'issue-centric degraded fallback'}。",
+            )
+        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_unavailable":
+            return BridgeStatusView(
+                "ChatGPTへ依頼準備中",
+                f"issue-centric runtime は unavailable のため、legacy fallback で次の依頼を準備します。理由: {issue_centric_bridge.state_view_reason or 'issue-centric runtime unavailable'}。",
+            )
+        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_consumed":
+            return BridgeStatusView(
+                "ChatGPTへ依頼準備中",
+                "前の issue-centric generation は consumed 済みです。次の generation を準備します。",
+            )
         return BridgeStatusView("ChatGPTへ依頼準備中", "完了報告をもとに、次の依頼を送る準備ができています。")
 
     if mode == "completed":
@@ -595,10 +633,27 @@ def save_state(state: Mapping[str, Any]) -> None:
     ensure_runtime_dirs()
     normalized = DEFAULT_STATE.copy()
     normalized.update(state)
+    _apply_issue_centric_state_bridge_fields(normalized)
     runtime_state_path().write_text(
         json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _apply_issue_centric_state_bridge_fields(state: dict[str, Any]) -> None:
+    bridge = resolve_issue_centric_state_bridge(state, repo_root=ROOT_DIR)
+    if bridge is None:
+        state["last_issue_centric_state_view"] = ""
+        state["last_issue_centric_state_view_reason"] = ""
+        state["last_issue_centric_state_view_source"] = ""
+        state["last_issue_centric_wait_kind"] = ""
+        state["last_issue_centric_wait_reason"] = ""
+        return
+    state["last_issue_centric_state_view"] = bridge.state_view
+    state["last_issue_centric_state_view_reason"] = bridge.state_view_reason
+    state["last_issue_centric_state_view_source"] = bridge.state_view_source
+    state["last_issue_centric_wait_kind"] = bridge.wait_kind
+    state["last_issue_centric_wait_reason"] = bridge.wait_reason
 
 
 def update_state(**changes: Any) -> dict[str, Any]:
@@ -1447,6 +1502,16 @@ def state_snapshot(state: Mapping[str, Any]) -> str:
         fields.append(f"- last_issue_centric_runtime_mode_reason: {state['last_issue_centric_runtime_mode_reason']}")
     if state.get("last_issue_centric_runtime_mode_source"):
         fields.append(f"- last_issue_centric_runtime_mode_source: {state['last_issue_centric_runtime_mode_source']}")
+    if state.get("last_issue_centric_state_view"):
+        fields.append(f"- last_issue_centric_state_view: {state['last_issue_centric_state_view']}")
+    if state.get("last_issue_centric_state_view_reason"):
+        fields.append(f"- last_issue_centric_state_view_reason: {state['last_issue_centric_state_view_reason']}")
+    if state.get("last_issue_centric_state_view_source"):
+        fields.append(f"- last_issue_centric_state_view_source: {state['last_issue_centric_state_view_source']}")
+    if state.get("last_issue_centric_wait_kind"):
+        fields.append(f"- last_issue_centric_wait_kind: {state['last_issue_centric_wait_kind']}")
+    if state.get("last_issue_centric_wait_reason"):
+        fields.append(f"- last_issue_centric_wait_reason: {state['last_issue_centric_wait_reason']}")
     if state.get("last_issue_centric_freshness_status"):
         fields.append(f"- last_issue_centric_freshness_status: {state['last_issue_centric_freshness_status']}")
     if state.get("last_issue_centric_freshness_reason"):
@@ -3371,6 +3436,18 @@ def build_issue_centric_request_status(
     fallback_text: str | None = None,
 ) -> str:
     base = fallback_text or state_snapshot(state)
+    state_bridge = resolve_issue_centric_state_bridge(state, repo_root=ROOT_DIR)
+    if state_bridge is not None:
+        bridge_lines = [
+            "- issue_centric_state_view: " + str(state_bridge.state_view).strip(),
+            "- issue_centric_state_view_reason: " + str(state_bridge.state_view_reason).strip(),
+            "- issue_centric_state_view_source: " + str(state_bridge.state_view_source).strip(),
+            "- issue_centric_wait_kind: " + str(state_bridge.wait_kind).strip(),
+            "- issue_centric_wait_reason: " + str(state_bridge.wait_reason).strip(),
+        ]
+        rendered_bridge = "\n".join(line for line in bridge_lines if not line.endswith(": "))
+        if rendered_bridge:
+            base = f"{base}\n\n## issue_centric_state_bridge\n{rendered_bridge}".strip()
     runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
     if runtime_mode is not None:
         mode_lines = [
