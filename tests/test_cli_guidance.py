@@ -1640,5 +1640,96 @@ class OrchestratorActionViewTest(unittest.TestCase):
                     "so orchestrator can use present_bridge_status() for display.")
 
 
+class StatusViewCutoverTest(unittest.TestCase):
+    """phase7 status-view-cutover: present_bridge_status() no longer calls resolve_codex_lifecycle_view().
+
+    Architecture invariant after this phase:
+      - present_bridge_status() uses is_blocked_codex_lifecycle_state() for the blocked case
+        and resolve_unified_next_action() for action-keyed routing with inline status strings.
+      - resolve_codex_lifecycle_view() external callers: ZERO.
+        It is consumed only by is_normal_path_state(), is_blocked_codex_lifecycle_state(),
+        and resolve_unified_next_action() — all within _bridge_common.py.
+    """
+
+    def test_present_bridge_status_does_not_call_resolve_codex_lifecycle_view_directly(self) -> None:
+        """present_bridge_status() must not call resolve_codex_lifecycle_view() — only mentions
+        in docstrings/comments are allowed.  The function is now a fully internal helper; all
+        outside paths go through present_bridge_status() or action keys from
+        resolve_unified_next_action().
+        """
+        import inspect
+        import re
+        import _bridge_common as m
+
+        src = inspect.getsource(m.present_bridge_status)
+        # Strip docstring (triple-quoted strings) and single-line comments before checking.
+        # getsource includes the full function body with docstring.
+        src_no_docstring = re.sub(r'""".*?"""', "", src, flags=re.DOTALL)
+        src_no_comments = re.sub(r"#[^\n]*", "", src_no_docstring)
+        self.assertNotIn(
+            "resolve_codex_lifecycle_view",
+            src_no_comments,
+            "present_bridge_status() must not call resolve_codex_lifecycle_view() "
+            "(docstring/comment mentions are allowed) "
+            "after the status-view-cutover phase.",
+        )
+
+    def test_present_bridge_status_lifecycle_ready_for_codex_actionable(self) -> None:
+        """mode=ready_for_codex + need_codex_run=True → label='Codex実行待ち'."""
+        from _bridge_common import present_bridge_status
+
+        status = present_bridge_status({"mode": "ready_for_codex", "need_codex_run": True})
+        self.assertEqual(status.label, "Codex実行待ち")
+
+    def test_present_bridge_status_lifecycle_codex_running(self) -> None:
+        """mode=codex_running → label='Codex実行中'."""
+        from _bridge_common import present_bridge_status
+
+        status = present_bridge_status({"mode": "codex_running"})
+        self.assertEqual(status.label, "Codex実行中")
+
+    def test_present_bridge_status_lifecycle_codex_done(self) -> None:
+        """mode=codex_done → label='完了報告整理中'."""
+        from _bridge_common import present_bridge_status
+
+        status = present_bridge_status({"mode": "codex_done"})
+        self.assertEqual(status.label, "完了報告整理中")
+
+    def test_present_bridge_status_lifecycle_blocked(self) -> None:
+        """mode=ready_for_codex + need_codex_run=False (blocked) → label='人確認待ち'."""
+        from _bridge_common import present_bridge_status
+
+        status = present_bridge_status({"mode": "ready_for_codex", "need_codex_run": False})
+        self.assertEqual(status.label, "人確認待ち")
+        status_default = present_bridge_status({"mode": "ready_for_codex"})
+        self.assertEqual(status_default.label, "人確認待ち")
+
+    def test_present_bridge_status_label_matches_lifecycle_view_regression(self) -> None:
+        """Regression: present_bridge_status().label == resolve_codex_lifecycle_view().status_label
+        for all lifecycle states.  The inline strings in present_bridge_status() must stay in
+        sync with the values returned by resolve_codex_lifecycle_view().
+        """
+        from _bridge_common import present_bridge_status, resolve_codex_lifecycle_view
+
+        cases = [
+            {"mode": "ready_for_codex", "need_codex_run": True},
+            {"mode": "ready_for_codex", "need_codex_run": False},
+            {"mode": "codex_running"},
+            {"mode": "codex_done"},
+        ]
+        for state in cases:
+            with self.subTest(state=state):
+                lv = resolve_codex_lifecycle_view(state)
+                self.assertIsNotNone(lv)
+                assert lv is not None
+                status = present_bridge_status(state)
+                self.assertEqual(
+                    status.label,
+                    lv.status_label,
+                    f"present_bridge_status().label must stay in sync with "
+                    f"resolve_codex_lifecycle_view().status_label for state={state}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
