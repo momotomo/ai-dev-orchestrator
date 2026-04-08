@@ -41,7 +41,6 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
-    resolve_codex_lifecycle_view,
     resolve_issue_centric_route_choice,
     resolve_runtime_dispatch_plan,
     resolve_unified_next_action,
@@ -963,15 +962,18 @@ def summarize_run(
     report_reference = handoff_report_reference(final_state)
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
     # Guard: Codex lifecycle states must not reach resolve_runtime_dispatch_plan().
-    # final_state may be a lifecycle state when the run stopped mid-lifecycle
-    # (e.g. stopped while mode=codex_running).  Resolve via the lifecycle view so
-    # the summary fields are accurate and the legacy fallback chain is not consulted.
-    _lifecycle_view = resolve_codex_lifecycle_view(final_state)
-    if _lifecycle_view is not None:
-        _summary_next_action: str = _lifecycle_view.action
+    # Lifecycle detection is via is_normal_path_state() (which encapsulates
+    # resolve_codex_lifecycle_view() as the sole classification authority) plus
+    # has_pending_issue_centric_codex_dispatch() to exclude pending dispatch states.
+    # This combined check is equivalent to resolve_codex_lifecycle_view(s) is not None,
+    # keeping summarize_run() free of a direct lifecycle view import.
+    # Action comes from resolve_unified_next_action(); detail from present_bridge_status()
+    # (called without blocked/stale flags to get the clean lifecycle status detail).
+    if not is_normal_path_state(final_state) and not has_pending_issue_centric_codex_dispatch(final_state):
+        _summary_next_action: str = resolve_unified_next_action(final_state)
         _summary_runtime_action: str = "codex_lifecycle_compat"
         _summary_is_fallback: bool = False
-        _summary_action_stop_note: str = _lifecycle_view.status_detail
+        _summary_action_stop_note: str = present_bridge_status(final_state).detail
     else:
         # Dispatch plan is the primary authority for next_action / runtime_action.
         # mode is kept in ## debug / state_snapshot as a compatibility field.
