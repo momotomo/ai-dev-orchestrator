@@ -11,7 +11,6 @@ from typing import Any
 
 from _bridge_common import (
     BridgeStop,
-    CodexLifecycleView,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
     bridge_runtime_root,
@@ -21,7 +20,6 @@ from _bridge_common import (
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
     is_awaiting_user_supplement,
-    is_codex_lifecycle_state,
     is_fetch_extended_wait_state,
     is_fetch_late_completion_state,
     is_normal_path_state,
@@ -43,9 +41,9 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
-    resolve_codex_lifecycle_view,
     resolve_issue_centric_route_choice,
     resolve_runtime_dispatch_plan,
+    resolve_unified_next_action,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -290,41 +288,15 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 def describe_next_action(state: dict[str, Any]) -> str:
     """Return the concrete action key for the next runtime step.
 
-    **Full cutover boundary:**
-    - For all states where is_normal_path_state(state) is True, the final
-      resolution is always resolve_runtime_dispatch_plan(state).next_action.
-      The dispatch plan is the sole routing authority.
-    - For Codex lifecycle states (ready_for_codex / codex_running / codex_done),
-      mode-driven compatibility guards handle routing instead of the dispatch plan.
-      These are the only remaining non-dispatch-plan branches.
+    Thin wrapper over resolve_unified_next_action() from _bridge_common.
+    Both Codex lifecycle compatibility states and normal-path states are handled
+    by the unified action resolver; this function exists as a local entry point
+    for run_until_stop callers.
 
-    Early exits handle Codex lifecycle states (unarchived report, pending
-    dispatch, ready_for_codex / codex_running / codex_done) as mode-driven
-    compatibility branches.  All other cases delegate to the dispatch plan.
-
-    Callers that need richer context (note, is_fallback, route_choice) should
-    call resolve_runtime_dispatch_plan() directly instead of this wrapper.
-    is_codex_lifecycle_state() / is_normal_path_state() can be used as guards
-    to check which branch owns the current state before calling this function.
+    For richer context (note, is_fallback, route_choice, status wording) call
+    resolve_runtime_dispatch_plan() or resolve_codex_lifecycle_view() directly.
     """
-    if should_prioritize_unarchived_report(state):
-        return "archive_codex_report"
-
-    if has_pending_issue_centric_codex_dispatch(state):
-        return "dispatch_issue_centric_codex_run"
-
-    # Codex lifecycle compatibility branch: mode-driven, NOT dispatch-plan-routed.
-    # All three lifecycle sub-cases (launch / wait / archive) are classified by
-    # resolve_codex_lifecycle_view(); callers should not inspect mode directly.
-    # is_blocked=True (ready_for_codex without need_codex_run) falls through to dispatch.
-    lifecycle_view = resolve_codex_lifecycle_view(state)
-    if lifecycle_view is not None and not lifecycle_view.is_blocked:
-        return lifecycle_view.action
-
-    # Normal path: dispatch plan is the sole routing authority.
-    # is_normal_path_state(state) is True for all states reaching this point.
-    plan = resolve_runtime_dispatch_plan(state)
-    return plan.next_action
+    return resolve_unified_next_action(state)
 
 
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
@@ -1267,11 +1239,9 @@ def run(argv: list[str] | None = None) -> int:
                     history=history,
                 )
 
-            # Full cutover: dispatch plan is the primary action authority for all
-            # normal-path states (is_normal_path_state(before) == True).
-            # When is_codex_lifecycle_state(before) is True, describe_next_action()
-            # routes via the Codex lifecycle compatibility branch instead.
-            # Resolve action ONCE per iteration and use it for all routing below.
+            # resolve_unified_next_action() covers both the normal dispatch-plan path and
+            # the Codex lifecycle compatibility branch via a single authority in
+            # _bridge_common.  Resolve action ONCE per iteration and use it for all routing.
             action = describe_next_action(before)
 
             if action == "completed":
