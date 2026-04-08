@@ -339,11 +339,11 @@ class CodexLifecycleView:
 
     This is the single place for ready_for_codex / codex_running / codex_done
     classification logic.  It centralises the action key, display wording, and
-    blocked flag that were previously scattered across describe_next_action(),
+    blocked flag that were previously scattered across resolve_unified_next_action(),
     present_bridge_status(), and bridge_orchestrator.run().
 
     Fields:
-        action      -- canonical action key used by describe_next_action() and
+        action      -- canonical action key used by resolve_unified_next_action() and
                        bridge_orchestrator dispatch ("launch_codex_once" /
                        "wait_for_codex_report" / "archive_codex_report" /
                        "check_codex_condition" when blocked).
@@ -1157,7 +1157,7 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
     # is enclosed inside resolve_codex_lifecycle_view()).
     if resolve_codex_lifecycle_view(state) is not None:
         return False
-    # Early-exit conditions that bypass the dispatch plan in describe_next_action().
+    # Early-exit conditions that bypass the dispatch plan in resolve_unified_next_action().
     if has_pending_issue_centric_codex_dispatch(state):
         return False
     # Unarchived report is handled before dispatch plan in the normal flow,

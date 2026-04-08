@@ -68,11 +68,11 @@ DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
 def start_bridge_mode(state: dict[str, Any]) -> str:
     """Return a short human-readable description of the bridge start posture.
 
-    Uses describe_next_action() (action-view) as the primary signal.
+    Uses resolve_unified_next_action() (action-view) as the primary signal.
     mode is only consulted via is_awaiting_user_supplement() for the
     sub-case where user supplement input is required before proceeding.
     """
-    action = describe_next_action(state)
+    action = resolve_unified_next_action(state)
     if action == "request_next_prompt":
         return "ready issue 参照から始められます"
     if action == "dispatch_issue_centric_codex_run":
@@ -202,7 +202,7 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
 
 
 def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
-    action = describe_next_action(state)
+    action = resolve_unified_next_action(state)
     if action == "request_next_prompt":
         if getattr(args, "request_body", "").strip():
             return (
@@ -286,20 +286,6 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def describe_next_action(state: dict[str, Any]) -> str:
-    """Return the concrete action key for the next runtime step.
-
-    Thin wrapper over resolve_unified_next_action() from _bridge_common.
-    Both Codex lifecycle compatibility states and normal-path states are handled
-    by the unified action resolver; this function exists as a local entry point
-    for run_until_stop callers.
-
-    For richer context (note, is_fallback, route_choice, status wording) call
-    resolve_runtime_dispatch_plan() or resolve_codex_lifecycle_view() directly.
-    """
-    return resolve_unified_next_action(state)
-
-
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
     command = [sys.executable, "scripts/bridge_orchestrator.py"]
     command.extend(["--codex-bin", args.codex_bin])
@@ -376,13 +362,13 @@ def recommended_operator_step(
 ) -> tuple[str, str]:
     """Return (step_label, suggested_command) for the operator.
 
-    Primary authority: describe_next_action() (action-view / dispatch plan).
+    Primary authority: resolve_unified_next_action() (action-view / dispatch plan).
     mode is only accessed via is_awaiting_user_supplement() for the sub-case
     where the user-supplement resume branch must be distinguished from the
     standard report-request path.  All other mode reads are delegated to
     action-key branches.
     """
-    action = describe_next_action(final_state)
+    action = resolve_unified_next_action(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
 
     if runtime_stop_path().exists():
@@ -413,11 +399,11 @@ def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]
 def suggested_next_note(final_state: dict[str, Any]) -> str:
     """Return the suggested next note for the operator.
 
-    Primary vocabulary: action-view / describe_next_action().
+    Primary vocabulary: action-view / resolve_unified_next_action().
     is_no_codex_decision_state() handles the ChatGPT-decision terminal cases
     before falling through to the action-key branches.
     """
-    action = describe_next_action(final_state)
+    action = resolve_unified_next_action(final_state)
     pending_request_signal = str(final_state.get("pending_request_signal", "")).strip()
     if is_no_codex_decision_state(final_state):
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
@@ -641,7 +627,7 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
 
 
 def is_stale_codex_running_candidate(reason: str, final_state: dict[str, Any]) -> bool:
-    if describe_next_action(final_state) != "wait_for_codex_report":
+    if resolve_unified_next_action(final_state) != "wait_for_codex_report":
         return False
 
     if runtime_stop_path().exists():
@@ -1186,7 +1172,7 @@ def run(argv: list[str] | None = None) -> int:
             history=history,
         )
 
-    if describe_next_action(initial_state) == "completed":
+    if resolve_unified_next_action(initial_state) == "completed":
         reason = "completed 相当の状態です。追加の 1 手はありません。"
         if is_no_codex_decision_state(initial_state):
             reason = no_codex_decision_reason(initial_state)
@@ -1219,7 +1205,7 @@ def run(argv: list[str] | None = None) -> int:
         )
 
     if args.dry_run:
-        history.append(f"- dry_run next_action: {describe_next_action(initial_state)}")
+        history.append(f"- dry_run next_action: {resolve_unified_next_action(initial_state)}")
         return finish(
             args=args,
             reason="dry-run のため実行せず停止しました。",
@@ -1258,7 +1244,7 @@ def run(argv: list[str] | None = None) -> int:
             # resolve_unified_next_action() covers both the normal dispatch-plan path and
             # the Codex lifecycle compatibility branch via a single authority in
             # _bridge_common.  Resolve action ONCE per iteration and use it for all routing.
-            action = describe_next_action(before)
+            action = resolve_unified_next_action(before)
 
             if action == "completed":
                 reason = "completed 相当の状態に到達しました。"
@@ -1393,7 +1379,7 @@ def run(argv: list[str] | None = None) -> int:
                 else:
                     reason = (
                         "state が変化しなかったため停止しました。"
-                        f" mode={after.get('mode', '')} next_action={describe_next_action(after)}"
+                        f" mode={after.get('mode', '')} next_action={resolve_unified_next_action(after)}"
                     )
                 return finish(
                     args=args,

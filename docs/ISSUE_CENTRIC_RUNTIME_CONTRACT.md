@@ -230,8 +230,8 @@ dispatch plan and with explicit fallback-reason notes in the stop summary.
 
 - `resolve_runtime_dispatch_plan()` — normal-path routing authority
 - `RuntimeDispatchPlan` — operator vocabulary for action, route, fallback
-- `describe_next_action()` / `completed` / `no_action` detection —
-  action-view primary, Codex lifecycle guards retained
+- `resolve_unified_next_action()` / `completed` / `no_action` detection —
+  single action authority, covers Codex lifecycle and normal dispatch-plan paths
 - Operator stop summary `## next_step` — dispatch plan fields + `action_stop_note`
 - `format_operator_stop_note()` — shared action-view stop phrasing
 - `format_next_action_note()` — shared next-action phrasing
@@ -257,10 +257,10 @@ dispatch plan and with explicit fallback-reason notes in the stop summary.
   the Codex lifecycle compatibility branch (mode-driven, not dispatch-plan-routed)
 - `is_normal_path_state(state)` — returns `True` when dispatch plan is the sole
   routing authority (not Codex lifecycle, not pending dispatch)
-- `describe_next_action()` — `is_codex_lifecycle_state()` guard replaces raw
-  mode comparisons; normal-path fallthrough uses `resolve_runtime_dispatch_plan()`
-- `run()` main loop — `describe_next_action(before)` called **once** per iteration
-  (double-call eliminated); result drives all routing in that iteration
+- `describe_next_action()` (deleted, phase7 describe-next-action-inline) — ~~`is_codex_lifecycle_state()` guard replaces raw
+  mode comparisons; normal-path fallthrough uses `resolve_runtime_dispatch_plan()`~~ inlined to `resolve_unified_next_action()` direct calls
+- `run()` main loop — `resolve_unified_next_action(before)` called **once** per iteration
+  (previously `describe_next_action(before)`); result drives all routing in that iteration
 - `bridge_orchestrator.py run()` — `is_codex_lifecycle_state()` guard replaces
   raw `mode = str(state.get(...))` reads for Codex lifecycle branches
 

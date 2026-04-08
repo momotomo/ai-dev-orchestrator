@@ -563,7 +563,8 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("pending", note)
         self.assertIn("reply 待ち", note)
 
-    def test_describe_next_action_prefers_fetch_for_fresh_pending_issue_centric_generation(self) -> None:
+    def test_resolve_unified_next_action_prefers_fetch_for_fresh_pending_issue_centric_generation(self) -> None:
+        from _bridge_common import resolve_unified_next_action
         with tempfile.TemporaryDirectory() as tmp:
             snapshot_path = Path(tmp) / "snapshot.json"
             snapshot_path.write_text(
@@ -600,7 +601,7 @@ class SummaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.object(run_until_stop, "should_prioritize_unarchived_report", return_value=False):
-                action = run_until_stop.describe_next_action(
+                action = resolve_unified_next_action(
                     {
                         "mode": "idle",
                         "need_chatgpt_next": True,
@@ -614,8 +615,9 @@ class SummaryTests(unittest.TestCase):
                 )
         self.assertEqual(action, "fetch_next_prompt")
 
-    def test_describe_next_action_prefers_later_codex_dispatch_when_prepared(self) -> None:
-        action = run_until_stop.describe_next_action(
+    def test_resolve_unified_next_action_prefers_later_codex_dispatch_when_prepared(self) -> None:
+        from _bridge_common import resolve_unified_next_action
+        action = resolve_unified_next_action(
             {
                 "mode": "awaiting_user",
                 "chatgpt_decision": "issue_centric:codex_run",
@@ -626,14 +628,14 @@ class SummaryTests(unittest.TestCase):
         )
         self.assertEqual(action, "dispatch_issue_centric_codex_run")
 
-    def test_describe_next_action_keeps_ready_for_codex_mode_driven(self) -> None:
+    def test_resolve_unified_next_action_keeps_ready_for_codex_mode_driven(self) -> None:
+        from _bridge_common import resolve_unified_next_action
         with patch.object(run_until_stop, "should_prioritize_unarchived_report", return_value=False):
-            with patch.object(
-                run_until_stop,
-                "resolve_runtime_dispatch_plan",
+            with patch(
+                "_bridge_common.resolve_runtime_dispatch_plan",
                 side_effect=AssertionError("issue-centric next-action should not override ready_for_codex"),
             ):
-                action = run_until_stop.describe_next_action(
+                action = resolve_unified_next_action(
                     {
                         "mode": "ready_for_codex",
                         "need_codex_run": True,
@@ -1223,10 +1225,9 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
                 self.assertEqual(status.label, view.status_label)
                 self.assertEqual(status.detail, view.status_detail)
 
-    def test_describe_next_action_uses_lifecycle_view_action(self) -> None:
-        """describe_next_action() returns lifecycle_view.action for non-blocked Codex states."""
-        import run_until_stop
-        from _bridge_common import resolve_codex_lifecycle_view
+    def test_resolve_unified_next_action_codex_lifecycle_action_matches_view(self) -> None:
+        """resolve_unified_next_action() returns lifecycle_view.action for non-blocked Codex states."""
+        from _bridge_common import resolve_codex_lifecycle_view, resolve_unified_next_action
 
         for mode, need_codex_run in (
             ("ready_for_codex", True),
@@ -1236,7 +1237,7 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 state: dict[str, object] = {"mode": mode, "need_codex_run": need_codex_run}
                 view = resolve_codex_lifecycle_view(state)
-                action = run_until_stop.describe_next_action(state)
+                action = resolve_unified_next_action(state)
                 self.assertIsNotNone(view)
                 assert view is not None
                 self.assertEqual(action, view.action)
@@ -1306,24 +1307,6 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
         # must return the dispatch plan's answer instead.
         self.assertNotEqual(unified, "check_codex_condition")
         self.assertEqual(unified, plan.next_action)
-
-    def test_describe_next_action_delegates_to_resolve_unified(self) -> None:
-        """describe_next_action() is now a thin wrapper over resolve_unified_next_action()."""
-        import run_until_stop
-        from _bridge_common import resolve_unified_next_action
-
-        for state in (
-            {"mode": "idle"},
-            {"mode": "codex_running"},
-            {"mode": "codex_done"},
-            {"mode": "ready_for_codex", "need_codex_run": True},
-            {"mode": "waiting_prompt_reply"},
-        ):
-            with self.subTest(state=state):
-                self.assertEqual(
-                    run_until_stop.describe_next_action(state),
-                    resolve_unified_next_action(state),
-                )
 
     def test_is_normal_path_state_uses_lifecycle_view(self) -> None:
         """is_normal_path_state() returns False for all Codex lifecycle modes
