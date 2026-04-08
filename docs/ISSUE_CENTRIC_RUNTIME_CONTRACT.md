@@ -102,6 +102,13 @@ The current implementation boundary is:
   shared issue-centric route choice and only drop to the older
   request-centric helpers when the runtime is degraded, unavailable, or
   invalidated
+- implemented: Plan A BODY base64 transport as the primary fetch path: the
+  polling loop in `fetch_next_prompt.py` now tries the Plan A contract
+  extractor first and only falls back to the visible DOM text extractor
+  (`===CHATGPT_PROMPT_REPLY===` / `===CHATGPT_NO_CODEX===`) when Plan A
+  contract markers are absent or parsing fails; `_bridge_common.py` exposes
+  `wait_for_plan_a_or_prompt_reply_text` that accepts a `plan_a_extractor`
+  callable injected from outside to avoid circular imports
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover

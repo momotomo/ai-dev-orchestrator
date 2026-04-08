@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +16,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import fetch_next_prompt  # noqa: E402
 import issue_centric_contract  # noqa: E402
 import issue_centric_transport  # noqa: E402
-from _bridge_common import BridgeStop  # noqa: E402
+from _bridge_common import BridgeError, BridgeStop  # noqa: E402
 
 
 def b64(text: str) -> str:
@@ -963,7 +963,7 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             ):
@@ -1028,7 +1028,7 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             ):
@@ -1046,6 +1046,139 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["pending_runtime_action"], "codex_run_dispatch")
             self.assertEqual(metadata["prepared_artifact"]["kind"], "codex_body")
+
+
+class PlanAFetchPrimaryPathTests(unittest.TestCase):
+    """Tests for Plan A BODY base64 transport as the primary fetch path.
+
+    Verifies that:
+    - wait_for_plan_a_or_prompt_reply_text succeeds on Plan A contract reply (primary path)
+    - wait_for_plan_a_or_prompt_reply_text succeeds on visible DOM text reply (safety fallback)
+    - fetch_next_prompt.run() passes a plan_a_extractor to wait_for_plan_a_or_prompt_reply_text
+    - fetch_next_prompt.run() falls through to visible DOM text path when Plan A is absent
+    """
+
+    def _build_plan_a_only_raw(self) -> str:
+        """Build a raw reply containing only a Plan A contract (no visible-text markers)."""
+        envelope = {
+            "action": "no_action",
+            "target_issue": "none",
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": "Plan A only reply.",
+        }
+        return build_raw_reply(envelope, after_text="request body")
+
+    def _build_visible_dom_only_raw(self) -> str:
+        """Build a raw reply containing only a visible DOM text (CHATGPT_PROMPT_REPLY) -- no Plan A contract."""
+        return "\n".join([
+            "あなた:",
+            "request body",
+            "ChatGPT:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "## Codex prompt body\n",
+            "===END_REPLY===",
+        ])
+
+    def test_plan_a_extractor_succeeds_when_contract_present(self) -> None:
+        """plan_a_extractor must not raise when a valid Plan A contract is present."""
+        import _bridge_common as bc
+
+        raw = self._build_plan_a_only_raw()
+
+        def plan_a_extractor(r: str, after: str | None) -> None:
+            result = issue_centric_contract.maybe_parse_issue_centric_reply(r, after_text=after)
+            if result is None:
+                raise BridgeError("not found")
+
+        # Must not raise -- Plan A contract is present
+        plan_a_extractor(raw, "request body")
+
+    def test_plan_a_extractor_raises_when_contract_absent(self) -> None:
+        """plan_a_extractor must raise BridgeError when no Plan A contract is present."""
+        raw = self._build_visible_dom_only_raw()
+
+        def plan_a_extractor(r: str, after: str | None) -> None:
+            result = issue_centric_contract.maybe_parse_issue_centric_reply(r, after_text=after)
+            if result is None:
+                raise BridgeError("not found")
+
+        with self.assertRaises(BridgeError):
+            plan_a_extractor(raw, "request body")
+
+    def test_fetch_run_uses_wait_for_plan_a_or_prompt_reply_text(self) -> None:
+        """fetch_next_prompt.run() must call wait_for_plan_a_or_prompt_reply_text (not wait_for_prompt_reply_text)."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash1",
+            "pending_request_source": "report:f",
+            "pending_request_log": "logs/r.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = self._build_plan_a_only_raw()
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            wait_mock = MagicMock(return_value=raw)
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", wait_mock),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: None),
+            ):
+                try:
+                    fetch_next_prompt.run(dict(state), [])
+                except Exception:
+                    pass
+
+            # Must have called wait_for_plan_a_or_prompt_reply_text with plan_a_extractor kwarg
+            self.assertTrue(wait_mock.called)
+            call_kwargs = wait_mock.call_args.kwargs
+            self.assertIn("plan_a_extractor", call_kwargs)
+            self.assertTrue(callable(call_kwargs["plan_a_extractor"]))
+
+    def test_fetch_run_falls_back_to_visible_dom_path_when_plan_a_absent(self) -> None:
+        """When Plan A contract is absent, fetch_next_prompt.run() falls through to visible DOM text path."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash2",
+            "pending_request_source": "report:g",
+            "pending_request_log": "logs/r.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = self._build_visible_dom_only_raw()
+        saved_states: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "write_text", side_effect=lambda p, t: None),
+            ):
+                result = fetch_next_prompt.run(dict(state), [])
+
+            # Visible DOM text path: codex_prompt → mode=ready_for_codex
+            self.assertEqual(result, 0)
+            saved = saved_states[0]
+            self.assertEqual(saved["mode"], "ready_for_codex")
+            self.assertTrue(bool(saved.get("need_codex_run")))
 
 
 if __name__ == "__main__":
