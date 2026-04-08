@@ -316,11 +316,17 @@ During this inventory phase, all of the following stay unchanged:
     active.  Signal values, retry/send/fetch behavior, and message delivery
     semantics are unchanged — only the view layer (wording) is enriched.
     Helper: `is_issue_centric_delivery_pending_state()` in `_bridge_common.py`.
+  - **#29 (landed)**: Remaining human-facing delivery-pending presentation aligned.
+    `present_bridge_handoff()` title now includes `target_issue` for IC ready +
+    delivery-pending states.  Error-path note in `run_until_stop.py` also enriched.
+    Signal semantics and runtime behavior unchanged; legacy / fallback path wording
+    preserved.
 - why this matters later:
   - ready-issue-first migration must not casually break late-completion or
     project-page recovery semantics
 - inventory conclusion:
-  - `#28` delivered the minimal view-layer mapping for delivery-pending signals
+  - `#28` delivered the minimal view-layer mapping for delivery-pending signals in status / operator notes
+  - `#29` extended the same mapping to `present_bridge_handoff()` title and the error-path note in `run_until_stop.py`
   - deeper behavioral mapping (retry cadence, issue-scoped send tracking) remains
     a future planned slice
 

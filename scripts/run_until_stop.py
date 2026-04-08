@@ -614,10 +614,18 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 f" handoff_log: {pending_handoff_log}"
             )
         elif str(final_state.get("pending_request_signal", "")).strip() == "submitted_unconfirmed":
-            note = (
-                "新しいチャットへの送信は通った可能性が高いため、"
-                " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
-            )
+            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(final_state)
+            if _ic_pending and _ic_issue:
+                note = (
+                    f"issue-centric delivery pending ({_ic_issue}): "
+                    "新しいチャットへの送信は通った可能性が高いため、"
+                    " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
+                )
+            else:
+                note = (
+                    "新しいチャットへの送信は通った可能性が高いため、"
+                    " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
+                )
         else:
             note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"
         if error_message:
