@@ -115,6 +115,11 @@ During this inventory phase, all of the following stay unchanged:
 - inventory conclusion:
   - this is a runtime-required boundary
   - it still does **not** require immediate state-machine redesign
+  - **next bounded slice**: [#26 Ready: add issue-aware provenance to report-based continuation](https://github.com/momotomo/ai-dev-orchestrator/issues/26)
+    — extends `build_report_request_source()` so `prepared_request_source` /
+    `pending_request_source` carries `:issue:{number}` when
+    `last_issue_centric_principal_issue` is present in state; does not change
+    same-chat, late-completion, or fetch-path semantics
 
 ### 4. Reply Extraction And Prompt Materialization
 
@@ -480,15 +485,22 @@ Likely next candidates:
   - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
 - completed bounded feasibility child:
   - [#22 Ready: test markdown-fidelity copy-response feasibility for bridge reply extraction](https://github.com/momotomo/ai-dev-orchestrator/issues/22)
+- completed runtime spine closure + lifecycle cleanup (Phase 7):
+  - [#25 Ready: issue-centric runtime spine closure and lifecycle cleanup (Phase 7)](https://github.com/momotomo/ai-dev-orchestrator/issues/25)
+  - Covers Plan A BODY base64 transport, issue-centric dispatcher, full dispatch-plan cutover,
+    post-cutover streamline, and lifecycle cleanup.  `resolve_codex_lifecycle_view()` external
+    callers: ZERO.  Legacy surfaces classified in the Legacy Route Inventory below.
 - current open ready child:
-  - none
-- one likely next ready slice after `#22`:
-  - move reply-body transport off visible DOM text and onto a bounded
-    BODY/base64 path without changing same-chat or late-completion semantics
-- one ready issue that adds issue-aware provenance to report-based continuation
-  without changing late-completion or handoff behavior
-- one later ready issue that maps late-completion and project-page send
-  signals into the future issue-centric model
+  - [#26 Ready: add issue-aware provenance to report-based continuation](https://github.com/momotomo/ai-dev-orchestrator/issues/26)
+  - `build_report_request_source()` extended so `prepared_request_source` / `pending_request_source`
+    carries `:issue:{number}` when `last_issue_centric_principal_issue` is present in state.
+    Does not change same-chat, late-completion, or fetch-path semantics.
+- likely next ready slices after `#26`:
+  - activate Plan A (`BODY` base64 transport) as the primary fetch path once ChatGPT-side
+    cooperation is confirmed (parser/transport side is implemented; fetch path still reads
+    visible DOM text today)
+  - one later ready issue that maps late-completion and project-page send signals into the
+    future issue-centric model
 
 Until those slices are promoted, this document is the current boundary record
 for runtime-adjacent work.

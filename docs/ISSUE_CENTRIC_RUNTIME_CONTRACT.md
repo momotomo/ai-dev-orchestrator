@@ -277,27 +277,20 @@ The following items are **not** part of the full cutover and are left for a futu
 3. **`mode` demotion**: keep `mode` as a backward-compatible write field but
    remove it from all routing logic; dispatch plan becomes the only authority
 
-**Post-cutover streamline (2026-04-09):**
-The following additional cleanup was applied in the post-cutover streamline phase:
+**Phase 7 lifecycle cleanup (2026-04-08, post-cutover streamline continued):**
+The following additional cleanup reduced lifecycle classification surface area
+without completing the full Codex lifecycle reshape:
 
-- `present_bridge_status()` — rewritten to use `resolve_runtime_dispatch_plan()`
-  for the normal path; `resolve_issue_centric_state_bridge()` removed from this
-  function; `mode` / `need_chatgpt_*` reads removed from the normal-path branch;
-  `is_codex_lifecycle_state()` guard retains Codex lifecycle as compatibility;
-  `is_awaiting_user_supplement()` replaces raw `mode == "awaiting_user"` read
-- `present_bridge_handoff()` — raw `mode`, `need_chatgpt_prompt`, `need_chatgpt_next`,
-  `need_codex_run` reads removed; `is_completed_state()` replaces the
-  `mode == "idle" and not need_*` check at the end of the guard chain
-- `resolve_next_generation_transition()` — docstring: marked as "residual
-  compatibility helper" called only from `resolve_runtime_dispatch_plan()`
-- `resolve_fallback_legacy_transition()` — docstring: marked as "safety fallback
-  (legacy) helper only"; explicit warning against direct normal-path use
-- `resolve_issue_centric_route_choice()` — docstring: marked as "internal helper"
-  used by `resolve_runtime_dispatch_plan()`; callers directed to that function
-- `resolve_runtime_next_action()` — docstring: marked as "internal dispatch step";
-  `fallback_legacy` description updated to reference `resolve_fallback_legacy_transition()`
-- `format_next_action_note()` — raw `mode == "awaiting_user"` read replaced with
-  `is_awaiting_user_supplement(state)`
+- `resolve_issue_centric_preferred_loop_action()` deleted (thin wrapper, all callers updated).
+- `CodexLifecycleView` + `resolve_codex_lifecycle_view()` centralize scattered per-site mode switches; all caller sites now see only the view or the action key — not raw lifecycle fields.
+- `resolve_unified_next_action()` is the single action-authority for all state classes (Codex lifecycle and normal dispatch-plan paths unified under one function).
+- `is_codex_lifecycle_state()` function deleted; check inlined into `resolve_codex_lifecycle_view()`.
+- `CODEX_LIFECYCLE_MODES` constant deleted; mode strings inlined into `resolve_codex_lifecycle_view()`.
+- `describe_next_action()` in `run_until_stop.py` deleted; all 9 call sites replaced with direct `resolve_unified_next_action()` calls.
+- `resolve_codex_lifecycle_view()` external callers reduced to ZERO: `run_until_stop.py` and `bridge_orchestrator.py` imports removed; `present_bridge_status()` lifecycle branch rewritten using `is_blocked_codex_lifecycle_state()` + `resolve_unified_next_action()` with inline status strings.
+- `is_blocked_codex_lifecycle_state()` added to encapsulate the `is_blocked` lifecycle flag without exposing lifecycle view fields.
+
+The Codex lifecycle branch is still **mode-driven** in `bridge_orchestrator.py`.  Full reshape (item 1 above) is deferred to the next Codex lifecycle action-view phase.
 
 Until the three remaining items above land, the current coexistence contract remains:
 dispatch plan is primary, Codex lifecycle is compatibility, legacy is safety fallback.
