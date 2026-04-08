@@ -1217,6 +1217,88 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
                 assert view is not None
                 self.assertEqual(action, view.action)
 
+    # ------------------------------------------------------------------
+    # resolve_unified_next_action / action-bridge tests (2026-04-08)
+    # ------------------------------------------------------------------
+
+    def test_resolve_unified_next_action_normal_path_delegates_to_dispatch_plan(self) -> None:
+        """Normal-path state: resolve_unified_next_action returns plan.next_action."""
+        from _bridge_common import resolve_runtime_dispatch_plan, resolve_unified_next_action
+
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+        }
+        unified = resolve_unified_next_action(state)
+        plan = resolve_runtime_dispatch_plan(state)
+        self.assertEqual(unified, plan.next_action)
+
+    def test_resolve_unified_next_action_codex_lifecycle_matches_lifecycle_view(self) -> None:
+        """Codex lifecycle states: resolve_unified_next_action matches lifecycle_view.action."""
+        from _bridge_common import resolve_codex_lifecycle_view, resolve_unified_next_action
+
+        for mode, need_codex_run in (
+            ("ready_for_codex", True),
+            ("codex_running", False),
+            ("codex_done", False),
+        ):
+            with self.subTest(mode=mode):
+                state: dict[str, object] = {"mode": mode, "need_codex_run": need_codex_run}
+                view = resolve_codex_lifecycle_view(state)
+                unified = resolve_unified_next_action(state)
+                self.assertIsNotNone(view)
+                assert view is not None
+                self.assertEqual(unified, view.action)
+
+    def test_resolve_unified_next_action_blocked_lifecycle_falls_through_to_dispatch(self) -> None:
+        """Blocked Codex lifecycle (ready_for_codex without need_codex_run) falls through
+        to the dispatch plan, not the lifecycle view action."""
+        from _bridge_common import resolve_runtime_dispatch_plan, resolve_unified_next_action
+
+        state: dict[str, object] = {"mode": "ready_for_codex", "need_codex_run": False}
+        unified = resolve_unified_next_action(state)
+        plan = resolve_runtime_dispatch_plan(state)
+        # Must not return "check_codex_condition" (that's the blocked lifecycle action);
+        # must return the dispatch plan's answer instead.
+        self.assertNotEqual(unified, "check_codex_condition")
+        self.assertEqual(unified, plan.next_action)
+
+    def test_describe_next_action_delegates_to_resolve_unified(self) -> None:
+        """describe_next_action() is now a thin wrapper over resolve_unified_next_action()."""
+        import run_until_stop
+        from _bridge_common import resolve_unified_next_action
+
+        for state in (
+            {"mode": "idle"},
+            {"mode": "codex_running"},
+            {"mode": "codex_done"},
+            {"mode": "ready_for_codex", "need_codex_run": True},
+            {"mode": "waiting_prompt_reply"},
+        ):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    run_until_stop.describe_next_action(state),
+                    resolve_unified_next_action(state),
+                )
+
+    def test_is_normal_path_state_uses_lifecycle_view(self) -> None:
+        """is_normal_path_state() returns False for all Codex lifecycle modes
+        (delegates to resolve_codex_lifecycle_view() not CODEX_LIFECYCLE_MODES directly)."""
+        from _bridge_common import is_normal_path_state
+
+        for mode in ("ready_for_codex", "codex_running", "codex_done"):
+            with self.subTest(mode=mode):
+                state: dict[str, object] = {"mode": mode}
+                self.assertFalse(is_normal_path_state(state))
+
+        # Normal modes must still return True.
+        for mode in ("idle", "waiting_prompt_reply", "awaiting_user"):
+            with self.subTest(mode=mode):
+                state = {"mode": mode}
+                self.assertTrue(is_normal_path_state(state))
+
 
 if __name__ == "__main__":
     unittest.main()

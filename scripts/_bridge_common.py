@@ -1172,9 +1172,11 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
 
     This is the full cutover boundary: callers that need to know whether dispatch
     plan or compatibility branches own the next step should call this helper.
+    Uses resolve_codex_lifecycle_view() internally so it stays in sync with the
+    single Codex lifecycle classification authority.
     """
-    mode = str(state.get("mode", "")).strip()
-    if mode in CODEX_LIFECYCLE_MODES:
+    # Delegate to the single Codex lifecycle authority instead of reading mode directly.
+    if resolve_codex_lifecycle_view(state) is not None:
         return False
     # Early-exit conditions that bypass the dispatch plan in describe_next_action().
     if has_pending_issue_centric_codex_dispatch(state):
@@ -1463,6 +1465,47 @@ def resolve_runtime_dispatch_plan(state: Mapping[str, Any]) -> RuntimeDispatchPl
         is_terminal=is_terminal,
         is_fallback=is_fallback,
     )
+
+
+def resolve_unified_next_action(state: Mapping[str, Any]) -> str:
+    """Return the canonical next-action key for any runtime state.
+
+    This is the single authoritative answer to "what action should the runtime
+    take next?" covering ALL state classes:
+
+      1. Unarchived report present (early exit):
+           -> "archive_codex_report"
+      2. Pending issue-centric Codex dispatch (early exit):
+           -> "dispatch_issue_centric_codex_run"
+      3. Codex lifecycle compatibility state (mode-driven, not dispatch-plan):
+           -> lifecycle_view.action  (one of launch_codex_once /
+              wait_for_codex_report / archive_codex_report)
+           -> Falls through to step 4 when lifecycle_view.is_blocked (operator
+              confirmation required before Codex can proceed).
+      4. Normal path (is_normal_path_state is True):
+           -> resolve_runtime_dispatch_plan(state).next_action
+
+    This function is the action-view bridge between Codex lifecycle compatibility
+    and the normal dispatch plan path.  Both paths answer the same question and
+    return the same vocabulary of action keys.
+
+    Callers that need richer context (note, is_fallback, route_choice, is_blocked
+    wording) should call resolve_runtime_dispatch_plan() or
+    resolve_codex_lifecycle_view() directly.
+    """
+    if should_prioritize_unarchived_report(state):
+        return "archive_codex_report"
+
+    if has_pending_issue_centric_codex_dispatch(state):
+        return "dispatch_issue_centric_codex_run"
+
+    lifecycle_view = resolve_codex_lifecycle_view(state)
+    if lifecycle_view is not None and not lifecycle_view.is_blocked:
+        return lifecycle_view.action
+
+    # Normal path: dispatch plan is the sole routing authority.
+    plan = resolve_runtime_dispatch_plan(state)
+    return plan.next_action
 
 
 def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatchPlan) -> str:
