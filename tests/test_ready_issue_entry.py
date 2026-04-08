@@ -314,5 +314,94 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
         self.assertIn("Codex worker の完了待ち", out.getvalue())
 
 
+class IssueAwareProvenanceTest(unittest.TestCase):
+    """#26: build_report_request_source() issue-aware provenance.
+
+    Invariants:
+      - With last_issue_centric_principal_issue → report:{file}:issue:{num}
+      - Without (absent / empty / falsy) → report:{file} (unchanged)
+      - awaiting_user mode still produces handoff:... regardless of principal_issue
+      - pending_request_source idempotency guard treats extended source as stable key
+    """
+
+    def _src(self, state: dict, resume_note: str = "") -> str:
+        from request_prompt_from_report import build_report_request_source
+        return build_report_request_source(state, resume_note)
+
+    def test_with_principal_issue_returns_extended_source(self) -> None:
+        state = {"last_report_file": "codex_report_20260408_123456.md",
+                 "last_issue_centric_principal_issue": "42"}
+        self.assertEqual(self._src(state), "report:codex_report_20260408_123456.md:issue:42")
+
+    def test_without_principal_issue_returns_plain_source(self) -> None:
+        state = {"last_report_file": "codex_report_20260408_123456.md"}
+        self.assertEqual(self._src(state), "report:codex_report_20260408_123456.md")
+
+    def test_empty_principal_issue_returns_plain_source(self) -> None:
+        state = {"last_report_file": "codex_report_20260408_123456.md",
+                 "last_issue_centric_principal_issue": ""}
+        self.assertEqual(self._src(state), "report:codex_report_20260408_123456.md")
+
+    def test_whitespace_only_principal_issue_returns_plain_source(self) -> None:
+        state = {"last_report_file": "codex_report_20260408_123456.md",
+                 "last_issue_centric_principal_issue": "  "}
+        self.assertEqual(self._src(state), "report:codex_report_20260408_123456.md")
+
+    def test_awaiting_user_mode_produces_handoff_regardless_of_principal_issue(self) -> None:
+        """awaiting_user path must not be affected by principal_issue addition."""
+        from request_prompt_from_report import build_report_request_source
+        state = {
+            "last_report_file": "report.md",
+            "mode": "awaiting_user",
+            "chatgpt_decision": "resume",
+            "last_issue_centric_principal_issue": "99",
+        }
+        src = build_report_request_source(state, "some note")
+        self.assertTrue(src.startswith("handoff:"), f"Expected handoff: prefix, got {src!r}")
+        self.assertNotIn(":issue:", src)
+
+    def test_missing_report_file_uses_unknown_report_fallback(self) -> None:
+        state = {"last_issue_centric_principal_issue": "7"}
+        self.assertEqual(self._src(state), "report:unknown-report:issue:7")
+
+    def test_idempotency_guard_extended_source_prevents_duplicate_send(self) -> None:
+        """pending_request_source == extended source → duplicate send is blocked.
+
+        Simulates the guard check in request_prompt_from_report.main():
+          if mode == 'waiting_prompt_reply' and pending_request_source == request_source: skip
+        The guard must work unchanged because it is a plain string equality check.
+        """
+        from request_prompt_from_report import build_report_request_source
+        state = {
+            "last_report_file": "codex_report_20260408_123456.md",
+            "mode": "waiting_prompt_reply",
+            "last_issue_centric_principal_issue": "42",
+            "pending_request_source": "report:codex_report_20260408_123456.md:issue:42",
+        }
+        request_source = build_report_request_source(state, "")
+        # Guard condition: same report + same issue → same key → duplicate send blocked
+        self.assertEqual(
+            state["pending_request_source"],
+            request_source,
+            "Extended source must be a stable key so idempotency guard prevents duplicate send.",
+        )
+
+    def test_idempotency_guard_different_issue_does_not_block(self) -> None:
+        """A different principal_issue produces a different source key → send is NOT blocked."""
+        from request_prompt_from_report import build_report_request_source
+        state = {
+            "last_report_file": "codex_report_20260408_123456.md",
+            "mode": "waiting_prompt_reply",
+            "last_issue_centric_principal_issue": "99",
+            "pending_request_source": "report:codex_report_20260408_123456.md:issue:42",
+        }
+        request_source = build_report_request_source(state, "")
+        self.assertNotEqual(
+            state["pending_request_source"],
+            request_source,
+            "Different issue number must produce a different source key.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

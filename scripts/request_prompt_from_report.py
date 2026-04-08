@@ -108,6 +108,9 @@ def build_report_request_source(state: dict[str, object], resume_note: str) -> s
         decision = str(state.get("chatgpt_decision", "")).strip() or "resume"
         resume_hash = stable_text_hash(resume_note.strip() or "no-note")
         return f"handoff:{decision}:{last_report_file}:{resume_hash}"
+    principal_issue = str(state.get("last_issue_centric_principal_issue", "")).strip()
+    if principal_issue:
+        return f"report:{last_report_file}:issue:{principal_issue}"
     return f"report:{last_report_file}"
 
 
