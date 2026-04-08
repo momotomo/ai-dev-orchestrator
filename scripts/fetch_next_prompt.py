@@ -31,7 +31,7 @@ from _bridge_common import (
     stable_text_hash,
     should_rotate_before_next_chat_request,
     promote_pending_request,
-    wait_for_prompt_reply_text,
+    wait_for_plan_a_or_prompt_reply_text,
     write_text,
 )
 from issue_centric_codex_launch import launch_issue_centric_codex_run
@@ -109,7 +109,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         if not raw_text:
             raise ValueError(f"raw file を読めませんでした: {args.raw_file}")
     else:
-        raw_text = wait_for_prompt_reply_text(
+        def _plan_a_extractor(raw: str, after: str | None) -> None:
+            result = maybe_parse_issue_centric_reply(raw, after_text=after)
+            if result is None:
+                raise BridgeError("issue-centric contract reply が見つかりませんでした")
+
+        raw_text = wait_for_plan_a_or_prompt_reply_text(
+            plan_a_extractor=_plan_a_extractor,
             timeout_seconds=args.timeout_seconds or None,
             request_text=request_text or None,
             stage_callback=handle_wait_event,

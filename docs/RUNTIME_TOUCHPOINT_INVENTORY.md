@@ -127,11 +127,19 @@ During this inventory phase, all of the following stay unchanged:
   - `scripts/fetch_next_prompt.py`
   - `scripts/_bridge_common.py`
   - `bridge/prompt_extraction_rules.md`
-- current behavior:
-  - the runtime expects either `CHATGPT_PROMPT_REPLY` or `CHATGPT_NO_CODEX`
-  - the runtime still reads ChatGPT reply text from visible DOM text
-    (`innerText` / `textContent`), not from a markdown-lossless transport
-  - extracted prompt text is written to `bridge/inbox/codex_prompt.md`
+- current behavior (updated 2026-04-09, post #27):
+  - **Plan A BODY base64 transport is now the primary fetch path**.
+    `fetch_next_prompt.py` calls `wait_for_plan_a_or_prompt_reply_text`
+    which tries the Plan A contract extractor first; if the Plan A contract
+    markers (`===CHATGPT_DECISION_JSON===` etc.) are present, polling stops
+    and the Plan A path handles the reply.
+  - If Plan A parsing fails or the contract is absent, the visible DOM text
+    extractor (`===CHATGPT_PROMPT_REPLY===` / `===CHATGPT_NO_CODEX===`) is
+    used as a **safety fallback only**.
+  - Extracted prompt text (from either path) is written to
+    `bridge/inbox/codex_prompt.md` when the visible DOM text fallback is
+    used. Plan A replies are handled directly by the materialization /
+    execution dispatcher pipeline.
 - why this matters later:
   - issue-centric runtime migration might eventually carry issue identifiers or
     backlog-home metadata in a more explicit way
@@ -142,6 +150,9 @@ During this inventory phase, all of the following stay unchanged:
     feasibility on top of this boundary
   - the observed feasibility verdict is recorded in
     `docs/MARKDOWN_FIDELITY_FEASIBILITY.md`
+  - `#27` is the completed bounded ready child for Plan A primary fetch path
+    activation (this slice). Plan A is now the primary transport; visible DOM
+    text is the safety fallback.
   - the first Plan A front-end slice can safely stop after extracting and
     validating the new JSON envelope plus opaque BASE64 body payloads
   - the next bounded Plan A transport slice can decode allowed BASE64 payloads

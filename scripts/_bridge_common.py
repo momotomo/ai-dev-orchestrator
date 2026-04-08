@@ -3987,6 +3987,39 @@ def wait_for_prompt_reply_text(
     )
 
 
+def wait_for_plan_a_or_prompt_reply_text(
+    *,
+    plan_a_extractor: Callable[[str, str | None], Any],
+    timeout_seconds: int | None = None,
+    request_text: str | None = None,
+    stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
+    allow_project_page_wait: bool = False,
+) -> str:
+    """Wait for a ChatGPT reply that satisfies either the Plan A contract extractor
+    or the visible DOM text (prompt/no-codex) extractor.
+
+    ``plan_a_extractor`` is tried first (primary path).  If it raises
+    :class:`BridgeError` or any exception, the visible DOM text extractor is
+    tried as a safety fallback.  Polling continues until either extractor
+    succeeds or the extended timeout / late-completion deadline is reached.
+    """
+
+    def combined_extractor(raw_text: str, after_text: str | None) -> Any:
+        try:
+            return plan_a_extractor(raw_text, after_text)
+        except Exception:
+            pass
+        return extract_last_chatgpt_reply(raw_text, after_text=after_text)
+
+    return _wait_for_chatgpt_reply_text(
+        timeout_seconds=timeout_seconds,
+        request_text=request_text,
+        extractor=combined_extractor,
+        stage_callback=stage_callback,
+        allow_project_page_wait=allow_project_page_wait,
+    )
+
+
 def wait_for_handoff_reply_text(
     *,
     timeout_seconds: int | None = None,
