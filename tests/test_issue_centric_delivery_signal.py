@@ -267,5 +267,121 @@ class IcentricDeliverySuggestedNoteTests(unittest.TestCase):
         self.assertNotIn("delivery pending", note)
 
 
+class IcentricHandoffTitleEnrichmentTests(unittest.TestCase):
+    """Tests that present_bridge_handoff() enriches title with target_issue for delivery-pending states."""
+
+    def test_submitted_unconfirmed_ic_ready_enriches_handoff_title(self) -> None:
+        """submitted_unconfirmed + IC ready → handoff title includes target_issue."""
+        from _bridge_common import present_bridge_handoff
+
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_signal": "submitted_unconfirmed",
+        }
+        with patch(
+            "_bridge_common.is_issue_centric_delivery_pending_state",
+            return_value=(True, "#29"),
+        ):
+            view = present_bridge_handoff(state)
+        self.assertIn("#29", view.title)
+        self.assertIn("delivery pending", view.title)
+
+    def test_extended_wait_ic_ready_enriches_handoff_title(self) -> None:
+        """extended_wait + IC ready → handoff title includes target_issue."""
+        from _bridge_common import present_bridge_handoff
+
+        state = {"mode": "extended_wait"}
+        with patch(
+            "_bridge_common.is_issue_centric_delivery_pending_state",
+            return_value=(True, "#29"),
+        ):
+            view = present_bridge_handoff(state)
+        self.assertIn("#29", view.title)
+        self.assertIn("delivery pending", view.title)
+
+    def test_await_late_completion_ic_ready_enriches_handoff_title(self) -> None:
+        """await_late_completion + IC ready → handoff title includes target_issue."""
+        from _bridge_common import present_bridge_handoff
+
+        state = {"mode": "await_late_completion"}
+        with patch(
+            "_bridge_common.is_issue_centric_delivery_pending_state",
+            return_value=(True, "#29"),
+        ):
+            view = present_bridge_handoff(state)
+        self.assertIn("#29", view.title)
+        self.assertIn("delivery pending", view.title)
+
+    def test_submitted_unconfirmed_legacy_handoff_title_unchanged(self) -> None:
+        """submitted_unconfirmed + legacy → handoff title is conventional."""
+        from _bridge_common import present_bridge_handoff
+
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_signal": "submitted_unconfirmed",
+        }
+        with patch(
+            "_bridge_common.is_issue_centric_delivery_pending_state",
+            return_value=(False, ""),
+        ):
+            view = present_bridge_handoff(state)
+        self.assertIn("ChatGPT の返答を待っています", view.title)
+        self.assertNotIn("delivery pending", view.title)
+
+    def test_no_delivery_pending_handoff_title_conventional(self) -> None:
+        """No delivery-pending signal → conventional handoff title."""
+        from _bridge_common import present_bridge_handoff
+
+        state = {"mode": "waiting_prompt_reply"}
+        view = present_bridge_handoff(state)
+        self.assertEqual(view.title, "ChatGPT の返答を待っています。")
+
+
+class IcentricErrorPathNoteEnrichmentTests(unittest.TestCase):
+    """Tests for run_until_stop.py error-path submitted_unconfirmed note enrichment."""
+
+    def test_submitted_unconfirmed_ic_ready_error_note_includes_target_issue(self) -> None:
+        """submitted_unconfirmed + IC ready + error state → error note includes target_issue."""
+        import run_until_stop
+
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_signal": "submitted_unconfirmed",
+            "error": True,
+            "error_message": "",
+        }
+        with patch(
+            "run_until_stop.is_issue_centric_delivery_pending_state",
+            return_value=(True, "#29"),
+        ):
+            result = run_until_stop.blocked_next_guidance(state)
+        self.assertIsNotNone(result)
+        assert result is not None
+        _step, note = result
+        self.assertIn("#29", note)
+        self.assertIn("delivery pending", note)
+
+    def test_submitted_unconfirmed_legacy_error_note_unchanged(self) -> None:
+        """submitted_unconfirmed + legacy + error state → error note without delivery pending."""
+        import run_until_stop
+
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_signal": "submitted_unconfirmed",
+            "error": True,
+            "error_message": "",
+        }
+        with patch(
+            "run_until_stop.is_issue_centric_delivery_pending_state",
+            return_value=(False, ""),
+        ):
+            result = run_until_stop.blocked_next_guidance(state)
+        self.assertIsNotNone(result)
+        assert result is not None
+        _step, note = result
+        self.assertIn("reply 回収側", note)
+        self.assertNotIn("delivery pending", note)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -696,6 +696,12 @@ def present_bridge_handoff(
     if status.label == "ChatGPTへ依頼準備中":
         return BridgeHandoffView("ChatGPT への次の依頼を送る準備ができています。", detail)
     if status.label == "ChatGPT返答待ち":
+        _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
+        if _ic_pending and _ic_issue:
+            return BridgeHandoffView(
+                f"ChatGPT の返答を待っています ({_ic_issue} の delivery pending)。",
+                detail,
+            )
         return BridgeHandoffView("ChatGPT の返答を待っています。", detail)
     if status.label == "Codex実行待ち":
         return BridgeHandoffView("Codex を起動する準備ができています。", detail)
