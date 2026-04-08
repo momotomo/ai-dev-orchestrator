@@ -310,13 +310,19 @@ During this inventory phase, all of the following stay unchanged:
     completion or other exception conditions require it
   - `submitted_unconfirmed` and `pending_request_signal` represent delivery-layer
     uncertainty around project-page send confirmation
+  - **#28 (landed)**: `submitted_unconfirmed`, `extended_wait`, and
+    `await_late_completion` delivery-pending substates now surface `target_issue`
+    context in status messages and operator notes when `issue_centric_ready` is
+    active.  Signal values, retry/send/fetch behavior, and message delivery
+    semantics are unchanged — only the view layer (wording) is enriched.
+    Helper: `is_issue_centric_delivery_pending_state()` in `_bridge_common.py`.
 - why this matters later:
   - ready-issue-first migration must not casually break late-completion or
     project-page recovery semantics
 - inventory conclusion:
-  - these are not first-slice rewrite targets
-  - they should be preserved as delivery/runtime signals until a later dedicated
-    mapping phase
+  - `#28` delivered the minimal view-layer mapping for delivery-pending signals
+  - deeper behavioral mapping (retry cadence, issue-scoped send tracking) remains
+    a future planned slice
 
 ### 6. Operator-Facing CLI Guidance And Runbook Wording
 

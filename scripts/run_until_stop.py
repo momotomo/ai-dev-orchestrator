@@ -22,6 +22,7 @@ from _bridge_common import (
     is_awaiting_user_supplement,
     is_fetch_extended_wait_state,
     is_fetch_late_completion_state,
+    is_issue_centric_delivery_pending_state,
     is_normal_path_state,
     latest_codex_progress_snapshot,
     load_browser_config,
@@ -428,6 +429,13 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         if route_note and "reply 待ち" in route_note:
             return route_note.strip()
         if pending_request_signal == "submitted_unconfirmed":
+            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(final_state)
+            if _ic_pending and _ic_issue:
+                return (
+                    f"issue-centric delivery pending ({_ic_issue}): "
+                    "新しいチャットへの送信は通った可能性が高いため、"
+                    "同じ handoff は再送せず reply を待ってから再実行してください。"
+                )
             return (
                 "新しいチャットへの送信は通った可能性が高いため、"
                 "同じ handoff は再送せず reply を待ってから再実行してください。"
