@@ -1000,18 +1000,6 @@ def resolve_issue_centric_route_choice(state: Mapping[str, Any]) -> IssueCentric
     )
 
 
-def resolve_issue_centric_preferred_loop_action(state: Mapping[str, Any]) -> tuple[str, str]:
-    """Thin wrapper over resolve_issue_centric_route_choice().
-
-    DELETION CANDIDATE — prefer resolve_runtime_dispatch_plan() for all
-    normal-path routing.  This wrapper exists only for legacy call sites that
-    need (preferred_loop_action, preferred_loop_reason) directly.  It will be
-    removed together with resolve_issue_centric_route_choice() once no external
-    call sites remain.
-    """
-    route_choice = resolve_issue_centric_route_choice(state)
-    return route_choice.preferred_loop_action, route_choice.preferred_loop_reason
-
 
 def resolve_runtime_next_action(state: Mapping[str, Any]) -> tuple[str, str]:
     """Return (action_key, reason) with the issue-centric state view as primary authority.

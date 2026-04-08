@@ -1072,13 +1072,12 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
         self.assertIsInstance(sig_a, tuple)
         self.assertIsInstance(sig_b, tuple)
 
-    def test_resolve_preferred_loop_action_delegates_to_route_choice(self) -> None:
-        """resolve_issue_centric_preferred_loop_action() is a thin wrapper and
-        deletion candidate; its return must match route_choice attributes exactly."""
-        from _bridge_common import (
-            resolve_issue_centric_preferred_loop_action,
-            resolve_issue_centric_route_choice,
-        )
+    def test_resolve_route_choice_returns_preferred_loop_action_and_reason(self) -> None:
+        """resolve_issue_centric_route_choice() exposes preferred_loop_action and
+        preferred_loop_reason directly.  The thin wrapper that used to re-expose
+        those two fields (resolve_issue_centric_preferred_loop_action) has been
+        removed; callers should use resolve_issue_centric_route_choice() instead."""
+        from _bridge_common import resolve_issue_centric_route_choice
 
         state = {
             "mode": "idle",
@@ -1086,10 +1085,11 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
             "need_chatgpt_prompt": False,
             "need_chatgpt_next": False,
         }
-        action, reason = resolve_issue_centric_preferred_loop_action(state)
         route = resolve_issue_centric_route_choice(state)
-        self.assertEqual(action, route.preferred_loop_action)
-        self.assertEqual(reason, route.preferred_loop_reason)
+        self.assertIsInstance(route.preferred_loop_action, str)
+        self.assertIsInstance(route.preferred_loop_reason, str)
+        # preferred_loop_action may be empty for a fully-idle state;
+        # what matters is that the attribute exists and is accessible directly.
 
     def test_present_bridge_status_does_not_use_raw_mode_in_normal_path(self) -> None:
         """present_bridge_status() must NOT read raw mode for normal-path routing.
