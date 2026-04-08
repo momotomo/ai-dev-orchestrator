@@ -1220,7 +1220,7 @@ def format_next_action_note(
     if next_action == "fetch_next_prompt":
         if route_choice is not None and route_choice.route_selected == "fallback_legacy":
             return (
-                "issue-centric preferred route は今回使わず、legacy fallback で ChatGPT 返答を回収します。"
+                "issue-centric preferred route を今回使えないため、safety fallback (legacy) route で ChatGPT 返答を回収します。"
                 f" 理由: {route_choice.route_reason or 'legacy fallback required'}."
             )
         return "ChatGPT 返答から次の prompt または停止判断を回収します。"
@@ -1237,7 +1237,7 @@ def format_next_action_note(
             return "次の ChatGPT request を送る前に、回収済み handoff の composer 入力確認と新チャット送信確認を再試行します。"
         route_reason = route_choice.route_reason if route_choice is not None else ""
         return (
-            "issue-centric preferred route は今回使わず、legacy fallback で同じチャットへ次フェーズ要求を送ります。"
+            "issue-centric preferred route を今回使えないため、safety fallback (legacy) route で同じチャットへ次フェーズ要求を送ります。"
             f" 理由: {route_reason or 'legacy fallback required'}."
         )
     if next_action == "completed":
@@ -1322,11 +1322,11 @@ def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatch
         if is_awaiting_user_supplement(state):
             return "補足入力を受けて次の ChatGPT 依頼へ進めます。"
         if plan.is_fallback:
-            return "legacy fallback route で次の ChatGPT 依頼を送ります。"
+            return "safety fallback (legacy) route で次の ChatGPT 依頼を送ります。"
         return "issue-centric route で次の ChatGPT 依頼を送ります。"
     if plan.next_action == "fetch_next_prompt":
         if plan.is_fallback:
-            return "legacy fallback route で ChatGPT 返答を回収します。"
+            return "safety fallback (legacy) route で ChatGPT 返答を回収します。"
         return "ChatGPT 返答を回収します。"
     # For less common next_action values, delegate to the dispatch note.
     return plan.note

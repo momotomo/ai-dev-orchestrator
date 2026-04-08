@@ -508,29 +508,29 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
     freshness_reason = runtime_mode.freshness_reason or fallback_reason
     if runtime_mode.runtime_mode == "issue_centric_unavailable":
         return (
-            " issue-centric runtime は今回 unavailable のため、legacy fallback で続行します。"
+            " issue-centric runtime は今回 unavailable のため、safety fallback (legacy) route で続行します。"
             f" 理由: {fallback_reason or 'issue-centric runtime unavailable'}."
         )
     if freshness_status == "issue_centric_invalidated":
         if target_issue:
             return (
-                " issue-centric runtime は invalidated のため、legacy fallback で "
+                " issue-centric runtime は invalidated のため、safety fallback (legacy) route で "
                 f"{target_issue} を target_issue 候補として扱います。"
                 f" 理由: {freshness_reason or 'issue-centric context invalidated'}."
             )
         return (
-            " issue-centric runtime は invalidated のため、legacy fallback で続行します。"
+            " issue-centric runtime は invalidated のため、safety fallback (legacy) route で続行します。"
             f" 理由: {freshness_reason or 'issue-centric context invalidated'}."
         )
     if freshness_status == "issue_centric_stale":
         if target_issue:
             return (
-                " issue-centric runtime は stale fallback のため、legacy fallback で "
+                " issue-centric runtime は stale のため、safety fallback (legacy) route で "
                 f"{target_issue} を target_issue 候補として扱います。"
                 f" 理由: {freshness_reason or 'issue-centric context is stale'}."
             )
         return (
-            " issue-centric runtime は stale fallback のため、legacy fallback で続行します。"
+            " issue-centric runtime は stale のため、safety fallback (legacy) route で続行します。"
             f" 理由: {freshness_reason or 'issue-centric context is stale'}."
         )
     if recovery_status == "issue_centric_recovered" and route_selected == "issue_centric" and target_issue:
@@ -554,23 +554,23 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
     if runtime_mode.runtime_mode == "issue_centric_degraded_fallback":
         if target_issue:
             return (
-                " issue-centric runtime は degraded fallback のため、legacy fallback で "
+                " issue-centric runtime は degraded のため、safety fallback (legacy) route で "
                 f"{target_issue} を target_issue 候補として扱います。"
                 f" 理由: {fallback_reason or 'issue-centric degraded fallback'}."
             )
         return (
-            " issue-centric runtime は degraded fallback のため、legacy fallback で続行します。"
+            " issue-centric runtime は degraded のため、safety fallback (legacy) route で続行します。"
             f" 理由: {fallback_reason or 'issue-centric degraded fallback'}."
         )
     if recovery_status == "issue_centric_recovery_fallback":
         if target_issue:
             return (
-                " issue-centric recovery は今回使えず、legacy fallback で "
+                " issue-centric recovery は今回使えず、safety fallback (legacy) route で "
                 f"{target_issue} を target_issue 候補として扱います。"
                 f" 理由: {fallback_reason or 'issue-centric recovery fallback'}."
             )
         return (
-            " issue-centric recovery は今回使えず、legacy fallback で続行します。"
+            " issue-centric recovery は今回使えず、safety fallback (legacy) route で続行します。"
             f" 理由: {fallback_reason or 'issue-centric recovery fallback'}."
         )
     fallback_reason = (
@@ -585,12 +585,12 @@ def issue_centric_route_note(final_state: dict[str, Any]) -> str:
     if route_choice.route_selected == "fallback_legacy":
         if target_issue:
             return (
-                " issue-centric preferred route は今回 ready 条件を満たさないため、legacy fallback で "
+                " issue-centric preferred route を今回使えないため、safety fallback (legacy) route で "
                 f"{target_issue} を target_issue 候補として扱います。"
                 f" 理由: {route_choice.route_reason or fallback_reason or 'route selection fallback'}."
             )
         return (
-            " issue-centric preferred route は今回 ready 条件を満たさないため、legacy fallback で続行します。"
+            " issue-centric preferred route を今回使えないため、safety fallback (legacy) route で続行します。"
             f" 理由: {route_choice.route_reason or fallback_reason or 'route selection fallback'}."
         )
     return ""

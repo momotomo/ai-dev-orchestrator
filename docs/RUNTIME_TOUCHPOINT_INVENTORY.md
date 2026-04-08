@@ -358,6 +358,65 @@ During this inventory phase, all of the following stay unchanged:
     and fallback surfaces, not the preferred read-side source
   - this section is now a rewrite boundary, not a pre-runtime placeholder
 
+## Current Routing Classification (Full Cutover Pre-Stage)
+
+> Status as of 2026-04-08 (state machine rewrite slice 7 merged).
+> Classify each touchpoint as **primary**, **Codex lifecycle**, or **safety fallback**
+> so the next full cutover phase can track exactly what still needs to move.
+
+### Primary — Issue-Centric Spine / Dispatch Plan / Action-View
+
+These touchpoints now route through `resolve_runtime_dispatch_plan()` and
+`RuntimeDispatchPlan`.  They are the authoritative source for operator-facing
+decisions whenever the runtime is not inside the Codex lifecycle branch.
+
+| Touchpoint | Primary routing |
+|---|---|
+| Run-loop action selection | `resolve_runtime_dispatch_plan()` → `next_action` |
+| Operator stop summary `## next_step` | `RuntimeDispatchPlan` fields + `action_stop_note` |
+| Operator progress note / guidance | `format_next_action_note()` / `format_operator_stop_note()` |
+| `issue_centric_route_note()` | dispatch plan + runtime mode + route choice |
+| Fetch-substate detection | `is_fetch_extended_wait_state()` / `is_fetch_late_completion_state()` |
+| `completed` / `no_action` detection | `is_completed_state()` / action-view helpers |
+| Operator entry status label | `present_bridge_status()` |
+
+### Codex Lifecycle Compatibility Branch
+
+These touchpoints remain mode-driven until full cutover.
+They are **not** subject to dispatch-plan routing.
+`mode` ∈ `{ready_for_codex, codex_running, codex_done}` drives them directly.
+
+| Touchpoint | Mode |
+|---|---|
+| `bridge_orchestrator.py` Codex launch | `ready_for_codex + need_codex_run = true` |
+| `bridge_orchestrator.py` Codex wait | `codex_running` |
+| `bridge_orchestrator.py` Codex done → archive | `codex_done` |
+| `run_until_stop.py describe_next_action()` Codex labels | `ready_for_codex` / `codex_running` / `codex_done` |
+| `should_include_codex_progress()` | `ready_for_codex` / `codex_running` / `codex_done` |
+| `stale_codex_running_note()` | `codex_running` state recovery instructions |
+
+Full cutover target: replace these with `action=launch_codex_once` /
+`action=wait_for_codex_report` / `action=handle_codex_done` action-view equivalents.
+
+### Safety Fallback — Legacy Request-Centric Route
+
+These touchpoints activate only when the issue-centric runtime is
+`degraded_fallback`, `unavailable`, or `invalidated`.
+They are **not** the normal path.  Operator-facing wording marks them with
+`is_fallback = True` and an explicit `fallback_reason`.
+
+| Touchpoint | Fallback condition |
+|---|---|
+| `run_until_stop.py` legacy request-centric branches | `fallback_legacy` runtime action |
+| `bridge_orchestrator.py` legacy request scripts | never reached when dispatch plan routes first |
+| `format_operator_stop_note()` fallback phrases | `plan.is_fallback = True` |
+| `format_next_action_note()` fallback phrases | `fallback_legacy` runtime action |
+| `resolve_issue_centric_route_choice()` legacy path | `route_selected == "fallback_legacy"` |
+| `issue_centric_route_note()` fallback strings | unavailable / invalidated / degraded / stale |
+
+Full cutover target: remove these branches once Codex lifecycle branch is
+replaced and the issue-centric spine is stable end-to-end.
+
 ## Boundary Between Docs Work And Runtime Work
 
 The following have already moved far enough through docs and GitHub operations
@@ -378,6 +437,7 @@ ready-issue-first:
 - extending request provenance beyond `ready_issue:` / `override:` /
   `report:` / `handoff:`
 - broadening the dispatcher matrix beyond the current narrow execution paths
+
 - updating operator-facing runtime wording so it matches the new behavior
 
 The following should stay deferred until later runtime phases:

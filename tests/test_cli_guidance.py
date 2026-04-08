@@ -629,7 +629,7 @@ class SummaryTests(unittest.TestCase):
                 "last_issue_centric_route_fallback_reason": "normalized_summary_missing",
             }
         )
-        self.assertIn("legacy fallback", note)
+        self.assertIn("safety fallback (legacy) route", note)
         self.assertIn("normalized_summary_missing", note)
 
     def test_request_prompt_from_report_note_mentions_recovery_fallback(self) -> None:
@@ -675,7 +675,7 @@ class SummaryTests(unittest.TestCase):
                     "last_issue_centric_snapshot_status": "issue_centric_snapshot_fallback",
                 }
             )
-        self.assertIn("degraded fallback", note)
+        self.assertIn("degraded", note)
         self.assertIn("dispatch_result_missing_or_unreadable", note)
 
     def test_request_prompt_from_report_note_mentions_unavailable_runtime_mode(self) -> None:
@@ -736,7 +736,7 @@ class SummaryTests(unittest.TestCase):
                 }
             )
 
-        self.assertIn("stale fallback", note)
+        self.assertIn("safety fallback (legacy) route", note)
         self.assertIn("chatgpt_reply_recovered_for_generation", note)
 
     def test_request_prompt_from_report_note_mentions_invalidated_runtime_mode(self) -> None:
