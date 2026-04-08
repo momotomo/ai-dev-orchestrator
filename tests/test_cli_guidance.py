@@ -269,6 +269,28 @@ class HumanFacingStatusTests(unittest.TestCase):
         handoff = present_bridge_handoff({"mode": "codex_running", "need_codex_run": True})
         self.assertEqual(handoff.title, "Codex の完了を待っています。")
 
+    def test_status_normal_path_no_snapshot_uses_safety_fallback_wording(self) -> None:
+        # No runtime snapshot → dispatch plan returns fallback_legacy.
+        # present_bridge_status() must reflect safety fallback framing, not
+        # old "legacy fallback" peer wording.
+        view = present_bridge_status({"mode": "idle", "need_chatgpt_next": True})
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("safety fallback (legacy) route", view.detail)
+        self.assertNotIn("legacy fallback で次の依頼", view.detail)
+
+    def test_status_pending_reply_dispatch_plan_routes_to_fetch(self) -> None:
+        # mode == "await_late_completion" is a fetch substate; dispatch plan
+        # resolves fetch_next_prompt and present_bridge_status() picks it up
+        # via is_fetch_late_completion_state() without a raw mode read.
+        view = present_bridge_status({"mode": "await_late_completion"})
+        self.assertEqual(view.label, "ChatGPT返答待ち")
+        self.assertIn("書き切られるまで", view.detail)
+
+    def test_handoff_completed_state_uses_is_completed_state(self) -> None:
+        # is_completed_state() should fire: mode="idle" and no need_* flags.
+        handoff = present_bridge_handoff({"mode": "idle"})
+        self.assertEqual(handoff.title, "完了しました。")
+
 
 class StartBridgeOutputTests(unittest.TestCase):
     def test_status_output_leads_with_human_facing_guidance(self) -> None:

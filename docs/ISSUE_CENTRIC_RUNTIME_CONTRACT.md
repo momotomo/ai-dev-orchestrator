@@ -266,7 +266,7 @@ dispatch plan and with explicit fallback-reason notes in the stop summary.
 
 ### Remaining post-cutover items
 
-The following items are **not** part of this cutover and are left for a future phase:
+The following items are **not** part of the full cutover and are left for a future phase:
 
 1. **Codex lifecycle branch reshape**: replace `is_codex_lifecycle_state()` branches
    with action-view equivalents (`action=launch_codex_once`,
@@ -277,7 +277,29 @@ The following items are **not** part of this cutover and are left for a future p
 3. **`mode` demotion**: keep `mode` as a backward-compatible write field but
    remove it from all routing logic; dispatch plan becomes the only authority
 
-Until those three changes land, the current coexistence contract remains:
+**Post-cutover streamline (2026-04-09):**
+The following additional cleanup was applied in the post-cutover streamline phase:
+
+- `present_bridge_status()` — rewritten to use `resolve_runtime_dispatch_plan()`
+  for the normal path; `resolve_issue_centric_state_bridge()` removed from this
+  function; `mode` / `need_chatgpt_*` reads removed from the normal-path branch;
+  `is_codex_lifecycle_state()` guard retains Codex lifecycle as compatibility;
+  `is_awaiting_user_supplement()` replaces raw `mode == "awaiting_user"` read
+- `present_bridge_handoff()` — raw `mode`, `need_chatgpt_prompt`, `need_chatgpt_next`,
+  `need_codex_run` reads removed; `is_completed_state()` replaces the
+  `mode == "idle" and not need_*` check at the end of the guard chain
+- `resolve_next_generation_transition()` — docstring: marked as "residual
+  compatibility helper" called only from `resolve_runtime_dispatch_plan()`
+- `resolve_fallback_legacy_transition()` — docstring: marked as "safety fallback
+  (legacy) helper only"; explicit warning against direct normal-path use
+- `resolve_issue_centric_route_choice()` — docstring: marked as "internal helper"
+  used by `resolve_runtime_dispatch_plan()`; callers directed to that function
+- `resolve_runtime_next_action()` — docstring: marked as "internal dispatch step";
+  `fallback_legacy` description updated to reference `resolve_fallback_legacy_transition()`
+- `format_next_action_note()` — raw `mode == "awaiting_user"` read replaced with
+  `is_awaiting_user_supplement(state)`
+
+Until the three remaining items above land, the current coexistence contract remains:
 dispatch plan is primary, Codex lifecycle is compatibility, legacy is safety fallback.
 
 ## Rewrite Boundary Before State-Machine Work
