@@ -1170,6 +1170,24 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
     return True
 
 
+def is_blocked_codex_lifecycle_state(state: Mapping[str, Any]) -> bool:
+    """Return True when the state is in a blocked Codex lifecycle branch.
+
+    A blocked lifecycle state (currently: ready_for_codex without need_codex_run=True)
+    requires operator confirmation before any dispatch can proceed.  It is distinct from
+    normal-path states (where the dispatch plan is primary) and from actionable lifecycle
+    states (where resolve_unified_next_action() returns a concrete action key).
+
+    This helper exists so that orchestrator callers can detect blocked lifecycle without
+    importing resolve_codex_lifecycle_view() directly.  It encapsulates the full lifecycle
+    classification check (including the is_blocked flag) in a single boolean query.
+
+    Returns False for all non-lifecycle states and for non-blocked lifecycle states.
+    """
+    view = resolve_codex_lifecycle_view(state)
+    return view is not None and view.is_blocked
+
+
 def resolve_codex_lifecycle_view(state: Mapping[str, Any]) -> "CodexLifecycleView | None":
     """Return the unified CodexLifecycleView for the current state, or None.
 

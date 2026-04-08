@@ -1531,5 +1531,114 @@ class LifecycleViewScopeTest(unittest.TestCase):
                 self.assertEqual(unified, view.action)
 
 
+# ------------------------------------------------------------------
+# Orchestrator action-view reshape tests (2026-04-08 phase7 orchestrator-action-view)
+# Validates that bridge_orchestrator.run() dispatch decisions go through action-view
+# authority, not lifecycle view fields directly.
+# ------------------------------------------------------------------
+
+class OrchestratorActionViewTest(unittest.TestCase):
+    """phase7 orchestrator-action-view: orchestrator dispatch via resolve_unified_next_action().
+
+    Responsibilities:
+      - Dispatch action comes from resolve_unified_next_action() (action authority)
+      - Blocked lifecycle gate: is_blocked_codex_lifecycle_state() (encapsulates lifecycle)
+      - Operator label: present_bridge_status(state).label
+      - resolve_codex_lifecycle_view() is NOT imported by bridge_orchestrator
+    """
+
+    def test_bridge_orchestrator_does_not_import_resolve_codex_lifecycle_view(self) -> None:
+        """bridge_orchestrator should not import resolve_codex_lifecycle_view directly.
+        Lifecycle classification is now encapsulated behind is_blocked_codex_lifecycle_state()
+        and resolve_unified_next_action().
+        """
+        import bridge_orchestrator
+        self.assertFalse(
+            hasattr(bridge_orchestrator, "resolve_codex_lifecycle_view"),
+            "resolve_codex_lifecycle_view should not be in bridge_orchestrator namespace; "
+            "use is_blocked_codex_lifecycle_state() + resolve_unified_next_action() instead.",
+        )
+
+    def test_is_blocked_codex_lifecycle_state_blocked_case(self) -> None:
+        """is_blocked_codex_lifecycle_state() returns True for the blocked lifecycle case only."""
+        from _bridge_common import is_blocked_codex_lifecycle_state
+
+        # Blocked: ready_for_codex without need_codex_run
+        self.assertTrue(is_blocked_codex_lifecycle_state({"mode": "ready_for_codex", "need_codex_run": False}))
+        self.assertTrue(is_blocked_codex_lifecycle_state({"mode": "ready_for_codex"}))
+
+    def test_is_blocked_codex_lifecycle_state_non_blocked_cases(self) -> None:
+        """is_blocked_codex_lifecycle_state() returns False for actionable lifecycle and normal states."""
+        from _bridge_common import is_blocked_codex_lifecycle_state
+
+        # Actionable lifecycle states (not blocked)
+        self.assertFalse(is_blocked_codex_lifecycle_state({"mode": "ready_for_codex", "need_codex_run": True}))
+        self.assertFalse(is_blocked_codex_lifecycle_state({"mode": "codex_running"}))
+        self.assertFalse(is_blocked_codex_lifecycle_state({"mode": "codex_done"}))
+        # Normal path states
+        self.assertFalse(is_blocked_codex_lifecycle_state({"mode": "idle"}))
+        self.assertFalse(is_blocked_codex_lifecycle_state({"mode": "awaiting_user"}))
+
+    def test_unified_action_covers_all_non_blocked_lifecycle_dispatch(self) -> None:
+        """resolve_unified_next_action() returns the correct action key for all non-blocked lifecycle
+        states that the orchestrator would previously dispatch via lifecycle_view.action.
+        This validates that the orchestrator can rely on resolve_unified_next_action() for routing.
+        """
+        from _bridge_common import resolve_unified_next_action
+
+        self.assertEqual(
+            resolve_unified_next_action({"mode": "ready_for_codex", "need_codex_run": True}),
+            "launch_codex_once",
+        )
+        self.assertEqual(
+            resolve_unified_next_action({"mode": "codex_running"}),
+            "wait_for_codex_report",
+        )
+        self.assertEqual(
+            resolve_unified_next_action({"mode": "codex_done"}),
+            "archive_codex_report",
+        )
+
+    def test_blocked_lifecycle_resolves_to_dispatch_plan_not_lifecycle_action(self) -> None:
+        """Blocked lifecycle (ready_for_codex without need_codex_run) falls through to the
+        dispatch plan in resolve_unified_next_action(), NOT to check_codex_condition.
+        is_blocked_codex_lifecycle_state() must be checked before consulting action authority
+        in orchestrator dispatch logic.
+        """
+        from _bridge_common import is_blocked_codex_lifecycle_state, resolve_unified_next_action
+
+        state: dict[str, object] = {"mode": "ready_for_codex", "need_codex_run": False}
+        # is_blocked should be True — caught BEFORE action authority
+        self.assertTrue(is_blocked_codex_lifecycle_state(state))
+        # Action authority falls through to plan; must NOT be "check_codex_condition"
+        action = resolve_unified_next_action(state)
+        self.assertNotEqual(action, "check_codex_condition",
+            "Blocked lifecycle should be caught by is_blocked_codex_lifecycle_state(); "
+            "resolve_unified_next_action() falls through to dispatch plan for these states.")
+
+    def test_status_label_matches_lifecycle_view_for_orchestrator_display(self) -> None:
+        """present_bridge_status(state).label == lifecycle_view.status_label for all lifecycle
+        states.  This confirms the orchestrator can use present_bridge_status() for display
+        instead of lifecycle_view.status_label directly.
+        """
+        from _bridge_common import present_bridge_status, resolve_codex_lifecycle_view
+
+        for mode, need_codex_run in (
+            ("ready_for_codex", True),
+            ("ready_for_codex", False),   # blocked
+            ("codex_running", False),
+            ("codex_done", False),
+        ):
+            with self.subTest(mode=mode, need_codex_run=need_codex_run):
+                state: dict[str, object] = {"mode": mode, "need_codex_run": need_codex_run}
+                view = resolve_codex_lifecycle_view(state)
+                status = present_bridge_status(state)
+                self.assertIsNotNone(view)
+                assert view is not None
+                self.assertEqual(status.label, view.status_label,
+                    "present_bridge_status().label must match lifecycle_view.status_label "
+                    "so orchestrator can use present_bridge_status() for display.")
+
+
 if __name__ == "__main__":
     unittest.main()
