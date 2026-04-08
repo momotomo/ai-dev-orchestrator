@@ -988,19 +988,32 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
             frozenset({"ready_for_codex", "codex_running", "codex_done"}),
         )
 
-    def test_is_codex_lifecycle_state_true(self) -> None:
-        from _bridge_common import is_codex_lifecycle_state
+    def test_resolve_codex_lifecycle_view_recognises_lifecycle_modes(self) -> None:
+        """resolve_codex_lifecycle_view() returns a view (not None) for every CODEX_LIFECYCLE_MODES member.
 
-        for mode in ("ready_for_codex", "codex_running", "codex_done"):
+        is_codex_lifecycle_state() was removed; classification is now enclosed inside
+        resolve_codex_lifecycle_view(), so we test that function directly.
+        """
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        for mode, kwargs in (
+            ("ready_for_codex", {"need_codex_run": True}),
+            ("codex_running", {}),
+            ("codex_done", {}),
+        ):
             with self.subTest(mode=mode):
-                self.assertTrue(is_codex_lifecycle_state({"mode": mode}))
+                self.assertIsNotNone(resolve_codex_lifecycle_view({"mode": mode, **kwargs}))
 
-    def test_is_codex_lifecycle_state_false_for_non_codex_modes(self) -> None:
-        from _bridge_common import is_codex_lifecycle_state
+    def test_resolve_codex_lifecycle_view_none_for_non_lifecycle_modes(self) -> None:
+        """resolve_codex_lifecycle_view() returns None for non-Codex lifecycle modes.
+
+        Replaces the removed is_codex_lifecycle_state()==False assertion.
+        """
+        from _bridge_common import resolve_codex_lifecycle_view
 
         for mode in ("idle", "waiting_prompt_reply", "extended_wait", "await_late_completion", ""):
             with self.subTest(mode=mode):
-                self.assertFalse(is_codex_lifecycle_state({"mode": mode}))
+                self.assertIsNone(resolve_codex_lifecycle_view({"mode": mode}))
 
     def test_is_normal_path_state_true(self) -> None:
         from _bridge_common import is_normal_path_state
@@ -1216,6 +1229,24 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
                 self.assertIsNotNone(view)
                 assert view is not None
                 self.assertEqual(action, view.action)
+
+    def test_present_bridge_status_routes_lifecycle_via_view_not_raw_guard(self) -> None:
+        """present_bridge_status() uses only resolve_codex_lifecycle_view(); no is_codex_lifecycle_state()
+        call site remains.  Verify that blocked lifecycle (check_codex_condition) still yields
+        the right label — i.e. the view-based path is followed, not a raw is_blocked check."""
+        from _bridge_common import BridgeStatusView, present_bridge_status, resolve_codex_lifecycle_view
+
+        # blocked case: ready_for_codex without need_codex_run
+        state: dict[str, object] = {"mode": "ready_for_codex", "need_codex_run": False}
+        view = resolve_codex_lifecycle_view(state)
+        status = present_bridge_status(state)
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertTrue(view.is_blocked)
+        # Both must agree: status comes from lifecycle view only
+        self.assertIsInstance(status, BridgeStatusView)
+        self.assertEqual(status.label, view.status_label)
+        self.assertEqual(status.detail, view.status_detail)
 
     # ------------------------------------------------------------------
     # resolve_unified_next_action / action-bridge tests (2026-04-08)
