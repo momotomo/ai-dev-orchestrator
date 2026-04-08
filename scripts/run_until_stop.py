@@ -11,6 +11,7 @@ from typing import Any
 
 from _bridge_common import (
     BridgeStop,
+    CODEX_LIFECYCLE_MODES,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
     bridge_runtime_root,
@@ -20,8 +21,10 @@ from _bridge_common import (
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
     is_awaiting_user_supplement,
+    is_codex_lifecycle_state,
     is_fetch_extended_wait_state,
     is_fetch_late_completion_state,
+    is_normal_path_state,
     latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
@@ -282,13 +285,22 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
 def describe_next_action(state: dict[str, Any]) -> str:
     """Return the concrete action key for the next runtime step.
 
+    **Full cutover boundary:**
+    - For all states where is_normal_path_state(state) is True, the final
+      resolution is always resolve_runtime_dispatch_plan(state).next_action.
+      The dispatch plan is the sole routing authority.
+    - For Codex lifecycle states (ready_for_codex / codex_running / codex_done),
+      mode-driven compatibility guards handle routing instead of the dispatch plan.
+      These are the only remaining non-dispatch-plan branches.
+
     Early exits handle Codex lifecycle states (unarchived report, pending
     dispatch, ready_for_codex / codex_running / codex_done) as mode-driven
-    compatibility branches.  All other cases delegate to the dispatch plan —
-    making the issue-centric action-view the primary authority.
+    compatibility branches.  All other cases delegate to the dispatch plan.
 
     Callers that need richer context (note, is_fallback, route_choice) should
     call resolve_runtime_dispatch_plan() directly instead of this wrapper.
+    is_codex_lifecycle_state() / is_normal_path_state() can be used as guards
+    to check which branch owns the current state before calling this function.
     """
     if should_prioritize_unarchived_report(state):
         return "archive_codex_report"
@@ -296,17 +308,20 @@ def describe_next_action(state: dict[str, Any]) -> str:
     if has_pending_issue_centric_codex_dispatch(state):
         return "dispatch_issue_centric_codex_run"
 
-    # Codex lifecycle mode branches are preserved as compatibility guards.
-    # For all other states the dispatch plan is the primary routing authority.
-    mode = str(state.get("mode", "idle"))
-    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-        return "launch_codex_once"
-    if mode == "codex_running":
-        return "wait_for_codex_report"
-    if mode == "codex_done":
-        return "archive_codex_report"
+    # Codex lifecycle compatibility branch: mode-driven, NOT dispatch-plan-routed.
+    # These are the only remaining non-dispatch-plan branches after full cutover.
+    # Full cutover target: replace with action-view equivalents.
+    if is_codex_lifecycle_state(state):
+        mode = str(state.get("mode", "")).strip()
+        if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
+            return "launch_codex_once"
+        if mode == "codex_running":
+            return "wait_for_codex_report"
+        if mode == "codex_done":
+            return "archive_codex_report"
 
-    # Issue-centric action-view (dispatch plan) is the primary authority.
+    # Normal path: dispatch plan is the sole routing authority.
+    # is_normal_path_state(state) is True for all states reaching this point.
     plan = resolve_runtime_dispatch_plan(state)
     return plan.next_action
 
@@ -1251,7 +1266,14 @@ def run(argv: list[str] | None = None) -> int:
                     history=history,
                 )
 
-            if describe_next_action(before) == "completed":
+            # Full cutover: dispatch plan is the primary action authority for all
+            # normal-path states (is_normal_path_state(before) == True).
+            # When is_codex_lifecycle_state(before) is True, describe_next_action()
+            # routes via the Codex lifecycle compatibility branch instead.
+            # Resolve action ONCE per iteration and use it for all routing below.
+            action = describe_next_action(before)
+
+            if action == "completed":
                 reason = "completed 相当の状態に到達しました。"
                 if is_no_codex_decision_state(before):
                     reason = no_codex_decision_reason(before)
@@ -1264,8 +1286,6 @@ def run(argv: list[str] | None = None) -> int:
                     final_state=before,
                     history=history,
                 )
-
-            action = describe_next_action(before)
             if action == "no_action":
                 history.append(
                     f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"

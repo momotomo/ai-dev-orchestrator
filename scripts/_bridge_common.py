@@ -1092,6 +1092,54 @@ def is_fetch_late_completion_state(state: Mapping[str, Any]) -> bool:
     return str(state.get("mode", "")).strip() == "await_late_completion"
 
 
+# The set of mode values that identify the Codex lifecycle compatibility branch.
+# These modes are handled by mode-driven compatibility guards rather than by
+# resolve_runtime_dispatch_plan().  All other states follow the normal path where
+# the dispatch plan is the primary routing authority.
+CODEX_LIFECYCLE_MODES: frozenset[str] = frozenset(
+    {"ready_for_codex", "codex_running", "codex_done"}
+)
+
+
+def is_codex_lifecycle_state(state: Mapping[str, Any]) -> bool:
+    """Return True when the runtime is inside the Codex lifecycle compatibility branch.
+
+    These states are handled by mode-driven compatibility guards in
+    describe_next_action() and bridge_orchestrator.run().  They are NOT subject
+    to dispatch-plan routing.
+
+    Full cutover target: replace with action-view equivalents
+    (action=launch_codex_once / action=wait_for_codex_report / action=handle_codex_done).
+    """
+    return str(state.get("mode", "")).strip() in CODEX_LIFECYCLE_MODES
+
+
+def is_normal_path_state(state: Mapping[str, Any]) -> bool:
+    """Return True when the runtime is in the normal path where dispatch plan is primary.
+
+    Normal path = NOT in Codex lifecycle compatibility branch AND no pending early-exit
+    conditions (unarchived report, pending Codex dispatch) that are handled before
+    the dispatch plan is consulted.
+
+    In normal-path states, resolve_runtime_dispatch_plan(state) is the authoritative
+    routing source.  Legacy request-centric helpers activate only when the returned
+    plan has is_fallback=True (i.e., degraded / unavailable / invalidated).
+
+    This is the full cutover boundary: callers that need to know whether dispatch
+    plan or compatibility branches own the next step should call this helper.
+    """
+    mode = str(state.get("mode", "")).strip()
+    if mode in CODEX_LIFECYCLE_MODES:
+        return False
+    # Early-exit conditions that bypass the dispatch plan in describe_next_action().
+    if has_pending_issue_centric_codex_dispatch(state):
+        return False
+    # Unarchived report is handled before dispatch plan in the normal flow,
+    # but it is itself an action-view action (archive_codex_report).
+    # Return True so dispatch-plan-aware callers see this as normal path.
+    return True
+
+
 def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
     """Return action key when the runtime action is 'need_next_generation'.
 
@@ -1248,13 +1296,18 @@ def format_next_action_note(
 def resolve_runtime_dispatch_plan(state: Mapping[str, Any]) -> RuntimeDispatchPlan:
     """Return a consolidated action-view of what the runtime should do next.
 
-    This is the single entry point for runners that need to know:
+    **This is the primary routing authority for all normal-path states.**
+    Call is_normal_path_state(state) first if you need to confirm whether the
+    runtime is in a normal-path state vs a Codex lifecycle compatibility branch.
+
+    Returns a RuntimeDispatchPlan with:
       - runtime_action  (high-level state from resolve_runtime_next_action)
       - next_action     (concrete action key after transition helpers)
       - note            (human-facing wording from format_next_action_note)
       - route_choice    (routing context for further use)
       - is_terminal     (True for completed / no_action — no dispatch needed)
-      - is_fallback     (True when runtime is degraded / unavailable / invalidated)
+      - is_fallback     (True when runtime is degraded / unavailable / invalidated
+                         and safety fallback (legacy) route is active)
 
     Decision order follows ISSUE_CENTRIC_RUNTIME_CONTRACT:
         runtime snapshot → health gate → generation lifecycle → transition helpers
@@ -1262,6 +1315,11 @@ def resolve_runtime_dispatch_plan(state: Mapping[str, Any]) -> RuntimeDispatchPl
     Callers that handled early-exit branches (unarchived report, pending Codex
     dispatch, Codex lifecycle mode) before reaching this function will never see
     those action keys in next_action.
+
+    Safety fallback (legacy route) activates only when is_fallback=True in the
+    returned plan — i.e., when the issue-centric runtime is degraded, unavailable,
+    or invalidated.  In all other cases, the issue-centric preferred route owns
+    the next action.
     """
     runtime_action, runtime_action_reason = resolve_runtime_next_action(state)
     route_choice = resolve_issue_centric_route_choice(state)
