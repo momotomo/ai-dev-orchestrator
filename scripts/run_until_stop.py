@@ -43,7 +43,6 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
-    resolve_issue_centric_preferred_loop_action,
     resolve_issue_centric_route_choice,
     resolve_runtime_dispatch_plan,
     repo_relative,

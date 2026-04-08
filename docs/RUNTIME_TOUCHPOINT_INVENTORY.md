@@ -554,7 +554,7 @@ Priority: these are the **next deletion target** once action-view equivalents fo
 | Item | Classification | Why it remains | Gate to remove |
 |---|---|---|---|
 | `resolve_issue_centric_route_choice()` | **MAINTAIN** | Called internally by `resolve_runtime_dispatch_plan()` to populate `route_choice` | No standalone callers outside dispatch plan; refactor opportunity after legacy path removal |
-| `resolve_issue_centric_preferred_loop_action()` | **DEFER** | Thin wrapper over `route_choice`; no active callers outside tests | After confirming no external callers remain |
+| `resolve_issue_centric_preferred_loop_action()` | **REMOVED** (2026-04-08) | Thin wrapper; no callers outside tests; deletion completed in phase7 cleanup | — |
 | mode reads inside `resolve_issue_centric_route_choice()` (for `fresh_pending` / `fresh_prepared` loop action) | **MAINTAIN** | Compatibility guard for `preferred_loop_action` resolution; used when `route_choice.preferred_loop_action` is consulted | Same gate as above |
 
 ---
@@ -569,6 +569,7 @@ Priority: these are the **next deletion target** once action-view equivalents fo
 | `resolve_runtime_next_action()` docstring | **done** | "internal dispatch step" framing |
 | `resolve_fallback_legacy_transition()` docstring | **done** | "safety fallback only" framing |
 | `resolve_next_generation_transition()` docstring | **done** | "residual compatibility helper" framing |
+| `resolve_issue_centric_preferred_loop_action()` | **done** | Removed 2026-04-08; callers updated to `resolve_issue_centric_route_choice()` directly |
 
 ---
 
@@ -587,9 +588,6 @@ The following ordering minimises risk:
 3. **`is_codex_lifecycle_state()` guards removed with Codex lifecycle reshape**:
    - All three guard blocks go away simultaneously when action-view replaces mode-driven Codex routing
 
-4. **`resolve_issue_centric_preferred_loop_action()` removed** (after confirming no callers):
-   - Low-risk thin wrapper; remove once tests no longer reference it directly
-
-5. **`mode` / `need_*` field demotion** (last; requires dedicated phase):
+4. **`mode` / `need_*` field demotion** (last; requires dedicated phase):
    - Do not remove until all runtime writers are confirmed to not depend on read-side mode
    - `state_signature()` must be updated at the same time
