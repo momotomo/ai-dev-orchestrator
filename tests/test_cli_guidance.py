@@ -957,6 +957,57 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertFalse(is_fetch_late_completion_state({"mode": mode}))
 
+    def test_codex_lifecycle_modes_constant(self) -> None:
+        from _bridge_common import CODEX_LIFECYCLE_MODES
+
+        self.assertIsInstance(CODEX_LIFECYCLE_MODES, frozenset)
+        self.assertEqual(
+            CODEX_LIFECYCLE_MODES,
+            frozenset({"ready_for_codex", "codex_running", "codex_done"}),
+        )
+
+    def test_is_codex_lifecycle_state_true(self) -> None:
+        from _bridge_common import is_codex_lifecycle_state
+
+        for mode in ("ready_for_codex", "codex_running", "codex_done"):
+            with self.subTest(mode=mode):
+                self.assertTrue(is_codex_lifecycle_state({"mode": mode}))
+
+    def test_is_codex_lifecycle_state_false_for_non_codex_modes(self) -> None:
+        from _bridge_common import is_codex_lifecycle_state
+
+        for mode in ("idle", "waiting_prompt_reply", "extended_wait", "await_late_completion", ""):
+            with self.subTest(mode=mode):
+                self.assertFalse(is_codex_lifecycle_state({"mode": mode}))
+
+    def test_is_normal_path_state_true(self) -> None:
+        from _bridge_common import is_normal_path_state
+
+        for mode in ("idle", "waiting_prompt_reply", "extended_wait", "await_late_completion", ""):
+            with self.subTest(mode=mode):
+                self.assertTrue(is_normal_path_state({"mode": mode}))
+
+    def test_is_normal_path_state_false_for_codex_lifecycle_modes(self) -> None:
+        from _bridge_common import is_normal_path_state
+
+        for mode in ("ready_for_codex", "codex_running", "codex_done"):
+            with self.subTest(mode=mode):
+                self.assertFalse(is_normal_path_state({"mode": mode}))
+
+    def test_is_normal_path_state_false_when_pending_dispatch(self) -> None:
+        from _bridge_common import is_normal_path_state
+
+        # State that satisfies has_pending_issue_centric_codex_dispatch()
+        state = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:codex_run",
+            "last_issue_centric_artifact_kind": "codex_body",
+            "last_issue_centric_metadata_log": "some_log.json",
+            "need_codex_run": False,
+            "last_issue_centric_execution_status": "",
+        }
+        self.assertFalse(is_normal_path_state(state))
+
     def test_summarize_run_includes_action_stop_note(self) -> None:
         args = run_until_stop.parse_args(
             ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],

@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_runtime_dispatch_plan, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, is_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_runtime_dispatch_plan, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -226,7 +226,6 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     project_config = load_project_config()
     args = parse_args(argv, project_config)
     print_project_config_warnings(project_config)
-    mode = str(state.get("mode", "idle"))
     if should_prioritize_unarchived_report(state):
         status = present_bridge_status(state)
         print(f"{status.label}です。未退避 report を先に archive します。")
@@ -237,35 +236,37 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。prepared Codex body を issue-centric codex_run dispatch へ進めます。")
         return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config)
 
-    # Preserve the existing Codex lifecycle steps as mode-driven compatibility branches.
-    # These branches are NOT subject to dispatch-plan routing until full cutover.
+    # Codex lifecycle compatibility branches: mode-driven, NOT dispatch-plan-routed.
+    # These are the only remaining non-dispatch-plan branches after full cutover.
     # Full cutover target: replace with action=launch_codex_once / action=wait_for_codex_report /
     # action=handle_codex_done action-view equivalents.
-    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-        status = present_bridge_status(state)
-        print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
-        return launch_codex_once.run(dict(state), build_codex_launch_argv(args))
+    if is_codex_lifecycle_state(state):
+        mode = str(state.get("mode", "")).strip()
+        if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
+            status = present_bridge_status(state)
+            print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
+            return launch_codex_once.run(dict(state), build_codex_launch_argv(args))
 
-    if mode == "ready_for_codex":
-        status = present_bridge_status(state, blocked=True)
-        print(f"{status.label}です。Codex 用 prompt はありますが、起動条件を確認してください。")
-        return 0
-
-    if mode == "codex_running":
-        if maybe_promote_codex_done(state):
+        if mode == "ready_for_codex":
+            status = present_bridge_status(state, blocked=True)
+            print(f"{status.label}です。Codex 用 prompt はありますが、起動条件を確認してください。")
             return 0
-        status = present_bridge_status(state)
-        print(
-            f"{status.label}です。Codex worker の完了待ちです。"
-            " live 再開前に長く残った state なら、report / error / pause / bridge/STOP を確認して"
-            " stale runtime でないか先に見てください。"
-        )
-        return 0
 
-    if mode == "codex_done":
-        status = present_bridge_status(state)
-        print(f"{status.label}です。完了報告を履歴へ退避します。")
-        return archive_codex_report.run(dict(state))
+        if mode == "codex_running":
+            if maybe_promote_codex_done(state):
+                return 0
+            status = present_bridge_status(state)
+            print(
+                f"{status.label}です。Codex worker の完了待ちです。"
+                " live 再開前に長く残った state なら、report / error / pause / bridge/STOP を確認して"
+                " stale runtime でないか先に見てください。"
+            )
+            return 0
+
+        if mode == "codex_done":
+            status = present_bridge_status(state)
+            print(f"{status.label}です。完了報告を履歴へ退避します。")
+            return archive_codex_report.run(dict(state))
 
     # Issue-centric action-view is the primary routing authority for all normal-path states.
     # mode is preserved for Codex lifecycle compatibility branches and display only.

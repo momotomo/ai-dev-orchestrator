@@ -178,9 +178,10 @@ The current read-side bridge is intentionally layered like this:
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
-## Full Cutover Pre-Stage: Normal Runtime Is Now Issue-Centric Spine
+## Full Cutover (Normal Path): Dispatch Plan Is Primary Subject
 
-> Status as of 2026-04-08 (state machine rewrite slice 7 merged)
+> Status as of 2026-04-09 (phase 7 full cutover merged)
+> Previously: "Full Cutover Pre-Stage" (slice 7 merged 2026-04-08)
 
 The dispatch plan / action-view layer is now the **primary** source of truth
 for all operator-facing routing decisions **except** the Codex lifecycle branch.
@@ -247,11 +248,27 @@ dispatch plan and with explicit fallback-reason notes in the stop summary.
 - `mode` field — written for compatibility display and downstream callers
 - `state_signature()` change-detection utility — includes `mode` by design
 
-### Full cutover boundary: what the next phase touches
+### What changed in this full cutover phase
 
-The next full cutover phase should target:
+**New explicit boundaries added (phase 7 full cutover):**
 
-1. **State machine reshape**: replace or wrap Codex lifecycle mode branches
+- `CODEX_LIFECYCLE_MODES` — frozenset constant naming all Codex lifecycle modes
+- `is_codex_lifecycle_state(state)` — returns `True` when the runtime is inside
+  the Codex lifecycle compatibility branch (mode-driven, not dispatch-plan-routed)
+- `is_normal_path_state(state)` — returns `True` when dispatch plan is the sole
+  routing authority (not Codex lifecycle, not pending dispatch)
+- `describe_next_action()` — `is_codex_lifecycle_state()` guard replaces raw
+  mode comparisons; normal-path fallthrough uses `resolve_runtime_dispatch_plan()`
+- `run()` main loop — `describe_next_action(before)` called **once** per iteration
+  (double-call eliminated); result drives all routing in that iteration
+- `bridge_orchestrator.py run()` — `is_codex_lifecycle_state()` guard replaces
+  raw `mode = str(state.get(...))` reads for Codex lifecycle branches
+
+### Remaining post-cutover items
+
+The following items are **not** part of this cutover and are left for a future phase:
+
+1. **Codex lifecycle branch reshape**: replace `is_codex_lifecycle_state()` branches
    with action-view equivalents (`action=launch_codex_once`,
    `action=wait_for_codex_report`, `action=handle_codex_done`)
 2. **Legacy request-centric path removal**: once the reshape above is stable,
