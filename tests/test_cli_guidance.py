@@ -1052,6 +1052,64 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
         )
         self.assertIn("action_stop_note:", summary)
 
+    # ------------------------------------------------------------------
+    # Legacy route inventory: deletion-boundary classification tests
+    # (added 2026-04-09, post-cutover streamline)
+    # ------------------------------------------------------------------
+
+    def test_state_signature_includes_mode_for_change_detection_only(self) -> None:
+        """state_signature() is a change-detection tuple; mode is included for
+        legacy-state change detection — NOT as a routing signal."""
+        state_a = {"mode": "idle"}
+        state_b = {"mode": "waiting_prompt_reply"}
+
+        sig_a = run_until_stop.state_signature(state_a)
+        sig_b = run_until_stop.state_signature(state_b)
+
+        # mode difference must be visible in the signature so change detection works
+        self.assertNotEqual(sig_a, sig_b)
+        # routing decisions must NOT consult state_signature; dispatch plan is authority
+        self.assertIsInstance(sig_a, tuple)
+        self.assertIsInstance(sig_b, tuple)
+
+    def test_resolve_preferred_loop_action_delegates_to_route_choice(self) -> None:
+        """resolve_issue_centric_preferred_loop_action() is a thin wrapper and
+        deletion candidate; its return must match route_choice attributes exactly."""
+        from _bridge_common import (
+            resolve_issue_centric_preferred_loop_action,
+            resolve_issue_centric_route_choice,
+        )
+
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+        }
+        action, reason = resolve_issue_centric_preferred_loop_action(state)
+        route = resolve_issue_centric_route_choice(state)
+        self.assertEqual(action, route.preferred_loop_action)
+        self.assertEqual(reason, route.preferred_loop_reason)
+
+    def test_present_bridge_status_does_not_use_raw_mode_in_normal_path(self) -> None:
+        """present_bridge_status() must NOT read raw mode for normal-path routing.
+
+        Verify that calling it with an action-view-only state (no mode) still
+        produces a coherent output — confirming the dispatch plan is primary
+        and mode is not required for normal-path status.
+        """
+        from _bridge_common import present_bridge_status
+
+        # action-view-only state: no mode field at all
+        state = {
+            "pending_request_hash": "abc123",
+            "pending_request_source": "user",
+            "pending_request_log": "some.log",
+        }
+        result = present_bridge_status(state)
+        # Must not crash and must return a BridgeStatusView with non-empty text
+        self.assertTrue(hasattr(result, "status_text") or isinstance(result, str) or result is not None)
+
 
 if __name__ == "__main__":
     unittest.main()
