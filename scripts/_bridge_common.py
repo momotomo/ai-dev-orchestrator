@@ -334,6 +334,37 @@ class BridgeStatusView:
 
 
 @dataclass(frozen=True)
+class CodexLifecycleView:
+    """Unified view of the Codex lifecycle compatibility state.
+
+    This is the single place for ready_for_codex / codex_running / codex_done
+    classification logic.  It centralises the action key, display wording, and
+    blocked flag that were previously scattered across describe_next_action(),
+    present_bridge_status(), and bridge_orchestrator.run().
+
+    Fields:
+        action      -- canonical action key used by describe_next_action() and
+                       bridge_orchestrator dispatch ("launch_codex_once" /
+                       "wait_for_codex_report" / "archive_codex_report" /
+                       "check_codex_condition" when blocked).
+        status_label -- human-facing label for BridgeStatusView.
+        status_detail -- human-facing detail for BridgeStatusView.
+        is_blocked   -- True when operator confirmation is needed before the
+                        Codex step can proceed (ready_for_codex without
+                        need_codex_run); callers should not dispatch in this case.
+    """
+
+    action: str
+    status_label: str
+    status_detail: str
+    is_blocked: bool
+
+    def to_status_view(self) -> "BridgeStatusView":
+        """Return a BridgeStatusView built from this lifecycle view."""
+        return BridgeStatusView(self.status_label, self.status_detail)
+
+
+@dataclass(frozen=True)
 class IssueCentricRouteChoice:
     route_selected: str
     route_reason: str
@@ -473,19 +504,11 @@ def present_bridge_status(
         )
 
     # --- Codex lifecycle compatibility branch (mode-driven, not dispatch-plan-routed) ---
-    # ready_for_codex / codex_running / codex_done are handled here as mode compatibility guards.
-    # Full cutover target: reshape into action-view equivalents (launch_codex_once etc.).
-    if is_codex_lifecycle_state(state):
-        codex_mode = str(state.get("mode", "")).strip()
-        need_codex_run = bool(state.get("need_codex_run"))
-        if codex_mode == "ready_for_codex" and need_codex_run:
-            return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
-        if codex_mode == "ready_for_codex":
-            return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
-        if codex_mode == "codex_running":
-            return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
-        if codex_mode == "codex_done":
-            return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
+    # ready_for_codex / codex_running / codex_done are handled via the single
+    # lifecycle view helper.  Full cutover target: reshape into action-view equivalents.
+    lifecycle_view = resolve_codex_lifecycle_view(state)
+    if lifecycle_view is not None:
+        return lifecycle_view.to_status_view()
 
     # --- Awaiting user supplement sub-case ---
     # next_action for these states is "request_prompt_from_report", but status is "人確認待ち"
@@ -1160,6 +1183,56 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
     # but it is itself an action-view action (archive_codex_report).
     # Return True so dispatch-plan-aware callers see this as normal path.
     return True
+
+
+def resolve_codex_lifecycle_view(state: Mapping[str, Any]) -> "CodexLifecycleView | None":
+    """Return the unified CodexLifecycleView for the current state, or None.
+
+    This is the single authoritative place for Codex lifecycle compatibility
+    classification.  Callers (describe_next_action, present_bridge_status,
+    bridge_orchestrator.run) should consult this instead of their own
+    is_codex_lifecycle_state() guard + per-mode branches.
+
+    Returns None when the state is not in the Codex lifecycle compatibility branch
+    (i.e., when is_codex_lifecycle_state() would return False).
+
+    Full cutover target: once action-view equivalents for the three Codex lifecycle
+    states are wired, this helper and CODEX_LIFECYCLE_MODES / is_codex_lifecycle_state
+    can be removed together with the caller call-sites.
+    """
+    if not is_codex_lifecycle_state(state):
+        return None
+    mode = str(state.get("mode", "")).strip()
+    need_codex_run = bool(state.get("need_codex_run"))
+    if mode == "ready_for_codex" and need_codex_run:
+        return CodexLifecycleView(
+            action="launch_codex_once",
+            status_label="Codex実行待ち",
+            status_detail="次の prompt はそろっています。bridge が Codex worker を 1 回起動します。",
+            is_blocked=False,
+        )
+    if mode == "ready_for_codex":
+        return CodexLifecycleView(
+            action="check_codex_condition",
+            status_label="人確認待ち",
+            status_detail="Codex 実行条件を確認してください。",
+            is_blocked=True,
+        )
+    if mode == "codex_running":
+        return CodexLifecycleView(
+            action="wait_for_codex_report",
+            status_label="Codex実行中",
+            status_detail="Codex worker の完了報告を待っています。",
+            is_blocked=False,
+        )
+    if mode == "codex_done":
+        return CodexLifecycleView(
+            action="archive_codex_report",
+            status_label="完了報告整理中",
+            status_detail="完了報告を整理して、次の ChatGPT 依頼へつなぎます。",
+            is_blocked=False,
+        )
+    return None  # unreachable: CODEX_LIFECYCLE_MODES exhausted
 
 
 def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
