@@ -529,11 +529,17 @@ for runtime-adjacent work.
 > lifecycle outer guard (previously `is_codex_lifecycle_state()`) is now fully enclosed
 > inside `resolve_codex_lifecycle_view()` — the call site only sees the view.  Status/view
 > callers no longer hold any raw lifecycle classification dependency.
+>
+> **2026-04-08 (phase7 lifecycle-modes-inline)**: `CODEX_LIFECYCLE_MODES` constant deleted.
+> `resolve_codex_lifecycle_view()` now uses a local inline set literal `{"ready_for_codex",
+> "codex_running", "codex_done"}` for the guard check.  The three lifecycle mode strings are
+> no longer exported from the module; all lifecycle classification knowledge is contained
+> inside `resolve_codex_lifecycle_view()` itself.
 
 | Item | File | Classification | Status (2026-04-08) | Gate to remove |
 |---|---|---|---|---|
 | `resolve_unified_next_action()` | `_bridge_common.py` | **MAINTAIN** | Canonical "next action?" for all states; covers lifecycle + normal path | Remove together with lifecycle guards after action-view reshape |
-| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | Single classification authority; CODEX_LIFECYCLE_MODES check now inlined here | Same gate |
+| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | **Sole** classification authority; lifecycle mode strings are internal to this helper only | After action-view reshape |
 | `CodexLifecycleView` dataclass | `_bridge_common.py` | **MAINTAIN** | Carries action, status wording, is_blocked; used by display and dispatch layers | Same gate |
 | `describe_next_action()` | `run_until_stop.py` | **MAINTAIN** | 1-line wrapper over `resolve_unified_next_action()`; exists for local call site convenience | Can be inlined independently |
 | `is_codex_lifecycle_state()` outer guard in `describe_next_action()` | `run_until_stop.py` | **REMOVED** ✅ | (action-bridge) import removed | ✅ done |
@@ -544,16 +550,14 @@ for runtime-adjacent work.
 | `mode` reads inside Codex lifecycle blocks | various | **REMOVED** ✅ | Centralised into `resolve_codex_lifecycle_view()` | ✅ done |
 | `should_include_codex_progress()` mode reads | `run_until_stop.py` | **MAINTAIN** | Codex lifecycle progress snapshot for operator wording; not yet centralised | After Codex lifecycle reshape |
 | `stale_codex_running_note()` and stale guard reads | `run_until_stop.py` | **MAINTAIN** | Stale runtime detection for codex_running must survive until action-view | After Codex lifecycle reshape |
-| `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **MAINTAIN** | Only remaining consumer is `resolve_codex_lifecycle_view()` inline check; remove together | After action-view reshape |
+| `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **REMOVED** ✅ | (lifecycle-modes-inline) Deleted; mode strings inlined into `resolve_codex_lifecycle_view()` | ✅ done |
 
 **Next deletion priority (minimum safe unit when action-view reshape is ready):**
-1. `CODEX_LIFECYCLE_MODES` + inline the set literal into `resolve_codex_lifecycle_view()`
-   Gate: no external callers remain (previously `is_codex_lifecycle_state()`, now deleted).
-2. `resolve_codex_lifecycle_view()` outer call in `bridge_orchestrator.run()` and `present_bridge_status()`
-   Gate: action-view equivalents wired in state machine.
-3. `describe_next_action()` in `run_until_stop.py` — inline the single `resolve_unified_next_action()` call
+1. `resolve_codex_lifecycle_view()` outer call in `bridge_orchestrator.run()` and `present_bridge_status()`
+   Gate: action-view equivalents wired in state machine (lifecycle states reshaped into normal-path actions).
+2. `describe_next_action()` in `run_until_stop.py` — inline the single `resolve_unified_next_action()` call
    Can happen independently of lifecycle reshape.
-4. `resolve_fallback_legacy_transition()` itself — remaining arms cover only legacy request-centric modes;
+3. `resolve_fallback_legacy_transition()` itself — remaining arms cover only legacy request-centric modes;
    gate: legacy request-centric path (idle/awaiting_user/waiting_prompt_reply) fully replaced by dispatch plan.
 
 > **2026-04-08 (phase7 fallback-arms-cleanup)**: `resolve_fallback_legacy_transition()` Codex

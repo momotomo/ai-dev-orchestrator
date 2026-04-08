@@ -1137,17 +1137,6 @@ def is_fetch_late_completion_state(state: Mapping[str, Any]) -> bool:
     return str(state.get("mode", "")).strip() == "await_late_completion"
 
 
-# The set of mode values that identify the Codex lifecycle compatibility branch.
-# These modes are handled by mode-driven compatibility guards rather than by
-# resolve_runtime_dispatch_plan().  All other states follow the normal path where
-# the dispatch plan is the primary routing authority.
-# Consumed only by resolve_codex_lifecycle_view(); no external callers should
-# read this directly.
-CODEX_LIFECYCLE_MODES: frozenset[str] = frozenset(
-    {"ready_for_codex", "codex_running", "codex_done"}
-)
-
-
 def is_normal_path_state(state: Mapping[str, Any]) -> bool:
     """Return True when the runtime is in the normal path where dispatch plan is primary.
 
@@ -1164,8 +1153,8 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
     Uses resolve_codex_lifecycle_view() internally so it stays in sync with the
     single Codex lifecycle classification authority.
     """
-    # Delegate to the single Codex lifecycle authority (CODEX_LIFECYCLE_MODES
-    # membership check is enclosed inside resolve_codex_lifecycle_view()).
+    # Delegate to the single Codex lifecycle authority (mode classification
+    # is enclosed inside resolve_codex_lifecycle_view()).
     if resolve_codex_lifecycle_view(state) is not None:
         return False
     # Early-exit conditions that bypass the dispatch plan in describe_next_action().
@@ -1180,21 +1169,18 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
 def resolve_codex_lifecycle_view(state: Mapping[str, Any]) -> "CodexLifecycleView | None":
     """Return the unified CodexLifecycleView for the current state, or None.
 
-    This is the single authoritative place for Codex lifecycle compatibility
-    classification.  Callers (describe_next_action, present_bridge_status,
-    bridge_orchestrator.run) should consult this instead of raw mode reads.
-    The CODEX_LIFECYCLE_MODES membership check is enclosed here; no caller
-    needs to call is_codex_lifecycle_state() or read CODEX_LIFECYCLE_MODES
-    directly.
+    This is the sole authority for Codex lifecycle compatibility classification.
+    The three lifecycle modes (ready_for_codex, codex_running, codex_done) are
+    named only here; no external constant or helper exposes them.  Callers
+    receive a view object and never need to inspect raw mode values directly.
 
     Returns None when the state is not in the Codex lifecycle compatibility branch.
 
     Full cutover target: once action-view equivalents for the three Codex lifecycle
-    states are wired, this helper and CODEX_LIFECYCLE_MODES can be removed together
-    with the caller call-sites.
+    states are wired, this helper can be removed together with its call-sites.
     """
     mode = str(state.get("mode", "")).strip()
-    if mode not in CODEX_LIFECYCLE_MODES:
+    if mode not in {"ready_for_codex", "codex_running", "codex_done"}:
         return None
     need_codex_run = bool(state.get("need_codex_run"))
     if mode == "ready_for_codex" and need_codex_run:
@@ -1225,7 +1211,7 @@ def resolve_codex_lifecycle_view(state: Mapping[str, Any]) -> "CodexLifecycleVie
             status_detail="完了報告を整理して、次の ChatGPT 依頼へつなぎます。",
             is_blocked=False,
         )
-    return None  # unreachable: CODEX_LIFECYCLE_MODES exhausted
+    return None  # unreachable: lifecycle modes exhausted
 
 
 def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:

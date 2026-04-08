@@ -979,20 +979,31 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertFalse(is_fetch_late_completion_state({"mode": mode}))
 
-    def test_codex_lifecycle_modes_constant(self) -> None:
-        from _bridge_common import CODEX_LIFECYCLE_MODES
+    def test_codex_lifecycle_view_covers_all_three_modes(self) -> None:
+        """resolve_codex_lifecycle_view() returns a non-None view for each of the three lifecycle
+        modes; CODEX_LIFECYCLE_MODES constant was removed — classification is now internal to
+        resolve_codex_lifecycle_view()."""
+        from _bridge_common import resolve_codex_lifecycle_view
 
-        self.assertIsInstance(CODEX_LIFECYCLE_MODES, frozenset)
-        self.assertEqual(
-            CODEX_LIFECYCLE_MODES,
-            frozenset({"ready_for_codex", "codex_running", "codex_done"}),
-        )
+        # Verify the three modes are still recognised after CODEX_LIFECYCLE_MODES removal.
+        for mode, kwargs in (
+            ("ready_for_codex", {"need_codex_run": True}),
+            ("codex_running", {}),
+            ("codex_done", {}),
+        ):
+            with self.subTest(mode=mode):
+                self.assertIsNotNone(resolve_codex_lifecycle_view({"mode": mode, **kwargs}))
+
+        # The constant must no longer be importable.
+        import _bridge_common
+        self.assertFalse(hasattr(_bridge_common, "CODEX_LIFECYCLE_MODES"),
+                         "CODEX_LIFECYCLE_MODES should have been deleted")
 
     def test_resolve_codex_lifecycle_view_recognises_lifecycle_modes(self) -> None:
-        """resolve_codex_lifecycle_view() returns a view (not None) for every CODEX_LIFECYCLE_MODES member.
+        """resolve_codex_lifecycle_view() returns a view (not None) for each lifecycle mode.
 
-        is_codex_lifecycle_state() was removed; classification is now enclosed inside
-        resolve_codex_lifecycle_view(), so we test that function directly.
+        CODEX_LIFECYCLE_MODES constant was deleted; classification is now internal to
+        resolve_codex_lifecycle_view().
         """
         from _bridge_common import resolve_codex_lifecycle_view
 
@@ -1316,7 +1327,7 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
 
     def test_is_normal_path_state_uses_lifecycle_view(self) -> None:
         """is_normal_path_state() returns False for all Codex lifecycle modes
-        (delegates to resolve_codex_lifecycle_view() not CODEX_LIFECYCLE_MODES directly)."""
+        (delegates to resolve_codex_lifecycle_view(); CODEX_LIFECYCLE_MODES removed)."""
         from _bridge_common import is_normal_path_state
 
         for mode in ("ready_for_codex", "codex_running", "codex_done"):
