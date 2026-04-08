@@ -554,13 +554,31 @@ def present_bridge_status(
             )
         pending_request_signal = str(state.get("pending_request_signal", "")).strip()
         if pending_request_signal == "submitted_unconfirmed":
+            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
+            if _ic_pending and _ic_issue:
+                return BridgeStatusView(
+                    "ChatGPT返答待ち",
+                    f"issue-centric delivery pending ({_ic_issue}): handoff 送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+                )
             return BridgeStatusView(
                 "ChatGPT返答待ち",
                 "新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
             )
         if is_fetch_extended_wait_state(state):
+            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
+            if _ic_pending and _ic_issue:
+                return BridgeStatusView(
+                    "ChatGPT返答待ち",
+                    f"issue-centric delivery pending ({_ic_issue}): 返答が重いため、追加待機しながら回収を続けています。",
+                )
             return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
         if is_fetch_late_completion_state(state):
+            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
+            if _ic_pending and _ic_issue:
+                return BridgeStatusView(
+                    "ChatGPT返答待ち",
+                    f"issue-centric delivery pending ({_ic_issue}): 返答が書き切られるまで監視し、その後で回収します。",
+                )
             return BridgeStatusView("ChatGPT返答待ち", "返答が書き切られるまで監視し、その後で回収します。")
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
 
@@ -1148,6 +1166,49 @@ def is_fetch_late_completion_state(state: Mapping[str, Any]) -> bool:
     the dispatch plan next_action remains "fetch_next_prompt" throughout.
     """
     return str(state.get("mode", "")).strip() == "await_late_completion"
+
+
+def is_issue_centric_delivery_pending_state(
+    state: Mapping[str, Any],
+) -> tuple[bool, str]:
+    """Return (True, target_issue) when issued-centric runtime has a delivery-pending substate.
+
+    A delivery-pending substate is any of the three late-completion / handoff substates
+    of fetch_next_prompt that indicate the reply has not yet been collected:
+    - ``pending_request_signal == "submitted_unconfirmed"``
+    - ``mode == "extended_wait"`` (is_fetch_extended_wait_state)
+    - ``mode == "await_late_completion"`` (is_fetch_late_completion_state)
+
+    Additionally the issue-centric runtime must be healthy (runtime_mode ==
+    ``"issue_centric_ready"``) with a known target_issue.  Legacy / fallback paths
+    always receive ``(False, "")``.
+
+    The cheap signal/mode check runs first; the more expensive
+    resolve_issue_centric_runtime_mode() call is only made when we already know
+    a delivery-pending substate is active, so the hot path (no pending state) is
+    inexpensive.
+
+    Returns:
+        ``(True, target_issue)``  when delivery-pending AND issue-centric healthy
+        ``(False, "")``           otherwise (legacy fallback path or no delivery pending)
+    """
+    signal = str(state.get("pending_request_signal", "")).strip()
+    is_delivery_pending = (
+        signal == "submitted_unconfirmed"
+        or is_fetch_extended_wait_state(state)
+        or is_fetch_late_completion_state(state)
+    )
+    if not is_delivery_pending:
+        return False, ""
+
+    runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
+    if runtime_mode is None:
+        return False, ""
+    if runtime_mode.runtime_mode != "issue_centric_ready":
+        return False, ""
+
+    target_issue = str(runtime_mode.target_issue or "").strip()
+    return True, target_issue
 
 
 def is_normal_path_state(state: Mapping[str, Any]) -> bool:
