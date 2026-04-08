@@ -358,11 +358,12 @@ During this inventory phase, all of the following stay unchanged:
     and fallback surfaces, not the preferred read-side source
   - this section is now a rewrite boundary, not a pre-runtime placeholder
 
-## Current Routing Classification (Full Cutover Pre-Stage)
+## Current Routing Classification (Post Full-Cutover Streamline)
 
-> Status as of 2026-04-08 (state machine rewrite slice 7 merged).
+> Status as of 2026-04-09 (post-cutover streamline merged; normal path dispatch-plan primary).
+> Previously "Full Cutover Pre-Stage" (slice 7 merged 2026-04-08).
 > Classify each touchpoint as **primary**, **Codex lifecycle**, or **safety fallback**
-> so the next full cutover phase can track exactly what still needs to move.
+> so the next Codex lifecycle reshape phase can track exactly what still needs to move.
 
 ### Primary — Issue-Centric Spine / Dispatch Plan / Action-View
 
@@ -491,3 +492,104 @@ Likely next candidates:
 
 Until those slices are promoted, this document is the current boundary record
 for runtime-adjacent work.
+
+## Legacy Route Inventory (Post-Cutover, 2026-04-09)
+
+> Status: full cutover (normal path) and post-cutover streamline are both merged.
+> Normal path is now dispatch-plan primary.  This section classifies remaining
+> legacy / compatibility surfaces as of the post-cutover streamline.
+
+### Classification Key
+
+- **DELETE**: can be removed once the Codex lifecycle branch is reshaped into action-view
+- **MAINTAIN**: required for safety fallback / recovery; do not remove yet
+- **NAME-ONLY**: behavior stays; rename / docstring / comment cleanup only
+- **DEFER**: do not touch until a later dedicated phase
+
+---
+
+### A. Codex Lifecycle Compatibility Branch (mode-driven routing)
+
+| Item | File | Classification | Why it remains | Gate to remove |
+|---|---|---|---|---|
+| `is_codex_lifecycle_state()` guard in `describe_next_action()` | `run_until_stop.py` | **DELETE** (future) | Codex lifecycle modes not yet in action-view | Codex lifecycle branch reshaped to action-view |
+| `is_codex_lifecycle_state()` guard in `present_bridge_status()` | `_bridge_common.py` | **DELETE** (future) | Same as above | Same gate |
+| `is_codex_lifecycle_state()` guard in `bridge_orchestrator.py run()` | `bridge_orchestrator.py` | **DELETE** (future) | Same as above | Same gate |
+| `mode` reads inside the Codex lifecycle guard blocks | various | **DELETE** (future) | `mode` still drives ready_for_codex / codex_running / codex_done | Same gate |
+| `should_include_codex_progress()` mode reads | `run_until_stop.py` | **MAINTAIN** | Codex lifecycle progress snapshot still needed for operator wording | After Codex lifecycle reshape |
+| `stale_codex_running_note()` and stale guard reads | `run_until_stop.py` | **MAINTAIN** | Stale runtime detection for codex_running must survive until action-view | After Codex lifecycle reshape |
+| `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **MAINTAIN** | Used by all three is_codex_lifecycle_state guards above | Deleted together with guards |
+
+Priority: these are the **next deletion target** once action-view equivalents for
+`launch_codex_once` / `wait_for_codex_report` / `handle_codex_done` are wired.
+
+---
+
+### B. Safety Fallback Helpers (legacy request-centric transition chain)
+
+| Item | File | Classification | Why it remains | Gate to remove |
+|---|---|---|---|---|
+| `resolve_fallback_legacy_transition()` | `_bridge_common.py` | **MAINTAIN** | Called by `resolve_runtime_dispatch_plan()` when `is_fallback=True` | Legacy request-centric path fully replaced |
+| `resolve_next_generation_transition()` | `_bridge_common.py` | **MAINTAIN** | Called by dispatch plan for `need_next_generation` runtime action | Same as above |
+| `resolve_fallback_legacy_transition()` Codex lifecycle branches inside | `_bridge_common.py` | **DELETE** (future) | These Codex lifecycle arms inside the fallback chain are inherited; after reshape they become unreachable | After Codex lifecycle reshape |
+| `format_next_action_note()` fallback phrases | `_bridge_common.py` | **MAINTAIN** | Operator-facing wording for `is_fallback=True` plan; actively needed | Same as fallback transition gate |
+| `issue_centric_route_note()` fallback strings in `run_until_stop.py` | `run_until_stop.py` | **MAINTAIN** | Per-condition fallback reason wording for operator guidance | Same gate |
+
+---
+
+### C. Legacy `mode` Field and `need_*` Fields
+
+| Item | Classification | Why it remains | Gate to remove |
+|---|---|---|---|
+| `mode` written by `bridge_orchestrator.py` and request scripts | **MAINTAIN** | Downstream callers, display, state_signature() change detection | mode demotion phase |
+| `need_chatgpt_prompt` / `need_chatgpt_next` / `need_codex_run` | **MAINTAIN** | Write-path still used; read-path already behind helpers | mode demotion phase |
+| `state_signature()` includes `mode`, `need_chatgpt_*`, `need_codex_run` | **MAINTAIN** | Change-detection tuple must remain stable; these fields still change | mode demotion phase |
+| `## debug` section `mode_compat` in stop summary | **NAME-ONLY** | Already labeled `_compat`; documents survival as compat field | No action needed now |
+| `mode` in history entries (`before=... after=...`) | **MAINTAIN** | Debug trace value; helps diagnose stale state or loop issues | mode demotion phase |
+
+---
+
+### D. `resolve_issue_centric_route_choice()` and `resolve_issue_centric_preferred_loop_action()`
+
+| Item | Classification | Why it remains | Gate to remove |
+|---|---|---|---|
+| `resolve_issue_centric_route_choice()` | **MAINTAIN** | Called internally by `resolve_runtime_dispatch_plan()` to populate `route_choice` | No standalone callers outside dispatch plan; refactor opportunity after legacy path removal |
+| `resolve_issue_centric_preferred_loop_action()` | **DEFER** | Thin wrapper over `route_choice`; no active callers outside tests | After confirming no external callers remain |
+| mode reads inside `resolve_issue_centric_route_choice()` (for `fresh_pending` / `fresh_prepared` loop action) | **MAINTAIN** | Compatibility guard for `preferred_loop_action` resolution; used when `route_choice.preferred_loop_action` is consulted | Same gate as above |
+
+---
+
+### E. Legacy Wording / Comment Cleanup (already-done and residual)
+
+| Item | Classification | Status |
+|---|---|---|
+| `present_bridge_status()` normal path | **done** | Dispatch plan primary; no legacy mode reads in normal path |
+| `present_bridge_handoff()` normal path | **done** | `is_completed_state()` replaces raw mode/need_* reads |
+| `format_next_action_note()` `request_prompt_from_report` branch | **done** | `is_awaiting_user_supplement()` replaces raw mode read |
+| `resolve_runtime_next_action()` docstring | **done** | "internal dispatch step" framing |
+| `resolve_fallback_legacy_transition()` docstring | **done** | "safety fallback only" framing |
+| `resolve_next_generation_transition()` docstring | **done** | "residual compatibility helper" framing |
+
+---
+
+### F. Next Safe Deletion Ordering
+
+The following ordering minimises risk:
+
+1. **Docstring / wording cleanup only** (no behavior change):
+   - Any remaining `legacy default` / `peer route` language in comments
+   - `## debug` section labels that still imply mode is a routing subject
+
+2. **`resolve_fallback_legacy_transition()` Codex arms removed** (after Codex lifecycle reshape):
+   - `ready_for_codex` / `codex_running` / `codex_done` arms inside the fallback
+     chain become unreachable once Codex lifecycle is action-view; remove them then
+
+3. **`is_codex_lifecycle_state()` guards removed with Codex lifecycle reshape**:
+   - All three guard blocks go away simultaneously when action-view replaces mode-driven Codex routing
+
+4. **`resolve_issue_centric_preferred_loop_action()` removed** (after confirming no callers):
+   - Low-risk thin wrapper; remove once tests no longer reference it directly
+
+5. **`mode` / `need_*` field demotion** (last; requires dedicated phase):
+   - Do not remove until all runtime writers are confirmed to not depend on read-side mode
+   - `state_signature()` must be updated at the same time

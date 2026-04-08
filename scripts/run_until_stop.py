@@ -269,6 +269,11 @@ def no_codex_decision_reason(state: dict[str, Any]) -> str:
 
 
 def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
+    # Change-detection tuple for the run loop: triggers when state stops changing.
+    # mode / need_* fields here are included for legacy-state change detection ONLY;
+    # they are NOT used for routing decisions.  Routing authority is
+    # resolve_runtime_dispatch_plan().  These fields survive until mode demotion
+    # phase fully removes them from the written state.
     return (
         state.get("mode"),
         bool(state.get("need_chatgpt_prompt")),
