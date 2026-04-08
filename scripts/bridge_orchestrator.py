@@ -238,6 +238,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config)
 
     # Preserve the existing Codex lifecycle steps as mode-driven compatibility branches.
+    # These branches are NOT subject to dispatch-plan routing until full cutover.
+    # Full cutover target: replace with action=launch_codex_once / action=wait_for_codex_report /
+    # action=handle_codex_done action-view equivalents.
     if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
         status = present_bridge_status(state)
         print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
@@ -264,8 +267,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。完了報告を履歴へ退避します。")
         return archive_codex_report.run(dict(state))
 
-    # Issue-centric action-view is the primary routing authority.
-    # mode is preserved for Codex lifecycle steps and compatibility display.
+    # Issue-centric action-view is the primary routing authority for all normal-path states.
+    # mode is preserved for Codex lifecycle compatibility branches and display only.
+    # If dispatch plan returns is_fallback=True, the underlying scripts activate the
+    # safety fallback (legacy) request-centric path internally.
     plan = resolve_runtime_dispatch_plan(state)
     status = present_bridge_status(state)
     print(f"{status.label}です。{plan.note}")

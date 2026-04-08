@@ -291,7 +291,7 @@ class OrchestratorArgForwardingTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         report_run.assert_called_once()
-        self.assertIn("legacy fallback", out.getvalue())
+        self.assertIn("safety fallback (legacy) route", out.getvalue())
         self.assertIn("legacy_fallback_selected", out.getvalue())
 
     def test_run_keeps_codex_running_mode_driven_before_issue_centric_routing(self) -> None:

@@ -178,6 +178,91 @@ The current read-side bridge is intentionally layered like this:
 
 Until full cutover, snapshot-first reads still coexist with legacy fallback.
 
+## Full Cutover Pre-Stage: Normal Runtime Is Now Issue-Centric Spine
+
+> Status as of 2026-04-08 (state machine rewrite slice 7 merged)
+
+The dispatch plan / action-view layer is now the **primary** source of truth
+for all operator-facing routing decisions **except** the Codex lifecycle branch.
+The legacy `mode`-driven request-centric path is now a **safety fallback**, not
+a peer alternative.
+
+### What is the primary path
+
+For any runtime state that is not inside `ready_for_codex` / `codex_running` /
+`codex_done`:
+
+- **`resolve_runtime_dispatch_plan(state)`** returns the authoritative
+  `next_action` / `runtime_action` / `is_fallback` answer.
+- Operator-facing status, stop summaries, and guided notes all read from
+  `RuntimeDispatchPlan` first.
+- `mode` is written for compatibility and Codex lifecycle display only; it
+  is not consulted for routing in the normal path.
+
+### What is the Codex lifecycle compatibility branch
+
+`ready_for_codex` / `codex_running` / `codex_done` remain mode-driven
+compatibility branches.  They are **not** subject to dispatch-plan routing.
+When the runtime is in one of these modes, the bridge dispatches directly to
+the Codex lifecycle handlers without going through `resolve_runtime_dispatch_plan`.
+
+These branches are kept as-is until full cutover.  Full cutover may eventually
+replace them with an action-view equivalent, but that change is out of scope
+until the rest of the state machine is reshaped.
+
+### What is the safety fallback
+
+The **legacy request-centric route** is now an **explicit safety fallback** that
+activates only when the issue-centric runtime is:
+
+- `issue_centric_degraded_fallback` — snapshot exists but is degraded
+- `issue_centric_unavailable` — snapshot or runtime prerequisites are missing
+- `issue_centric_invalidated` — the current generation was explicitly invalidated
+
+In all other cases, the issue-centric preferred route owns the next action.
+Operator-facing wording marks fallback exits with `is_fallback = True` in the
+dispatch plan and with explicit fallback-reason notes in the stop summary.
+
+### What is replaced vs what remains
+
+**Replaced / centralized (slices 1–7):**
+
+- `resolve_runtime_dispatch_plan()` — normal-path routing authority
+- `RuntimeDispatchPlan` — operator vocabulary for action, route, fallback
+- `describe_next_action()` / `completed` / `no_action` detection —
+  action-view primary, Codex lifecycle guards retained
+- Operator stop summary `## next_step` — dispatch plan fields + `action_stop_note`
+- `format_operator_stop_note()` — shared action-view stop phrasing
+- `format_next_action_note()` — shared next-action phrasing
+- `is_awaiting_user_supplement()` / `is_fetch_extended_wait_state()` /
+  `is_fetch_late_completion_state()` — substate reads abstracted from callers
+- Loop heartbeat fetch-substate detection — new helpers, no raw mode reads
+
+**Retained as compatibility / safety fallback (not yet replaced):**
+
+- Codex lifecycle branch (`ready_for_codex` / `codex_running` / `codex_done`) —
+  mode-driven, kept until full cutover
+- Legacy request-centric prepare / fetch / next-step helpers —
+  activated only when `is_fallback = True`
+- `mode` field — written for compatibility display and downstream callers
+- `state_signature()` change-detection utility — includes `mode` by design
+
+### Full cutover boundary: what the next phase touches
+
+The next full cutover phase should target:
+
+1. **State machine reshape**: replace or wrap Codex lifecycle mode branches
+   with action-view equivalents (`action=launch_codex_once`,
+   `action=wait_for_codex_report`, `action=handle_codex_done`)
+2. **Legacy request-centric path removal**: once the reshape above is stable,
+   remove the request-centric fallback branches from
+   `run_until_stop.py` and `bridge_orchestrator.py`
+3. **`mode` demotion**: keep `mode` as a backward-compatible write field but
+   remove it from all routing logic; dispatch plan becomes the only authority
+
+Until those three changes land, the current coexistence contract remains:
+dispatch plan is primary, Codex lifecycle is compatibility, legacy is safety fallback.
+
 ## Rewrite Boundary Before State-Machine Work
 
 Treat the current runtime read path like this before any broader
