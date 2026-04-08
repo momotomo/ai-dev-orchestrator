@@ -41,6 +41,7 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
+    resolve_codex_lifecycle_view,
     resolve_issue_centric_route_choice,
     resolve_runtime_dispatch_plan,
     resolve_unified_next_action,
@@ -975,9 +976,24 @@ def summarize_run(
     )
     report_reference = handoff_report_reference(final_state)
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
-    # Dispatch plan is the primary authority for next_action / runtime_action.
-    # mode is kept in ## debug / state_snapshot as a compatibility field.
-    dispatch_plan = resolve_runtime_dispatch_plan(final_state)
+    # Guard: Codex lifecycle states must not reach resolve_runtime_dispatch_plan().
+    # final_state may be a lifecycle state when the run stopped mid-lifecycle
+    # (e.g. stopped while mode=codex_running).  Resolve via the lifecycle view so
+    # the summary fields are accurate and the legacy fallback chain is not consulted.
+    _lifecycle_view = resolve_codex_lifecycle_view(final_state)
+    if _lifecycle_view is not None:
+        _summary_next_action: str = _lifecycle_view.action
+        _summary_runtime_action: str = "codex_lifecycle_compat"
+        _summary_is_fallback: bool = False
+        _summary_action_stop_note: str = _lifecycle_view.status_detail
+    else:
+        # Dispatch plan is the primary authority for next_action / runtime_action.
+        # mode is kept in ## debug / state_snapshot as a compatibility field.
+        _plan = resolve_runtime_dispatch_plan(final_state)
+        _summary_next_action = _plan.next_action
+        _summary_runtime_action = _plan.runtime_action
+        _summary_is_fallback = _plan.is_fallback
+        _summary_action_stop_note = format_operator_stop_note(final_state, plan=_plan)
     lines = [
         "# Run Until Stop Summary",
         "",
@@ -989,10 +1005,10 @@ def summarize_run(
         f"- 次に見るもの: {handoff.detail}",
         f"- 次の操作: {suggested_command}",
         f"- 補足: {suggested_note}",
-        f"- next_action: {dispatch_plan.next_action}",
-        f"- runtime_action: {dispatch_plan.runtime_action}",
-        f"- is_fallback: {dispatch_plan.is_fallback}",
-        f"- action_stop_note: {format_operator_stop_note(final_state, plan=dispatch_plan)}",
+        f"- next_action: {_summary_next_action}",
+        f"- runtime_action: {_summary_runtime_action}",
+        f"- is_fallback: {_summary_is_fallback}",
+        f"- action_stop_note: {_summary_action_stop_note}",
         "",
         "## run",
         f"- initial_user_status: {initial_status.label}",

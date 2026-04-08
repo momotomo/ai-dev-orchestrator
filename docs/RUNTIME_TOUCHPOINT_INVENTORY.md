@@ -553,17 +553,15 @@ for runtime-adjacent work.
    Gate: action-view equivalents wired in state machine.
 3. `describe_next_action()` in `run_until_stop.py` — inline the single `resolve_unified_next_action()` call
    Can happen independently of lifecycle reshape.
+4. `resolve_fallback_legacy_transition()` itself — remaining arms cover only legacy request-centric modes;
+   gate: legacy request-centric path (idle/awaiting_user/waiting_prompt_reply) fully replaced by dispatch plan.
 
-**`resolve_fallback_legacy_transition()` Codex lifecycle arms readiness:**
-- These three arms (`ready_for_codex`, `codex_running`, `codex_done`) inside the fallback chain
-  are now **unreachable** via `resolve_unified_next_action()` / `bridge_orchestrator.run()` paths.
-- They are NOT yet deleted because `resolve_runtime_dispatch_plan()` can be called directly with
-  `final_state` in summary builders (e.g. `run_until_stop.py` summarize_run()), and `final_state`
-  could be a Codex lifecycle state if the run stopped while in those modes.  The fallback arms
-  remain as a safety net for those direct callers.
-- **Deletion gate**: verify all direct `resolve_runtime_dispatch_plan()` callers guard Codex
-  lifecycle states via `resolve_codex_lifecycle_view()` before reaching the dispatch plan; then
-  the three arms inside `resolve_fallback_legacy_transition()` can be removed safely.
+> **2026-04-08 (phase7 fallback-arms-cleanup)**: `resolve_fallback_legacy_transition()` Codex
+> lifecycle 3 arms (`ready_for_codex`, `codex_running`, `codex_done`) deleted.  Deletion gate
+> cleared by adding a `resolve_codex_lifecycle_view()` guard at the top of `summarize_run()` in
+> `run_until_stop.py`: lifecycle `final_state` now produces `_summary_next_action` from
+> `lifecycle_view.action` and is never forwarded to `resolve_runtime_dispatch_plan()`.
+> `resolve_codex_lifecycle_view` import added to `run_until_stop.py`.
 
 ---
 
@@ -571,9 +569,9 @@ for runtime-adjacent work.
 
 | Item | File | Classification | Why it remains | Gate to remove |
 |---|---|---|---|---|
-| `resolve_fallback_legacy_transition()` | `_bridge_common.py` | **MAINTAIN** | Called by `resolve_runtime_dispatch_plan()` when `is_fallback=True` | Legacy request-centric path fully replaced |
+| `resolve_fallback_legacy_transition()` | `_bridge_common.py` | **MAINTAIN** | Called by `resolve_runtime_dispatch_plan()` when `is_fallback=True`; Codex lifecycle arms removed | Legacy request-centric path fully replaced |
 | `resolve_next_generation_transition()` | `_bridge_common.py` | **MAINTAIN** | Called by dispatch plan for `need_next_generation` runtime action | Same as above |
-| `resolve_fallback_legacy_transition()` Codex lifecycle branches inside | `_bridge_common.py` | **DELETE** (future) | These Codex lifecycle arms inside the fallback chain are inherited; after reshape they become unreachable | After Codex lifecycle reshape |
+| `resolve_fallback_legacy_transition()` Codex lifecycle branches inside | `_bridge_common.py` | **REMOVED** ✅ | (fallback-arms-cleanup) Deleted; `summarize_run()` now guards lifecycle state via `resolve_codex_lifecycle_view()` | ✅ done |
 | `format_next_action_note()` fallback phrases | `_bridge_common.py` | **MAINTAIN** | Operator-facing wording for `is_fallback=True` plan; actively needed | Same as fallback transition gate |
 | `issue_centric_route_note()` fallback strings in `run_until_stop.py` | `run_until_stop.py` | **MAINTAIN** | Per-condition fallback reason wording for operator guidance | Same gate |
 
