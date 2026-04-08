@@ -11,7 +11,7 @@ from typing import Any
 
 from _bridge_common import (
     BridgeStop,
-    CODEX_LIFECYCLE_MODES,
+    CodexLifecycleView,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
     bridge_runtime_root,
@@ -43,6 +43,7 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
+    resolve_codex_lifecycle_view,
     resolve_issue_centric_route_choice,
     resolve_runtime_dispatch_plan,
     repo_relative,
@@ -313,16 +314,12 @@ def describe_next_action(state: dict[str, Any]) -> str:
         return "dispatch_issue_centric_codex_run"
 
     # Codex lifecycle compatibility branch: mode-driven, NOT dispatch-plan-routed.
-    # These are the only remaining non-dispatch-plan branches after full cutover.
-    # Full cutover target: replace with action-view equivalents.
-    if is_codex_lifecycle_state(state):
-        mode = str(state.get("mode", "")).strip()
-        if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-            return "launch_codex_once"
-        if mode == "codex_running":
-            return "wait_for_codex_report"
-        if mode == "codex_done":
-            return "archive_codex_report"
+    # All three lifecycle sub-cases (launch / wait / archive) are classified by
+    # resolve_codex_lifecycle_view(); callers should not inspect mode directly.
+    # is_blocked=True (ready_for_codex without need_codex_run) falls through to dispatch.
+    lifecycle_view = resolve_codex_lifecycle_view(state)
+    if lifecycle_view is not None and not lifecycle_view.is_blocked:
+        return lifecycle_view.action
 
     # Normal path: dispatch plan is the sole routing authority.
     # is_normal_path_state(state) is True for all states reaching this point.

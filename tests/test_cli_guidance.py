@@ -1110,6 +1110,113 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
         # Must not crash and must return a BridgeStatusView with non-empty text
         self.assertTrue(hasattr(result, "status_text") or isinstance(result, str) or result is not None)
 
+    # ------------------------------------------------------------------
+    # Codex lifecycle centralisation tests (added 2026-04-08)
+    # ------------------------------------------------------------------
+
+    def test_resolve_codex_lifecycle_view_returns_none_for_normal_path(self) -> None:
+        """resolve_codex_lifecycle_view() returns None for non-Codex lifecycle states."""
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        for mode in ("idle", "waiting_prompt_reply", "awaiting_user", ""):
+            with self.subTest(mode=mode):
+                state: dict[str, object] = {"mode": mode}
+                self.assertIsNone(resolve_codex_lifecycle_view(state))
+
+    def test_resolve_codex_lifecycle_view_launch(self) -> None:
+        """ready_for_codex + need_codex_run=True → action=launch_codex_once, not blocked."""
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        state = {"mode": "ready_for_codex", "need_codex_run": True}
+        view = resolve_codex_lifecycle_view(state)
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view.action, "launch_codex_once")
+        self.assertFalse(view.is_blocked)
+
+    def test_resolve_codex_lifecycle_view_blocked(self) -> None:
+        """ready_for_codex without need_codex_run → is_blocked=True, action=check_codex_condition."""
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        state = {"mode": "ready_for_codex", "need_codex_run": False}
+        view = resolve_codex_lifecycle_view(state)
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertTrue(view.is_blocked)
+        self.assertEqual(view.action, "check_codex_condition")
+
+    def test_resolve_codex_lifecycle_view_running(self) -> None:
+        """codex_running → action=wait_for_codex_report, not blocked."""
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        state = {"mode": "codex_running"}
+        view = resolve_codex_lifecycle_view(state)
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view.action, "wait_for_codex_report")
+        self.assertFalse(view.is_blocked)
+
+    def test_resolve_codex_lifecycle_view_done(self) -> None:
+        """codex_done → action=archive_codex_report, not blocked."""
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        state = {"mode": "codex_done"}
+        view = resolve_codex_lifecycle_view(state)
+        self.assertIsNotNone(view)
+        assert view is not None
+        self.assertEqual(view.action, "archive_codex_report")
+        self.assertFalse(view.is_blocked)
+
+    def test_codex_lifecycle_view_to_status_view(self) -> None:
+        """CodexLifecycleView.to_status_view() returns a BridgeStatusView with matching text."""
+        from _bridge_common import BridgeStatusView, resolve_codex_lifecycle_view
+
+        state = {"mode": "codex_running"}
+        view = resolve_codex_lifecycle_view(state)
+        self.assertIsNotNone(view)
+        assert view is not None
+        status = view.to_status_view()
+        self.assertIsInstance(status, BridgeStatusView)
+        self.assertEqual(status.label, view.status_label)
+        self.assertEqual(status.detail, view.status_detail)
+
+    def test_present_bridge_status_uses_lifecycle_view_for_codex_states(self) -> None:
+        """present_bridge_status() returns the same wording as resolve_codex_lifecycle_view()
+        for all Codex lifecycle states — confirming the two are now in sync."""
+        from _bridge_common import present_bridge_status, resolve_codex_lifecycle_view
+
+        for mode, need_codex_run in (
+            ("ready_for_codex", True),
+            ("codex_running", False),
+            ("codex_done", False),
+        ):
+            with self.subTest(mode=mode):
+                state: dict[str, object] = {"mode": mode, "need_codex_run": need_codex_run}
+                view = resolve_codex_lifecycle_view(state)
+                status = present_bridge_status(state)
+                self.assertIsNotNone(view)
+                assert view is not None
+                self.assertEqual(status.label, view.status_label)
+                self.assertEqual(status.detail, view.status_detail)
+
+    def test_describe_next_action_uses_lifecycle_view_action(self) -> None:
+        """describe_next_action() returns lifecycle_view.action for non-blocked Codex states."""
+        import run_until_stop
+        from _bridge_common import resolve_codex_lifecycle_view
+
+        for mode, need_codex_run in (
+            ("ready_for_codex", True),
+            ("codex_running", False),
+            ("codex_done", False),
+        ):
+            with self.subTest(mode=mode):
+                state: dict[str, object] = {"mode": mode, "need_codex_run": need_codex_run}
+                view = resolve_codex_lifecycle_view(state)
+                action = run_until_stop.describe_next_action(state)
+                self.assertIsNotNone(view)
+                assert view is not None
+                self.assertEqual(action, view.action)
+
 
 if __name__ == "__main__":
     unittest.main()
