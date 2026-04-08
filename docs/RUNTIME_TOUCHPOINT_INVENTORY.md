@@ -554,11 +554,26 @@ for runtime-adjacent work.
 > and `present_bridge_status()` (status display; wraps `to_status_view()`).  Internal callers
 > inside `_bridge_common.py`: `is_normal_path_state()` (routing gate) and
 > `resolve_unified_next_action()` (action authority).
+>
+> **2026-04-08 (phase7 orchestrator-action-view)**: `bridge_orchestrator.run()` rewritten so
+> dispatch decisions no longer come from `resolve_codex_lifecycle_view()` directly.
+> `resolve_codex_lifecycle_view` import removed from `bridge_orchestrator.py`.  New helper
+> `is_blocked_codex_lifecycle_state()` added to `_bridge_common.py` to encapsulate the
+> `is_blocked` flag check without exposing lifecycle view fields to callers.
+> Orchestrator routing flow:
+>   1. `is_blocked_codex_lifecycle_state(state)` — blocked lifecycle guard (operator stop)
+>   2. `resolve_unified_next_action(state)` — dispatch action (launch_codex_once /
+>      wait_for_codex_report / archive_codex_report / request_next_prompt / ...)
+>   3. `present_bridge_status(state).label` — operator-facing label for all arms
+> Remaining `resolve_codex_lifecycle_view()` external callers: `present_bridge_status()`
+> (status display, wraps `to_status_view()`) only.  All new callers should use
+> `is_blocked_codex_lifecycle_state()` + `resolve_unified_next_action()` instead.
 
 | Item | File | Classification | Status (2026-04-08) | Gate to remove |
 |---|---|---|---|---|
 | `resolve_unified_next_action()` | `_bridge_common.py` | **MAINTAIN** | Canonical "next action?" for all states; covers lifecycle + normal path | Remove together with lifecycle guards after action-view reshape |
-| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | **Sole** classification authority; lifecycle mode strings are internal to this helper only; external callers narrowed to status (present_bridge_status) + orchestrator (bridge_orchestrator.run) | After action-view reshape |
+| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | **Sole** classification authority; external callers: `present_bridge_status()` (status display) only; `bridge_orchestrator.run()` no longer a direct caller | After action-view reshape |
+| `is_blocked_codex_lifecycle_state()` | `_bridge_common.py` | **MAINTAIN** | Encapsulates `is_blocked` flag for orchestrator/callers without exposing lifecycle view fields | Remove when lifecycle states are action-view equivalents |
 | `CodexLifecycleView` dataclass | `_bridge_common.py` | **MAINTAIN** | Carries action, status wording, is_blocked; used by display and dispatch layers | Same gate |
 | `describe_next_action()` | `run_until_stop.py` | **REMOVED** ✅ | (describe-next-action-inline) Deleted; all call sites replaced with direct `resolve_unified_next_action()` calls | ✅ done |
 | `is_codex_lifecycle_state()` outer guard in `describe_next_action()` | `run_until_stop.py` | **REMOVED** ✅ | (action-bridge) import removed | ✅ done |
@@ -572,13 +587,14 @@ for runtime-adjacent work.
 | `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **REMOVED** ✅ | (lifecycle-modes-inline) Deleted; mode strings inlined into `resolve_codex_lifecycle_view()` | ✅ done |
 
 **Next deletion priority (minimum safe unit when action-view reshape is ready):**
-1. `resolve_codex_lifecycle_view()` calls in `bridge_orchestrator.run()` and `present_bridge_status()`
+1. `resolve_codex_lifecycle_view()` call in `present_bridge_status()` (the last remaining external caller)
    Gate: action-view equivalents for Codex lifecycle states wired in the state machine.
-   `bridge_orchestrator.run()` needs `is_blocked` + `status_label` not available elsewhere;
-   `present_bridge_status()` is the status gate and must keep the lifecycle branch
-   until the lifecycle states are represented as normal-path action-view states.
-2. ~~`describe_next_action()` in `run_until_stop.py`~~ **✅ Done (describe-next-action-inline phase)**
-3. `resolve_fallback_legacy_transition()` itself — remaining arms cover only legacy request-centric modes;
+   Once lifecycle states are represented as normal-path action-view states, the lifecycle
+   branch in `present_bridge_status()` can be replaced with a normal action-key switch.
+2. `is_blocked_codex_lifecycle_state()` — can be removed once lifecycle states are no longer
+   a special compatibility branch (they become part of the normal dispatch-plan flow).
+3. ~~`describe_next_action()` in `run_until_stop.py`~~ **✅ Done (describe-next-action-inline phase)**
+4. `resolve_fallback_legacy_transition()` itself — remaining arms cover only legacy request-centric modes;
    gate: legacy request-centric path (idle/awaiting_user/waiting_prompt_reply) fully replaced by dispatch plan.
 
 > **2026-04-08 (phase7 fallback-arms-cleanup)**: `resolve_fallback_legacy_transition()` Codex

@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_codex_lifecycle_view, resolve_runtime_dispatch_plan, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -236,47 +236,51 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。prepared Codex body を issue-centric codex_run dispatch へ進めます。")
         return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config)
 
-    # Codex lifecycle compatibility branch (orchestrator dispatch responsibility).
-    # resolve_codex_lifecycle_view() is called here directly because the orchestrator
-    # needs THREE fields from the view: .action (routing), .is_blocked (blocked lifecycle
-    # guard), and .status_label (operator-facing print).  resolve_unified_next_action()
-    # alone cannot distinguish blocked lifecycle states (it falls through to the dispatch
-    # plan for those), so the lifecycle view remains here as the orchestrator's direct
-    # authority until lifecycle states are reshaped into action-view equivalents.
-    # Classification is centralised in resolve_codex_lifecycle_view(); this block
-    # dispatches on lifecycle_view.action instead of reading mode directly.
-    # Full cutover target: replace with action=launch_codex_once / wait_for_codex_report /
-    # handle_codex_done action-view equivalents.
-    lifecycle_view = resolve_codex_lifecycle_view(state)
-    if lifecycle_view is not None:
-        if lifecycle_view.action == "launch_codex_once":
-            print(f"{lifecycle_view.status_label}です。bridge が Codex worker を 1 回起動します。")
-            return launch_codex_once.run(dict(state), build_codex_launch_argv(args))
+    # Blocked lifecycle guard: operator confirmation required, no dispatch.
+    # resolve_unified_next_action() falls through to the dispatch plan for blocked lifecycle
+    # states (ready_for_codex without need_codex_run), so this guard must come before
+    # the unified action call to avoid incorrect normal-path routing.
+    # is_blocked_codex_lifecycle_state() encapsulates lifecycle classification so this
+    # call site does not need to import resolve_codex_lifecycle_view() directly.
+    if is_blocked_codex_lifecycle_state(state):
+        status = present_bridge_status(state)
+        print(f"{status.label}です。Codex 用 prompt はありますが、起動条件を確認してください。")
+        return 0
 
-        if lifecycle_view.is_blocked:
-            print(f"{lifecycle_view.status_label}です。Codex 用 prompt はありますが、起動条件を確認してください。")
-            return 0
-
-        if lifecycle_view.action == "wait_for_codex_report":
-            if maybe_promote_codex_done(state):
-                return 0
-            print(
-                f"{lifecycle_view.status_label}です。Codex worker の完了待ちです。"
-                " live 再開前に長く残った state なら、report / error / pause / bridge/STOP を確認して"
-                " stale runtime でないか先に見てください。"
-            )
-            return 0
-
-        if lifecycle_view.action == "archive_codex_report":
-            print(f"{lifecycle_view.status_label}です。完了報告を履歴へ退避します。")
-            return archive_codex_report.run(dict(state))
-
-    # Issue-centric action-view is the primary routing authority for all normal-path states.
-    # mode is preserved for Codex lifecycle compatibility branches and display only.
-    # If dispatch plan returns is_fallback=True, the underlying scripts activate the
-    # safety fallback (legacy) request-centric path internally.
-    plan = resolve_runtime_dispatch_plan(state)
+    # action-view routing: resolve_unified_next_action() is the single authority.
+    # Covers both Codex lifecycle (launch_codex_once / wait_for_codex_report /
+    # archive_codex_report) and normal-path (request_next_prompt / fetch_next_prompt /
+    # request_prompt_from_report) action keys.  resolve_codex_lifecycle_view() is no
+    # longer called at this call site; all dispatch decisions go through the action key.
+    action = resolve_unified_next_action(state)
     status = present_bridge_status(state)
+
+    # Codex lifecycle dispatch arms (named by action key, not by mode).
+    if action == "launch_codex_once":
+        # Codex lifecycle: ready_for_codex + need_codex_run=True
+        print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
+        return launch_codex_once.run(dict(state), build_codex_launch_argv(args))
+
+    if action == "wait_for_codex_report":
+        # Codex lifecycle: codex_running — promote to codex_done if report ready
+        if maybe_promote_codex_done(state):
+            return 0
+        print(
+            f"{status.label}です。Codex worker の完了待ちです。"
+            " live 再開前に長く残った state なら、report / error / pause / bridge/STOP を確認して"
+            " stale runtime でないか先に見てください。"
+        )
+        return 0
+
+    if action == "archive_codex_report":
+        # Reached from codex_done lifecycle; unarchived report priority was handled above.
+        print(f"{status.label}です。完了報告を履歴へ退避します。")
+        return archive_codex_report.run(dict(state))
+
+    # Normal path: dispatch plan is the primary routing authority.
+    # resolve_runtime_dispatch_plan() is called here (and only here) for plan.note.
+    # status is already resolved above via present_bridge_status(state).
+    plan = resolve_runtime_dispatch_plan(state)
     print(f"{status.label}です。{plan.note}")
 
     # Dispatch layer: route to the appropriate script.
