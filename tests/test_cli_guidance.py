@@ -1331,5 +1331,104 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
                 self.assertTrue(is_normal_path_state(state))
 
 
+# ------------------------------------------------------------------
+# Fallback arms cleanup tests (2026-04-08 phase7 fallback-arms-cleanup)
+# ------------------------------------------------------------------
+
+class FallbackArmsCleanupTest(unittest.TestCase):
+    """Lifecycle arms removed from resolve_fallback_legacy_transition(); summarize_run()
+    now guards lifecycle states via resolve_codex_lifecycle_view()."""
+
+    def _make_args(self) -> "argparse.Namespace":
+        import run_until_stop
+        return run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6",
+             "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+
+    def test_fallback_lifecycle_arms_removed_ready_for_codex(self) -> None:
+        """resolve_fallback_legacy_transition() no longer handles ready_for_codex."""
+        from _bridge_common import resolve_fallback_legacy_transition
+        result = resolve_fallback_legacy_transition({"mode": "ready_for_codex", "need_codex_run": True})
+        # Was "launch_codex_once"; now falls through to "no_action".
+        self.assertEqual(result, "no_action")
+
+    def test_fallback_lifecycle_arms_removed_codex_running(self) -> None:
+        """resolve_fallback_legacy_transition() no longer handles codex_running."""
+        from _bridge_common import resolve_fallback_legacy_transition
+        result = resolve_fallback_legacy_transition({"mode": "codex_running"})
+        # Was "wait_for_codex_report"; now falls through to "no_action".
+        self.assertEqual(result, "no_action")
+
+    def test_fallback_lifecycle_arms_removed_codex_done(self) -> None:
+        """resolve_fallback_legacy_transition() no longer handles codex_done."""
+        from _bridge_common import resolve_fallback_legacy_transition
+        result = resolve_fallback_legacy_transition({"mode": "codex_done"})
+        # Was "archive_codex_report"; now falls through to "no_action".
+        self.assertEqual(result, "no_action")
+
+    def test_fallback_normal_modes_unchanged(self) -> None:
+        """Non-lifecycle arms in resolve_fallback_legacy_transition() are intact."""
+        from _bridge_common import resolve_fallback_legacy_transition
+        self.assertEqual(resolve_fallback_legacy_transition({"mode": "idle", "need_chatgpt_prompt": True}), "request_next_prompt")
+        self.assertEqual(resolve_fallback_legacy_transition({"mode": "waiting_prompt_reply"}), "fetch_next_prompt")
+        self.assertEqual(resolve_fallback_legacy_transition({"mode": "extended_wait"}), "fetch_next_prompt")
+
+    def test_summarize_run_lifecycle_state_uses_lifecycle_view_not_dispatch_plan(self) -> None:
+        """summarize_run() with a Codex lifecycle final_state reads from resolve_codex_lifecycle_view(),
+        not resolve_runtime_dispatch_plan(), so next_action reflects lifecycle_view.action."""
+        import run_until_stop
+        args = self._make_args()
+        # codex_done: lifecycle_view.action == "archive_codex_report"
+        final_state: dict[str, object] = {"mode": "codex_done"}
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test",
+            steps=1,
+            warnings=[],
+            initial_state={"mode": "codex_done"},
+            final_state=final_state,
+            history=[],
+        )
+        self.assertIn("next_action: archive_codex_report", summary)
+        self.assertIn("runtime_action: codex_lifecycle_compat", summary)
+        self.assertIn("is_fallback: False", summary)
+
+    def test_summarize_run_codex_running_uses_lifecycle_view(self) -> None:
+        """summarize_run() with mode=codex_running reflects wait_for_codex_report."""
+        import run_until_stop
+        args = self._make_args()
+        final_state: dict[str, object] = {"mode": "codex_running"}
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test",
+            steps=1,
+            warnings=[],
+            initial_state={"mode": "codex_running"},
+            final_state=final_state,
+            history=[],
+        )
+        self.assertIn("next_action: wait_for_codex_report", summary)
+        self.assertIn("is_fallback: False", summary)
+
+    def test_summarize_run_normal_state_still_uses_dispatch_plan(self) -> None:
+        """summarize_run() with a normal final_state still uses resolve_runtime_dispatch_plan()."""
+        import run_until_stop
+        args = self._make_args()
+        final_state: dict[str, object] = {"mode": "idle", "need_chatgpt_next": True}
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test",
+            steps=1,
+            warnings=[],
+            initial_state=final_state,
+            final_state=final_state,
+            history=[],
+        )
+        # Dispatch plan path: runtime_action is not "codex_lifecycle_compat"
+        self.assertNotIn("codex_lifecycle_compat", summary)
+
+
 if __name__ == "__main__":
     unittest.main()

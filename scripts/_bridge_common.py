@@ -1266,22 +1266,21 @@ def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
     resolve_runtime_dispatch_plan(), which is the primary routing authority and calls
     this helper only when the safety fallback route is required.
 
-    The Codex lifecycle branches (ready_for_codex / codex_running / codex_done) are
-    included so that this helper is self-contained.  Through resolve_unified_next_action()
-    or bridge_orchestrator.run(), lifecycle states are handled by resolve_codex_lifecycle_view()
-    before dispatch-plan lookup, so these arms are unreachable in those paths.
-    Deletion gate: confirm no direct resolve_runtime_dispatch_plan() caller passes a
-    Codex lifecycle state; until then, keep arms as a defence for direct callers.
+    Codex lifecycle states (ready_for_codex, codex_running, codex_done) are NOT
+    handled here.  All callers guard lifecycle states via resolve_codex_lifecycle_view()
+    before reaching resolve_runtime_dispatch_plan():
+      - resolve_unified_next_action() handles them as a higher-priority branch
+      - bridge_orchestrator.run() dispatches via lifecycle_view.action
+      - summarize_run() in run_until_stop.py guards via resolve_codex_lifecycle_view()
+    Passing a Codex lifecycle state here is a caller bug.
 
     Returns one of:
         "request_next_prompt"        - idle initial request path
         "fetch_next_prompt"          - reply waiting modes
         "request_prompt_from_report" - awaiting_user / next-phase report path
-        "launch_codex_once"          - ready_for_codex with need_codex_run
-        "wait_for_codex_report"      - codex_running
-        "archive_codex_report"       - codex_done
         "completed"                  - session already finished
-        "no_action"                  - no matching condition
+        "no_action"                  - no matching condition (including lifecycle states
+                                       that should not reach this function)
     """
     mode = str(state.get("mode", "idle")).strip()
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
@@ -1290,12 +1289,6 @@ def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
         return "fetch_next_prompt"
     if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
         return "request_prompt_from_report"
-    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-        return "launch_codex_once"
-    if mode == "codex_running":
-        return "wait_for_codex_report"
-    if mode == "codex_done":
-        return "archive_codex_report"
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         return "request_prompt_from_report"
     if is_completed_state(state):
