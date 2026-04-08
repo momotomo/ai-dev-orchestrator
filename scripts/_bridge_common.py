@@ -446,16 +446,20 @@ def present_bridge_status(
     blocked: bool = False,
     stale_codex_running: bool = False,
 ) -> BridgeStatusView:
-    mode = str(state.get("mode", "idle"))
-    need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
-    need_chatgpt_next = bool(state.get("need_chatgpt_next"))
-    need_codex_run = bool(state.get("need_codex_run"))
-    pending_handoff_log = str(state.get("pending_handoff_log", "")).strip()
-    pending_request_signal = str(state.get("pending_request_signal", "")).strip()
-    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
-    chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
-    issue_centric_bridge = resolve_issue_centric_state_bridge(state, repo_root=ROOT_DIR)
+    """Return a human-facing status view for the current runtime state.
 
+    Routing priority (post full-cutover):
+      1. Pre-dispatch-plan early-exit guards (error / blocked / Codex dispatch)
+      2. Codex lifecycle compatibility branch — mode-driven, not dispatch-plan-routed
+      3. Awaiting user supplement sub-case — human input required before dispatch resumes
+      4. Normal path — resolve_runtime_dispatch_plan() is the primary routing authority;
+         route by plan.runtime_action / plan.next_action / plan.is_fallback
+
+    mode is NOT read directly in the normal path (step 4); dispatch plan / action-view
+    helpers are the subjects.  Codex lifecycle branch (step 2) retains mode reads as a
+    compatibility guard until those states are reshaped into action-view equivalents.
+    """
+    # --- Pre-dispatch-plan early-exit guards ---
     if bool(state.get("error")):
         return BridgeStatusView("異常", "まず stop summary と doctor を見て、必要なら詳しい error を確認してから再開します。")
 
@@ -468,94 +472,101 @@ def present_bridge_status(
             "issue-centric で prepared Codex body を保持しています。次の bridge 手で codex_run dispatch を進めます。",
         )
 
-    if mode == "awaiting_user" or chatgpt_decision in {"human_review", "need_info"}:
+    # --- Codex lifecycle compatibility branch (mode-driven, not dispatch-plan-routed) ---
+    # ready_for_codex / codex_running / codex_done are handled here as mode compatibility guards.
+    # Full cutover target: reshape into action-view equivalents (launch_codex_once etc.).
+    if is_codex_lifecycle_state(state):
+        codex_mode = str(state.get("mode", "")).strip()
+        need_codex_run = bool(state.get("need_codex_run"))
+        if codex_mode == "ready_for_codex" and need_codex_run:
+            return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
+        if codex_mode == "ready_for_codex":
+            return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
+        if codex_mode == "codex_running":
+            return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
+        if codex_mode == "codex_done":
+            return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
+
+    # --- Awaiting user supplement sub-case ---
+    # next_action for these states is "request_prompt_from_report", but status is "人確認待ち"
+    # because human input is required before dispatch can resume.
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
+    if is_awaiting_user_supplement(state) or chatgpt_decision in {"human_review", "need_info"}:
         detail = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
         return BridgeStatusView("人確認待ち", detail)
 
-    if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_prepared_request":
+    # --- Normal path: dispatch plan is the primary routing authority ---
+    # For all states reaching this point, is_normal_path_state(state) is True.
+    # mode is not read directly; plan.runtime_action / plan.next_action / plan.is_fallback
+    # are the canonical routing subjects.
+    plan = resolve_runtime_dispatch_plan(state)
+
+    # Prepared request (fresh_prepared): reuse without rebuilding regardless of send sub-route.
+    if plan.runtime_action == "prepared_request":
         return BridgeStatusView(
             "ChatGPT送信待ち",
             "issue-centric prepared request があり、再生成せずそのまま送信できます。",
         )
 
-    if mode == "idle" and need_chatgpt_prompt:
-        return BridgeStatusView(
-            "ready issue参照で開始待ち",
-            "通常は current ready issue の参照で始めます。free-form 初回本文は override 用で、bridge は reply contract だけを足します。",
-        )
-
-    if mode == "waiting_prompt_reply":
-        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_pending_reply":
+    if plan.next_action == "fetch_next_prompt":
+        # issue-centric pending reply: distinct from legacy fetch substates.
+        if plan.runtime_action == "pending_reply":
             return BridgeStatusView(
                 "ChatGPT返答待ち",
                 "issue-centric pending generation に対する reply 回収を待っています。",
             )
+        pending_request_signal = str(state.get("pending_request_signal", "")).strip()
         if pending_request_signal == "submitted_unconfirmed":
             return BridgeStatusView(
                 "ChatGPT返答待ち",
                 "新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
             )
+        if is_fetch_extended_wait_state(state):
+            return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
+        if is_fetch_late_completion_state(state):
+            return BridgeStatusView("ChatGPT返答待ち", "返答が書き切られるまで監視し、その後で回収します。")
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
-    if mode == "extended_wait":
-        return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
-    if mode == "await_late_completion":
-        return BridgeStatusView("ChatGPT返答待ち", "返答が書き切られるまで監視し、その後で回収します。")
 
-    if mode == "ready_for_codex" and need_codex_run:
-        return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
+    if plan.next_action == "request_next_prompt":
+        return BridgeStatusView(
+            "ready issue参照で開始待ち",
+            "通常は current ready issue の参照で始めます。free-form 初回本文は override 用で、bridge は reply contract だけを足します。",
+        )
 
-    if mode == "ready_for_codex":
-        return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
-
-    if mode == "codex_running":
-        return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
-
-    if mode == "codex_done":
-        return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
-
-    if mode == "idle" and need_chatgpt_next and pending_handoff_log and should_rotate_before_next_chat_request(state):
-        return BridgeStatusView("ChatGPTへ依頼準備中", "次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。")
-
-    if mode == "idle" and need_chatgpt_next:
-        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_invalidated":
+    if plan.next_action == "request_prompt_from_report":
+        pending_handoff_log = str(state.get("pending_handoff_log", "")).strip()
+        if pending_handoff_log and should_rotate_before_next_chat_request(state):
             return BridgeStatusView(
                 "ChatGPTへ依頼準備中",
-                f"issue-centric runtime は invalidated のため、legacy fallback で次の依頼を準備します。理由: {issue_centric_bridge.state_view_reason or 'issue-centric context invalidated'}。",
+                "次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。",
             )
-        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_degraded_fallback":
-            return BridgeStatusView(
-                "ChatGPTへ依頼準備中",
-                f"issue-centric runtime は degraded fallback のため、legacy fallback で次の依頼を準備します。理由: {issue_centric_bridge.state_view_reason or 'issue-centric degraded fallback'}。",
-            )
-        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_unavailable":
-            return BridgeStatusView(
-                "ChatGPTへ依頼準備中",
-                f"issue-centric runtime は unavailable のため、legacy fallback で次の依頼を準備します。理由: {issue_centric_bridge.state_view_reason or 'issue-centric runtime unavailable'}。",
-            )
-        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_consumed":
-            return BridgeStatusView(
-                "ChatGPTへ依頼準備中",
-                "前の issue-centric generation は consumed 済みです。次の generation を準備します。",
-            )
-        if issue_centric_bridge is not None and issue_centric_bridge.state_view == "issue_centric_ready_next":
-            target_issue = issue_centric_bridge.target_issue
-            if target_issue:
+        if plan.is_fallback:
+            # Safety fallback (legacy) route is active: degraded / unavailable / invalidated.
+            route_choice = plan.route_choice
+            route_reason = (route_choice.route_reason if route_choice else "") or "fallback required"
+            gen_lifecycle = (route_choice.generation_lifecycle if route_choice else "")
+            if "invalidated" in gen_lifecycle:
                 return BridgeStatusView(
                     "ChatGPTへ依頼準備中",
-                    f"issue-centric preferred route で次の依頼を準備します。target_issue は {target_issue} です。",
+                    f"issue-centric generation は invalidated のため、safety fallback (legacy) route で次の依頼を準備します。理由: {route_reason}。",
                 )
             return BridgeStatusView(
                 "ChatGPTへ依頼準備中",
-                "issue-centric preferred route で次の依頼を準備します。",
+                f"safety fallback (legacy) route で次の依頼を準備します。理由: {route_reason}。",
             )
-        return BridgeStatusView("ChatGPTへ依頼準備中", "完了報告をもとに、次の依頼を送る準備ができています。")
+        # issue-centric preferred route.
+        target_issue = (plan.route_choice.target_issue if plan.route_choice else "") or ""
+        if target_issue:
+            return BridgeStatusView(
+                "ChatGPTへ依頼準備中",
+                f"issue-centric preferred route で次の依頼を準備します。target_issue は {target_issue} です。",
+            )
+        return BridgeStatusView("ChatGPTへ依頼準備中", "issue-centric preferred route で次の依頼を準備します。")
 
-    if mode == "completed":
+    if plan.is_terminal:
         detail = chatgpt_decision_note or "追加の操作は不要です。"
         return BridgeStatusView("完了", detail)
-
-    if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
-        return BridgeStatusView("完了", "追加の操作は不要です。")
 
     return BridgeStatusView("人確認待ち", "まず stop summary と doctor を確認してから再開します。")
 
@@ -569,10 +580,12 @@ def present_bridge_handoff(
     stale_codex_running: bool = False,
     cycle_boundary_stop: bool = False,
 ) -> BridgeHandoffView:
-    mode = str(state.get("mode", "idle"))
-    need_chatgpt_prompt = bool(state.get("need_chatgpt_prompt"))
-    need_chatgpt_next = bool(state.get("need_chatgpt_next"))
-    need_codex_run = bool(state.get("need_codex_run"))
+    """Return a human-facing handoff view for the current runtime state.
+
+    Early-exit guards fire before the status-driven fallthrough at the end.
+    is_completed_state() replaces raw mode / need_* reads for the completion check
+    so that mode is not consulted as an independent routing subject in this function.
+    """
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     error_message = str(state.get("error_message", "")).strip()
     normalized_reason = reason.strip()
@@ -585,7 +598,10 @@ def present_bridge_handoff(
         detail = suggested_note or "この run は現在の cycle 完了までで止めました。次 cycle は次回実行で進めます。"
         return BridgeHandoffView("この run は cycle 完了で停止しました。", detail)
 
-    if chatgpt_decision == "completed" or mode == "completed":
+    # Explicit completion signals: chatgpt_decision == "completed" or mode == "completed".
+    # is_completed_state() is NOT used here intentionally: it also matches
+    # mode == "idle" and not need_*, which must fire AFTER the blocked guard below.
+    if chatgpt_decision == "completed" or str(state.get("mode", "")) == "completed":
         detail = suggested_note or "summary を確認し、必要なら report を見れば十分です。"
         return BridgeHandoffView("完了しました。", detail)
 
@@ -609,7 +625,9 @@ def present_bridge_handoff(
         detail = suggested_note or "再開するか、このまま止めるかを summary を見て決めてください。"
         return BridgeHandoffView("途中で停止しました。summary / note を確認してください。", detail)
 
-    if mode == "idle" and not need_chatgpt_prompt and not need_chatgpt_next and not need_codex_run:
+    # Normal path: effectively-idle completed state check.
+    # blocked guard has already fired above, so is_completed_state() is safe here.
+    if is_completed_state(state):
         detail = suggested_note or "追加の操作は不要です。"
         return BridgeHandoffView("完了しました。", detail)
 
@@ -922,6 +940,12 @@ def can_reuse_prepared_request(state: Mapping[str, Any]) -> bool:
 
 
 def resolve_issue_centric_route_choice(state: Mapping[str, Any]) -> IssueCentricRouteChoice:
+    """Return a routing-context snapshot for the current runtime state.
+
+    Internal helper consumed by resolve_runtime_dispatch_plan() to populate
+    route_choice in the returned RuntimeDispatchPlan.  Not the primary routing
+    authority — callers should use resolve_runtime_dispatch_plan() instead.
+    """
     runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
     if runtime_mode is None:
         return IssueCentricRouteChoice(
@@ -984,21 +1008,23 @@ def resolve_issue_centric_preferred_loop_action(state: Mapping[str, Any]) -> tup
 def resolve_runtime_next_action(state: Mapping[str, Any]) -> tuple[str, str]:
     """Return (action_key, reason) with the issue-centric state view as primary authority.
 
+    Internal dispatch step consumed by resolve_runtime_dispatch_plan().  Callers
+    outside that function should use resolve_runtime_dispatch_plan() instead.
+
     action_key is one of:
         "prepared_request"     - fresh_prepared generation; reuse and send without rebuilding
         "pending_reply"        - fresh_pending generation; wait for reply recovery
         "need_next_generation" - issue_centric_ready but generation is consumed or unset;
-                                 caller uses mode as compatibility display to select the
-                                 concrete request builder
-        "fallback_legacy"      - degraded / unavailable / invalidated; caller uses the
-                                 legacy request-centric mode-driven path
+                                 resolve_next_generation_transition() selects the concrete builder
+        "fallback_legacy"      - degraded / unavailable / invalidated; safety fallback (legacy)
+                                 route is active; resolve_fallback_legacy_transition() handles it
 
-    Decision order follows ISSUE_CENTRIC_RUNTIME_CONTRACT rewrite boundary:
+    Decision order follows ISSUE_CENTRIC_RUNTIME_CONTRACT:
         1. runtime snapshot
         2. runtime readiness / health gate  (runtime_mode)
         3. generation lifecycle
-        4. thin state-view bridge (freshness / invalidation already folded into runtime_mode)
-        5. legacy mode only when the layers above require fallback
+        4. freshness / invalidation (folded into runtime_mode by resolve_issue_centric_runtime_mode)
+        5. legacy mode only when the layers above require fallback (fallback_legacy)
     """
     runtime_mode = resolve_issue_centric_runtime_mode(state, repo_root=ROOT_DIR)
     if runtime_mode is None:
@@ -1141,15 +1167,19 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
 
 
 def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
-    """Return action key when the runtime action is 'need_next_generation'.
+    """Residual compatibility helper — called only from resolve_runtime_dispatch_plan().
 
-    mode is used as the compatibility display to select the concrete request builder.
+    Fires when runtime_action == 'need_next_generation' (issue-centric is ready but the
+    current generation is consumed or unset).  Uses mode as a compatibility display signal
+    to select the concrete request builder; this is NOT a primary routing API.
+
+    Callers outside resolve_runtime_dispatch_plan() should use that function instead.
 
     Returns one of:
-        "request_next_prompt"       - idle initial request path
+        "request_next_prompt"        - idle initial request path
         "request_prompt_from_report" - awaiting_user or next-phase report path
-        "completed"                 - session already finished
-        "no_action"                 - no matching condition
+        "completed"                  - session already finished
+        "no_action"                  - no matching condition
     """
     mode = str(state.get("mode", "idle")).strip()
     if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
@@ -1164,12 +1194,19 @@ def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
 
 
 def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
-    """Return action key for the fallback_legacy path (degraded / unavailable / invalidated).
+    """Safety fallback (legacy) helper — called only from resolve_runtime_dispatch_plan().
 
-    Full legacy mode-driven chain.  The Codex lifecycle branches (ready_for_codex,
-    codex_running, codex_done) are included so that this helper is self-contained;
-    callers that already handle those modes before reaching this point will never
-    receive those keys in practice.
+    Fires when runtime_action == 'fallback_legacy' (plan.is_fallback == True), i.e., when
+    the issue-centric runtime is degraded / unavailable / invalidated.  This is a
+    mode-driven chain retained for compatibility with the legacy request-centric path.
+
+    Do NOT call this directly from normal-path routing.  Normal-path states go through
+    resolve_runtime_dispatch_plan(), which is the primary routing authority and calls
+    this helper only when the safety fallback route is required.
+
+    The Codex lifecycle branches (ready_for_codex / codex_running / codex_done) are
+    included so that this helper is self-contained; callers that handle those modes
+    before reaching resolve_runtime_dispatch_plan() will never see those keys.
 
     Returns one of:
         "request_next_prompt"        - idle initial request path
@@ -1273,8 +1310,8 @@ def format_next_action_note(
             )
         return "ChatGPT 返答から次の prompt または停止判断を回収します。"
     if next_action == "request_prompt_from_report":
-        mode = str(state.get("mode", "")).strip()
-        if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
+        # Use is_awaiting_user_supplement() instead of a raw mode read.
+        if is_awaiting_user_supplement(state):
             return "次の ChatGPT request に添える補足入力を受けて再開します。"
         if route_choice is not None and route_choice.route_selected == "issue_centric":
             return (
