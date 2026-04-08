@@ -503,7 +503,11 @@ def present_bridge_status(
             "issue-centric で prepared Codex body を保持しています。次の bridge 手で codex_run dispatch を進めます。",
         )
 
-    # --- Codex lifecycle compatibility branch (view-based, no raw mode at this call site) ---
+    # --- Codex lifecycle compatibility branch (status display responsibility) ---
+    # This is one of two direct external callers of resolve_codex_lifecycle_view().
+    # present_bridge_status() retains the direct call because to_status_view() provides
+    # both label and detail in a single step.  All other callers outside this module
+    # should obtain lifecycle status via present_bridge_status(), not the raw view.
     # Classification is enclosed inside resolve_codex_lifecycle_view(); callers here
     # only see the view.  Full cutover target: reshape into action-view equivalents.
     lifecycle_view = resolve_codex_lifecycle_view(state)
@@ -1253,11 +1257,11 @@ def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
     this helper only when the safety fallback route is required.
 
     Codex lifecycle states (ready_for_codex, codex_running, codex_done) are NOT
-    handled here.  All callers guard lifecycle states via resolve_codex_lifecycle_view()
-    before reaching resolve_runtime_dispatch_plan():
+    handled here.  Callers guard lifecycle states before reaching resolve_runtime_dispatch_plan():
       - resolve_unified_next_action() handles them as a higher-priority branch
-      - bridge_orchestrator.run() dispatches via lifecycle_view.action
-      - summarize_run() in run_until_stop.py guards via resolve_codex_lifecycle_view()
+      - bridge_orchestrator.run() dispatches directly via resolve_codex_lifecycle_view()
+      - summarize_run() in run_until_stop.py guards via is_normal_path_state() +
+        has_pending_issue_centric_codex_dispatch() (no direct lifecycle view import)
     Passing a Codex lifecycle state here is a caller bug.
 
     Returns one of:

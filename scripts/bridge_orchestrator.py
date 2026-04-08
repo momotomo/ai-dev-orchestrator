@@ -236,7 +236,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print(f"{status.label}です。prepared Codex body を issue-centric codex_run dispatch へ進めます。")
         return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config)
 
-    # Codex lifecycle compatibility branch: mode-driven, NOT dispatch-plan-routed.
+    # Codex lifecycle compatibility branch (orchestrator dispatch responsibility).
+    # resolve_codex_lifecycle_view() is called here directly because the orchestrator
+    # needs THREE fields from the view: .action (routing), .is_blocked (blocked lifecycle
+    # guard), and .status_label (operator-facing print).  resolve_unified_next_action()
+    # alone cannot distinguish blocked lifecycle states (it falls through to the dispatch
+    # plan for those), so the lifecycle view remains here as the orchestrator's direct
+    # authority until lifecycle states are reshaped into action-view equivalents.
     # Classification is centralised in resolve_codex_lifecycle_view(); this block
     # dispatches on lifecycle_view.action instead of reading mode directly.
     # Full cutover target: replace with action=launch_codex_once / wait_for_codex_report /

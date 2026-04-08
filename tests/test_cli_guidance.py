@@ -1331,7 +1331,8 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
 
 class FallbackArmsCleanupTest(unittest.TestCase):
     """Lifecycle arms removed from resolve_fallback_legacy_transition(); summarize_run()
-    now guards lifecycle states via resolve_codex_lifecycle_view()."""
+    now guards lifecycle states via is_normal_path_state() + has_pending_issue_centric_codex_dispatch()
+    (no direct resolve_codex_lifecycle_view() call in run_until_stop.py)."""
 
     def _make_args(self) -> "argparse.Namespace":
         import run_until_stop
@@ -1369,12 +1370,13 @@ class FallbackArmsCleanupTest(unittest.TestCase):
         self.assertEqual(resolve_fallback_legacy_transition({"mode": "waiting_prompt_reply"}), "fetch_next_prompt")
         self.assertEqual(resolve_fallback_legacy_transition({"mode": "extended_wait"}), "fetch_next_prompt")
 
-    def test_summarize_run_lifecycle_state_uses_lifecycle_view_not_dispatch_plan(self) -> None:
-        """summarize_run() with a Codex lifecycle final_state reads from resolve_codex_lifecycle_view(),
-        not resolve_runtime_dispatch_plan(), so next_action reflects lifecycle_view.action."""
+    def test_summarize_run_lifecycle_state_uses_lifecycle_compat_path(self) -> None:
+        """summarize_run() with a Codex lifecycle final_state uses the lifecycle compat path,
+        not resolve_runtime_dispatch_plan().  next_action comes from resolve_unified_next_action();
+        runtime_action is 'codex_lifecycle_compat'; is_fallback is False."""
         import run_until_stop
         args = self._make_args()
-        # codex_done: lifecycle_view.action == "archive_codex_report"
+        # codex_done: resolve_unified_next_action returns "archive_codex_report"
         final_state: dict[str, object] = {"mode": "codex_done"}
         summary = run_until_stop.summarize_run(
             args=args,
@@ -1422,6 +1424,111 @@ class FallbackArmsCleanupTest(unittest.TestCase):
         )
         # Dispatch plan path: runtime_action is not "codex_lifecycle_compat"
         self.assertNotIn("codex_lifecycle_compat", summary)
+
+
+# ------------------------------------------------------------------
+# Lifecycle view scope tests (2026-04-08 phase7 lifecycle-view-scope)
+# Verifies that resolve_codex_lifecycle_view() callers are limited to
+# the status-display and orchestrator-dispatch scope.
+# ------------------------------------------------------------------
+
+class LifecycleViewScopeTest(unittest.TestCase):
+    """phase7 lifecycle-view-scope: residue narrowed to status / orchestrator.
+
+    resolve_codex_lifecycle_view() external call sites:
+      - present_bridge_status()  — STATUS DISPLAY responsibility (label + detail)
+      - bridge_orchestrator.run() — ORCHESTRATOR DISPATCH (action + is_blocked + label)
+    Internal call sites in _bridge_common.py:
+      - is_normal_path_state()  — routing gate
+      - resolve_unified_next_action() — action authority
+    run_until_stop.py no longer imports resolve_codex_lifecycle_view directly.
+    """
+
+    def test_run_until_stop_does_not_import_resolve_codex_lifecycle_view(self) -> None:
+        """run_until_stop.py no longer has a direct resolve_codex_lifecycle_view import.
+        summarize_run() now uses is_normal_path_state() + resolve_unified_next_action()
+        + present_bridge_status() instead.
+        """
+        import run_until_stop
+        self.assertFalse(
+            hasattr(run_until_stop, "resolve_codex_lifecycle_view"),
+            "resolve_codex_lifecycle_view should not be in run_until_stop namespace; "
+            "use is_normal_path_state() + resolve_unified_next_action() instead.",
+        )
+
+    def test_present_bridge_status_detail_matches_lifecycle_view_detail(self) -> None:
+        """present_bridge_status(state).detail == lifecycle_view.status_detail for all lifecycle
+        states (including blocked).  This validates that summarize_run() can use
+        present_bridge_status(final_state).detail as the stop note source.
+        """
+        from _bridge_common import present_bridge_status, resolve_codex_lifecycle_view
+
+        for mode, need_codex_run in (
+            ("ready_for_codex", True),
+            ("ready_for_codex", False),   # blocked lifecycle
+            ("codex_running", False),
+            ("codex_done", False),
+        ):
+            with self.subTest(mode=mode, need_codex_run=need_codex_run):
+                state: dict[str, object] = {"mode": mode, "need_codex_run": need_codex_run}
+                view = resolve_codex_lifecycle_view(state)
+                # Call without blocked/stale flags to get clean lifecycle status.
+                status = present_bridge_status(state)
+                self.assertIsNotNone(view)
+                assert view is not None
+                self.assertEqual(status.detail, view.status_detail)
+
+    def test_lifecycle_guard_equivalence(self) -> None:
+        """not is_normal_path_state(s) and not has_pending_issue_centric_codex_dispatch(s)
+        is equivalent to resolve_codex_lifecycle_view(s) is not None.
+        This is the guard logic used by summarize_run() to avoid a direct lifecycle view call.
+        """
+        from _bridge_common import (
+            has_pending_issue_centric_codex_dispatch,
+            is_normal_path_state,
+            resolve_codex_lifecycle_view,
+        )
+
+        lifecycle_cases: list[tuple[dict[str, object], bool]] = [
+            ({"mode": "ready_for_codex", "need_codex_run": True}, True),
+            ({"mode": "ready_for_codex", "need_codex_run": False}, True),  # blocked
+            ({"mode": "codex_running"}, True),
+            ({"mode": "codex_done"}, True),
+            ({"mode": "idle"}, False),
+            ({"mode": "awaiting_user"}, False),
+            ({"mode": "waiting_prompt_reply"}, False),
+        ]
+        for state, expected_lifecycle in lifecycle_cases:
+            with self.subTest(state=state):
+                via_view = resolve_codex_lifecycle_view(state) is not None
+                via_guard = (
+                    not is_normal_path_state(state)
+                    and not has_pending_issue_centric_codex_dispatch(state)
+                )
+                self.assertEqual(via_view, expected_lifecycle)
+                self.assertEqual(via_guard, via_view,
+                    "Guard equivalence failed: the two lifecycle detection paths must agree.")
+
+    def test_resolve_unified_next_action_covers_non_blocked_lifecycle(self) -> None:
+        """resolve_unified_next_action() returns the lifecycle action for non-blocked lifecycle
+        states.  summarize_run() relies on this for _summary_next_action.
+        """
+        from _bridge_common import resolve_codex_lifecycle_view, resolve_unified_next_action
+
+        non_blocked_cases = [
+            ({"mode": "ready_for_codex", "need_codex_run": True}, "launch_codex_once"),
+            ({"mode": "codex_running"}, "wait_for_codex_report"),
+            ({"mode": "codex_done"}, "archive_codex_report"),
+        ]
+        for state, expected_action in non_blocked_cases:
+            with self.subTest(state=state):
+                view = resolve_codex_lifecycle_view(state)
+                unified = resolve_unified_next_action(state)
+                self.assertIsNotNone(view)
+                assert view is not None
+                self.assertFalse(view.is_blocked)
+                self.assertEqual(unified, expected_action)
+                self.assertEqual(unified, view.action)
 
 
 if __name__ == "__main__":

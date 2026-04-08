@@ -541,11 +541,24 @@ for runtime-adjacent work.
 > `run_until_stop.py` deleted.  All 9 call sites replaced with direct
 > `resolve_unified_next_action()` calls.  `resolve_unified_next_action()` is now the single,
 > unambiguous authority for "next action?" across all callers — no local wrapper remains.
+>
+> **2026-04-08 (phase7 lifecycle-view-scope)**: `resolve_codex_lifecycle_view()` call site
+> audit performed.  `run_until_stop.py` (`summarize_run()`) was the only external caller
+> outside `_bridge_common.py` that was not strictly a status-display or orchestrator-dispatch
+> site.  It has been restructured to use `is_normal_path_state()` +
+> `has_pending_issue_centric_codex_dispatch()` for lifecycle detection,
+> `resolve_unified_next_action()` for action, and `present_bridge_status(final_state).detail`
+> for the stop note.  `resolve_codex_lifecycle_view` import removed from `run_until_stop.py`.
+> Remaining external callers: `bridge_orchestrator.run()` (orchestrator dispatch; needs
+> `is_blocked` + `status_label` which are not available through the action authority alone)
+> and `present_bridge_status()` (status display; wraps `to_status_view()`).  Internal callers
+> inside `_bridge_common.py`: `is_normal_path_state()` (routing gate) and
+> `resolve_unified_next_action()` (action authority).
 
 | Item | File | Classification | Status (2026-04-08) | Gate to remove |
 |---|---|---|---|---|
 | `resolve_unified_next_action()` | `_bridge_common.py` | **MAINTAIN** | Canonical "next action?" for all states; covers lifecycle + normal path | Remove together with lifecycle guards after action-view reshape |
-| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | **Sole** classification authority; lifecycle mode strings are internal to this helper only | After action-view reshape |
+| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | **Sole** classification authority; lifecycle mode strings are internal to this helper only; external callers narrowed to status (present_bridge_status) + orchestrator (bridge_orchestrator.run) | After action-view reshape |
 | `CodexLifecycleView` dataclass | `_bridge_common.py` | **MAINTAIN** | Carries action, status wording, is_blocked; used by display and dispatch layers | Same gate |
 | `describe_next_action()` | `run_until_stop.py` | **REMOVED** ✅ | (describe-next-action-inline) Deleted; all call sites replaced with direct `resolve_unified_next_action()` calls | ✅ done |
 | `is_codex_lifecycle_state()` outer guard in `describe_next_action()` | `run_until_stop.py` | **REMOVED** ✅ | (action-bridge) import removed | ✅ done |
@@ -559,9 +572,12 @@ for runtime-adjacent work.
 | `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **REMOVED** ✅ | (lifecycle-modes-inline) Deleted; mode strings inlined into `resolve_codex_lifecycle_view()` | ✅ done |
 
 **Next deletion priority (minimum safe unit when action-view reshape is ready):**
-1. `resolve_codex_lifecycle_view()` outer call in `bridge_orchestrator.run()` and `present_bridge_status()`
-   Gate: action-view equivalents wired in state machine (lifecycle states reshaped into normal-path actions).
-2. `describe_next_action()` in `run_until_stop.py` — ~~inline the single `resolve_unified_next_action()` call~~ **✅ Done (describe-next-action-inline phase)**
+1. `resolve_codex_lifecycle_view()` calls in `bridge_orchestrator.run()` and `present_bridge_status()`
+   Gate: action-view equivalents for Codex lifecycle states wired in the state machine.
+   `bridge_orchestrator.run()` needs `is_blocked` + `status_label` not available elsewhere;
+   `present_bridge_status()` is the status gate and must keep the lifecycle branch
+   until the lifecycle states are represented as normal-path action-view states.
+2. ~~`describe_next_action()` in `run_until_stop.py`~~ **✅ Done (describe-next-action-inline phase)**
 3. `resolve_fallback_legacy_transition()` itself — remaining arms cover only legacy request-centric modes;
    gate: legacy request-centric path (idle/awaiting_user/waiting_prompt_reply) fully replaced by dispatch plan.
 
@@ -571,6 +587,8 @@ for runtime-adjacent work.
 > `run_until_stop.py`: lifecycle `final_state` now produces `_summary_next_action` from
 > `lifecycle_view.action` and is never forwarded to `resolve_runtime_dispatch_plan()`.
 > `resolve_codex_lifecycle_view` import added to `run_until_stop.py`.
+> *(Phase7 lifecycle-view-scope note: this import has since been removed; the guard is now
+> expressed via `is_normal_path_state()` + `has_pending_issue_centric_codex_dispatch()`.)*
 
 ---
 
