@@ -481,14 +481,14 @@ def present_bridge_status(
 
     Routing priority (post full-cutover):
       1. Pre-dispatch-plan early-exit guards (error / blocked / Codex dispatch)
-      2. Codex lifecycle compatibility branch — mode-driven, not dispatch-plan-routed
+      2. Codex lifecycle compatibility branch — action-view based, not direct lifecycle view
       3. Awaiting user supplement sub-case — human input required before dispatch resumes
       4. Normal path — resolve_runtime_dispatch_plan() is the primary routing authority;
          route by plan.runtime_action / plan.next_action / plan.is_fallback
 
-    mode is NOT read directly in the normal path (step 4); dispatch plan / action-view
-    helpers are the subjects.  Codex lifecycle branch (step 2) retains mode reads as a
-    compatibility guard until those states are reshaped into action-view equivalents.
+    mode is NOT read directly at any point.  Lifecycle states (step 2) are classified via
+    is_blocked_codex_lifecycle_state() and resolve_unified_next_action(); resolve_codex_lifecycle_view()
+    is not called here.  Status labels and details for lifecycle states are expressed inline.
     """
     # --- Pre-dispatch-plan early-exit guards ---
     if bool(state.get("error")):
@@ -503,16 +503,25 @@ def present_bridge_status(
             "issue-centric で prepared Codex body を保持しています。次の bridge 手で codex_run dispatch を進めます。",
         )
 
-    # --- Codex lifecycle compatibility branch (status display responsibility) ---
-    # This is one of two direct external callers of resolve_codex_lifecycle_view().
-    # present_bridge_status() retains the direct call because to_status_view() provides
-    # both label and detail in a single step.  All other callers outside this module
-    # should obtain lifecycle status via present_bridge_status(), not the raw view.
-    # Classification is enclosed inside resolve_codex_lifecycle_view(); callers here
-    # only see the view.  Full cutover target: reshape into action-view equivalents.
-    lifecycle_view = resolve_codex_lifecycle_view(state)
-    if lifecycle_view is not None:
-        return lifecycle_view.to_status_view()
+    # --- Codex lifecycle compatibility branch (action-view based, no direct lifecycle view call) ---
+    # is_blocked_codex_lifecycle_state() covers the blocked lifecycle case (ready_for_codex
+    # without need_codex_run).  resolve_unified_next_action() covers non-blocked lifecycle
+    # states.  Status labels and details are expressed inline so resolve_codex_lifecycle_view()
+    # is not required at this call site.
+    # Full cutover target: once lifecycle states are action-view equivalents in the state
+    # machine, remove these arms and the is_blocked_codex_lifecycle_state() guard.
+    if is_blocked_codex_lifecycle_state(state):
+        return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
+
+    if not is_normal_path_state(state):
+        # Non-blocked lifecycle state: route by action key.
+        action = resolve_unified_next_action(state)
+        if action == "launch_codex_once":
+            return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
+        if action == "wait_for_codex_report":
+            return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
+        if action == "archive_codex_report":
+            return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
 
     # --- Awaiting user supplement sub-case ---
     # next_action for these states is "request_prompt_from_report", but status is "人確認待ち"
@@ -1198,8 +1207,15 @@ def resolve_codex_lifecycle_view(state: Mapping[str, Any]) -> "CodexLifecycleVie
 
     Returns None when the state is not in the Codex lifecycle compatibility branch.
 
-    Full cutover target: once action-view equivalents for the three Codex lifecycle
-    states are wired, this helper can be removed together with its call-sites.
+    External callers: NONE.  This helper is consumed only internally by:
+      - is_normal_path_state() (routing gate)
+      - is_blocked_codex_lifecycle_state() (blocked lifecycle flag)
+      - resolve_unified_next_action() (action authority)
+    All external code obtains lifecycle status via present_bridge_status() or
+    action keys via resolve_unified_next_action().
+
+    Full cutover target: once lifecycle states are action-view equivalents in the
+    state machine, this helper and its 3 internal callers can be removed together.
     """
     mode = str(state.get("mode", "")).strip()
     if mode not in {"ready_for_codex", "codex_running", "codex_done"}:
@@ -1277,7 +1293,7 @@ def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
     Codex lifecycle states (ready_for_codex, codex_running, codex_done) are NOT
     handled here.  Callers guard lifecycle states before reaching resolve_runtime_dispatch_plan():
       - resolve_unified_next_action() handles them as a higher-priority branch
-      - bridge_orchestrator.run() dispatches directly via resolve_codex_lifecycle_view()
+      - bridge_orchestrator.run() uses is_blocked_codex_lifecycle_state() + resolve_unified_next_action()
       - summarize_run() in run_until_stop.py guards via is_normal_path_state() +
         has_pending_issue_centric_codex_dispatch() (no direct lifecycle view import)
     Passing a Codex lifecycle state here is a caller bug.
@@ -1485,8 +1501,8 @@ def resolve_unified_next_action(state: Mapping[str, Any]) -> str:
     return the same vocabulary of action keys.
 
     Callers that need richer context (note, is_fallback, route_choice, is_blocked
-    wording) should call resolve_runtime_dispatch_plan() or
-    resolve_codex_lifecycle_view() directly.
+    wording) should call resolve_runtime_dispatch_plan() directly.
+    For lifecycle state status wording, use present_bridge_status().
     """
     if should_prioritize_unarchived_report(state):
         return "archive_codex_report"
