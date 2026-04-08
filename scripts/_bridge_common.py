@@ -503,9 +503,9 @@ def present_bridge_status(
             "issue-centric で prepared Codex body を保持しています。次の bridge 手で codex_run dispatch を進めます。",
         )
 
-    # --- Codex lifecycle compatibility branch (mode-driven, not dispatch-plan-routed) ---
-    # ready_for_codex / codex_running / codex_done are handled via the single
-    # lifecycle view helper.  Full cutover target: reshape into action-view equivalents.
+    # --- Codex lifecycle compatibility branch (view-based, no raw mode at this call site) ---
+    # Classification is enclosed inside resolve_codex_lifecycle_view(); callers here
+    # only see the view.  Full cutover target: reshape into action-view equivalents.
     lifecycle_view = resolve_codex_lifecycle_view(state)
     if lifecycle_view is not None:
         return lifecycle_view.to_status_view()
@@ -1141,22 +1141,11 @@ def is_fetch_late_completion_state(state: Mapping[str, Any]) -> bool:
 # These modes are handled by mode-driven compatibility guards rather than by
 # resolve_runtime_dispatch_plan().  All other states follow the normal path where
 # the dispatch plan is the primary routing authority.
+# Consumed only by resolve_codex_lifecycle_view(); no external callers should
+# read this directly.
 CODEX_LIFECYCLE_MODES: frozenset[str] = frozenset(
     {"ready_for_codex", "codex_running", "codex_done"}
 )
-
-
-def is_codex_lifecycle_state(state: Mapping[str, Any]) -> bool:
-    """Return True when the runtime is inside the Codex lifecycle compatibility branch.
-
-    These states are handled by mode-driven compatibility guards in
-    describe_next_action() and bridge_orchestrator.run().  They are NOT subject
-    to dispatch-plan routing.
-
-    Full cutover target: replace with action-view equivalents
-    (action=launch_codex_once / action=wait_for_codex_report / action=handle_codex_done).
-    """
-    return str(state.get("mode", "")).strip() in CODEX_LIFECYCLE_MODES
 
 
 def is_normal_path_state(state: Mapping[str, Any]) -> bool:
@@ -1175,7 +1164,8 @@ def is_normal_path_state(state: Mapping[str, Any]) -> bool:
     Uses resolve_codex_lifecycle_view() internally so it stays in sync with the
     single Codex lifecycle classification authority.
     """
-    # Delegate to the single Codex lifecycle authority instead of reading mode directly.
+    # Delegate to the single Codex lifecycle authority (CODEX_LIFECYCLE_MODES
+    # membership check is enclosed inside resolve_codex_lifecycle_view()).
     if resolve_codex_lifecycle_view(state) is not None:
         return False
     # Early-exit conditions that bypass the dispatch plan in describe_next_action().
@@ -1192,19 +1182,20 @@ def resolve_codex_lifecycle_view(state: Mapping[str, Any]) -> "CodexLifecycleVie
 
     This is the single authoritative place for Codex lifecycle compatibility
     classification.  Callers (describe_next_action, present_bridge_status,
-    bridge_orchestrator.run) should consult this instead of their own
-    is_codex_lifecycle_state() guard + per-mode branches.
+    bridge_orchestrator.run) should consult this instead of raw mode reads.
+    The CODEX_LIFECYCLE_MODES membership check is enclosed here; no caller
+    needs to call is_codex_lifecycle_state() or read CODEX_LIFECYCLE_MODES
+    directly.
 
-    Returns None when the state is not in the Codex lifecycle compatibility branch
-    (i.e., when is_codex_lifecycle_state() would return False).
+    Returns None when the state is not in the Codex lifecycle compatibility branch.
 
     Full cutover target: once action-view equivalents for the three Codex lifecycle
-    states are wired, this helper and CODEX_LIFECYCLE_MODES / is_codex_lifecycle_state
-    can be removed together with the caller call-sites.
+    states are wired, this helper and CODEX_LIFECYCLE_MODES can be removed together
+    with the caller call-sites.
     """
-    if not is_codex_lifecycle_state(state):
-        return None
     mode = str(state.get("mode", "")).strip()
+    if mode not in CODEX_LIFECYCLE_MODES:
+        return None
     need_codex_run = bool(state.get("need_codex_run"))
     if mode == "ready_for_codex" and need_codex_run:
         return CodexLifecycleView(
@@ -1276,8 +1267,11 @@ def resolve_fallback_legacy_transition(state: Mapping[str, Any]) -> str:
     this helper only when the safety fallback route is required.
 
     The Codex lifecycle branches (ready_for_codex / codex_running / codex_done) are
-    included so that this helper is self-contained; callers that handle those modes
-    before reaching resolve_runtime_dispatch_plan() will never see those keys.
+    included so that this helper is self-contained.  Through resolve_unified_next_action()
+    or bridge_orchestrator.run(), lifecycle states are handled by resolve_codex_lifecycle_view()
+    before dispatch-plan lookup, so these arms are unreachable in those paths.
+    Deletion gate: confirm no direct resolve_runtime_dispatch_plan() caller passes a
+    Codex lifecycle state; until then, keep arms as a defence for direct callers.
 
     Returns one of:
         "request_next_prompt"        - idle initial request path

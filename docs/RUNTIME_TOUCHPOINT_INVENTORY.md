@@ -522,26 +522,33 @@ for runtime-adjacent work.
 > `bridge_orchestrator.py` (was unused in code; only referenced in comments).
 > `is_normal_path_state()` now delegates to `resolve_codex_lifecycle_view()` instead
 > of reading `CODEX_LIFECYCLE_MODES` directly.
+>
+> **2026-04-08 (phase7 status-view-guard)**: `is_codex_lifecycle_state()` function deleted.
+> Its single remaining call site inside `resolve_codex_lifecycle_view()` is replaced with
+> an inline `mode not in CODEX_LIFECYCLE_MODES` check.  `present_bridge_status()` Codex
+> lifecycle outer guard (previously `is_codex_lifecycle_state()`) is now fully enclosed
+> inside `resolve_codex_lifecycle_view()` — the call site only sees the view.  Status/view
+> callers no longer hold any raw lifecycle classification dependency.
 
 | Item | File | Classification | Status (2026-04-08) | Gate to remove |
 |---|---|---|---|---|
-| `resolve_unified_next_action()` | `_bridge_common.py` | **MAINTAIN** | **NEW (action-bridge)** — canonical "next action?" for all states; covers lifecycle + normal path | Remove together with lifecycle guards after action-view reshape |
-| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | Single classification authority; called by `resolve_unified_next_action` and `present_bridge_status` | Same gate |
+| `resolve_unified_next_action()` | `_bridge_common.py` | **MAINTAIN** | Canonical "next action?" for all states; covers lifecycle + normal path | Remove together with lifecycle guards after action-view reshape |
+| `resolve_codex_lifecycle_view()` | `_bridge_common.py` | **MAINTAIN** | Single classification authority; CODEX_LIFECYCLE_MODES check now inlined here | Same gate |
 | `CodexLifecycleView` dataclass | `_bridge_common.py` | **MAINTAIN** | Carries action, status wording, is_blocked; used by display and dispatch layers | Same gate |
-| `describe_next_action()` | `run_until_stop.py` | **MAINTAIN** | Now a 1-line wrapper over `resolve_unified_next_action()`; exists for local call site convenience | Can be inlined when outer guard is fully removed |
-| `is_codex_lifecycle_state()` outer guard in `describe_next_action()` | `run_until_stop.py` | **REMOVED** | Import removed (was unused in code); logic lives in `resolve_codex_lifecycle_view()` | ✅ done |
-| `is_codex_lifecycle_state()` outer guard in `bridge_orchestrator.run()` | `bridge_orchestrator.py` | **REMOVED** | Import removed (was unused in code); logic lives in `resolve_codex_lifecycle_view()` | ✅ done |
-| `is_codex_lifecycle_state()` use in `present_bridge_status()` | `_bridge_common.py` | **REMOVED** | Now inside `resolve_codex_lifecycle_view()`; callers see only the view | ✅ done |
-| `is_codex_lifecycle_state()` function | `_bridge_common.py` | **MAINTAIN** | Only remaining caller is `resolve_codex_lifecycle_view()` itself; remove together | After action-view reshape |
-| `is_normal_path_state()` | `_bridge_common.py` | **MAINTAIN** | Now delegates to `resolve_codex_lifecycle_view()` instead of `CODEX_LIFECYCLE_MODES` directly; stays in sync with lifecycle authority | After action-view reshape |
-| `mode` reads inside Codex lifecycle blocks | various | **REMOVED** | **Centralised** into `resolve_codex_lifecycle_view()` | ✅ done |
+| `describe_next_action()` | `run_until_stop.py` | **MAINTAIN** | 1-line wrapper over `resolve_unified_next_action()`; exists for local call site convenience | Can be inlined independently |
+| `is_codex_lifecycle_state()` outer guard in `describe_next_action()` | `run_until_stop.py` | **REMOVED** ✅ | (action-bridge) import removed | ✅ done |
+| `is_codex_lifecycle_state()` outer guard in `bridge_orchestrator.run()` | `bridge_orchestrator.py` | **REMOVED** ✅ | (action-bridge) import removed | ✅ done |
+| `is_codex_lifecycle_state()` use in `present_bridge_status()` | `_bridge_common.py` | **REMOVED** ✅ | (centralize) Inside `resolve_codex_lifecycle_view()`; callers see only the view | ✅ done |
+| `is_codex_lifecycle_state()` function | `_bridge_common.py` | **REMOVED** ✅ | (status-view-guard) Deleted; check inlined into `resolve_codex_lifecycle_view()` | ✅ done |
+| `is_normal_path_state()` | `_bridge_common.py` | **MAINTAIN** | Delegates to `resolve_codex_lifecycle_view()`; stays in sync with lifecycle authority | After action-view reshape |
+| `mode` reads inside Codex lifecycle blocks | various | **REMOVED** ✅ | Centralised into `resolve_codex_lifecycle_view()` | ✅ done |
 | `should_include_codex_progress()` mode reads | `run_until_stop.py` | **MAINTAIN** | Codex lifecycle progress snapshot for operator wording; not yet centralised | After Codex lifecycle reshape |
 | `stale_codex_running_note()` and stale guard reads | `run_until_stop.py` | **MAINTAIN** | Stale runtime detection for codex_running must survive until action-view | After Codex lifecycle reshape |
-| `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **MAINTAIN** | Only remaining consumer is `is_codex_lifecycle_state()`; remove together | After action-view reshape |
+| `CODEX_LIFECYCLE_MODES` constant | `_bridge_common.py` | **MAINTAIN** | Only remaining consumer is `resolve_codex_lifecycle_view()` inline check; remove together | After action-view reshape |
 
 **Next deletion priority (minimum safe unit when action-view reshape is ready):**
-1. `is_codex_lifecycle_state()` + `CODEX_LIFECYCLE_MODES` + inline the check into `resolve_codex_lifecycle_view()`
-   Gate: `CODEX_LIFECYCLE_MODES` has no external callers other than `is_codex_lifecycle_state()`.
+1. `CODEX_LIFECYCLE_MODES` + inline the set literal into `resolve_codex_lifecycle_view()`
+   Gate: no external callers remain (previously `is_codex_lifecycle_state()`, now deleted).
 2. `resolve_codex_lifecycle_view()` outer call in `bridge_orchestrator.run()` and `present_bridge_status()`
    Gate: action-view equivalents wired in state machine.
 3. `describe_next_action()` in `run_until_stop.py` — inline the single `resolve_unified_next_action()` call
@@ -549,14 +556,14 @@ for runtime-adjacent work.
 
 **`resolve_fallback_legacy_transition()` Codex lifecycle arms readiness:**
 - These three arms (`ready_for_codex`, `codex_running`, `codex_done`) inside the fallback chain
-  are now **unreachable** whenever callers dispatch via `resolve_unified_next_action()` or
-  `resolve_codex_lifecycle_view()` first, because those callers handle lifecycle states before
-  reaching `resolve_runtime_dispatch_plan()`.
-- They are NOT yet deleted because `resolve_fallback_legacy_transition()` is also reachable
-  directly via the dispatch plan when `is_fallback=True`.  Until the Codex lifecycle states
-  are mapped to action-view equivalents in the state machine writer, those arms remain a
-  safety fallback for degraded paths.  Next safe step: verify no `is_fallback=True` path
-  can receive a Codex lifecycle state; if confirmed, remove those arms.
+  are now **unreachable** via `resolve_unified_next_action()` / `bridge_orchestrator.run()` paths.
+- They are NOT yet deleted because `resolve_runtime_dispatch_plan()` can be called directly with
+  `final_state` in summary builders (e.g. `run_until_stop.py` summarize_run()), and `final_state`
+  could be a Codex lifecycle state if the run stopped while in those modes.  The fallback arms
+  remain as a safety net for those direct callers.
+- **Deletion gate**: verify all direct `resolve_runtime_dispatch_plan()` callers guard Codex
+  lifecycle states via `resolve_codex_lifecycle_view()` before reaching the dispatch plan; then
+  the three arms inside `resolve_fallback_legacy_transition()` can be removed safely.
 
 ---
 
