@@ -217,6 +217,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "github_repository": "",
     "github_project_url": "",
     "execution_agent": "codex",
+    "github_copilot_bin": "gh",
     "codex_bin": "codex",
     "codex_model": "",
     "codex_sandbox": "",
@@ -2145,6 +2146,7 @@ def load_project_config() -> dict[str, Any]:
     _validate_worker_repo_markers(config)
     _validate_worker_repo_path(config)
     _validate_execution_agent(config)
+    _require_project_config_text(config, "github_copilot_bin")
     _require_project_config_text(config, "codex_bin")
     _require_project_config_text(config, "codex_model", allow_empty=True)
     _require_project_config_text(config, "codex_sandbox", allow_empty=True)
