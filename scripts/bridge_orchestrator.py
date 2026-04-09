@@ -11,7 +11,7 @@ import fetch_next_prompt
 import launch_codex_once
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
@@ -28,6 +28,11 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     project_config = project_config or load_project_config()
     browser_config = load_browser_config()
     parser = argparse.ArgumentParser(description="bridge/state.json を見て次の 1 手だけ進めます。")
+    parser.add_argument(
+        "--execution-agent",
+        default=str(project_config.get("execution_agent", "codex")),
+        help="実行エージェント。有効値: codex / github_copilot (default: project_config.json の execution_agent)",
+    )
     parser.add_argument(
         "--codex-bin",
         default=str(project_config.get("codex_bin", "codex")),
@@ -226,6 +231,21 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     project_config = load_project_config()
     args = parse_args(argv, project_config)
     print_project_config_warnings(project_config)
+
+    # Provider guard: resolve the active execution agent from CLI / config.
+    # Valid: "codex" (current path) / "github_copilot" (stub — not yet implemented).
+    # Invalid / missing values are caught by resolve_execution_agent().
+    execution_agent = resolve_execution_agent(
+        {"execution_agent": args.execution_agent} if args.execution_agent else project_config
+    )
+    if execution_agent == "github_copilot":
+        print(
+            "github_copilot execution: not yet implemented. "
+            "GitHub Copilot の実行パスは次のスライスで追加されます。"
+        )
+        return 0
+
+    # execution_agent == "codex" — fall through to existing Codex dispatch path.
     if should_prioritize_unarchived_report(state):
         status = present_bridge_status(state)
         print(f"{status.label}です。未退避 report を先に archive します。")

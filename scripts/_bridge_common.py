@@ -216,6 +216,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "worker_repo_markers": [],
     "github_repository": "",
     "github_project_url": "",
+    "execution_agent": "codex",
     "codex_bin": "codex",
     "codex_model": "",
     "codex_sandbox": "",
@@ -1877,6 +1878,56 @@ def _add_project_config_warning(config: dict[str, Any], message: str) -> None:
         warnings.append(message)
 
 
+_VALID_EXECUTION_AGENTS = {"codex", "github_copilot"}
+
+
+def _validate_execution_agent(config: dict[str, Any]) -> None:
+    raw = config.get("execution_agent", "")
+    if not isinstance(raw, str):
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `execution_agent` は文字列で指定してください。"
+        )
+    normalized = raw.strip()
+    if not normalized:
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `execution_agent` が空です。"
+            f" 有効な値: {sorted(_VALID_EXECUTION_AGENTS)}"
+        )
+    if normalized not in _VALID_EXECUTION_AGENTS:
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `execution_agent` に無効な値が指定されています: {normalized!r}。"
+            f" 有効な値: {sorted(_VALID_EXECUTION_AGENTS)}"
+        )
+    config["execution_agent"] = normalized
+
+
+def resolve_execution_agent(project_config: Mapping[str, Any]) -> str:
+    """Return the execution agent name from project_config.
+
+    Valid values: ``"codex"`` / ``"github_copilot"``.
+    Raises :class:`BridgeError` for missing, empty, or unrecognised values.
+    """
+    raw = project_config.get("execution_agent", "")
+    if not isinstance(raw, str):
+        raise BridgeError(
+            "`execution_agent` は文字列で指定してください。"
+            f" 有効な値: {sorted(_VALID_EXECUTION_AGENTS)}"
+        )
+    normalized = raw.strip()
+    if not normalized:
+        raise BridgeError(
+            "`execution_agent` が未設定です。"
+            f" 有効な値: {sorted(_VALID_EXECUTION_AGENTS)}"
+        )
+    if normalized not in _VALID_EXECUTION_AGENTS:
+        raise BridgeError(
+            f"`execution_agent` に無効な値が指定されています: {normalized!r}。"
+            f" 有効な値: {sorted(_VALID_EXECUTION_AGENTS)}"
+        )
+    return normalized
+
+
+
 def project_config_warnings(config: Mapping[str, Any]) -> list[str]:
     warnings = config.get(PROJECT_CONFIG_WARNING_KEY, [])
     if not isinstance(warnings, list):
@@ -2093,6 +2144,7 @@ def load_project_config() -> dict[str, Any]:
     _validate_worker_repo_marker_mode(config)
     _validate_worker_repo_markers(config)
     _validate_worker_repo_path(config)
+    _validate_execution_agent(config)
     _require_project_config_text(config, "codex_bin")
     _require_project_config_text(config, "codex_model", allow_empty=True)
     _require_project_config_text(config, "codex_sandbox", allow_empty=True)
