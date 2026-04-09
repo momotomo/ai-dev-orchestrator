@@ -68,6 +68,17 @@ def parse_args(
         default=str(project_config.get("github_copilot_bin", DEFAULT_GITHUB_COPILOT_BIN)),
         help="GitHub Copilot 実行コマンド (default: gh)",
     )
+    # agent_model (active-provider common field) provides the model for GitHub Copilot.
+    # gh copilot suggest does not yet have a stable --model flag, so the model value is
+    # stored in args.model and forwarded to custom wrapper scripts via --model argv when
+    # the bin is not the default "gh".  For the default "gh" path, the model is noted
+    # in the process environment description only (gh CLI does not accept --model today).
+    _agent_model = str(project_config.get("agent_model", "")).strip()
+    parser.add_argument(
+        "--model",
+        default=_agent_model,
+        help="GitHub Copilot 実行時の model 名 (agent_model から設定。未設定なら provider default)",
+    )
     parser.add_argument(
         "--timeout-seconds",
         type=int,
@@ -105,16 +116,30 @@ def build_github_copilot_command(args: argparse.Namespace) -> list[str]:
     Default: ``gh copilot suggest --target=shell -``
     The trailing ``-`` tells ``gh copilot suggest`` to read from stdin.
 
+    Model handling:
+    - For the default ``gh`` bin: ``gh copilot suggest`` does not yet expose a stable
+      ``--model`` flag, so the model stored in ``args.model`` is *not* appended to the
+      command.  Set ``github_copilot_bin`` to a custom wrapper script if you need to
+      forward the model value to a non-default CLI.
+    - For a custom wrapper bin: ``--model <value>`` is appended when ``args.model`` is
+      non-empty, so wrapper scripts receive the active agent_model value.
+
     Operators can replace ``github_copilot_bin`` with a wrapper script that
     accepts the same stdin contract and produces ``codex_report.md``.
     """
     bin_path = args.github_copilot_bin.strip()
+    model = str(getattr(args, "model", "")).strip()
     if bin_path == "gh":
         # Use the gh CLI Copilot extension in shell-suggestion mode.
         # Prompt is piped via stdin.
+        # Note: model is not forwarded here because gh copilot suggest has no stable
+        # --model flag yet.  Use a custom wrapper to forward the model when needed.
         return ["gh", "copilot", "suggest", "--target=shell", "-"]
-    # Custom wrapper: just call it with no extra args; prompt via stdin.
-    return [bin_path]
+    # Custom wrapper: call it with --model when agent_model is set; prompt via stdin.
+    cmd = [bin_path]
+    if model:
+        cmd.extend(["--model", model])
+    return cmd
 
 
 def mark_launch_failure(state: dict[str, object], message: str) -> None:

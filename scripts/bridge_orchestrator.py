@@ -40,6 +40,11 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
         help="launch_github_copilot.py に渡す GitHub Copilot CLI コマンド (default: gh)",
     )
     parser.add_argument(
+        "--agent-model",
+        default=str(project_config.get("agent_model", "")),
+        help="active execution agent に渡す model 名 (execution_agent に依らず共通。未設定なら provider default)",
+    )
+    parser.add_argument(
         "--codex-bin",
         default=str(project_config.get("codex_bin", "codex")),
         help="launch_codex_once.py に渡す Codex CLI コマンド",
@@ -47,7 +52,7 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument(
         "--codex-model",
         default=str(project_config.get("codex_model", "")),
-        help="launch_codex_once.py に渡す model 名",
+        help="launch_codex_once.py に渡す model 名 (--agent-model が空のときの fallback)",
     )
     parser.add_argument(
         "--codex-timeout-seconds",
@@ -87,8 +92,10 @@ def build_codex_launch_argv(args: argparse.Namespace) -> list[str]:
     ]
     if args.worker_repo_path:
         launch_argv.extend(["--worker-repo-path", args.worker_repo_path])
-    if args.codex_model:
-        launch_argv.extend(["--model", args.codex_model])
+    # agent_model (common active-provider field) takes priority over codex_model (legacy).
+    effective_model = str(getattr(args, "agent_model", "")).strip() or str(getattr(args, "codex_model", "")).strip()
+    if effective_model:
+        launch_argv.extend(["--model", effective_model])
     if args.dry_run_codex:
         launch_argv.append("--dry-run")
     return launch_argv
@@ -103,6 +110,10 @@ def build_github_copilot_launch_argv(args: argparse.Namespace) -> list[str]:
     ]
     if args.worker_repo_path:
         launch_argv.extend(["--worker-repo-path", args.worker_repo_path])
+    # Forward agent_model to launch_github_copilot.py for use in custom wrapper scripts.
+    agent_model = str(getattr(args, "agent_model", "")).strip()
+    if agent_model:
+        launch_argv.extend(["--model", agent_model])
     if args.dry_run_codex:
         launch_argv.append("--dry-run")
     return launch_argv
