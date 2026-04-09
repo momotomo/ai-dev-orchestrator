@@ -9,6 +9,7 @@ from pathlib import Path
 import archive_codex_report
 import fetch_next_prompt
 import launch_codex_once
+import launch_github_copilot
 import request_next_prompt
 import request_prompt_from_report
 from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
@@ -32,6 +33,11 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
         "--execution-agent",
         default=str(project_config.get("execution_agent", "codex")),
         help="実行エージェント。有効値: codex / github_copilot (default: project_config.json の execution_agent)",
+    )
+    parser.add_argument(
+        "--github-copilot-bin",
+        default=str(project_config.get("github_copilot_bin", "gh")),
+        help="launch_github_copilot.py に渡す GitHub Copilot CLI コマンド (default: gh)",
     )
     parser.add_argument(
         "--codex-bin",
@@ -83,6 +89,20 @@ def build_codex_launch_argv(args: argparse.Namespace) -> list[str]:
         launch_argv.extend(["--worker-repo-path", args.worker_repo_path])
     if args.codex_model:
         launch_argv.extend(["--model", args.codex_model])
+    if args.dry_run_codex:
+        launch_argv.append("--dry-run")
+    return launch_argv
+
+
+def build_github_copilot_launch_argv(args: argparse.Namespace) -> list[str]:
+    launch_argv = [
+        "--github-copilot-bin",
+        args.github_copilot_bin,
+        "--timeout-seconds",
+        str(args.codex_timeout_seconds),
+    ]
+    if args.worker_repo_path:
+        launch_argv.extend(["--worker-repo-path", args.worker_repo_path])
     if args.dry_run_codex:
         launch_argv.append("--dry-run")
     return launch_argv
@@ -232,20 +252,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     args = parse_args(argv, project_config)
     print_project_config_warnings(project_config)
 
-    # Provider guard: resolve the active execution agent from CLI / config.
-    # Valid: "codex" (current path) / "github_copilot" (stub — not yet implemented).
-    # Invalid / missing values are caught by resolve_execution_agent().
+    # Resolve the active execution agent from CLI arg / config.
+    # Valid values: "codex" | "github_copilot".
+    # Invalid / missing values raise BridgeError via resolve_execution_agent().
     execution_agent = resolve_execution_agent(
         {"execution_agent": args.execution_agent} if args.execution_agent else project_config
     )
-    if execution_agent == "github_copilot":
-        print(
-            "github_copilot execution: not yet implemented. "
-            "GitHub Copilot の実行パスは次のスライスで追加されます。"
-        )
-        return 0
-
-    # execution_agent == "codex" — fall through to existing Codex dispatch path.
     if should_prioritize_unarchived_report(state):
         status = present_bridge_status(state)
         print(f"{status.label}です。未退避 report を先に archive します。")
@@ -278,6 +290,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # Codex lifecycle dispatch arms (named by action key, not by mode).
     if action == "launch_codex_once":
         # Codex lifecycle: ready_for_codex + need_codex_run=True
+        # Route to the provider-specific launch script.
+        if execution_agent == "github_copilot":
+            print(f"{status.label}です。bridge が GitHub Copilot を 1 回起動します。")
+            return launch_github_copilot.run(dict(state), build_github_copilot_launch_argv(args))
+        # Default: execution_agent == "codex"
         print(f"{status.label}です。bridge が Codex worker を 1 回起動します。")
         return launch_codex_once.run(dict(state), build_codex_launch_argv(args))
 
