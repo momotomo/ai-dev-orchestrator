@@ -513,19 +513,27 @@ Likely next candidates:
   - Covers Plan A BODY base64 transport, issue-centric dispatcher, full dispatch-plan cutover,
     post-cutover streamline, and lifecycle cleanup.  `resolve_codex_lifecycle_view()` external
     callers: ZERO.  Legacy surfaces classified in the Legacy Route Inventory below.
-- current open ready child:
+- completed ready children (#26 – #29):
   - [#26 Ready: add issue-aware provenance to report-based continuation](https://github.com/momotomo/ai-dev-orchestrator/issues/26)
-  - `build_report_request_source()` extended so `prepared_request_source` / `pending_request_source`
+    — `build_report_request_source()` extended; `prepared_request_source` / `pending_request_source`
     carries `:issue:{number}` when `last_issue_centric_principal_issue` is present in state.
-    Does not change same-chat, late-completion, or fetch-path semantics.
-- likely next ready slices after `#26`:
-  - activate Plan A (`BODY` base64 transport) as the primary fetch path once ChatGPT-side
-    cooperation is confirmed (parser/transport side is implemented; fetch path still reads
-    visible DOM text today)
-  - one later ready issue that maps late-completion and project-page send signals into the
-    future issue-centric model
+  - [#27 Ready: activate Plan A BODY base64 transport as the primary fetch path](https://github.com/momotomo/ai-dev-orchestrator/issues/27)
+    — Plan A is now the primary fetch transport; visible DOM text is the safety fallback.
+  - [#28 Ready: map late-completion and handoff delivery signals into the issue-centric runtime view](https://github.com/momotomo/ai-dev-orchestrator/issues/28)
+    — `submitted_unconfirmed`, `extended_wait`, `await_late_completion` now surface `target_issue`
+    in status messages and operator notes when `issue_centric_ready` is active.
+  - [#29 Ready: align handoff and remaining human-facing delivery-pending presentation with the issue-centric runtime view](https://github.com/momotomo/ai-dev-orchestrator/issues/29)
+    — `present_bridge_handoff()` title and error-path note in `run_until_stop.py` enriched.
+    `ic_delivery_pending_detail()` shared helper added as the single assembly point.
+- current open ready child:
+  - [#30 Ready: close out and synchronize the runtime touchpoint inventory after landed slices #20 #22 #25 #26 #27 #28 #29](https://github.com/momotomo/ai-dev-orchestrator/issues/30)
+    — docs / GitHub / Project sync for the inventory theme; #10 closeout decision.
+- likely next ready slices after #30:
+  - deeper behavioral mapping for delivery-pending signals (retry cadence, issue-scoped send tracking)
+  - Codex lifecycle branch reshape into action-view equivalents (removes mode-driven Codex routing)
+  - any follow-on inventory or tooling slice that emerges from the #30 closeout review
 
-Until those slices are promoted, this document is the current boundary record
+Until the #30 closeout and next implementation slices are promoted, this document is the current boundary record
 for runtime-adjacent work.
 
 ## Legacy Route Inventory (Post-Cutover, 2026-04-09)
