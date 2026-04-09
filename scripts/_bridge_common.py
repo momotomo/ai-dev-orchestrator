@@ -554,32 +554,24 @@ def present_bridge_status(
             )
         pending_request_signal = str(state.get("pending_request_signal", "")).strip()
         if pending_request_signal == "submitted_unconfirmed":
-            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
-            if _ic_pending and _ic_issue:
-                return BridgeStatusView(
-                    "ChatGPT返答待ち",
-                    f"issue-centric delivery pending ({_ic_issue}): handoff 送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
-                )
             return BridgeStatusView(
                 "ChatGPT返答待ち",
-                "新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+                ic_delivery_pending_detail(
+                    "handoff 送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+                    state,
+                    legacy_base_text="新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+                ),
             )
         if is_fetch_extended_wait_state(state):
-            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
-            if _ic_pending and _ic_issue:
-                return BridgeStatusView(
-                    "ChatGPT返答待ち",
-                    f"issue-centric delivery pending ({_ic_issue}): 返答が重いため、追加待機しながら回収を続けています。",
-                )
-            return BridgeStatusView("ChatGPT返答待ち", "返答が重いため、追加待機しながら回収を続けています。")
+            return BridgeStatusView(
+                "ChatGPT返答待ち",
+                ic_delivery_pending_detail("返答が重いため、追加待機しながら回収を続けています。", state),
+            )
         if is_fetch_late_completion_state(state):
-            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
-            if _ic_pending and _ic_issue:
-                return BridgeStatusView(
-                    "ChatGPT返答待ち",
-                    f"issue-centric delivery pending ({_ic_issue}): 返答が書き切られるまで監視し、その後で回収します。",
-                )
-            return BridgeStatusView("ChatGPT返答待ち", "返答が書き切られるまで監視し、その後で回収します。")
+            return BridgeStatusView(
+                "ChatGPT返答待ち",
+                ic_delivery_pending_detail("返答が書き切られるまで監視し、その後で回収します。", state),
+            )
         return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
 
     if plan.next_action == "request_next_prompt":
@@ -1215,6 +1207,37 @@ def is_issue_centric_delivery_pending_state(
 
     target_issue = str(runtime_mode.target_issue or "").strip()
     return True, target_issue
+
+
+def ic_delivery_pending_detail(
+    ic_base_text: str,
+    state: Mapping[str, Any],
+    *,
+    legacy_base_text: str | None = None,
+) -> str:
+    """Return a delivery-pending aware detail string for human-facing views.
+
+    Single assembly point for the IC delivery-pending detail prefix across all
+    human-facing surfaces.  When is_issue_centric_delivery_pending_state() reports
+    an active IC delivery-pending substate, returns:
+
+        f"issue-centric delivery pending ({target_issue}): {ic_base_text}"
+
+    When delivery-pending is not active or the runtime is on the legacy/fallback path:
+    - returns ``legacy_base_text`` when explicitly provided (preserves legacy wording
+      that differs from ``ic_base_text``),
+    - otherwise returns ``ic_base_text`` unchanged.
+
+    This keeps the IC-aware prefix in one place so present_bridge_status(),
+    suggested_next_note(), and the error-path note in run_until_stop all produce
+    consistent, issue-targeted wording without repeating the inline pattern.
+    """
+    _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(state)
+    if _ic_pending and _ic_issue:
+        return f"issue-centric delivery pending ({_ic_issue}): {ic_base_text}"
+    if legacy_base_text is not None:
+        return legacy_base_text
+    return ic_base_text
 
 
 def is_normal_path_state(state: Mapping[str, Any]) -> bool:

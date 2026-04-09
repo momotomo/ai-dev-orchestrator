@@ -20,9 +20,9 @@ from _bridge_common import (
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
     is_awaiting_user_supplement,
+    ic_delivery_pending_detail,
     is_fetch_extended_wait_state,
     is_fetch_late_completion_state,
-    is_issue_centric_delivery_pending_state,
     is_normal_path_state,
     latest_codex_progress_snapshot,
     load_browser_config,
@@ -429,16 +429,10 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         if route_note and "reply 待ち" in route_note:
             return route_note.strip()
         if pending_request_signal == "submitted_unconfirmed":
-            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(final_state)
-            if _ic_pending and _ic_issue:
-                return (
-                    f"issue-centric delivery pending ({_ic_issue}): "
-                    "新しいチャットへの送信は通った可能性が高いため、"
-                    "同じ handoff は再送せず reply を待ってから再実行してください。"
-                )
-            return (
+            return ic_delivery_pending_detail(
                 "新しいチャットへの送信は通った可能性が高いため、"
-                "同じ handoff は再送せず reply を待ってから再実行してください。"
+                "同じ handoff は再送せず reply を待ってから再実行してください。",
+                final_state,
             )
         return "CHATGPT_PROMPT_REPLY が同じ current tab に出たら再実行してください。"
     if action == "dispatch_issue_centric_codex_run":
@@ -614,18 +608,11 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 f" handoff_log: {pending_handoff_log}"
             )
         elif str(final_state.get("pending_request_signal", "")).strip() == "submitted_unconfirmed":
-            _ic_pending, _ic_issue = is_issue_centric_delivery_pending_state(final_state)
-            if _ic_pending and _ic_issue:
-                note = (
-                    f"issue-centric delivery pending ({_ic_issue}): "
-                    "新しいチャットへの送信は通った可能性が高いため、"
-                    " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
-                )
-            else:
-                note = (
-                    "新しいチャットへの送信は通った可能性が高いため、"
-                    " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
-                )
+            note = ic_delivery_pending_detail(
+                "新しいチャットへの送信は通った可能性が高いため、"
+                " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。",
+                final_state,
+            )
         else:
             note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"
         if error_message:
