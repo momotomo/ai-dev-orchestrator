@@ -23,6 +23,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from _bridge_common import (  # noqa: E402
+    ic_delivery_pending_detail,
     is_issue_centric_delivery_pending_state,
     present_bridge_status,
 )
@@ -243,7 +244,7 @@ class IcentricDeliverySuggestedNoteTests(unittest.TestCase):
             "pending_request_signal": "submitted_unconfirmed",
         }
         with patch(
-            "run_until_stop.is_issue_centric_delivery_pending_state",
+            "_bridge_common.is_issue_centric_delivery_pending_state",
             return_value=(True, "#28"),
         ):
             note = run_until_stop.suggested_next_note(state)
@@ -259,7 +260,7 @@ class IcentricDeliverySuggestedNoteTests(unittest.TestCase):
             "pending_request_signal": "submitted_unconfirmed",
         }
         with patch(
-            "run_until_stop.is_issue_centric_delivery_pending_state",
+            "_bridge_common.is_issue_centric_delivery_pending_state",
             return_value=(False, ""),
         ):
             note = run_until_stop.suggested_next_note(state)
@@ -351,7 +352,7 @@ class IcentricErrorPathNoteEnrichmentTests(unittest.TestCase):
             "error_message": "",
         }
         with patch(
-            "run_until_stop.is_issue_centric_delivery_pending_state",
+            "_bridge_common.is_issue_centric_delivery_pending_state",
             return_value=(True, "#29"),
         ):
             result = run_until_stop.blocked_next_guidance(state)
@@ -372,7 +373,7 @@ class IcentricErrorPathNoteEnrichmentTests(unittest.TestCase):
             "error_message": "",
         }
         with patch(
-            "run_until_stop.is_issue_centric_delivery_pending_state",
+            "_bridge_common.is_issue_centric_delivery_pending_state",
             return_value=(False, ""),
         ):
             result = run_until_stop.blocked_next_guidance(state)
@@ -381,6 +382,82 @@ class IcentricErrorPathNoteEnrichmentTests(unittest.TestCase):
         _step, note = result
         self.assertIn("reply 回収側", note)
         self.assertNotIn("delivery pending", note)
+
+
+class IcDeliveryPendingDetailHelperTests(unittest.TestCase):
+    """Unit tests for the ic_delivery_pending_detail() shared helper."""
+
+    def test_ic_ready_prefixes_with_issue(self) -> None:
+        """IC ready → detail is prefixed with 'issue-centric delivery pending ({issue}): '."""
+        state = {"mode": "waiting_prompt_reply", "pending_request_signal": "submitted_unconfirmed"}
+        ic_mode = make_ic_ready_mode("#29")
+        with patch("_bridge_common.resolve_issue_centric_runtime_mode", return_value=ic_mode):
+            result = ic_delivery_pending_detail("base text here", state)
+        self.assertEqual(result, "issue-centric delivery pending (#29): base text here")
+
+    def test_legacy_path_returns_ic_base_unchanged(self) -> None:
+        """Legacy path (no IC snapshot) → ic_base_text returned unchanged."""
+        state = {"mode": "extended_wait"}
+        with patch("_bridge_common.resolve_issue_centric_runtime_mode", return_value=None):
+            result = ic_delivery_pending_detail("base text legacy", state)
+        self.assertEqual(result, "base text legacy")
+
+    def test_legacy_path_returns_legacy_base_when_provided(self) -> None:
+        """Legacy path + legacy_base_text provided → legacy_base_text returned."""
+        state = {"pending_request_signal": "submitted_unconfirmed"}
+        with patch("_bridge_common.resolve_issue_centric_runtime_mode", return_value=None):
+            result = ic_delivery_pending_detail(
+                "ic text",
+                state,
+                legacy_base_text="legacy text",
+            )
+        self.assertEqual(result, "legacy text")
+
+    def test_ic_ready_ignores_legacy_base_text(self) -> None:
+        """IC ready + legacy_base_text provided → prefixed ic_base_text returned (legacy ignored)."""
+        state = {"pending_request_signal": "submitted_unconfirmed"}
+        ic_mode = make_ic_ready_mode("#29")
+        with patch("_bridge_common.resolve_issue_centric_runtime_mode", return_value=ic_mode):
+            result = ic_delivery_pending_detail(
+                "ic text",
+                state,
+                legacy_base_text="legacy text",
+            )
+        self.assertEqual(result, "issue-centric delivery pending (#29): ic text")
+
+    def test_no_delivery_pending_signal_no_enrichment(self) -> None:
+        """No delivery-pending substate active → base text unchanged even if IC is ready."""
+        state = {"mode": "waiting_prompt_reply", "pending_request_signal": ""}
+        ic_mode = make_ic_ready_mode("#29")
+        with patch("_bridge_common.resolve_issue_centric_runtime_mode", return_value=ic_mode):
+            result = ic_delivery_pending_detail("no pending text", state)
+        self.assertEqual(result, "no pending text")
+
+    def test_multi_surface_reuse_status_and_note(
+        self,
+    ) -> None:
+        """Verify shared helper is used by both present_bridge_status and suggested_next_note.
+
+        When is_issue_centric_delivery_pending_state reports IC delivery pending,
+        both surfaces include the target issue in their output, confirming the
+        shared ic_delivery_pending_detail helper path is active in both code paths.
+        """
+        import run_until_stop
+
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_signal": "submitted_unconfirmed",
+        }
+        with patch(
+            "_bridge_common.is_issue_centric_delivery_pending_state",
+            return_value=(True, "#99"),
+        ):
+            status_view = present_bridge_status(state)
+            note = run_until_stop.suggested_next_note(state)
+        self.assertIn("#99", status_view.detail)
+        self.assertIn("delivery pending", status_view.detail)
+        self.assertIn("#99", note)
+        self.assertIn("delivery pending", note)
 
 
 if __name__ == "__main__":
