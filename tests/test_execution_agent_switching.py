@@ -81,6 +81,7 @@ def _make_minimal_project_config(execution_agent: str = "codex") -> dict[str, ob
         "github_project_review_state": "review",
         "github_project_done_state": "done",
         "execution_agent": execution_agent,
+        "agent_model": "",
         "github_copilot_bin": "gh",
         "codex_bin": "codex",
         "codex_model": "",
@@ -294,6 +295,171 @@ class LaunchGithubCopilotTests(unittest.TestCase):
                     ],
                 )
         self.assertEqual(result, 0)
+
+
+# ---------------------------------------------------------------------------
+# agent_model configuration tests
+# ---------------------------------------------------------------------------
+
+
+class AgentModelConfigTests(unittest.TestCase):
+    """Tests that agent_model is wired correctly into each provider's launch argv."""
+
+    def _config(self, execution_agent: str = "codex", agent_model: str = "", codex_model: str = "") -> dict[str, object]:
+        base = _make_minimal_project_config(execution_agent)
+        base["agent_model"] = agent_model
+        base["codex_model"] = codex_model
+        return base
+
+    # ------------------------------------------------------------------
+    # bridge_orchestrator.build_codex_launch_argv
+    # ------------------------------------------------------------------
+
+    def test_codex_agent_model_appears_in_codex_argv(self) -> None:
+        config = self._config("codex", agent_model="o4-mini")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "codex"], config)
+        argv = bridge_orchestrator.build_codex_launch_argv(args)
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "o4-mini")
+
+    def test_codex_agent_model_empty_falls_back_to_codex_model(self) -> None:
+        config = self._config("codex", agent_model="", codex_model="codex-legacy")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "codex"], config)
+        argv = bridge_orchestrator.build_codex_launch_argv(args)
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "codex-legacy")
+
+    def test_codex_both_empty_no_model_in_argv(self) -> None:
+        config = self._config("codex", agent_model="", codex_model="")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "codex"], config)
+        argv = bridge_orchestrator.build_codex_launch_argv(args)
+        self.assertNotIn("--model", argv)
+
+    def test_codex_agent_model_takes_priority_over_codex_model(self) -> None:
+        config = self._config("codex", agent_model="new-model", codex_model="old-model")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "codex"], config)
+        argv = bridge_orchestrator.build_codex_launch_argv(args)
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "new-model")
+
+    # ------------------------------------------------------------------
+    # bridge_orchestrator.build_github_copilot_launch_argv
+    # ------------------------------------------------------------------
+
+    def test_copilot_agent_model_forwarded_to_copilot_argv(self) -> None:
+        config = self._config("github_copilot", agent_model="gpt-4o")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "github_copilot"], config)
+        argv = bridge_orchestrator.build_github_copilot_launch_argv(args)
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-4o")
+
+    def test_copilot_agent_model_empty_no_model_in_argv(self) -> None:
+        config = self._config("github_copilot", agent_model="")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "github_copilot"], config)
+        argv = bridge_orchestrator.build_github_copilot_launch_argv(args)
+        self.assertNotIn("--model", argv)
+
+    # ------------------------------------------------------------------
+    # Non-active provider does not receive agent_model
+    # ------------------------------------------------------------------
+
+    def test_inactive_codex_does_not_get_copilot_model(self) -> None:
+        # When provider is github_copilot, codex launch argv is NOT called.
+        # Verify build_codex_launch_argv still works when agent is codex with empty model.
+        config = self._config("codex", agent_model="")
+        with patch("bridge_orchestrator.load_project_config", return_value=config):
+            args = bridge_orchestrator.parse_args(["--execution-agent", "codex"], config)
+        argv = bridge_orchestrator.build_github_copilot_launch_argv(args)
+        self.assertNotIn("--model", argv)
+
+    # ------------------------------------------------------------------
+    # launch_codex_once.parse_args: agent_model priority logic
+    # ------------------------------------------------------------------
+
+    def test_launch_codex_once_agent_model_priority(self) -> None:
+        import launch_codex_once
+        config = {"agent_model": "priority-model", "codex_model": "legacy-model",
+                  "codex_bin": "codex", "codex_timeout_seconds": 7200,
+                  "worker_repo_path": "/tmp", "codex_sandbox": ""}
+        with patch("launch_codex_once.load_project_config", return_value=config):
+            args = launch_codex_once.parse_args([], config)
+        self.assertEqual(args.model, "priority-model")
+
+    def test_launch_codex_once_agent_model_empty_uses_codex_model(self) -> None:
+        import launch_codex_once
+        config = {"agent_model": "", "codex_model": "fallback-model",
+                  "codex_bin": "codex", "codex_timeout_seconds": 7200,
+                  "worker_repo_path": "/tmp", "codex_sandbox": ""}
+        with patch("launch_codex_once.load_project_config", return_value=config):
+            args = launch_codex_once.parse_args([], config)
+        self.assertEqual(args.model, "fallback-model")
+
+    def test_launch_codex_once_both_empty_model_is_empty(self) -> None:
+        import launch_codex_once
+        config = {"agent_model": "", "codex_model": "",
+                  "codex_bin": "codex", "codex_timeout_seconds": 7200,
+                  "worker_repo_path": "/tmp", "codex_sandbox": ""}
+        with patch("launch_codex_once.load_project_config", return_value=config):
+            args = launch_codex_once.parse_args([], config)
+        self.assertEqual(args.model, "")
+
+    # ------------------------------------------------------------------
+    # launch_github_copilot.parse_args / build_github_copilot_command
+    # ------------------------------------------------------------------
+
+    def test_launch_copilot_parse_args_sets_model_from_agent_model(self) -> None:
+        config = {"agent_model": "gpt-4o", "github_copilot_bin": "gh",
+                  "codex_timeout_seconds": 7200, "worker_repo_path": "/tmp",
+                  "bridge_runtime_root": "."}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args([], config)
+        self.assertEqual(args.model, "gpt-4o")
+
+    def test_launch_copilot_parse_args_model_empty_when_agent_model_unset(self) -> None:
+        config = {"agent_model": "", "github_copilot_bin": "gh",
+                  "codex_timeout_seconds": 7200, "worker_repo_path": "/tmp",
+                  "bridge_runtime_root": "."}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args([], config)
+        self.assertEqual(args.model, "")
+
+    def test_launch_copilot_build_command_default_gh_no_model_flag(self) -> None:
+        """Default gh bin should never include --model (gh copilot suggest has no such flag)."""
+        config = {"agent_model": "gpt-4o", "github_copilot_bin": "gh",
+                  "codex_timeout_seconds": 7200, "worker_repo_path": "/tmp",
+                  "bridge_runtime_root": "."}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args([], config)
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertNotIn("--model", cmd)
+
+    def test_launch_copilot_build_command_custom_bin_with_model(self) -> None:
+        """Custom wrapper bin should receive --model when agent_model is set."""
+        config = {"agent_model": "gpt-4o", "github_copilot_bin": "/usr/local/bin/my-gh",
+                  "codex_timeout_seconds": 7200, "worker_repo_path": "/tmp",
+                  "bridge_runtime_root": "."}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args([], config)
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertEqual(cmd[0], "/usr/local/bin/my-gh")
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "gpt-4o")
+
+    def test_launch_copilot_build_command_custom_bin_empty_model_no_flag(self) -> None:
+        """Custom wrapper bin should NOT get --model when agent_model is empty."""
+        config = {"agent_model": "", "github_copilot_bin": "/usr/local/bin/my-gh",
+                  "codex_timeout_seconds": 7200, "worker_repo_path": "/tmp",
+                  "bridge_runtime_root": "."}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args([], config)
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertNotIn("--model", cmd)
 
 
 if __name__ == "__main__":
