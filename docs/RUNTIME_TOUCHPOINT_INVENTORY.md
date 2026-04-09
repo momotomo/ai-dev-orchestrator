@@ -525,16 +525,17 @@ Likely next candidates:
   - [#29 Ready: align handoff and remaining human-facing delivery-pending presentation with the issue-centric runtime view](https://github.com/momotomo/ai-dev-orchestrator/issues/29)
     — `present_bridge_handoff()` title and error-path note in `run_until_stop.py` enriched.
     `ic_delivery_pending_detail()` shared helper added as the single assembly point.
-- current open ready child:
+- completed ready child (#30):
   - [#30 Ready: close out and synchronize the runtime touchpoint inventory after landed slices #20 #22 #25 #26 #27 #28 #29](https://github.com/momotomo/ai-dev-orchestrator/issues/30)
-    — docs / GitHub / Project sync for the inventory theme; #10 closeout decision.
-- likely next ready slices after #30:
+    — docs / GitHub / Project sync for the inventory theme; #10 closed upon completion.
+- current open ready child: none (inventory theme complete; #10 closed)
+- likely future slices (not yet cut; no current open ready child):
   - deeper behavioral mapping for delivery-pending signals (retry cadence, issue-scoped send tracking)
   - Codex lifecycle branch reshape into action-view equivalents (removes mode-driven Codex routing)
-  - any follow-on inventory or tooling slice that emerges from the #30 closeout review
+  - these can be cut as new bounded ready issues under a new or existing Epic when ready
 
-Until the #30 closeout and next implementation slices are promoted, this document is the current boundary record
-for runtime-adjacent work.
+The #30 closeout is complete. `#10` (runtime touchpoint inventory theme) is closed. This document is the
+final boundary record for the runtime touchpoint inventory theme.
 
 ## Legacy Route Inventory (Post-Cutover, 2026-04-09)
 
