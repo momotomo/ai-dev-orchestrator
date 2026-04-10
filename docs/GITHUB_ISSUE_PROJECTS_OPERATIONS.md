@@ -261,6 +261,68 @@ Keep the backlog readable with these minimum rules:
 - keep GitHub Projects as a list or grouping surface; the issue body and
   `state:*` label remain the authoritative operating record
 
+## Duplicate Merge and Follow-Up Cutting Rules
+
+### When to merge duplicate planned issues
+
+Two `planned` issues are duplicates when all of the following apply:
+
+- they describe the same bounded work or theme, even if wording differs
+- one could be closed without losing any candidate slice or open question
+  that the other does not already hold
+- keeping both alive would force an unnecessary choice between them at
+  promotion time
+
+When merging:
+
+1. pick the surviving issue that has the clearer scope, title, and context
+2. move any candidate slices or open questions from the closing issue into
+   the surviving issue before closing
+3. close the duplicate with a short note pointing to the surviving issue
+4. update any parent Epic or `planned` cross-references accordingly
+
+Do **not** merge issues that cover meaningfully different future slices even
+if they share the same Epic track.
+Keep them separate and let the `planned` label carry the distinction.
+
+### When to cut a follow-up issue
+
+Cut a follow-up issue when at least one of the following applies:
+
+- review finds unresolved work that does not fit cleanly inside the
+  acceptance criteria of the completed issue
+- the completed issue would need its scope silently stretched to absorb
+  the work
+- the work is real and durable but was deliberately out of scope for this
+  phase and should land in a later phase
+
+Do **not** cut a follow-up when the work can be absorbed honestly into an
+existing `planned` issue without distorting it.
+Add a note to the relevant `planned` issue instead.
+
+When you do cut a follow-up:
+
+- write it as `planned` if it still needs decomposition before it becomes
+  a direct Codex target
+- write it as `ready` only if it is already bounded and passes the ready gate
+- link it back to the same Epic or parent `planned` issue as the completed issue
+- cut at most one follow-up per review pass unless multiple independent themes
+  each need their own separate tracking record
+
+### Zero-ready promotion principle
+
+When open `state:ready` reaches zero:
+
+- do not force any `planned` issue into `ready` immediately
+- review the backlog with one question: what is the single most bounded,
+  actionable next slice?
+- promote only that one slice to `ready`
+- leave all other `planned` issues as `planned` even if they are nearly ready
+- if nothing is clearly ready to promote right now, zero open `ready` is a
+  valid steady state until the next review pass
+
+`ready` is a scarce execution slot, not a quota to keep filled at all times.
+
 ## GitHub Projects Usage
 
 If you use GitHub Projects, keep the setup minimal.
