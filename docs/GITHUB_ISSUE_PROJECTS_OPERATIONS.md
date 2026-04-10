@@ -423,6 +423,109 @@ trigger rules in this order:
 
 This order keeps the backlog honest before adding new work, not after.
 
+## Backlog Curation Calibration Examples
+
+Use this section as a reference point when running a backlog curation review
+pass.
+Each completed example below shows which curation rule or trigger applies and
+what the correct action was.
+When a review signal during a new pass resembles one of these examples, use the
+matching rule from
+[Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules)
+or
+[Backlog Curation Review Triggers](#backlog-curation-review-triggers)
+to guide the decision.
+
+### How to use this section
+
+During a review pass:
+
+1. identify the signal you see in the current backlog (a duplicate, a scope
+   question, an inactive issue, an unresolved follow-up, or a promotion
+   decision)
+2. find the closest calibration example below
+3. follow the rule or trigger referenced by that example
+4. if no example matches closely, go directly to the rule and trigger sections
+
+The examples are not exhaustive.
+They are calibration points — anchors that show the rules applied to real
+decisions in this repository.
+
+### #11 — first accepted ready slice (cadence calibration point)
+
+`#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route`
+
+**What this example shows**: the first slice from a `planned` issue (#7)
+promoted to `ready` and completed successfully through the full
+`ready → in_progress → review → done` loop.
+
+**Calibration use**: when deciding whether a `planned` issue is ready for
+promotion, compare against #11's scope size.
+If the candidate slice is significantly larger than #11 was, consider whether
+it needs to be split first.
+Relevant rule: [Ready-Issue To Review Flow](#ready-issue-to-review-flow) and
+[Planned-To-Ready Promotion Pattern](#planned-to-ready-promotion-pattern).
+
+### #12 — zero-ready cadence (backlog cadence calibration point)
+
+`#12 Ready: define one-next-ready cadence for the labels-first backlog`
+
+**What this example shows**: after a `done` issue, the open `ready` queue
+returned to zero and the next `ready` was promoted as a single bounded slice
+rather than filling the queue.
+
+**Calibration use**: when open `ready` reaches zero, use #12 as the reference
+for what "promote only one" looks like in practice.
+If you are tempted to promote more than one `planned` issue at once, check
+whether each candidate is actually #12-sized and independently reviewable.
+Relevant rule: [Backlog Curation Cadence](#backlog-curation-cadence) and
+[Zero-ready promotion principle](#zero-ready-promotion-principle).
+
+### #37 — duplicate merge / follow-up cutting / zero-ready rule itself (rule calibration point)
+
+`#37 Ready: document duplicate merge and follow-up cutting rules for zero-ready backlog curation`
+
+**What this example shows**: a docs-only slice that added the rule itself for
+duplicate merging, follow-up cutting, and zero-ready promotion.
+No runtime changes.
+
+**Calibration use**: when you see two `planned` issues that look like
+duplicates, check whether they meet the three-condition test from #37 before
+merging.
+When review surfaces unresolved work, check the follow-up cutting conditions
+from #37 before cutting a new issue.
+When open `ready` reaches zero, use the zero-ready promotion principle from #37.
+Relevant rule: [Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules).
+
+### #38 — review triggers (trigger calibration point)
+
+`#38 Ready: document review triggers for merge, split, archive, and follow-up decisions during backlog curation`
+
+**What this example shows**: a docs-only slice that added the trigger rubric —
+the signals that cause merge, split, archival, and follow-up cutting to fire
+during a review pass.
+No runtime changes.
+
+**Calibration use**: when you are running a review pass and a signal appears
+(for example, two issues look similar, or a `planned` issue has not moved in
+several passes), use the trigger rubric from #38 to decide whether to act.
+Use the zero-ready review pass ordering from #38 to sequence your review
+actions.
+Relevant rule: [Backlog Curation Review Triggers](#backlog-curation-review-triggers).
+
+### Role summary: how the four sections work together
+
+| Section | Answers |
+|---|---|
+| [Backlog Curation Cadence](#backlog-curation-cadence) | When to run a review pass |
+| [Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules) | What to do when a trigger fires |
+| [Backlog Curation Review Triggers](#backlog-curation-review-triggers) | When a trigger fires |
+| This section | How past decisions illustrate the above |
+
+Use them in that order during a review pass: cadence tells you when, triggers
+tell you what to look for, rules tell you what to do, and calibration examples
+show what it looked like in practice.
+
 ## GitHub Projects Usage
 
 If you use GitHub Projects, keep the setup minimal.
