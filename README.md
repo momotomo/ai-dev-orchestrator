@@ -213,7 +213,8 @@ At minimum, you need:
 - Python 3
 - Safari
 - ChatGPT logged in inside Safari
-- Codex CLI available as `codex` or configured in `bridge/project_config.json`
+- Codex CLI available as `codex` or configured in `bridge/project_config.json` (for the default `execution_agent: codex` path)
+- GitHub CLI (`gh`) with the Copilot extension available, if using `execution_agent: github_copilot`
 
 No extra Python packages are currently required.
 
@@ -248,6 +249,8 @@ Typical local setup is:
 1. copy it to `bridge/project_config.json`
 2. fill in your target repository path
 3. optionally set Codex binary / model / sandbox overrides
+4. optionally set `execution_agent` to `github_copilot` to use the GitHub Copilot CLI path instead of Codex
+5. optionally set `agent_model` to specify the model for the active provider (empty = provider default)
 
 Browser timing and Safari-specific behavior live in:
 

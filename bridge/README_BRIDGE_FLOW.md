@@ -290,7 +290,34 @@ sample browser 内の軽い UI polish に留め、schema / resolver / preview / 
 - 外部 worker repo 向けの最小例は `bridge/project_config.example.json` を参照し、まず `worker_repo_path` だけを書き換える
 - 旧 `repo_path` は後方互換のため `bridge_runtime_root` の alias として読む
 - Codex 実行方法を変えたい場合は `codex_bin`、`codex_model`、`codex_sandbox`、`codex_timeout_seconds` を変える
+- 実行 agent を切り替えたい場合は `execution_agent`（`codex` / `github_copilot`）を変える。デフォルトは `codex`
+- `agent_model` でアクティブな provider のモデルを指定できる。空の場合は provider のデフォルトを使う
 - 毎回の差分は config ではなく、実行時の `--next-todo` や `bridge/inbox/codex_prompt.md` 側に載せる
+
+## 実行 agent の設定
+
+`execution_agent` で Codex と GitHub Copilot CLI のどちらを worker として使うかを選ぶ。
+1 つだけ選択し、起動時に validate される。不正な値の場合は BridgeError で停止する。
+
+| フィールド | 値 | デフォルト | 説明 |
+|---|---|---|---|
+| `execution_agent` | `codex` / `github_copilot` | `codex` | worker の排他選択 |
+| `agent_model` | 任意の文字列 / `""` | `""` (provider デフォルト) | アクティブな provider のモデル指定 |
+| `github_copilot_bin` | コマンド名またはパス | `gh` | GitHub Copilot path の実行バイナリ |
+| `codex_bin` | コマンド名またはパス | `codex` | Codex path の実行バイナリ |
+| `codex_model` | モデル名 / `""` | `""` | `agent_model` が空の場合の Codex 専用フォールバック |
+
+### Codex path (`execution_agent: codex`)
+
+- `agent_model` を Codex のモデル指定として使う。空の場合は `codex_model` にフォールバックする
+- `agent_model` も `codex_model` も空の場合は Codex のデフォルトモデルで動作する
+- 従来どおり `codex_bin`、`codex_sandbox`、`codex_timeout_seconds` も有効
+
+### GitHub Copilot path (`execution_agent: github_copilot`)
+
+- `github_copilot_bin`（デフォルト: `gh`）が `--target=shell` オプション付きで prompt を stdin から受け取る
+- `agent_model` が設定されている場合、**custom wrapper script** には `--model <value>` が渡される
+- **制限事項**: デフォルトの `gh copilot suggest` コマンドには安定した `--model` フラグがまだ存在しない。そのため、デフォルトの `gh` path では `agent_model` は引数に付与されない。`github_copilot_bin` に custom wrapper を指定することで `--model` 転送が使える
 
 ## 外部 worker repo 導入 3 ステップ
 
