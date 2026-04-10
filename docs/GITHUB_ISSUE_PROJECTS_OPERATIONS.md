@@ -323,6 +323,106 @@ When open `state:ready` reaches zero:
 
 `ready` is a scarce execution slot, not a quota to keep filled at all times.
 
+## Backlog Curation Review Triggers
+
+Use this section alongside the rules in
+[Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules)
+to answer the question: **when does a trigger fire during a backlog review pass?**
+
+The rules above say what to do when a trigger fires.
+This section says which review signals should cause each trigger to fire.
+
+### Merge trigger
+
+Merge is worth considering when you see at least one of the following during a
+review pass:
+
+- two `planned` issues describe work that is indistinguishable from each other
+  when you try to write separate acceptance criteria for both
+- a `planned` issue has become a subset of another open `planned` issue after
+  recent scoping work
+- promotion time would force a choice between two `planned` issues covering the
+  same theme, with no meaningful distinction to guide the choice
+
+**Basic action**: merge toward the issue with the clearer scope, title, and
+Epic alignment; close the other with a short note pointing to the survivor.
+
+Do **not** fire this trigger just because two issues share the same Epic or
+track. Shared track is not enough.
+
+### Split trigger
+
+Split is worth considering when you see at least one of the following:
+
+- a `planned` or `ready` issue has grown to cover two or more independent value
+  bundles that could each be reviewed separately
+- implementation started on a `ready` issue and review found that a meaningful
+  part of the scope is not actually needed for the original acceptance criteria
+- the issue would need to be kept in `in_progress` or `review` much longer than
+  one phase because two separable themes are tangled inside it
+
+**Basic action**: write a new `planned` issue for the split-off scope; keep
+the original issue tight to its original acceptance criteria; link both back
+to the same Epic or parent `planned` issue.
+
+Do **not** fire this trigger as a way to make a large issue look smaller
+without actually reducing scope.
+
+### Archival trigger
+
+Archival is worth considering when you see at least one of the following:
+
+- a `planned` issue has not moved toward `ready` across multiple backlog review
+  passes and no review pass has surfaced a reason to promote it
+- the context that originally motivated the `planned` issue has changed enough
+  that the issue would need to be rewritten substantially before it could
+  become a direct Codex target
+- a `planned` issue was predicated on a design decision or dependency that has
+  since been resolved in a different direction
+
+**Basic action**: close the issue with a short note explaining why it is no
+longer active; if the underlying theme is still real, add a note to the parent
+Epic or surviving `planned` issue so the context is not lost.
+
+Archival is not the same as abandonment. It means the issue is no longer in
+the active backlog but the context is preserved.
+
+### Follow-up cutting trigger
+
+Follow-up cutting is worth considering when you see at least one of the
+following:
+
+- review of a completed `done` issue surfaces unresolved work that does not
+  belong inside that issue's acceptance criteria
+- implementation revealed a real adjacent problem that was intentionally kept
+  out of scope during this phase
+- a `review` pass finds that the only way to accept the current issue is to
+  defer a specific bounded piece of work into a separate future slice
+
+**Basic action**: check first whether an existing `planned` parent can absorb
+the work honestly; if yes, add a note there instead of cutting a new issue; if
+no existing parent can absorb it without distortion, cut a new `planned` issue
+(or `ready` if already bounded) and link it to the same Epic.
+
+### Using triggers during a zero-ready review pass
+
+When open `state:ready` reaches zero and you run a backlog review, use the
+trigger rules in this order:
+
+1. scan `planned` issues for merge triggers first — reducing duplicates before
+   promoting reduces future noise
+2. scan for archival triggers — issues that are no longer active should not
+   compete for promotion attention
+3. scan `done` issues completed since the last review for follow-up cutting
+   triggers — absorb into existing `planned` first, cut new only when needed
+4. scan for split triggers in any `planned` issue you are considering for
+   promotion — split before promoting, not after
+5. after the above clean-up, apply the zero-ready promotion principle: choose
+   the single most bounded, actionable next slice and promote only that one
+   to `ready`
+
+This order keeps the backlog honest before adding new work, not after.
+
 ## GitHub Projects Usage
 
 If you use GitHub Projects, keep the setup minimal.
