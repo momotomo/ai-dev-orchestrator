@@ -545,6 +545,10 @@ For an initial bootstrap, a labels-first setup plus a plain Project list view is
 acceptable.
 `gh` is optional for this step; GitHub UI or direct API calls are also valid.
 
+See [Minimal Bootstrap Invariants](#minimal-bootstrap-invariants) for the
+conditions under which labels-first remains acceptable and the minimum rules
+for keeping Project and label state coherent.
+
 ## Minimal Label Taxonomy
 
 Keep labels small and honest.
@@ -567,6 +571,124 @@ Optional work-type labels can stay narrow:
 
 If you use both Project `State` and `state:*` labels, keep them synchronized.
 Do not let labels become a second conflicting state system.
+
+See [Minimal Bootstrap Invariants](#minimal-bootstrap-invariants) for the
+essential / optional label distinction and the guardrail rules.
+
+## Minimal Bootstrap Invariants
+
+Use this section as the authoritative reference for keeping GitHub Project and
+label bootstrap minimal and coherent in this repository.
+
+These invariants define the operational floor — the smallest set of rules that
+preserve issue-centric backlog honesty without creating a heavy second workflow
+surface.
+
+The first completed implementation of labels-first bootstrap is `#11`.
+This section documents the invariants that make that bootstrap sustainable
+going forward.
+
+### Source-of-truth ordering
+
+When a GitHub Project item, a `state:*` label, and an issue body disagree,
+resolve in this order:
+
+1. **issue body / completion comment / state record** — authoritative source
+   of truth for scope, acceptance criteria, and current state
+2. **`state:*` label** — mirrors operating state on the issue surface; update
+   to match the issue body
+3. **GitHub Project item** — mirrors operating state for queue visibility;
+   update last, to match the issue body and label
+
+In practice: fix the issue body first, update the label next, then bring the
+Project item into sync.
+
+Never adjust scope or acceptance criteria in the issue body to rationalize a
+Project field value.
+
+### Labels-first bootstrap condition
+
+A labels-first setup — using only `state:*` labels with no Project State field
+— is acceptable when all of the following hold:
+
+- the backlog is small enough that label scan gives sufficient queue visibility
+- no automated workflow depends on the Project State field
+- label and issue state coherence can be maintained manually without significant
+  overhead
+- a Project State field has not yet been justified by backlog size or automation
+  need
+
+When any of those conditions fails, add the Project State field and keep it
+synchronized with `state:*` labels from that point forward.
+
+### Minimal Project / label sync rules
+
+When both a GitHub Project `Status` field and `state:*` labels are in use,
+apply these minimum rules:
+
+- keep label and Project Status in agreement at the end of each review pass
+- if label and Project Status disagree, treat the `state:*` label as correct
+  and update the Project Status to match
+- when closing an issue as `done`, update both the `state:done` label and the
+  Project Status to `Done` before closing
+
+Batch updates are acceptable.
+The invariant is that no issue stays permanently mismatched between label and
+Project.
+
+### Essential labels
+
+The following labels are required for the issue-centric operating model to
+function:
+
+| Label | Purpose |
+|---|---|
+| `state:planned` | Backlog candidate; decomposition still allowed |
+| `state:ready` | Bounded execution unit; direct Codex target |
+| `state:done` | Accepted result with coherent implementation records |
+| `track:ops` | GitHub operations and process bootstrap track |
+
+Without `state:planned`, `state:ready`, and `state:done`, the
+`planned → ready → done` loop cannot be expressed as label state.
+At least one `track:*` label is required to keep theming visible without
+issue-title scanning.
+
+### Optional labels
+
+The following labels are optional — add them only when they provide clear
+queue or filter benefit:
+
+| Label | When to add |
+|---|---|
+| `state:in_progress` | When active implementation status adds queue clarity |
+| `state:review` | When review-in-progress state aids operator awareness |
+| `state:blocked` | When a blocked issue needs visibility distinct from `planned` |
+| `type:epic` | When a parent grouping issue needs explicit Epic marking |
+| `track:docs` | When docs-only work needs separation from ops |
+| `track:runtime` | When runtime-focused work needs its own track label |
+
+Do not pre-populate optional labels that have no issues attached.
+
+### Labels-as-second-workflow guardrail
+
+Labels become a second conflicting workflow when any of the following happens:
+
+- label state disagrees with the issue body and neither is updated to resolve
+  the conflict
+- label combinations express compound state (for example, two `state:*` labels
+  on the same issue)
+- labels carry information that belongs in the issue body (for example,
+  priority flags, checklist-style labels, or sub-phase labels)
+- labels are changed without updating the issue body or Project item, leaving
+  three-way disagreement
+
+To stay on the right side of this boundary:
+
+- keep label meaning to state and track taxonomy only
+- if a label creates ambiguity about which surface is correct, remove it and
+  consolidate into the issue body
+- prefer fewer labels that map cleanly to the state model over a richer
+  taxonomy that drifts out of sync with issue bodies
 
 ## Ready-Issue To Review Flow
 
