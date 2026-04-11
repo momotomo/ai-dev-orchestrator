@@ -711,6 +711,48 @@ class IssueCentricTargetIssueFormatTests(unittest.TestCase):
                 self._make_reply("#abc"), after_text="request body"
             )
 
+    # --- cross-repo: extra slash variants (added in #42 review follow-up) ---
+
+    def test_rejects_cross_repo_with_extra_path_segment(self) -> None:
+        """owner/repo/extra#42 must be rejected (only 2-segment owner/repo allowed)."""
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("owner/repo/extra#42"), after_text="request body"
+            )
+
+    def test_rejects_cross_repo_with_double_slash(self) -> None:
+        """owner//repo#42 must be rejected (empty segment is not valid)."""
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("owner//repo#42"), after_text="request body"
+            )
+
+    def test_rejects_cross_repo_with_trailing_junk_after_number(self) -> None:
+        """owner/repo#42/extra must be rejected."""
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("owner/repo#42/extra"), after_text="request body"
+            )
+
+    def test_rejects_cross_repo_with_alphabetic_issue_number(self) -> None:
+        """owner/repo#abc must be rejected."""
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("owner/repo#abc"), after_text="request body"
+            )
+
 
 class IssueCentricTransportTests(unittest.TestCase):
     def materialize(

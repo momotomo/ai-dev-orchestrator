@@ -160,7 +160,7 @@ def resolve_target_issue(
             source_ref=raw,
         )
 
-    repo_ref_match = re.match(r"^([^/\s]+/[^#\s]+)#([0-9]+)$", raw)
+    repo_ref_match = re.match(r"^([^/\s]+/[^/#\s]+)#([0-9]+)$", raw)
     if repo_ref_match:
         repository = repo_ref_match.group(1)
         number = int(repo_ref_match.group(2))

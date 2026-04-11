@@ -31,7 +31,7 @@ USER_TURN_MARKER = "あなた:"
 _TARGET_ISSUE_URL_RE = re.compile(
     r"^https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+$"
 )
-_TARGET_ISSUE_REF_RE = re.compile(r"^(?:[^/\s]+/[^#\s]+#|#)?([0-9]+)$")
+_TARGET_ISSUE_REF_RE = re.compile(r"^(?:[^/\s]+/[^/#\s]+#|#)?([0-9]+)$")
 
 
 class IssueCentricContractError(ValueError):
