@@ -585,6 +585,107 @@ class IssueCentricContractParserTests(unittest.TestCase):
         self.assertIsNone(issue_centric_contract.maybe_parse_issue_centric_reply(raw, after_text="request body"))
 
 
+class IssueCentricTargetIssueFormatTests(unittest.TestCase):
+    """Tests for target_issue format validation (added in #42)."""
+
+    def _make_reply(self, target_issue: str, action: str = "no_action") -> str:
+        return build_raw_reply(
+            {
+                "action": action,
+                "target_issue": target_issue,
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Format validation test.",
+            }
+        )
+
+    # --- valid formats ---
+
+    def test_accepts_hash_prefixed_number(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("#42"), after_text="request body"
+        )
+        self.assertEqual(decision.target_issue, "#42")
+
+    def test_accepts_bare_number(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("42"), after_text="request body"
+        )
+        self.assertEqual(decision.target_issue, "42")
+
+    def test_accepts_cross_repo_reference(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("owner/repo#42"), after_text="request body"
+        )
+        self.assertEqual(decision.target_issue, "owner/repo#42")
+
+    def test_accepts_none_sentinel(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("none"), after_text="request body"
+        )
+        self.assertIsNone(decision.target_issue)
+
+    def test_accepts_none_sentinel_case_insensitive(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("NONE"), after_text="request body"
+        )
+        self.assertIsNone(decision.target_issue)
+
+    def test_accepts_none_sentinel_with_surrounding_spaces(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("  none  "), after_text="request body"
+        )
+        self.assertIsNone(decision.target_issue)
+
+    # --- invalid formats ---
+
+    def test_rejects_freetext_target_issue(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("not-a-number"), after_text="request body"
+            )
+
+    def test_rejects_double_hash_target_issue(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("##42"), after_text="request body"
+            )
+
+    def test_rejects_url_as_target_issue(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("https://github.com/org/repo/issues/42"),
+                after_text="request body",
+            )
+
+    def test_rejects_hash_only(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("#"), after_text="request body"
+            )
+
+    def test_rejects_alphabetic_after_hash(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("#abc"), after_text="request body"
+            )
+
+
 class IssueCentricTransportTests(unittest.TestCase):
     def materialize(
         self,
@@ -929,6 +1030,115 @@ class IssueCentricTransportTests(unittest.TestCase):
             "no_action must not include body blocks",
         ):
             issue_centric_transport.decode_issue_centric_decision(decision)
+
+
+class IssueCentricDispatcherPreparedPayloadTests(unittest.TestCase):
+    """Tests that the minimal dispatcher returns expected prepared state / artifact per action (#42)."""
+
+    def _decode(
+        self,
+        action: str,
+        target_issue: str,
+        *,
+        issue_body: str | None = None,
+        codex_body: str | None = None,
+        review: str | None = None,
+        followup_body: str | None = None,
+    ) -> issue_centric_transport.PreparedIssueCentricDecision:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction(action),
+            target_issue=None if target_issue == "none" else target_issue,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Dispatch payload test.",
+            issue_body_base64=b64(issue_body) if issue_body else None,
+            codex_body_base64=b64(codex_body) if codex_body else None,
+            review_base64=b64(review) if review else None,
+            followup_issue_body_base64=b64(followup_body) if followup_body else None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        return issue_centric_transport.decode_issue_centric_decision(decision)
+
+    # --- issue_create ---
+
+    def test_issue_create_has_issue_body_as_primary(self) -> None:
+        prepared = self._decode(
+            "issue_create", "none", issue_body="# New issue\n\nBody text."
+        )
+        self.assertIsNotNone(prepared.issue_body)
+        self.assertEqual(
+            prepared.issue_body.kind,
+            issue_centric_transport.IssueCentricArtifactKind.ISSUE_BODY,
+        )
+        self.assertIsNone(prepared.codex_body)
+        self.assertEqual(prepared.primary_body, prepared.issue_body)
+        self.assertEqual(prepared.pending_runtime_action, "issue_create_mutation")
+
+    def test_issue_create_decoded_text_is_accessible(self) -> None:
+        prepared = self._decode(
+            "issue_create", "none", issue_body="# Title\n\nContent."
+        )
+        self.assertEqual(prepared.issue_body.decoded_text, "# Title\n\nContent.")
+
+    # --- codex_run ---
+
+    def test_codex_run_has_codex_body_as_primary(self) -> None:
+        prepared = self._decode(
+            "codex_run", "#42", codex_body="Run this task."
+        )
+        self.assertIsNotNone(prepared.codex_body)
+        self.assertEqual(
+            prepared.codex_body.kind,
+            issue_centric_transport.IssueCentricArtifactKind.CODEX_BODY,
+        )
+        self.assertIsNone(prepared.issue_body)
+        self.assertEqual(prepared.primary_body, prepared.codex_body)
+        self.assertEqual(prepared.pending_runtime_action, "codex_run_dispatch")
+
+    def test_codex_run_decoded_text_is_accessible(self) -> None:
+        prepared = self._decode("codex_run", "#42", codex_body="Implement X.\n")
+        self.assertEqual(prepared.codex_body.decoded_text, "Implement X.\n")
+
+    # --- no_action ---
+
+    def test_no_action_has_no_primary_body(self) -> None:
+        prepared = self._decode("no_action", "none")
+        self.assertIsNone(prepared.primary_body)
+        self.assertIsNone(prepared.issue_body)
+        self.assertIsNone(prepared.codex_body)
+        self.assertEqual(prepared.pending_runtime_action, "decision_finalize")
+
+    # --- human_review_needed ---
+
+    def test_human_review_needed_has_review_body_as_primary(self) -> None:
+        prepared = self._decode(
+            "human_review_needed", "#77", review="## Review\n\nApproved."
+        )
+        self.assertIsNotNone(prepared.review_body)
+        self.assertEqual(
+            prepared.review_body.kind,
+            issue_centric_transport.IssueCentricArtifactKind.REVIEW,
+        )
+        self.assertIsNone(prepared.codex_body)
+        self.assertEqual(prepared.primary_body, prepared.review_body)
+        self.assertEqual(prepared.pending_runtime_action, "human_review_dispatch")
+
+    def test_human_review_without_review_body_has_no_primary(self) -> None:
+        prepared = self._decode("human_review_needed", "#77")
+        self.assertIsNone(prepared.review_body)
+        self.assertIsNone(prepared.primary_body)
+        self.assertEqual(prepared.pending_runtime_action, "human_review_dispatch")
+
+    # --- metadata ---
+
+    def test_dispatch_payload_metadata_chars_match_decoded_text(self) -> None:
+        body_text = "# Issue title\n\nBody paragraph.\n"
+        prepared = self._decode("issue_create", "none", issue_body=body_text)
+        meta = prepared.issue_body.payload_metadata()
+        self.assertEqual(meta["decoded_text_chars"], len(body_text))
+        self.assertIn("decoded_text_sha256", meta)
+        self.assertIn("normalized_payload_sha256", meta)
 
 
 class FetchNextPromptContractStopTests(unittest.TestCase):

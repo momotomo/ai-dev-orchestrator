@@ -24,6 +24,10 @@ FOLLOWUP_ISSUE_BODY_END = "===END_FOLLOWUP_ISSUE_BODY==="
 CHATGPT_TURN_MARKER = "ChatGPT:"
 USER_TURN_MARKER = "あなた:"
 
+# Accepted target_issue formats: bare number ("42"), hash-prefixed ("#42"),
+# or cross-repo reference ("owner/repo#42").
+_TARGET_ISSUE_REF_RE = re.compile(r"^(?:[^/\s]+/[^/\s]+#|#)?(\d+)$")
+
 
 class IssueCentricContractError(ValueError):
     """Raised when a ChatGPT issue-centric contract reply is invalid."""
@@ -244,7 +248,16 @@ def _require_string(envelope: Mapping[str, Any], field: str) -> str:
 
 
 def _normalize_target_issue(raw_target_issue: str) -> str | None:
-    return None if raw_target_issue.strip().lower() == "none" else raw_target_issue.strip()
+    stripped = raw_target_issue.strip()
+    if stripped.lower() == "none":
+        return None
+    if not _TARGET_ISSUE_REF_RE.match(stripped):
+        raise IssueCentricContractError(
+            f"target_issue has an invalid format: {stripped!r}. "
+            "Accepted formats: bare number (\"42\"), hash-prefixed (\"#42\"), "
+            "or cross-repo reference (\"owner/repo#42\")."
+        )
+    return stripped
 
 
 def extract_issue_centric_reply(
