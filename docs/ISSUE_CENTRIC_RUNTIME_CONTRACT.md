@@ -537,9 +537,13 @@ markdown fidelity in future implementation phases.
 Apply these additional rules:
 
 - when `target_issue = none`, `action = codex_run` is not allowed
-- `target_issue` must be `none` or a valid issue reference: bare number
-  (`42`), hash-prefixed (`#42`), or cross-repo (`owner/repo#42`); any other
-  format is rejected at parse time by `_normalize_target_issue`
+- `target_issue` must be `none` or a valid issue reference in one of the
+  following formats (mirrors `resolve_target_issue` in `issue_centric_github.py`):
+  - bare number: `42`
+  - hash-prefixed: `#42`
+  - cross-repo reference: `owner/repo#42`
+  - full GitHub issue URL: `https://github.com/owner/repo/issues/42`
+  - any other format is rejected at parse time by `_normalize_target_issue`
 - `create_followup_issue` is a helper flag, not a separate action
 - `close_current_issue` means close is appropriate, not that ChatGPT performs
   the close itself

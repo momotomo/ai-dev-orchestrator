@@ -657,13 +657,39 @@ class IssueCentricTargetIssueFormatTests(unittest.TestCase):
                 self._make_reply("##42"), after_text="request body"
             )
 
-    def test_rejects_url_as_target_issue(self) -> None:
+    def test_accepts_full_github_issue_url(self) -> None:
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("https://github.com/org/repo/issues/42"),
+            after_text="request body",
+        )
+        self.assertEqual(decision.target_issue, "https://github.com/org/repo/issues/42")
+
+    def test_accepts_full_github_issue_url_large_number(self) -> None:
+        url = "https://github.com/owner/my-repo/issues/1234"
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply(url), after_text="request body"
+        )
+        self.assertEqual(decision.target_issue, url)
+
+    # --- invalid URL variants ---
+
+    def test_rejects_github_url_with_trailing_path(self) -> None:
         with self.assertRaisesRegex(
             issue_centric_contract.IssueCentricContractError,
             "target_issue has an invalid format",
         ):
             issue_centric_contract.parse_issue_centric_reply(
-                self._make_reply("https://github.com/org/repo/issues/42"),
+                self._make_reply("https://github.com/org/repo/issues/42/files"),
+                after_text="request body",
+            )
+
+    def test_rejects_non_github_url(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("https://gitlab.com/org/repo/issues/42"),
                 after_text="request body",
             )
 
