@@ -41,6 +41,7 @@ def build_decision(
     close_current_issue: bool = False,
     create_followup_issue: bool = False,
     issue_text: str | None = None,
+    codex_text: str | None = None,
     review_text: str | None = None,
     followup_text: str | None = None,
 ) -> issue_centric_contract.IssueCentricDecision:
@@ -51,7 +52,7 @@ def build_decision(
         create_followup_issue=create_followup_issue,
         summary="Dispatcher test decision",
         issue_body_base64=(b64(issue_text) if issue_text is not None else None),
-        codex_body_base64=None,
+        codex_body_base64=(b64(codex_text) if codex_text is not None else None),
         review_base64=(b64(review_text) if review_text is not None else None),
         followup_issue_body_base64=(b64(followup_text) if followup_text is not None else None),
         raw_json="{}",
@@ -2630,6 +2631,628 @@ class IssueCentricFollowupDispatchIntegrationTests(unittest.TestCase):
             # Confirm decoded artifact body was passed through correctly
             self.assertEqual(len(followup_artifact_text), 1)
             self.assertEqual(followup_artifact_text[0], followup_text)
+
+
+class IssueCentricCodexRunHumanReviewDispatchTests(unittest.TestCase):
+    """#45: dispatcher-level tests for codex_run and human_review_needed paths.
+
+    Confirms that the validated contract decision from parse_issue_centric_reply is
+    the authoritative entry point for codex_run and human_review_needed, using the
+    same spine-test pattern as #43, #44.
+
+    Coverage:
+    codex_run:
+    - trigger-only positive path (executor returns blocked → codex_run_trigger_only)
+    - trigger + launch + continuation positive path (codex_run_launch_and_continuation)
+    - codex_run + close (no followup) → blocked_codex_run_close
+    - codex_run + create_followup_issue missing codex artifact → blocked at dispatcher
+    - end-to-end raw JSON → parse → materialize → dispatch (trigger-only)
+
+    human_review_needed:
+    - standalone positive path (human_review)
+    - executor returns blocked
+    - end-to-end raw JSON → parse → materialize → dispatch
+    """
+
+    def _base_state(self) -> dict[str, object]:
+        return {
+            "last_issue_centric_action": "",
+            "last_issue_centric_target_issue": "",
+            "last_issue_centric_stop_reason": "",
+            "chatgpt_decision_note": "",
+            "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
+            "last_issue_centric_close_order": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_execution_status": "",
+            "last_issue_centric_execution_log": "",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_created_issue_url": "",
+            "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
+            "last_issue_centric_project_sync_status": "",
+            "last_issue_centric_project_url": "",
+            "last_issue_centric_project_item_id": "",
+            "last_issue_centric_project_state_field": "",
+            "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
+            "last_issue_centric_followup_status": "",
+            "last_issue_centric_followup_log": "",
+            "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
+            "last_issue_centric_close_status": "",
+            "last_issue_centric_close_log": "",
+            "last_issue_centric_closed_issue_number": "",
+            "last_issue_centric_closed_issue_url": "",
+            "last_issue_centric_closed_issue_title": "",
+            "last_issue_centric_review_status": "",
+            "last_issue_centric_review_log": "",
+            "last_issue_centric_review_comment_id": "",
+            "last_issue_centric_review_comment_url": "",
+            "last_issue_centric_review_close_policy": "",
+        }
+
+    def _no_project_sync_fn(self, root: Path):
+        def fn(*args, **kwargs):
+            p = root / "no-project-sync.json"
+            if not p.exists():
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="not_requested",
+                sync_status="not_requested_no_project",
+                lifecycle_stage=kwargs.get("lifecycle_stage", ""),
+                resolved_issue=None,
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="No GitHub Project is configured.",
+            )
+
+        return fn
+
+    def _dispatch(
+        self,
+        *,
+        decision: issue_centric_contract.IssueCentricDecision,
+        root: Path,
+        prior_resolved: str = "https://github.com/example/repo/issues/20",
+        execute_codex_run_action_fn=None,
+        launch_issue_centric_codex_run_fn=None,
+        execute_human_review_action_fn=None,
+        execute_close_current_issue_fn=None,
+    ) -> issue_centric_execution.IssueCentricDispatchResult:
+        materialized = materialized_from_decision(decision, root=root)
+        state = self._base_state()
+        state["last_issue_centric_resolved_issue"] = prior_resolved
+        saved: list[dict] = []
+
+        def _abort(name: str):
+            def fn(*args, **kwargs):
+                raise AssertionError(f"{name} should not be called in this test")
+
+            return fn
+
+        return issue_centric_execution.dispatch_issue_centric_execution(
+            contract_decision=decision,
+            materialized=materialized,
+            prior_state={"last_issue_centric_resolved_issue": prior_resolved},
+            mutable_state=state,
+            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            repo_path=REPO_ROOT,
+            source_raw_log="logs/raw.txt",
+            source_decision_log="logs/decision.md",
+            source_metadata_log="logs/metadata.json",
+            source_artifact_path="logs/artifact.md",
+            log_writer=TempLogWriter(root),
+            repo_relative=lambda p: str(p),
+            load_state_fn=lambda: dict(saved[-1]) if saved else dict(state),
+            save_state_fn=lambda s: saved.append(dict(s)),
+            execute_issue_create_action_fn=_abort("issue_create"),
+            execute_codex_run_action_fn=execute_codex_run_action_fn or _abort("codex_run"),
+            launch_issue_centric_codex_run_fn=launch_issue_centric_codex_run_fn or _abort("launch"),
+            execute_human_review_action_fn=execute_human_review_action_fn or _abort("human_review"),
+            execute_close_current_issue_fn=execute_close_current_issue_fn or _abort("close"),
+            execute_followup_issue_action_fn=_abort("followup"),
+            execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
+            launch_runner=lambda s, argv=None: 0,
+        )
+
+    # ---- codex_run: executor returns blocked → codex_run_trigger_only ----
+
+    def test_dispatcher_codex_run_trigger_only_when_executor_blocked(self) -> None:
+        """codex_run executor returns blocked → matrix_path=codex_run_trigger_only, blocked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement the issue.\n",
+            )
+            calls: list[str] = []
+
+            def fake_codex_run_blocked(*args, **kwargs):
+                calls.append("codex_run")
+                p = root / "codex_run_blocked.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    launch_status="blocked",
+                    resolved_issue=None,
+                    created_comment=None,
+                    payload_log_path=None,
+                    execution_log_path=p,
+                    safe_stop_reason="target issue resolution failed",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_codex_run_action_fn=fake_codex_run_blocked,
+            )
+
+            self.assertEqual(calls, ["codex_run"])
+            self.assertEqual(result.matrix_path, "codex_run_trigger_only")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual([s.name for s in result.steps], ["codex_trigger_comment"])
+            self.assertEqual(result.final_state["last_issue_centric_execution_status"], "blocked")
+
+    # ---- codex_run: trigger + launch + continuation happy path ----
+
+    def test_dispatcher_codex_run_launch_and_continuation_happy_path(self) -> None:
+        """Standalone codex_run (no followup, no close): trigger + launch → codex_run_launch_and_continuation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement the issue.\n",
+            )
+            calls: list[str] = []
+
+            def fake_codex_run(*args, **kwargs):
+                calls.append("codex_run")
+                p = root / "codex_run.json"
+                p.write_text("{}", encoding="utf-8")
+                payload = root / "payload.json"
+                payload.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="waiting_launch",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(1001, 20),
+                    payload_log_path=payload,
+                    execution_log_path=p,
+                    safe_stop_reason="trigger comment registered",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                launch_log = root / "launch.json"
+                launch_log.write_text("{}", encoding="utf-8")
+                cont_log = root / "continuation.json"
+                cont_log.write_text("{}", encoding="utf-8")
+                prompt_log = root / "prompt.json"
+                prompt_log.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="launched",
+                    launch_entrypoint="codex_runner",
+                    launch_log_path=launch_log,
+                    continuation_status="completed",
+                    continuation_log_path=cont_log,
+                    prompt_log_path=prompt_log,
+                    report_status="ready",
+                    report_file="report.md",
+                    safe_stop_reason="codex ran and continuation completed",
+                    final_mode="codex_running",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_codex_run_action_fn=fake_codex_run,
+                launch_issue_centric_codex_run_fn=fake_launch,
+            )
+
+            self.assertEqual(calls, ["codex_run", "launch"])
+            self.assertEqual(result.matrix_path, "codex_run_launch_and_continuation")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                [s.name for s in result.steps],
+                ["codex_trigger_comment", "codex_launch_and_continuation"],
+            )
+            self.assertEqual(result.final_state["last_issue_centric_execution_status"], "completed")
+            self.assertEqual(result.final_state["last_issue_centric_trigger_comment_id"], "1001")
+
+    # ---- codex_run: close without followup is blocked at dispatcher ----
+
+    def test_dispatcher_codex_run_close_blocked_without_followup(self) -> None:
+        """codex_run + close_current_issue (no followup) → blocked_codex_run_close.
+
+        The dispatcher passes the close call to execute_close_current_issue_fn
+        but records the result as blocked regardless of what the executor returns.
+        This confirms the currently intended behavior.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                codex_text="Implement the issue.\n",
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    close_status="blocked",
+                    close_order="blocked_codex_run",
+                    execution_log_path=p,
+                    issue_before=None,
+                    issue_after=None,
+                    safe_stop_reason="action=codex_run cannot execute close_current_issue in this slice.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["close"])
+            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual([s.name for s in result.steps], ["close_current_issue"])
+            self.assertIn("codex_run + close_current_issue", result.stop_message)
+
+    # ---- codex_run: create_followup_issue missing codex artifact blocked at dispatcher ----
+
+    def test_dispatcher_codex_run_missing_codex_artifact_blocked_at_dispatcher(self) -> None:
+        """codex_run + create_followup_issue + codex_body=None → blocked_codex_run_followup_missing_codex.
+
+        This state is not reachable through parse_issue_centric_reply (validator requires
+        codex_body for codex_run). We bypass the validator using PreparedIssueCentricDecision
+        directly, following the same approach as test_dispatcher_issue_create_missing_followup*.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Build a decision with create_followup_issue + codex_body present (passes validator)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                codex_text="Implement the issue.\n",
+                followup_text="# Follow-up\n\nBody.\n",
+            )
+            # Override prepared to have codex_body=None, bypassing the validator
+            prepared_no_codex = issue_centric_transport.PreparedIssueCentricDecision(
+                decision=decision,
+                issue_body=None,
+                codex_body=None,  # absent — dispatcher should block before executor
+                review_body=None,
+                followup_issue_body=issue_centric_transport.IssueCentricDecodedBody(
+                    kind=issue_centric_transport.IssueCentricArtifactKind.FOLLOWUP_ISSUE_BODY,
+                    block_name="CHATGPT_FOLLOWUP_ISSUE_BODY",
+                    raw_base64=b64("# Follow-up\n\nBody.\n"),
+                    normalized_base64=b64("# Follow-up\n\nBody.\n"),
+                    decoded_text="# Follow-up\n\nBody.\n",
+                ),
+            )
+            metadata = root / "metadata.json"
+            metadata.write_text("{}", encoding="utf-8")
+            artifact = root / "artifact.md"
+            artifact.write_text("artifact", encoding="utf-8")
+            mat = SimpleNamespace(
+                prepared=prepared_no_codex,
+                metadata_log_path=metadata,
+                artifact_log_path=artifact,
+                safe_stop_reason="prepared",
+            )
+            state = self._base_state()
+            result = issue_centric_execution.dispatch_issue_centric_execution(
+                contract_decision=decision,
+                materialized=mat,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                mutable_state=state,
+                project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                repo_path=REPO_ROOT,
+                source_raw_log="logs/raw.txt",
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/artifact.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda p: str(p),
+                load_state_fn=lambda: dict(state),
+                save_state_fn=lambda s: None,
+                execute_issue_create_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("issue_create")),
+                execute_codex_run_action_fn=lambda *a, **kw: (_ for _ in ()).throw(
+                    AssertionError("executor should not be called when codex artifact is absent")
+                ),
+                launch_issue_centric_codex_run_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("launch")),
+                execute_human_review_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("review")),
+                execute_close_current_issue_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("close")),
+                execute_followup_issue_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("followup")),
+                execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
+                launch_runner=lambda s, argv=None: 0,
+            )
+
+            self.assertEqual(result.matrix_path, "blocked_codex_run_followup_missing_codex")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_execution_status"], "blocked_missing_codex_artifact")
+
+    # ---- codex_run: end-to-end raw JSON → parse → dispatch ----
+
+    def test_e2e_parse_to_dispatch_codex_run(self) -> None:
+        """End-to-end: raw reply with CHATGPT_CODEX_BODY enters codex_run trigger path.
+
+        Executor returns blocked so the test remains fast (no real Codex launch needed).
+        Confirms the decoded codex artifact is passed through the dispatcher correctly.
+        """
+        codex_text = "Implement the feature described in issue #20.\n"
+        raw_reply = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                issue_centric_contract.CODEX_BODY_START,
+                b64(codex_text),
+                issue_centric_contract.CODEX_BODY_END,
+                issue_centric_contract.DECISION_JSON_START,
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "target_issue": "#20",
+                        "close_current_issue": False,
+                        "create_followup_issue": False,
+                        "summary": "e2e codex_run dispatch test",
+                    }
+                ),
+                issue_centric_contract.DECISION_JSON_END,
+            ]
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw_reply, after_text="request body")
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.CODEX_RUN)
+        self.assertEqual(decision.target_issue, "#20")
+        self.assertIsNotNone(decision.codex_body_base64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            codex_artifact_text: list[str] = []
+            calls: list[str] = []
+
+            def fake_codex_run(prepared, **kwargs):
+                calls.append("codex_run")
+                if prepared.codex_body is not None:
+                    codex_artifact_text.append(prepared.codex_body.decoded_text)
+                p = root / "codex_run_e2e.json"
+                p.write_text("{}", encoding="utf-8")
+                # Return blocked so the test doesn't need a launch mock
+                return SimpleNamespace(
+                    status="blocked",
+                    launch_status="blocked",
+                    resolved_issue=None,
+                    created_comment=None,
+                    payload_log_path=None,
+                    execution_log_path=p,
+                    safe_stop_reason="stopped at trigger for e2e test",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_codex_run_action_fn=fake_codex_run,
+            )
+
+            self.assertEqual(calls, ["codex_run"])
+            self.assertEqual(result.matrix_path, "codex_run_trigger_only")
+            self.assertEqual(result.final_status, "blocked")
+            # Confirm the decoded codex body was passed through correctly
+            self.assertEqual(len(codex_artifact_text), 1)
+            self.assertEqual(codex_artifact_text[0], codex_text)
+
+    # ---- human_review_needed: standalone positive path ----
+
+    def test_dispatcher_human_review_standalone_happy_path(self) -> None:
+        """Standalone human_review_needed (no followup, no close) → human_review, completed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                target_issue="#20",
+                review_text="## Review\n\n- Everything looks good.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("human_review")
+                p = root / "review.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(4001, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review comment posted",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+            )
+
+            self.assertEqual(calls, ["human_review"])
+            self.assertEqual(result.matrix_path, "human_review")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual([s.name for s in result.steps], ["human_review_comment"])
+            self.assertEqual(result.final_state["last_issue_centric_review_status"], "completed")
+            self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "4001")
+
+    # ---- human_review_needed: executor returns blocked ----
+
+    def test_dispatcher_human_review_blocked_when_executor_returns_blocked(self) -> None:
+        """When the review executor returns blocked, final_status=blocked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                target_issue="#20",
+                review_text="## Review\n\n- Blocked.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review_blocked(*args, **kwargs):
+                calls.append("human_review")
+                p = root / "review_blocked.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    review_status="blocked_resolve_failed",
+                    close_policy="no_close",
+                    resolved_issue=None,
+                    created_comment=None,
+                    execution_log_path=p,
+                    safe_stop_reason="target issue resolution failed",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review_blocked,
+            )
+
+            self.assertEqual(calls, ["human_review"])
+            self.assertEqual(result.matrix_path, "human_review")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_review_status"], "blocked_resolve_failed")
+            self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "")
+
+    # ---- human_review_needed: end-to-end raw JSON → parse → dispatch ----
+
+    def test_e2e_parse_to_dispatch_human_review_needed(self) -> None:
+        """End-to-end: raw reply with CHATGPT_REVIEW enters human_review_needed path."""
+        review_text = "## Review Comment\n\n- Implementation looks correct.\n"
+        raw_reply = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                issue_centric_contract.REVIEW_BODY_START,
+                b64(review_text),
+                issue_centric_contract.REVIEW_BODY_END,
+                issue_centric_contract.DECISION_JSON_START,
+                json.dumps(
+                    {
+                        "action": "human_review_needed",
+                        "target_issue": "#20",
+                        "close_current_issue": False,
+                        "create_followup_issue": False,
+                        "summary": "e2e human_review_needed dispatch test",
+                    }
+                ),
+                issue_centric_contract.DECISION_JSON_END,
+            ]
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw_reply, after_text="request body")
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED)
+        self.assertEqual(decision.target_issue, "#20")
+        self.assertIsNotNone(decision.review_base64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            review_artifact_text: list[str] = []
+            calls: list[str] = []
+
+            def fake_review(prepared, **kwargs):
+                calls.append("human_review")
+                if prepared.review_body is not None:
+                    review_artifact_text.append(prepared.review_body.decoded_text)
+                p = root / "review_e2e.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(5001, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="e2e review posted",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+            )
+
+            self.assertEqual(calls, ["human_review"])
+            self.assertEqual(result.matrix_path, "human_review")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "5001")
+            # Confirm decoded review body was passed through correctly
+            self.assertEqual(len(review_artifact_text), 1)
+            self.assertEqual(review_artifact_text[0], review_text)
 
 
 if __name__ == "__main__":
