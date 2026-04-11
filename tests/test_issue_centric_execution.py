@@ -2102,5 +2102,535 @@ class IssueCentricMutationSpineDispatchTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_closed_issue_number"], "20")
 
 
+class IssueCentricFollowupDispatchIntegrationTests(unittest.TestCase):
+    """#44: dispatcher-level tests for the create_followup_issue execution path.
+
+    These tests confirm that the validated contract decision from
+    parse_issue_centric_reply is the authoritative entry point for the follow-up
+    issue execution path, using the same spine-test pattern as #43.
+
+    Coverage:
+    - no_action + create_followup_issue positive path (standalone, no close)
+    - no_action + create_followup_issue + close_current_issue positive path
+    - blocked executor: follow-up blocked → close not attempted
+    - missing follow-up artifact routed to executor → executor returns blocked
+    - end-to-end: raw JSON → parse → materialize → dispatch follow-up path
+    """
+
+    def _base_state(self) -> dict[str, object]:
+        return {
+            "last_issue_centric_action": "",
+            "last_issue_centric_target_issue": "",
+            "last_issue_centric_stop_reason": "",
+            "chatgpt_decision_note": "",
+            "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
+            "last_issue_centric_close_order": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_execution_status": "",
+            "last_issue_centric_execution_log": "",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_created_issue_url": "",
+            "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
+            "last_issue_centric_project_sync_status": "",
+            "last_issue_centric_project_url": "",
+            "last_issue_centric_project_item_id": "",
+            "last_issue_centric_project_state_field": "",
+            "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
+            "last_issue_centric_followup_status": "",
+            "last_issue_centric_followup_log": "",
+            "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
+            "last_issue_centric_close_status": "",
+            "last_issue_centric_close_log": "",
+            "last_issue_centric_closed_issue_number": "",
+            "last_issue_centric_closed_issue_url": "",
+            "last_issue_centric_closed_issue_title": "",
+            "last_issue_centric_review_status": "",
+            "last_issue_centric_review_log": "",
+            "last_issue_centric_review_comment_id": "",
+            "last_issue_centric_review_comment_url": "",
+            "last_issue_centric_review_close_policy": "",
+        }
+
+    def _no_project_sync_fn(self, root: Path):
+        def fn(*args, **kwargs):
+            p = root / "no-project-sync.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="not_requested",
+                sync_status="not_requested_no_project",
+                lifecycle_stage=kwargs.get("lifecycle_stage", ""),
+                resolved_issue=None,
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="No GitHub Project is configured.",
+            )
+
+        return fn
+
+    def _dispatch(
+        self,
+        *,
+        decision: issue_centric_contract.IssueCentricDecision,
+        root: Path,
+        prior_resolved: str = "https://github.com/example/repo/issues/20",
+        execute_followup_issue_action_fn=None,
+        execute_close_current_issue_fn=None,
+    ) -> issue_centric_execution.IssueCentricDispatchResult:
+        materialized = materialized_from_decision(decision, root=root)
+        state = self._base_state()
+        state["last_issue_centric_resolved_issue"] = prior_resolved
+
+        def _abort(name: str):
+            def fn(*args, **kwargs):
+                raise AssertionError(f"{name} should not be called in this test")
+
+            return fn
+
+        return issue_centric_execution.dispatch_issue_centric_execution(
+            contract_decision=decision,
+            materialized=materialized,
+            prior_state={"last_issue_centric_resolved_issue": prior_resolved},
+            mutable_state=state,
+            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            repo_path=REPO_ROOT,
+            source_raw_log="logs/raw.txt",
+            source_decision_log="logs/decision.md",
+            source_metadata_log="logs/metadata.json",
+            source_artifact_path="logs/artifact.md",
+            log_writer=TempLogWriter(root),
+            repo_relative=lambda p: str(p),
+            load_state_fn=lambda: dict(state),
+            save_state_fn=lambda s: None,
+            execute_issue_create_action_fn=_abort("issue_create"),
+            execute_codex_run_action_fn=_abort("codex_run"),
+            launch_issue_centric_codex_run_fn=_abort("launch"),
+            execute_human_review_action_fn=_abort("human_review"),
+            execute_close_current_issue_fn=execute_close_current_issue_fn or _abort("close"),
+            execute_followup_issue_action_fn=execute_followup_issue_action_fn or _abort("followup"),
+            execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
+            launch_runner=lambda s, argv=None: 0,
+        )
+
+    def _fake_followup_completed(self, root: Path, issue_number: int = 72):
+        def fn(*args, **kwargs):
+            p = root / "followup.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                followup_status="completed",
+                parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                created_issue=fake_issue(issue_number),
+                execution_log_path=p,
+                project_sync_status="issue_only_fallback",
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason=f"created follow-up issue #{issue_number}",
+            )
+
+        return fn
+
+    def _fake_followup_blocked(self, root: Path):
+        def fn(*args, **kwargs):
+            p = root / "followup_blocked.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="blocked",
+                followup_status="blocked_missing_followup_artifact",
+                parent_issue=None,
+                created_issue=None,
+                execution_log_path=p,
+                project_sync_status="",
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="create_followup_issue=true requires a decoded CHATGPT_FOLLOWUP_ISSUE_BODY artifact.",
+            )
+
+        return fn
+
+    # --- no_action + create_followup_issue positive path (no close) ---
+
+    def test_dispatcher_no_action_followup_standalone_happy_path(self) -> None:
+        """no_action + create_followup_issue=True (no close) routes to followup executor once.
+
+        Confirms that the validated contract decision from parse_issue_centric_reply
+        is the authoritative entry point for the follow-up issue execution path.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Follow-up\n\nNext bounded slice.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup_completed(root, issue_number=72)(*args, **kwargs)
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=fake_followup,
+            )
+
+            self.assertEqual(calls, ["followup"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual([s.name for s in result.steps], ["followup_issue_create"])
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "72")
+
+    # --- no_action + create_followup_issue + close positive path ---
+
+    def test_dispatcher_no_action_followup_then_close_positive_path(self) -> None:
+        """no_action + create_followup_issue=True + close=True → followup then close, both succeed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="# Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup_completed(root, issue_number=80)(*args, **kwargs)
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed #20",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["followup", "close"])
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                [s.name for s in result.steps],
+                ["followup_issue_create", "close_current_issue"],
+            )
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "80")
+            self.assertEqual(result.final_state["last_issue_centric_closed_issue_number"], "20")
+
+    # --- executor returns blocked ---
+
+    def test_dispatcher_no_action_followup_blocked_when_executor_returns_blocked(self) -> None:
+        """When the followup executor returns blocked, final_status=blocked and close is not attempted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup_blocked(root)(*args, **kwargs)
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=fake_followup,
+            )
+
+            self.assertEqual(calls, ["followup"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_followup_status"], "blocked_missing_followup_artifact")
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "")
+
+    # --- close not attempted when followup blocked ---
+
+    def test_dispatcher_no_action_followup_does_not_close_when_followup_blocked(self) -> None:
+        """With close=True, if followup is blocked the close step is recorded as not_attempted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="# Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup_blocked(root)(*args, **kwargs)
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=lambda *a, **kw: (_ for _ in ()).throw(
+                    AssertionError("close should not be called when followup is blocked")
+                ),
+            )
+
+            self.assertEqual(calls, ["followup"])
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "not_attempted_followup_blocked")
+            close_steps = [s for s in result.steps if s.name == "close_current_issue"]
+            self.assertEqual(len(close_steps), 1)
+            self.assertEqual(close_steps[0].status, "not_attempted_followup_blocked")
+
+    # --- missing artifact routed to executor (no dispatcher-level guard for no_action path) ---
+
+    def test_dispatcher_no_action_followup_missing_artifact_routes_to_executor(self) -> None:
+        """For no_action path, a missing followup_issue_body has no dispatcher-level guard.
+
+        Unlike the issue_create path (which has an explicit dispatcher guard before the executor),
+        the no_action followup path routes the call to the executor unconditionally.  The executor
+        itself returns blocked when the artifact is absent.
+
+        This state is not reachable through parse_issue_centric_reply because the contract
+        validator enforces the same constraint.  We bypass the validator by constructing
+        PreparedIssueCentricDecision directly, the same pattern used in #43's
+        test_dispatcher_issue_create_missing_followup_artifact_is_blocked_at_dispatcher.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            # Build decision with create_followup_issue=True but no followup body.
+            # Use NO_ACTION so the issue_create dispatcher guard does not apply.
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="placeholder",  # needed for contract validation pass
+            )
+            # Override prepared to have followup_issue_body=None, bypassing the validator
+            prepared_with_missing_artifact = issue_centric_transport.PreparedIssueCentricDecision(
+                decision=decision,
+                issue_body=None,
+                codex_body=None,
+                review_body=None,
+                followup_issue_body=None,  # absent — should route to executor, not dispatcher guard
+            )
+            metadata = root / "metadata.json"
+            metadata.write_text("{}", encoding="utf-8")
+            artifact = root / "artifact.md"
+            artifact.write_text("artifact", encoding="utf-8")
+            mat = SimpleNamespace(
+                prepared=prepared_with_missing_artifact,
+                metadata_log_path=metadata,
+                artifact_log_path=artifact,
+                safe_stop_reason="prepared",
+            )
+
+            executor_called = [False]
+
+            def fake_followup_missing_artifact(*args, **kwargs):
+                executor_called[0] = True
+                p = root / "followup_no_artifact.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    followup_status="blocked_missing_followup_artifact",
+                    parent_issue=None,
+                    created_issue=None,
+                    execution_log_path=p,
+                    project_sync_status="",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="create_followup_issue=true requires a decoded CHATGPT_FOLLOWUP_ISSUE_BODY artifact.",
+                )
+
+            state = self._base_state()
+            result = issue_centric_execution.dispatch_issue_centric_execution(
+                contract_decision=decision,
+                materialized=mat,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                mutable_state=state,
+                project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                repo_path=REPO_ROOT,
+                source_raw_log="logs/raw.txt",
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/artifact.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda p: str(p),
+                load_state_fn=lambda: dict(state),
+                save_state_fn=lambda s: None,
+                execute_issue_create_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("issue_create")),
+                execute_codex_run_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("codex_run")),
+                launch_issue_centric_codex_run_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("launch")),
+                execute_human_review_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("review")),
+                execute_close_current_issue_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("close")),
+                execute_followup_issue_action_fn=fake_followup_missing_artifact,
+                execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
+                launch_runner=lambda s, argv=None: 0,
+            )
+
+            # Executor IS called for no_action path (no dispatcher-level guard unlike issue_create path)
+            self.assertTrue(executor_called[0], "executor should be called even when artifact is absent for no_action path")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_followup_status"], "blocked_missing_followup_artifact")
+
+    # --- end-to-end: parse_issue_centric_reply → decode → dispatch ---
+
+    def test_e2e_parse_to_dispatch_no_action_followup(self) -> None:
+        """End-to-end: raw JSON with CHATGPT_FOLLOWUP_ISSUE_BODY enters the follow-up dispatch path.
+
+        Verifies that the decoded follow-up artifact from parse_issue_centric_reply is
+        correctly routed through the dispatcher into the follow-up issue execution path.
+        """
+        followup_text = "# Follow-up: next slice\n\nBody of follow-up issue.\n"
+        raw_reply = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+                b64(followup_text),
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+                issue_centric_contract.DECISION_JSON_START,
+                json.dumps(
+                    {
+                        "action": "no_action",
+                        "target_issue": "#20",
+                        "close_current_issue": False,
+                        "create_followup_issue": True,
+                        "summary": "e2e followup dispatch test",
+                    }
+                ),
+                issue_centric_contract.DECISION_JSON_END,
+            ]
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw_reply, after_text="request body")
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.NO_ACTION)
+        self.assertTrue(decision.create_followup_issue)
+        self.assertIsNotNone(decision.followup_issue_body_base64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            followup_artifact_text: list[str] = []
+            calls: list[str] = []
+
+            def fake_followup(prepared, **kwargs):
+                calls.append("followup")
+                # Confirm the decoded artifact text matches the raw input
+                if prepared.followup_issue_body is not None:
+                    followup_artifact_text.append(prepared.followup_issue_body.decoded_text)
+                p = root / "followup_e2e.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_issue=fake_issue(101),
+                    execution_log_path=p,
+                    project_sync_status="issue_only_fallback",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="e2e follow-up created",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=fake_followup,
+            )
+
+            self.assertEqual(calls, ["followup"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "101")
+            # Confirm decoded artifact body was passed through correctly
+            self.assertEqual(len(followup_artifact_text), 1)
+            self.assertEqual(followup_artifact_text[0], followup_text)
+
+
 if __name__ == "__main__":
     unittest.main()
