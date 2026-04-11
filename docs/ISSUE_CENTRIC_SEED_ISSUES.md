@@ -68,17 +68,17 @@ catalog.
 - Project:
   - [ai-dev-orchestrator Issue-Centric Seed Backlog](https://github.com/users/momotomo/projects/4)
 - Registered Epic issues:
-  - [#1 Epic: issue-centric execution contract and operator path](https://github.com/momotomo/ai-dev-orchestrator/issues/1)
-  - [#2 Epic: GitHub backlog and Project bootstrap for issue-centric work](https://github.com/momotomo/ai-dev-orchestrator/issues/2)
-  - [#3 Epic: completion, review, and follow-up slicing loop](https://github.com/momotomo/ai-dev-orchestrator/issues/3)
+  - [#1 Epic: issue-centric execution contract and operator path](https://github.com/momotomo/ai-dev-orchestrator/issues/1) — **closed / done**
+  - [#2 Epic: GitHub backlog and Project bootstrap for issue-centric work](https://github.com/momotomo/ai-dev-orchestrator/issues/2) — **closed / done**
+  - [#3 Epic: completion, review, and follow-up slicing loop](https://github.com/momotomo/ai-dev-orchestrator/issues/3) — **closed / done**
   - [#4 Epic: runtime migration inventory and staged orchestration](https://github.com/momotomo/ai-dev-orchestrator/issues/4)
 - Registered planned issues:
-  - [#5 Planned: make ready issue the normal operator entry example](https://github.com/momotomo/ai-dev-orchestrator/issues/5)
-  - [#6 Planned: position free-form initial input as an exception and recovery override](https://github.com/momotomo/ai-dev-orchestrator/issues/6)
-  - [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
-  - [#8 Planned: define planned-to-ready promotion cadence and backlog curation](https://github.com/momotomo/ai-dev-orchestrator/issues/8)
-  - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9)
-  - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10)
+  - [#5 Planned: make ready issue the normal operator entry example](https://github.com/momotomo/ai-dev-orchestrator/issues/5) — **closed / done**
+  - [#6 Planned: position free-form initial input as an exception and recovery override](https://github.com/momotomo/ai-dev-orchestrator/issues/6) — **closed / done**
+  - [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7) — **closed / done**
+  - [#8 Planned: define planned-to-ready promotion cadence and backlog curation](https://github.com/momotomo/ai-dev-orchestrator/issues/8) — **closed / done**
+  - [#9 Planned: tighten Codex completion to ChatGPT review handoff](https://github.com/momotomo/ai-dev-orchestrator/issues/9) — **closed / done**
+  - [#10 Planned: inventory minimal runtime touchpoints for ready-issue-first execution](https://github.com/momotomo/ai-dev-orchestrator/issues/10) — **closed / done**
 - Current open ready issues:
   - none
 - Completed ready examples:
@@ -91,9 +91,9 @@ catalog.
   - [#20 Ready: accept a ready issue reference as the normal initial bridge entry](https://github.com/momotomo/ai-dev-orchestrator/issues/20)
   - [#22 Ready: test markdown-fidelity copy-response feasibility for bridge reply extraction](https://github.com/momotomo/ai-dev-orchestrator/issues/22)
 
-The first public ready example intentionally keeps
+The first public ready example intentionally used
 [#7 Planned: keep GitHub Project and label bootstrap intentionally small](https://github.com/momotomo/ai-dev-orchestrator/issues/7)
-as the backlog-shaped `planned` parent and uses
+as the backlog-shaped `planned` parent and used
 [#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route](https://github.com/momotomo/ai-dev-orchestrator/issues/11)
 as the bounded direct Codex target and first completed review-loop example.
 Promote only the next bounded slice to `ready`.
@@ -103,8 +103,8 @@ Promote only the next bounded slice to `ready`.
 Use the `#7 -> #11` pair as the smallest reference pattern for future
 promotion.
 
-- `#7` stays `planned` because it still holds the broader backlog theme and
-  future slices
+- `#7` was kept `planned` while it still held the broader backlog theme and
+  future slices; it is now closed / done
 - `#11` first became `ready` because it carried one bounded execution unit with
   explicit acceptance criteria and review focus
 - `#11` now also serves as the smallest public example of completion comment,
@@ -142,31 +142,25 @@ Use the current public backlog like this:
 In the current public set:
 
 - `#11` is the completed calibration example
-- `#5` remains the flexible planned parent for operator-entry wording
+- `#5` is the closed planned parent for operator-entry wording — completed via `#14`
 - `#14` is the completed ready child for the normal operator-entry slice
-- `#6` remains the flexible planned parent for exception / recovery / override
-  wording
+- `#6` is the closed planned parent for exception / recovery / override wording — completed via `#15`
 - `#15` is the completed ready child for the exception / recovery /
   override-path slice
-- `#9` remains the flexible planned parent for completion-to-review handoff
-  wording
+- `#9` is the closed planned parent for completion-to-review handoff wording — completed via `#16`
 - `#16` is the completed ready child for the completion / review handoff
   slice
-- `#8` remains the flexible planned parent for promotion-cadence work
+- `#8` is the closed planned parent for promotion-cadence work — completed via `#12` / `#37` / `#38` / `#39`
 - `#12` is the completed ready child for the backlog-cadence slice
-- `#10` remains the flexible planned parent for runtime-boundary inventory and
-  staged migration work
+- `#10` is the closed planned parent for runtime-boundary inventory and
+  staged migration work — completed via `#18` / `#20`
 - `#18` is the completed ready child for the inventory-only runtime touchpoint
   slice
 - `#20` is the completed ready child for the first bounded runtime
   implementation slice at the initial entry boundary
 - `#22` is the completed ready child for reply-fidelity feasibility at the
   extraction boundary
-- current open `ready` is `none` again until a bounded Plan A transport slice
-  is promoted
-- `#5`, `#6`, `#9`, and `#10` remain planned because follow-up and next-slice
-  decisions should return to backlog curation instead of stretching completed
-  ready issues
+- current open `ready` is `none`; the remaining active planned backlog is under Epic `#4`
 
 ## Epic Unit
 
