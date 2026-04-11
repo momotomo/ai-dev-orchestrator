@@ -480,6 +480,35 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
             self.assertIn("Codex launch / continuation path and follow-up issue path", result.safe_stop_reason)
 
 
+    def test_close_current_issue_blocks_when_no_target_can_be_resolved(self) -> None:
+        """close_current_issue is blocked when target_issue=none and state has no backfill (#43)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self.prepared(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue=None,  # no explicit target
+                close_current_issue=True,
+            )
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={
+                    # no last_issue_centric_resolved_issue
+                    # no last_issue_centric_target_issue
+                },
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=root,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda p: str(p),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.close_status, "blocked")
+        self.assertIn("could not resolve", result.safe_stop_reason)
+
+
 class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
     def test_issue_create_can_close_current_issue_after_creation(self) -> None:
         state = {

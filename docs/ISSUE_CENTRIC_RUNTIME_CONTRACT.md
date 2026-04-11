@@ -109,6 +109,19 @@ The current implementation boundary is:
   contract markers are absent or parsing fails; `_bridge_common.py` exposes
   `wait_for_plan_a_or_prompt_reply_text` that accepts a `plan_a_extractor`
   callable injected from outside to avoid circular imports
+- implemented: `target_issue` format validation at parse time — accepted
+  formats are `42`, `#42`, `owner/repo#42` (strictly two segments; extra
+  slash rejected), and `https://github.com/owner/repo/issues/N`; validated by
+  `_TARGET_ISSUE_REF_RE` / `_TARGET_ISSUE_URL_RE` in `issue_centric_contract.py`
+  and the matching `repo_ref_match` regex in `resolve_target_issue` in
+  `issue_centric_github.py`
+- implemented: dispatch integration tests confirming that the validated
+  contract decision from `parse_issue_centric_reply` is the authoritative
+  entry point for both narrow mutation paths: standalone `issue_create`
+  (no followup, no close), `issue_create` blocked when executor returns
+  blocked, `close_current_issue` blocked when no target can be resolved,
+  and end-to-end raw-JSON → parse → materialize → dispatch for `issue_create`
+  and `no_action + close_current_issue`
 - not yet implemented: follow-up mutation for other actions or broader
   post-review automation
 - not yet implemented: large state-machine rewrite or full contract cutover
