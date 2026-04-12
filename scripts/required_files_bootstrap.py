@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from copilot_stability_preamble import COPILOT_STABILITY_PREAMBLE
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 PACK_DIR = ROOT_DIR / "bridge" / "required_files_bootstrap"
@@ -102,12 +104,13 @@ def render_bootstrap_prompt(
 ) -> str:
     pack = pack or load_required_files_pack()
     template = PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
-    return (
+    body = (
         template.replace("__TARGET_REPO_NAME__", target_repo_name)
         .replace("__TARGET_REPO_PATH__", str(target_repo_path))
         .replace("__REQUIRED_FILES_SUMMARY__", render_required_files_summary(pack))
         .replace("__FILE_SECTIONS__", render_file_sections(pack, target_repo_name))
-    ).rstrip() + "\n"
+    ).rstrip()
+    return COPILOT_STABILITY_PREAMBLE + "\n\n" + body + "\n"
 
 
 def write_bootstrap_prompt_artifact(

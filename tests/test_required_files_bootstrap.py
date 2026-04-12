@@ -12,10 +12,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from copilot_stability_preamble import COPILOT_STABILITY_PREAMBLE  # noqa: E402
 import required_files_bootstrap  # noqa: E402
 
 
 class RequiredFilesBootstrapTests(unittest.TestCase):
+    def assert_shared_preamble_in_prompt(self, prompt_text: str) -> None:
+        self.assertIn(COPILOT_STABILITY_PREAMBLE, prompt_text)
+        self.assertEqual(prompt_text.count(COPILOT_STABILITY_PREAMBLE), 1)
+        self.assertEqual(prompt_text.count("# Required Files Bootstrap Pack"), 1)
+        self.assertEqual(prompt_text.count("## Stability-first instruction"), 1)
+        self.assertLess(
+            prompt_text.index("## Stability-first instruction"),
+            prompt_text.index("# Required Files Bootstrap Pack"),
+        )
+
     def test_bootstrap_artifact_materializes_real_required_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             temp_root = Path(tmp)
@@ -86,6 +97,7 @@ class RequiredFilesBootstrapTests(unittest.TestCase):
             self.assertIn("Required Files Bootstrap Pack", prompt_text)
             self.assertIn("PATH: AGENTS.md", prompt_text)
             self.assertIn("PATH: .github/copilot-instructions.md", prompt_text)
+            self.assert_shared_preamble_in_prompt(prompt_text)
 
             pack = required_files_bootstrap.load_required_files_pack()
             for spec in pack.required_files:
@@ -131,6 +143,9 @@ class RequiredFilesBootstrapTests(unittest.TestCase):
                 Path(summary["summary_path"]),
                 (workspace_root / "smoke-test-summary.json").resolve(),
             )
+
+            prompt_text = Path(summary["prompt_artifact_path"]).read_text(encoding="utf-8")
+            self.assert_shared_preamble_in_prompt(prompt_text)
 
 
 if __name__ == "__main__":
