@@ -3255,5 +3255,457 @@ class IssueCentricCodexRunHumanReviewDispatchTests(unittest.TestCase):
             self.assertEqual(review_artifact_text[0], review_text)
 
 
+class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
+    """#46: combo-matrix and close-policy coverage across dispatcher paths.
+
+    Confirms under-specified cross-path combinations and state field recording
+    that lacked explicit coverage after #45:
+
+    - codex_run + close (no followup): blocked_codex_run_close state fields recorded
+    - human_review_needed + create_followup_issue + missing review body: blocked at dispatcher
+    - human_review_needed + create_followup_issue + missing followup body: blocked at dispatcher
+    - codex_run + create_followup_issue + close (tri-flag): trigger-only matrix path when executor blocked
+    - no_action + close_current_issue: routes to no_action_close
+    - close_policy field recorded in state after human_review
+    """
+
+    def _base_state(self) -> dict[str, object]:
+        return {
+            "last_issue_centric_action": "",
+            "last_issue_centric_target_issue": "",
+            "last_issue_centric_stop_reason": "",
+            "chatgpt_decision_note": "",
+            "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
+            "last_issue_centric_close_order": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_execution_status": "",
+            "last_issue_centric_execution_log": "",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_created_issue_url": "",
+            "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
+            "last_issue_centric_project_sync_status": "",
+            "last_issue_centric_project_url": "",
+            "last_issue_centric_project_item_id": "",
+            "last_issue_centric_project_state_field": "",
+            "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
+            "last_issue_centric_followup_status": "",
+            "last_issue_centric_followup_log": "",
+            "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
+            "last_issue_centric_close_status": "",
+            "last_issue_centric_close_log": "",
+            "last_issue_centric_closed_issue_number": "",
+            "last_issue_centric_closed_issue_url": "",
+            "last_issue_centric_closed_issue_title": "",
+            "last_issue_centric_review_status": "",
+            "last_issue_centric_review_log": "",
+            "last_issue_centric_review_comment_id": "",
+            "last_issue_centric_review_comment_url": "",
+            "last_issue_centric_review_close_policy": "",
+        }
+
+    def _no_project_sync_fn(self, root: Path):
+        def fn(*args, **kwargs):
+            p = root / "no-project-sync.json"
+            if not p.exists():
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="not_requested",
+                sync_status="not_requested_no_project",
+                lifecycle_stage=kwargs.get("lifecycle_stage", ""),
+                resolved_issue=None,
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="No GitHub Project is configured.",
+            )
+
+        return fn
+
+    def _dispatch(
+        self,
+        *,
+        decision: issue_centric_contract.IssueCentricDecision,
+        root: Path,
+        prior_resolved: str = "https://github.com/example/repo/issues/20",
+        execute_codex_run_action_fn=None,
+        launch_issue_centric_codex_run_fn=None,
+        execute_human_review_action_fn=None,
+        execute_close_current_issue_fn=None,
+        execute_followup_issue_action_fn=None,
+        materialized_override=None,
+    ) -> issue_centric_execution.IssueCentricDispatchResult:
+        if materialized_override is not None:
+            mat = materialized_override
+        else:
+            mat = materialized_from_decision(decision, root=root)
+        state = self._base_state()
+        state["last_issue_centric_resolved_issue"] = prior_resolved
+        saved: list[dict] = []
+
+        def _abort(name: str):
+            def fn(*args, **kwargs):
+                raise AssertionError(f"{name} should not be called in this test")
+
+            return fn
+
+        return issue_centric_execution.dispatch_issue_centric_execution(
+            contract_decision=decision,
+            materialized=mat,
+            prior_state={"last_issue_centric_resolved_issue": prior_resolved},
+            mutable_state=state,
+            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            repo_path=REPO_ROOT,
+            source_raw_log="logs/raw.txt",
+            source_decision_log="logs/decision.md",
+            source_metadata_log="logs/metadata.json",
+            source_artifact_path="logs/artifact.md",
+            log_writer=TempLogWriter(root),
+            repo_relative=lambda p: str(p),
+            load_state_fn=lambda: dict(saved[-1]) if saved else dict(state),
+            save_state_fn=lambda s: saved.append(dict(s)),
+            execute_issue_create_action_fn=_abort("issue_create"),
+            execute_codex_run_action_fn=execute_codex_run_action_fn or _abort("codex_run"),
+            launch_issue_centric_codex_run_fn=launch_issue_centric_codex_run_fn or _abort("launch"),
+            execute_human_review_action_fn=execute_human_review_action_fn or _abort("human_review"),
+            execute_close_current_issue_fn=execute_close_current_issue_fn or _abort("close"),
+            execute_followup_issue_action_fn=execute_followup_issue_action_fn or _abort("followup"),
+            execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
+            launch_runner=lambda s, argv=None: 0,
+        )
+
+    # ---- codex_run + close (no followup): state fields recorded ----
+
+    def test_combo_codex_run_close_state_fields_recorded(self) -> None:
+        """codex_run + close_current_issue (no followup) → blocked_codex_run_close.
+
+        The dispatcher calls execute_close_current_issue_fn and applies its result to
+        mutable_state before finalizing as blocked. Confirms close_status and close_order
+        fields are recorded from the executor response.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                codex_text="Implement the issue.\n",
+            )
+
+            def fake_close(*args, **kwargs):
+                p = root / "close_combo.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    close_status="blocked_codex_run",
+                    close_order="blocked_codex_run",
+                    execution_log_path=p,
+                    issue_before=None,
+                    issue_after=None,
+                    safe_stop_reason="codex_run cannot close in this slice.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "blocked_codex_run")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "blocked_codex_run")
+
+    # ---- human_review_needed + create_followup_issue: missing review body guard ----
+
+    def test_combo_human_review_followup_missing_review_blocked_at_dispatcher(self) -> None:
+        """human_review_needed + create_followup_issue + review_body=None → blocked before executor.
+
+        The dispatcher guards that a prepared CHATGPT_REVIEW artifact is present before
+        entering the human_review + followup combo path. With review_text=None (no review
+        artifact in the reply) the dispatcher must block without calling the executor.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # human_review_needed + create_followup_issue=True — review artifact absent (review_text=None)
+            # followup artifact present (required by contract when create_followup_issue=True)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                create_followup_issue=True,
+                review_text=None,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                # no executor fns provided — dispatcher must block before reaching any executor
+            )
+
+            self.assertEqual(result.matrix_path, "blocked_human_review_followup_missing_review")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(
+                result.final_state["last_issue_centric_review_status"],
+                "blocked_missing_review_artifact",
+            )
+
+    # ---- human_review_needed + create_followup_issue: missing followup body guard ----
+
+    def test_combo_human_review_followup_missing_followup_body_blocked_at_dispatcher(self) -> None:
+        """human_review_needed + create_followup_issue + followup_body=None → blocked before executor.
+
+        When the review artifact is present but the follow-up body is absent (bypassing the
+        contract validator via PreparedIssueCentricDecision), the dispatcher blocks before
+        calling any executor fn.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Build a valid decision that would normally pass the validator
+            # (review + followup both present) then override prepared to have followup_body=None
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                create_followup_issue=True,
+                review_text="## Review notes\n\nLooks good.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            review_decoded = issue_centric_transport.IssueCentricDecodedBody(
+                kind=issue_centric_transport.IssueCentricArtifactKind.REVIEW,
+                block_name="CHATGPT_REVIEW",
+                raw_base64=b64("## Review notes\n\nLooks good.\n"),
+                normalized_base64=b64("## Review notes\n\nLooks good.\n"),
+                decoded_text="## Review notes\n\nLooks good.\n",
+            )
+            prepared_no_followup = issue_centric_transport.PreparedIssueCentricDecision(
+                decision=decision,
+                issue_body=None,
+                codex_body=None,
+                review_body=review_decoded,
+                followup_issue_body=None,  # absent — dispatcher must block before executor
+            )
+            metadata = root / "metadata.json"
+            metadata.write_text("{}", encoding="utf-8")
+            artifact = root / "artifact.md"
+            artifact.write_text("artifact", encoding="utf-8")
+            mat = SimpleNamespace(
+                prepared=prepared_no_followup,
+                metadata_log_path=metadata,
+                artifact_log_path=artifact,
+                safe_stop_reason="prepared",
+            )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                materialized_override=mat,
+                # no executor fns — dispatcher must block before reaching any executor
+            )
+
+            self.assertEqual(result.matrix_path, "blocked_human_review_followup_missing_followup")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_status"],
+                "blocked_missing_followup_artifact",
+            )
+
+    # ---- codex_run + create_followup_issue + close tri-flag: trigger-only when executor blocked ----
+
+    def test_combo_codex_run_followup_close_tri_flag_trigger_only_when_blocked(self) -> None:
+        """codex_run + create_followup_issue + close_current_issue + executor blocked → codex_run_trigger_only.
+
+        With all three flags set but the codex trigger executor returning blocked (no Codex
+        launch), the dispatcher must route to codex_run_trigger_only and record
+        close_status as not_attempted_trigger_blocked.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=True,
+                codex_text="Implement the issue.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_codex_blocked(*args, **kwargs):
+                calls.append("codex_run")
+                p = root / "codex_trigger_blocked.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    launch_status="blocked",
+                    resolved_issue=None,
+                    execution_log_path=p,
+                    payload_log_path=None,
+                    created_comment=None,
+                    safe_stop_reason="trigger blocked for test.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_codex_run_action_fn=fake_codex_blocked,
+            )
+
+            self.assertEqual(calls, ["codex_run"])
+            self.assertEqual(result.matrix_path, "codex_run_trigger_only")
+            self.assertEqual(result.final_status, "blocked")
+            self.assertEqual(
+                result.final_state["last_issue_centric_close_status"],
+                "not_attempted_trigger_blocked",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_close_order"],
+                "after_codex_run_followup",
+            )
+
+    # ---- no_action + close_current_issue: routes to no_action_close ----
+
+    def test_combo_no_action_close_standalone_routes_to_no_action_close(self) -> None:
+        """no_action + close_current_issue → matrix_path=no_action_close.
+
+        The dispatcher must call execute_close_current_issue_fn and route the result
+        to the no_action_close path without entering any other executor.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close_no_action.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20, state="open"),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+            )
+
+            self.assertEqual(calls, ["close"])
+            self.assertEqual(result.matrix_path, "no_action_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "completed")
+            self.assertEqual(result.final_state["last_issue_centric_closed_issue_number"], "20")
+
+    # ---- close_policy field recorded in state after human_review ----
+
+    def test_close_policy_field_recorded_after_human_review(self) -> None:
+        """human_review completed → last_issue_centric_review_close_policy recorded in state.
+
+        Confirms that _apply_review_execution_state writes the close_policy value from the
+        executor response into mutable_state, making it available for downstream logic.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                target_issue="#20",
+                review_text="## Review\n\nApproved.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("human_review")
+                p = root / "review_close_policy.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(9001, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review comment posted.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+            )
+
+            self.assertEqual(calls, ["human_review"])
+            self.assertEqual(result.matrix_path, "human_review")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_review_close_policy"],
+                "after_review_close_if_review_succeeds",
+            )
+            self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "9001")
+
+
 if __name__ == "__main__":
     unittest.main()
