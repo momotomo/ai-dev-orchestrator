@@ -502,6 +502,43 @@ def _bridge_lifecycle_sync_suffix(state: Mapping[str, Any]) -> str:
     return f" [lifecycle_sync: {' '.join(parts)}]"
 
 
+def bridge_lifecycle_sync_suffix(state: Mapping[str, Any]) -> str:
+    """Public wrapper around _bridge_lifecycle_sync_suffix for cross-module use.
+
+    Returns '[lifecycle_sync: stage=X signal=synced/skipped_no_project/sync_failed]' or ''.
+    Consistent with the signal model introduced in issue #50.
+    """
+    return _bridge_lifecycle_sync_suffix(state)
+
+
+def format_lifecycle_sync_state_note(state: Mapping[str, Any]) -> str:
+    """Return a short lifecycle sync diagnostic note for stop summaries and doctor output.
+
+    Returns e.g. 'stage=closing signal=synced' or 'not_recorded' when no sync data.
+    Consistent with the signal model introduced in issue #50.
+    Three signals: synced | skipped_no_project | sync_failed (+ reason for failures).
+    """
+    sync_status = str(state.get("last_issue_centric_lifecycle_sync_status", "")).strip()
+    sync_stage = str(state.get("last_issue_centric_lifecycle_sync_stage", "")).strip()
+    if not sync_status and not sync_stage:
+        return "not_recorded"
+    if sync_status == "project_state_synced":
+        signal = "synced"
+    elif sync_status == "not_requested_no_project":
+        signal = "skipped_no_project"
+    elif sync_status:
+        signal = "sync_failed"
+    else:
+        return "not_recorded"
+    parts: list[str] = []
+    if sync_stage:
+        parts.append(f"stage={sync_stage}")
+    parts.append(f"signal={signal}")
+    if signal == "sync_failed" and sync_status:
+        parts.append(f"reason={sync_status}")
+    return " ".join(parts)
+
+
 def present_bridge_status(
     state: Mapping[str, Any],
     *,
@@ -1659,11 +1696,14 @@ def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatch
     directly, keeping mode as a compatibility signal in the background.
     """
     if plan.next_action == "completed":
-        return "追加の Codex 実行・ChatGPT 依頼は不要です。"
+        _lc = _bridge_lifecycle_sync_suffix(state)
+        return f"追加の Codex 実行・ChatGPT 依頼は不要です。{_lc}"
     if plan.next_action == "no_action":
-        return "次の 1 手が見つかりません。state と doctor を確認してください。"
+        _lc = _bridge_lifecycle_sync_suffix(state)
+        return f"次の 1 手が見つかりません。state と doctor を確認してください。{_lc}"
     if plan.next_action == "request_next_prompt":
-        return "次の ChatGPT 依頼を送る新規入口へ進めます。"
+        _lc = _bridge_lifecycle_sync_suffix(state)
+        return f"次の ChatGPT 依頼を送る新規入口へ進めます。{_lc}"
     if plan.next_action == "request_prompt_from_report":
         _lc = _bridge_lifecycle_sync_suffix(state)
         if is_awaiting_user_supplement(state):

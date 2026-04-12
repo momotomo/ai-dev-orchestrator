@@ -11,11 +11,13 @@ from typing import Any
 
 from _bridge_common import (
     BridgeStop,
+    bridge_lifecycle_sync_suffix,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
     bridge_runtime_root,
     check_stop_conditions,
     codex_report_is_ready,
+    format_lifecycle_sync_state_note,
     format_operator_stop_note,
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
@@ -411,13 +413,18 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         if decision == "completed":
             if note:
                 return note
-            return "ChatGPT が完了判断を返したため、追加の Codex 実行は不要です。"
+            _lc = bridge_lifecycle_sync_suffix(final_state)
+            return f"ChatGPT が完了判断を返したため、追加の Codex 実行は不要です。{_lc}"
         if decision == "human_review":
+            _lc = bridge_lifecycle_sync_suffix(final_state)
             base = note or "ChatGPT が人判断待ちと判断しました。"
-            return f"{base} bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。"
+            suffix = f" bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。{_lc}" if not note else " bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。"
+            return f"{base}{suffix}"
         if decision == "need_info":
+            _lc = bridge_lifecycle_sync_suffix(final_state)
             base = note or "ChatGPT が情報不足と判断しました。"
-            return f"{base} bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。"
+            suffix = f" bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。{_lc}" if not note else " bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。"
+            return f"{base}{suffix}"
         return "ChatGPT が Codex 不要と判断しました。人が次の判断を行ってください。"
     if action == "request_next_prompt":
         return (
@@ -1000,6 +1007,7 @@ def summarize_run(
         f"- runtime_action: {_summary_runtime_action}",
         f"- is_fallback: {_summary_is_fallback}",
         f"- action_stop_note: {_summary_action_stop_note}",
+        f"- lifecycle_sync_state: {format_lifecycle_sync_state_note(final_state)}",
         "",
         "## run",
         f"- initial_user_status: {initial_status.label}",
