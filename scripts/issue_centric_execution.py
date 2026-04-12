@@ -293,6 +293,25 @@ def dispatch_issue_centric_execution(
                     )
                 )
                 final_status = "partial"
+            if not contract_decision.close_current_issue and followup_execution.status == "completed":
+                followup_sync_execution = _run_current_issue_project_state_sync(
+                    lifecycle_stage="followup_created",
+                    prepared=materialized.prepared,
+                    prior_state=mutable_state,
+                    target_state=mutable_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(followup_execution.execution_log_path),
+                    step_name="current_issue_project_state_sync_followup_created",
+                    steps=steps,
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                    execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                )
+                if followup_sync_execution.status not in {"completed", "not_requested"}:
+                    final_status = "partial"
         if contract_decision.close_current_issue and execution.status == "completed":
             if not contract_decision.create_followup_issue:
                 close_execution = execute_close_current_issue_fn(
@@ -1109,6 +1128,25 @@ def dispatch_issue_centric_execution(
                     )
                 )
                 final_status = "partial"
+            if not contract_decision.close_current_issue and followup_execution.status == "completed":
+                followup_sync_execution = _run_current_issue_project_state_sync(
+                    lifecycle_stage="followup_created",
+                    prepared=materialized.prepared,
+                    prior_state=mutable_state,
+                    target_state=mutable_state,
+                    project_config=project_config,
+                    repo_path=repo_path,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(followup_execution.execution_log_path),
+                    step_name="current_issue_project_state_sync_followup_created",
+                    steps=steps,
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                    execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+                )
+                if followup_sync_execution.status not in {"completed", "not_requested"}:
+                    final_status = "partial"
         elif contract_decision.close_current_issue and review_execution.status == "completed":
             close_execution = execute_close_current_issue_fn(
                 materialized.prepared,
@@ -1332,6 +1370,25 @@ def dispatch_issue_centric_execution(
                 )
             )
             final_status = "partial"
+        if not contract_decision.close_current_issue and followup_execution.status == "completed":
+            followup_sync_execution = _run_current_issue_project_state_sync(
+                lifecycle_stage="followup_created",
+                prepared=materialized.prepared,
+                prior_state=mutable_state,
+                target_state=mutable_state,
+                project_config=project_config,
+                repo_path=repo_path,
+                source_decision_log=source_decision_log,
+                source_metadata_log=source_metadata_log,
+                source_action_execution_log=repo_relative(followup_execution.execution_log_path),
+                step_name="current_issue_project_state_sync_followup_created",
+                steps=steps,
+                log_writer=log_writer,
+                repo_relative=repo_relative,
+                execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn,
+            )
+            if followup_sync_execution.status not in {"completed", "not_requested"}:
+                final_status = "partial"
         followup_note = ""
         if followup_execution.created_issue is not None:
             followup_note = (

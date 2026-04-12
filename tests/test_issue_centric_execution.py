@@ -3707,5 +3707,851 @@ class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_review_comment_id"], "9001")
 
 
+class IssueCentricLifecycleSyncIntegrationTests(unittest.TestCase):
+    """#48: lifecycle sync and project-state automation after issue-centric execution.
+
+    Tests the followup_created lifecycle sync stage that was wired into:
+    - no_action + create_followup_issue (no close)
+    - human_review_needed + create_followup_issue (no close)
+    - issue_create + create_followup_issue (no close)
+
+    Also covers:
+    - success path with project sync available
+    - no-project safe fallback (sync returns not_requested, main path stays completed)
+    - sync failure recording (final_status downgrades to partial)
+    - review-completed path state fields
+    - close-completed path state fields
+    - regression: paths with close still reach done sync first
+    """
+
+    def _base_state(self) -> dict[str, object]:
+        return {
+            "last_issue_centric_action": "",
+            "last_issue_centric_target_issue": "",
+            "last_issue_centric_stop_reason": "",
+            "chatgpt_decision_note": "",
+            "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
+            "last_issue_centric_close_order": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_execution_status": "",
+            "last_issue_centric_execution_log": "",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_created_issue_url": "",
+            "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
+            "last_issue_centric_project_sync_status": "",
+            "last_issue_centric_project_url": "",
+            "last_issue_centric_project_item_id": "",
+            "last_issue_centric_project_state_field": "",
+            "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
+            "last_issue_centric_followup_status": "",
+            "last_issue_centric_followup_log": "",
+            "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
+            "last_issue_centric_close_status": "",
+            "last_issue_centric_close_log": "",
+            "last_issue_centric_closed_issue_number": "",
+            "last_issue_centric_closed_issue_url": "",
+            "last_issue_centric_closed_issue_title": "",
+            "last_issue_centric_review_status": "",
+            "last_issue_centric_review_log": "",
+            "last_issue_centric_review_comment_id": "",
+            "last_issue_centric_review_comment_url": "",
+            "last_issue_centric_review_close_policy": "",
+        }
+
+    def _make_sync_fn(self, root: Path, calls: list[str], *, status: str = "completed") -> object:
+        """Return a project-state sync fn that records its lifecycle_stage call and returns status."""
+
+        def fn(*args, **kwargs):
+            stage = kwargs.get("lifecycle_stage", "unknown")
+            calls.append(f"sync:{stage}")
+            p = root / f"sync_{stage}.json"
+            if not p.exists():
+                p.write_text("{}", encoding="utf-8")
+            if status == "completed":
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=stage,
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="PVTI_example",
+                    project_state_field_name="Status",
+                    project_state_value_name=stage,
+                    safe_stop_reason=f"synced to {stage}",
+                )
+            elif status == "not_requested":
+                return SimpleNamespace(
+                    status="not_requested",
+                    sync_status="not_requested_no_project",
+                    lifecycle_stage=stage,
+                    resolved_issue=None,
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="No GitHub Project is configured.",
+                )
+            else:  # "blocked" / any failure status
+                return SimpleNamespace(
+                    status="blocked",
+                    sync_status="blocked_project_preflight",
+                    lifecycle_stage=stage,
+                    resolved_issue=None,
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason=f"project sync failed for stage {stage}",
+                )
+
+        return fn
+
+    def _make_followup_fn(self, root: Path, calls: list[str]) -> object:
+        """Return a followup executor that creates a fake follow-up issue."""
+
+        def fn(*args, **kwargs):
+            calls.append("followup")
+            p = root / "followup.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                followup_status="completed",
+                execution_log_path=p,
+                parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                project_item_id="",
+                project_url="",
+                project_sync_status="",
+                project_state_field_name="",
+                project_state_value_name="",
+                created_issue=fake_issue(99),
+                safe_stop_reason="created follow-up issue #99",
+            )
+
+        return fn
+
+    def _dispatch(
+        self,
+        *,
+        decision: issue_centric_contract.IssueCentricDecision,
+        root: Path,
+        prior_resolved: str = "https://github.com/example/repo/issues/20",
+        execute_issue_create_action_fn=None,
+        execute_human_review_action_fn=None,
+        execute_close_current_issue_fn=None,
+        execute_followup_issue_action_fn=None,
+        execute_current_issue_project_state_sync_fn=None,
+    ) -> issue_centric_execution.IssueCentricDispatchResult:
+        mat = materialized_from_decision(decision, root=root)
+        state = self._base_state()
+        state["last_issue_centric_resolved_issue"] = prior_resolved
+        saved: list[dict] = []
+
+        def _abort(name: str):
+            def fn(*args, **kwargs):
+                raise AssertionError(f"{name} should not be called in this test")
+
+            return fn
+
+        def _no_project_sync(*args, **kwargs):
+            stage = kwargs.get("lifecycle_stage", "unknown")
+            p = root / f"no_sync_{stage}.json"
+            if not p.exists():
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="not_requested",
+                sync_status="not_requested_no_project",
+                lifecycle_stage=stage,
+                resolved_issue=None,
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="No GitHub Project is configured.",
+            )
+
+        return issue_centric_execution.dispatch_issue_centric_execution(
+            contract_decision=decision,
+            materialized=mat,
+            prior_state={"last_issue_centric_resolved_issue": prior_resolved},
+            mutable_state=state,
+            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            repo_path=REPO_ROOT,
+            source_raw_log="logs/raw.txt",
+            source_decision_log="logs/decision.md",
+            source_metadata_log="logs/metadata.json",
+            source_artifact_path="logs/artifact.md",
+            log_writer=TempLogWriter(root),
+            repo_relative=lambda p: str(p),
+            load_state_fn=lambda: dict(saved[-1]) if saved else dict(state),
+            save_state_fn=lambda s: saved.append(dict(s)),
+            execute_issue_create_action_fn=execute_issue_create_action_fn or _abort("issue_create"),
+            execute_codex_run_action_fn=_abort("codex_run"),
+            launch_issue_centric_codex_run_fn=_abort("launch"),
+            execute_human_review_action_fn=execute_human_review_action_fn or _abort("human_review"),
+            execute_close_current_issue_fn=execute_close_current_issue_fn or _abort("close"),
+            execute_followup_issue_action_fn=execute_followup_issue_action_fn or _abort("followup"),
+            execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync_fn or _no_project_sync,
+            launch_runner=lambda s, argv=None: 0,
+        )
+
+    # ---- no_action + followup: followup_created lifecycle sync ----
+
+    def test_no_action_followup_calls_followup_created_sync_on_success(self) -> None:
+        """no_action + create_followup_issue → follows followup_created lifecycle sync step."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls),
+            )
+
+            self.assertIn("followup", calls)
+            self.assertIn("sync:followup_created", calls)
+            self.assertEqual(calls, ["followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "followup_created")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "project_state_synced")
+            self.assertIn("current_issue_project_state_sync_followup_created", [s.name for s in result.steps])
+
+    def test_no_action_followup_sync_not_requested_safe_fallback(self) -> None:
+        """no_action + followup: when no project configured, sync returns not_requested and final_status stays completed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="not_requested"),
+            )
+
+            self.assertEqual(calls, ["followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            # not_requested must NOT degrade the main execution
+            self.assertEqual(result.final_status, "completed")
+            # lifecycle sync state not touched when not_requested (early return in _apply_current_issue_project_state_sync_state)
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "")
+
+    def test_no_action_followup_sync_failure_records_partial(self) -> None:
+        """no_action + followup: sync failure → final_status=partial, sync status recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="blocked"),
+            )
+
+            self.assertEqual(calls, ["followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            # sync failure must degrade final_status
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "blocked_project_preflight")
+
+    def test_no_action_followup_then_close_calls_done_sync_not_followup_created(self) -> None:
+        """no_action + followup + close: only done sync is called (not followup_created).
+
+        Regression: when close_current_issue=True, the followup_created sync must NOT fire.
+        The close path already calls done sync.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action_followup",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_close_current_issue_fn=fake_close,
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls),
+            )
+
+            self.assertIn("close", calls)
+            self.assertIn("sync:done", calls)
+            # followup_created sync must NOT be called when close is present
+            self.assertNotIn("sync:followup_created", calls)
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "done")
+
+    # ---- human_review + followup: followup_created lifecycle sync ----
+
+    def test_human_review_followup_calls_review_then_followup_created_sync(self) -> None:
+        """human_review_needed + create_followup_issue → review sync then followup_created sync."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                create_followup_issue=True,
+                review_text="## Review\n\nApproved.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                p = root / "review.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(7001, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review posted.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls),
+            )
+
+            self.assertEqual(calls, ["review", "sync:review", "followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "human_review_followup")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "followup_created")
+            self.assertIn("current_issue_project_state_sync_followup_created", [s.name for s in result.steps])
+
+    def test_human_review_followup_sync_not_requested_safe_fallback(self) -> None:
+        """human_review + followup: no-project fallback keeps final_status=completed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                create_followup_issue=True,
+                review_text="## Review\n\nApproved.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                p = root / "review.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(7002, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review posted.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="not_requested"),
+            )
+
+            # Both review and followup syncs are called but return not_requested
+            self.assertEqual(calls, ["review", "sync:review", "followup", "sync:followup_created"])
+            self.assertEqual(result.final_status, "completed")
+            # not_requested does not write to lifecycle sync state
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "")
+
+    def test_human_review_followup_sync_failure_records_partial(self) -> None:
+        """human_review + followup: sync failure at followup_created → final_status=partial."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                create_followup_issue=True,
+                review_text="## Review\n\nApproved.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                p = root / "review.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(7003, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review posted.",
+                )
+
+            call_count = [0]
+
+            def sync_fn_mixed(*args, **kwargs):
+                stage = kwargs.get("lifecycle_stage", "unknown")
+                call_count[0] += 1
+                calls.append(f"sync:{stage}")
+                p = root / f"sync_{stage}_{call_count[0]}.json"
+                p.write_text("{}", encoding="utf-8")
+                if stage == "review":
+                    return SimpleNamespace(
+                        status="completed",
+                        sync_status="project_state_synced",
+                        lifecycle_stage=stage,
+                        resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                        issue_snapshot=None,
+                        execution_log_path=p,
+                        project_url="https://github.com/users/example/projects/1",
+                        project_item_id="PVTI_example",
+                        project_state_field_name="Status",
+                        project_state_value_name=stage,
+                        safe_stop_reason=f"synced to {stage}",
+                    )
+                else:
+                    return SimpleNamespace(
+                        status="blocked",
+                        sync_status="blocked_project_preflight",
+                        lifecycle_stage=stage,
+                        resolved_issue=None,
+                        issue_snapshot=None,
+                        execution_log_path=p,
+                        project_url="",
+                        project_item_id="",
+                        project_state_field_name="",
+                        project_state_value_name="",
+                        safe_stop_reason=f"sync blocked for {stage}",
+                    )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=sync_fn_mixed,
+            )
+
+            self.assertEqual(calls, ["review", "sync:review", "followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "human_review_followup")
+            # followup sync failed → partial
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "blocked_project_preflight")
+
+    # ---- issue_create + followup: followup_created lifecycle sync ----
+
+    def test_issue_create_followup_calls_followup_created_sync(self) -> None:
+        """issue_create + create_followup_issue (no close) → followup_created sync called."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                create_followup_issue=True,
+                issue_text="## New Issue\n\nBody.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_issue_create(*args, **kwargs):
+                calls.append("issue_create")
+                p = root / "issue_create.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    project_item_id="PVTI_new",
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/example/projects/1",
+                    project_state_field_name="Status",
+                    project_state_value_name="ready",
+                    created_issue=fake_issue(101),
+                    safe_stop_reason="created issue #101",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_issue_create_action_fn=fake_issue_create,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls),
+            )
+
+            self.assertIn("issue_create", calls)
+            self.assertIn("followup", calls)
+            self.assertIn("sync:followup_created", calls)
+            self.assertEqual(calls, ["issue_create", "followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "issue_create_followup")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "followup_created")
+
+    def test_issue_create_followup_sync_not_requested_safe_fallback(self) -> None:
+        """issue_create + followup: no-project fallback keeps final_status=completed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                create_followup_issue=True,
+                issue_text="## New Issue\n\nBody.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_issue_create(*args, **kwargs):
+                calls.append("issue_create")
+                p = root / "issue_create.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    project_item_id="",
+                    project_sync_status="",
+                    project_url="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    created_issue=fake_issue(102),
+                    safe_stop_reason="created issue #102",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_issue_create_action_fn=fake_issue_create,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="not_requested"),
+            )
+
+            self.assertEqual(calls, ["issue_create", "followup", "sync:followup_created"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "")
+
+    def test_issue_create_followup_sync_failure_records_partial(self) -> None:
+        """issue_create + followup: sync failure at followup_created → final_status=partial."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                create_followup_issue=True,
+                issue_text="## New Issue\n\nBody.\n",
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_issue_create(*args, **kwargs):
+                calls.append("issue_create")
+                p = root / "issue_create.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    project_item_id="",
+                    project_sync_status="",
+                    project_url="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    created_issue=fake_issue(103),
+                    safe_stop_reason="created issue #103",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_issue_create_action_fn=fake_issue_create,
+                execute_followup_issue_action_fn=self._make_followup_fn(root, calls),
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="blocked"),
+            )
+
+            self.assertEqual(calls, ["issue_create", "followup", "sync:followup_created"])
+            self.assertEqual(result.matrix_path, "issue_create_followup")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "blocked_project_preflight")
+
+    # ---- review-completed path: state fields explicitly verified ----
+
+    def test_review_completed_lifecycle_sync_state_fields(self) -> None:
+        """human_review completed (no followup, no close) → review sync state fields recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                review_text="## Review\n\nApproved.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                p = root / "review.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="after_review_close_if_review_succeeds",
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    created_comment=fake_comment(8001, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review posted.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls),
+            )
+
+            self.assertEqual(calls, ["review", "sync:review"])
+            self.assertEqual(result.matrix_path, "human_review")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "review")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "project_state_synced")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "review")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_project_item_id"], "PVTI_example")
+            self.assertIn("current_issue_project_state_sync_review", [s.name for s in result.steps])
+
+    def test_review_completed_sync_not_requested_no_project(self) -> None:
+        """human_review completed: no-project sync keeps final_status=completed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.HUMAN_REVIEW_NEEDED,
+                review_text="## Review\n\nApproved.\n",
+            )
+            calls: list[str] = []
+
+            def fake_review(*args, **kwargs):
+                calls.append("review")
+                p = root / "review.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    review_status="completed",
+                    close_policy="",
+                    resolved_issue=None,
+                    created_comment=fake_comment(8002, 20),
+                    execution_log_path=p,
+                    safe_stop_reason="review posted.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_human_review_action_fn=fake_review,
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="not_requested"),
+            )
+
+            self.assertEqual(calls, ["review", "sync:review"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "")
+
+    # ---- close-completed path: state fields explicitly verified ----
+
+    def test_close_completed_lifecycle_sync_state_fields(self) -> None:
+        """no_action + close_current_issue: done sync state fields recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls),
+            )
+
+            self.assertEqual(calls, ["close", "sync:done"])
+            self.assertEqual(result.matrix_path, "no_action_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_stage"], "done")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "project_state_synced")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_state_value"], "done")
+            self.assertIn("current_issue_project_state_sync_done", [s.name for s in result.steps])
+
+    def test_close_completed_sync_not_requested_no_project(self) -> None:
+        """close completed: no-project sync keeps final_status=completed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="not_requested"),
+            )
+
+            self.assertEqual(calls, ["close", "sync:done"])
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "")
+
+    def test_close_completed_sync_failure_records_partial(self) -> None:
+        """close completed: sync failure → final_status=partial, sync failure recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+                execute_current_issue_project_state_sync_fn=self._make_sync_fn(root, calls, status="blocked"),
+            )
+
+            self.assertEqual(calls, ["close", "sync:done"])
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "blocked_project_preflight")
+
+
 if __name__ == "__main__":
     unittest.main()
