@@ -2731,6 +2731,18 @@ def recover_codex_report(
 
     ordered_candidates: list[Path] = []
 
+    def candidate_paths_from_log(log_candidate: Path) -> list[Path]:
+        try:
+            raw_text = read_text(log_candidate)
+        except UnicodeDecodeError:
+            print(
+                "[note] report recovery skipped unreadable historical log (non-UTF-8):"
+                f" {repo_relative(log_candidate)}",
+                flush=True,
+            )
+            return []
+        return _candidate_report_paths_from_text(raw_text)
+
     def add_candidate(path: Path | str) -> None:
         candidate = _normalize_recovery_path(path)
         if candidate == target_path or candidate in ordered_candidates:
@@ -2746,14 +2758,14 @@ def recover_codex_report(
             continue
         if newer_than is not None and log_candidate.stat().st_mtime < newer_than:
             continue
-        for candidate in _candidate_report_paths_from_text(read_text(log_candidate)):
+        for candidate in candidate_paths_from_log(log_candidate):
             add_candidate(candidate)
 
     if search_recent_logs:
         for log_candidate in _recent_codex_log_paths():
             if newer_than is not None and log_candidate.stat().st_mtime < newer_than:
                 continue
-            for candidate in _candidate_report_paths_from_text(read_text(log_candidate)):
+            for candidate in candidate_paths_from_log(log_candidate):
                 add_candidate(candidate)
 
     for candidate in ordered_candidates:
@@ -3131,6 +3143,14 @@ def _conversation_url_matches(url: str, config: Mapping[str, Any]) -> bool:
     if not keywords:
         return True
     return any(keyword in url for keyword in keywords)
+
+
+def _project_page_url_matches(url: str, config: Mapping[str, Any]) -> bool:
+    normalized = url.rstrip("/")
+    explicit = str(config.get("project_page_url", "")).strip().rstrip("/")
+    if explicit and normalized == explicit:
+        return True
+    return normalized.endswith("/project")
 
 
 def _normalized_url(url: str) -> str:
@@ -3864,6 +3884,37 @@ def send_to_chatgpt(text: str) -> None:
     with open_chatgpt_page(reset_chat=False) as (_, page, config, _):
         fill_chatgpt_composer(page, text, config)
         submit_chatgpt_message(page)
+
+
+def send_initial_request_to_chatgpt(text: str) -> None:
+    config = load_browser_config()
+    front_tab = frontmost_safari_tab_info(config, require_conversation=False)
+    current_url = front_tab.get("url", "")
+    if _conversation_url_matches(current_url, config):
+        send_to_chatgpt(text)
+        return
+    if _project_page_url_matches(current_url, config):
+        last_error = ""
+        for hint in PROJECT_CHAT_COMPOSER_HINTS + ("",):
+            try:
+                send_to_chatgpt_in_current_surface(
+                    text,
+                    require_conversation=False,
+                    require_target_chat=False,
+                    preferred_hint=hint or None,
+                    project_page_mode=True,
+                )
+                return
+            except BridgeError as exc:
+                last_error = str(exc)
+        raise BridgeError(
+            "Safari の現在 ChatGPT タブは project ページですが、初回 request を送る composer を特定できませんでした。"
+            f" {last_error}"
+        )
+    raise BridgeError(
+        "Safari の現在 ChatGPT タブが対象会話でも project ページでもありません。"
+        f" 対象チャットまたは project ページを開いてください: {front_tab.get('title', '')} {current_url}"
+    )
 
 
 def send_to_chatgpt_in_current_surface(

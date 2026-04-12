@@ -18,7 +18,7 @@ from _bridge_common import (
     promote_pending_request,
     read_prepared_request_text,
     repo_relative,
-    send_to_chatgpt,
+    send_initial_request_to_chatgpt,
     save_state,
     stage_prepared_request,
     stable_text_hash,
@@ -297,7 +297,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     save_state(prepared_state)
 
     try:
-        send_to_chatgpt(request_text)
+        send_initial_request_to_chatgpt(request_text)
     except Exception:
         retry_state = clear_error_fields(dict(state))
         stage_prepared_request(

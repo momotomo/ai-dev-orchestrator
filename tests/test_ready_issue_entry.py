@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import _bridge_common  # noqa: E402
 import bridge_orchestrator  # noqa: E402
 import request_next_prompt  # noqa: E402
 
@@ -76,6 +77,79 @@ class RequestNextPromptTests(unittest.TestCase):
         with patch.object(request_next_prompt, "read_prepared_request_text", return_value="request text"):
             retryable = request_next_prompt.load_retryable_initial_request(state)
         self.assertEqual(retryable, ("request text", "hash123", "ready_issue:abc"))
+
+
+class InitialRequestSurfaceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = {
+            "chat_url_prefix": "https://chatgpt.com/",
+            "conversation_url_keywords": ["/c/"],
+            "project_page_url": "",
+        }
+
+    def test_existing_conversation_url_is_still_accepted(self) -> None:
+        with (
+            patch.object(_bridge_common, "load_browser_config", return_value=self.config),
+            patch.object(
+                _bridge_common,
+                "frontmost_safari_tab_info",
+                return_value={"url": "https://chatgpt.com/c/abc", "title": "ChatGPT"},
+            ),
+            patch.object(_bridge_common, "send_to_chatgpt") as send_to_chatgpt,
+            patch.object(_bridge_common, "send_to_chatgpt_in_current_surface") as send_to_surface,
+        ):
+            _bridge_common.send_initial_request_to_chatgpt("hello")
+        send_to_chatgpt.assert_called_once_with("hello")
+        send_to_surface.assert_not_called()
+
+    def test_project_page_is_accepted_for_initial_request_boundary(self) -> None:
+        with (
+            patch.object(_bridge_common, "load_browser_config", return_value=self.config),
+            patch.object(
+                _bridge_common,
+                "frontmost_safari_tab_info",
+                return_value={
+                    "url": "https://chatgpt.com/g/g-p-123/project",
+                    "title": "ChatGPT - Project",
+                },
+            ),
+            patch.object(_bridge_common, "send_to_chatgpt") as send_to_chatgpt,
+            patch.object(_bridge_common, "send_to_chatgpt_in_current_surface") as send_to_surface,
+        ):
+            _bridge_common.send_initial_request_to_chatgpt("hello")
+        send_to_chatgpt.assert_not_called()
+        send_to_surface.assert_called_once()
+        self.assertEqual(send_to_surface.call_args.kwargs["project_page_mode"], True)
+        self.assertEqual(send_to_surface.call_args.kwargs["require_conversation"], False)
+        self.assertEqual(send_to_surface.call_args.kwargs["require_target_chat"], False)
+
+    def test_non_chatgpt_pages_are_still_rejected(self) -> None:
+        with (
+            patch.object(_bridge_common, "load_browser_config", return_value=self.config),
+            patch.object(
+                _bridge_common,
+                "frontmost_safari_tab_info",
+                side_effect=_bridge_common.BridgeError(
+                    "Safari の現在タブが ChatGPT ではありません: Example https://example.com"
+                ),
+            ),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as ctx:
+                _bridge_common.send_initial_request_to_chatgpt("hello")
+        self.assertIn("ChatGPT ではありません", str(ctx.exception))
+
+    def test_chatgpt_root_page_stays_clear_when_not_conversation_or_project_page(self) -> None:
+        with (
+            patch.object(_bridge_common, "load_browser_config", return_value=self.config),
+            patch.object(
+                _bridge_common,
+                "frontmost_safari_tab_info",
+                return_value={"url": "https://chatgpt.com/", "title": "ChatGPT"},
+            ),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as ctx:
+                _bridge_common.send_initial_request_to_chatgpt("hello")
+        self.assertIn("対象会話でも project ページでもありません", str(ctx.exception))
 
     def test_load_retryable_initial_request_accepts_prepared_ready_issue_source(self) -> None:
         state = {
