@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from _bridge_common import bridge_lifecycle_sync_suffix
 from issue_centric_contract import IssueCentricAction
 from issue_centric_github import (
     CreatedGitHubComment,
@@ -74,6 +75,8 @@ def execute_human_review_action(
     else:
         close_policy = "review_only"
 
+    _lc = bridge_lifecycle_sync_suffix(prior_state)
+
     try:
         if prepared.decision.create_followup_issue and not allow_followup_combo:
             raise IssueCentricHumanReviewError(
@@ -88,6 +91,8 @@ def execute_human_review_action(
             raise IssueCentricHumanReviewError(
                 "human_review_needed review body must not be empty."
             )
+        if _lc:
+            review_text = review_text.rstrip("\n") + "\n" + _lc.strip()
 
         repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
         resolved_issue = resolve_review_target_issue(
@@ -138,6 +143,7 @@ def execute_human_review_action(
             safe_stop_reason += (
                 " close_current_issue=true may now be evaluated immediately after review in this slice."
             )
+        safe_stop_reason += _lc
         execution_status = "completed"
     except (IssueCentricHumanReviewError, IssueCentricGitHubError) as exc:
         review_status = "blocked"

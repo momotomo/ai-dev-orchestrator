@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from dataclasses import asdict
 
+from _bridge_common import bridge_lifecycle_sync_suffix
 from issue_centric_normalized_summary import (
     build_issue_centric_normalized_summary,
     build_issue_centric_runtime_snapshot,
@@ -1938,11 +1939,12 @@ def _finalize_dispatch(
                     "last_issue_centric_consumed_generation_id": "",
                 }
             )
+    _lc = bridge_lifecycle_sync_suffix(mutable_state)
     return IssueCentricDispatchResult(
         matrix_path=matrix_path,
         final_status=final_status,
         steps=tuple(steps),
         summary_log_path=summary_log_path,
         final_state=mutable_state,
-        stop_message=stop_message,
+        stop_message=stop_message + _lc,
     )
