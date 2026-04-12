@@ -745,5 +745,136 @@ class IssueCentricArchiveLifecycleSyncSurfacingTests(unittest.TestCase):
         self.assertIn("lifecycle_sync: not_recorded", content)
 
 
+class CopilotStabilityPreambleTests(unittest.TestCase):
+    """Tests that build_issue_centric_codex_prompt always includes the
+    stability-first preamble before the prompt title."""
+
+    def _prepared(self, body_text: str = "Do the work.") -> issue_centric_transport.PreparedIssueCentricDecision:
+        return issue_centric_transport.decode_issue_centric_decision(
+            build_codex_decision(
+                "https://github.com/example/repo/issues/99",
+                body_text,
+            )
+        )
+
+    def _execution(self) -> issue_centric_codex_run.CodexRunExecutionResult:
+        return issue_centric_codex_run.CodexRunExecutionResult(
+            status="completed",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=99,
+                issue_url="https://github.com/example/repo/issues/99",
+                source_ref="#99",
+            ),
+            created_comment=issue_centric_github.CreatedGitHubComment(
+                repository="example/repo",
+                issue_number=99,
+                comment_id=111,
+                url="https://github.com/example/repo/issues/99#issuecomment-111",
+                body="Do the work.\n",
+            ),
+            payload=issue_centric_codex_run.CodexRunExecutionPayload(
+                repo=str(REPO_ROOT),
+                target_issue="https://github.com/example/repo/issues/99",
+                request="Do the work.\n",
+                trigger_comment="https://github.com/example/repo/issues/99#issuecomment-111",
+            ),
+            payload_log_path=REPO_ROOT / "logs" / "payload.json",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            launch_status="not_implemented",
+            launch_note="Not implemented.",
+            safe_stop_reason="codex_run completed through trigger comment creation.",
+        )
+
+    def _build_prompt(self) -> str:
+        return issue_centric_codex_launch.build_issue_centric_codex_prompt(
+            self._prepared(), self._execution()
+        )
+
+    def test_preamble_is_present_in_generated_prompt(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("## Stability-first instruction", prompt)
+
+    def test_mandatory_rules_block_is_present(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("## Mandatory execution rules", prompt)
+
+    def test_preamble_appears_before_title(self) -> None:
+        prompt = self._build_prompt()
+        preamble_pos = prompt.find("## Stability-first instruction")
+        title_pos = prompt.find("# Issue-Centric Codex Prompt")
+        self.assertGreater(preamble_pos, -1, "preamble not found")
+        self.assertGreater(title_pos, -1, "title not found")
+        self.assertLess(preamble_pos, title_pos, "preamble must appear before the title")
+
+    def test_mandatory_rules_appear_before_title(self) -> None:
+        prompt = self._build_prompt()
+        rules_pos = prompt.find("## Mandatory execution rules")
+        title_pos = prompt.find("# Issue-Centric Codex Prompt")
+        self.assertGreater(rules_pos, -1, "mandatory rules section not found")
+        self.assertGreater(title_pos, -1, "title not found")
+        self.assertLess(rules_pos, title_pos, "mandatory rules must appear before the title")
+
+    def test_title_appears_exactly_once(self) -> None:
+        prompt = self._build_prompt()
+        self.assertEqual(prompt.count("# Issue-Centric Codex Prompt"), 1)
+
+    def test_prompt_starts_with_preamble_not_title(self) -> None:
+        prompt = self._build_prompt()
+        self.assertTrue(
+            prompt.startswith("## Stability-first instruction"),
+            "prompt must start with the stability-first preamble, not the title",
+        )
+
+    def test_preamble_constant_contains_forbidden_rules(self) -> None:
+        preamble = issue_centric_codex_launch.COPILOT_STABILITY_PREAMBLE
+        self.assertIn("&&", preamble)
+        self.assertIn("並列作業", preamble)
+        self.assertIn("semantic_search", preamble)
+
+    def test_existing_prompt_body_content_not_regressed(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("## Execution Context", prompt)
+        self.assertIn("## Required Steps", prompt)
+        self.assertIn("## Request", prompt)
+        self.assertIn("## Report Handoff", prompt)
+        self.assertIn("target issue: https://github.com/example/repo/issues/99", prompt)
+        self.assertIn("Do the work.", prompt)
+
+    def test_launch_flow_writes_preamble_to_prompt_file(self) -> None:
+        prepared = self._prepared()
+        execution = self._execution()
+        saved_states: list[dict[str, object]] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            prompt_path = temp_root / "codex_prompt.md"
+            report_path = temp_root / "codex_report.md"
+            report_path.write_text("# Report\n\nbody\n", encoding="utf-8")
+
+            result = issue_centric_codex_launch.launch_issue_centric_codex_run(
+                prepared,
+                execution,
+                state={"mode": "awaiting_user", "need_codex_run": False},
+                project_config={"worker_repo_path": "."},
+                log_writer=TempLogWriter(temp_root),
+                repo_relative=lambda path: path.name,
+                launch_runner=lambda state, argv: 0,
+                runtime_prompt_path_fn=lambda _config=None: prompt_path,
+                runtime_report_path_fn=lambda: report_path,
+                write_text_fn=lambda path, text: path.write_text(text, encoding="utf-8"),
+                save_state_fn=lambda s: saved_states.append(dict(s)),
+                load_state_fn=lambda: {**saved_states[-1], "mode": "codex_done", "need_codex_run": False} if saved_states else {},
+            )
+
+            self.assertEqual(result.status, "completed")
+            written_prompt = prompt_path.read_text(encoding="utf-8")
+            self.assertIn("## Stability-first instruction", written_prompt)
+            self.assertIn("## Mandatory execution rules", written_prompt)
+            preamble_pos = written_prompt.find("## Stability-first instruction")
+            title_pos = written_prompt.find("# Issue-Centric Codex Prompt")
+            self.assertLess(preamble_pos, title_pos)
+
+
 if __name__ == "__main__":
     unittest.main()
