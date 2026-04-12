@@ -170,9 +170,12 @@ def build_issue_centric_normalized_summary(
 
     codex_target_issue = current_issue if action == "codex_run" else None
     review_target_issue = current_issue if action == "human_review_needed" else None
+    _sync_status = str(state.get("last_issue_centric_lifecycle_sync_status", "")).strip()
+    _sync_stage = str(state.get("last_issue_centric_lifecycle_sync_stage", "")).strip()
     project_lifecycle_sync = {
-        "status": str(state.get("last_issue_centric_lifecycle_sync_status", "")).strip(),
-        "stage": str(state.get("last_issue_centric_lifecycle_sync_stage", "")).strip(),
+        "status": _sync_status,
+        "stage": _sync_stage,
+        "signal": _lifecycle_sync_signal(_sync_status, _sync_stage),
         "project_url": str(state.get("last_issue_centric_lifecycle_sync_project_url", "")).strip(),
         "project_item_id": str(state.get("last_issue_centric_lifecycle_sync_project_item_id", "")).strip(),
         "state_field": str(state.get("last_issue_centric_lifecycle_sync_state_field", "")).strip(),
@@ -316,10 +319,20 @@ def render_issue_centric_summary_for_request(summary: Mapping[str, Any]) -> str:
     if isinstance(lifecycle_sync, Mapping):
         lifecycle_status = str(lifecycle_sync.get("status", "")).strip()
         lifecycle_stage = str(lifecycle_sync.get("stage", "")).strip()
-        if lifecycle_status or lifecycle_stage:
-            lines.append(
-                f"- issue_centric_project_lifecycle_sync: stage={lifecycle_stage or 'unknown'} status={lifecycle_status or 'unknown'}"
-            )
+        lifecycle_signal = str(lifecycle_sync.get("signal", "")).strip() or _lifecycle_sync_signal(
+            lifecycle_status, lifecycle_stage
+        )
+        if lifecycle_status or lifecycle_stage or lifecycle_signal:
+            parts = []
+            if lifecycle_stage:
+                parts.append(f"stage={lifecycle_stage}")
+            if lifecycle_signal:
+                parts.append(f"signal={lifecycle_signal}")
+            elif lifecycle_status:
+                parts.append(f"status={lifecycle_status}")
+            if lifecycle_signal == "sync_failed" and lifecycle_status:
+                parts.append(f"reason={lifecycle_status}")
+            lines.append(f"- issue_centric_project_lifecycle_sync: {' '.join(parts)}")
     blocked_reason = str(summary.get("blocked_reason", "")).strip()
     partial_reason = str(summary.get("partial_reason", "")).strip()
     if blocked_reason:
@@ -1160,6 +1173,22 @@ def render_issue_centric_next_request_section(
         lines.append(f"- dispatch_result: {dispatch_result_path}")
     if fallback_reason:
         lines.append(f"- fallback_reason: {fallback_reason}")
+    project_lifecycle_sync = getattr(context, "project_lifecycle_sync", None)
+    if isinstance(project_lifecycle_sync, Mapping):
+        lc_status = str(project_lifecycle_sync.get("status", "")).strip()
+        lc_stage = str(project_lifecycle_sync.get("stage", "")).strip()
+        lc_signal = str(project_lifecycle_sync.get("signal", "")).strip() or _lifecycle_sync_signal(
+            lc_status, lc_stage
+        )
+        if lc_stage or lc_signal:
+            lc_parts: list[str] = []
+            if lc_stage:
+                lc_parts.append(f"stage={lc_stage}")
+            if lc_signal:
+                lc_parts.append(f"signal={lc_signal}")
+            if lc_signal == "sync_failed" and lc_status:
+                lc_parts.append(f"reason={lc_status}")
+            lines.append(f"- lifecycle_sync: {' '.join(lc_parts)}")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -1595,6 +1624,26 @@ def _mapping_copy(value: object) -> dict[str, Any]:
     return {str(key): value[key] for key in value}
 
 
+def _lifecycle_sync_signal(sync_status: str, sync_stage: str) -> str:
+    """Compact operator-readable signal for lifecycle sync outcome.
+
+    Returns:
+        "synced"             — project state was successfully updated.
+        "skipped_no_project" — no GitHub Project is configured; safe skip.
+        "sync_failed"        — sync was attempted but failed.
+        ""                   — no sync was triggered (stage and status both empty).
+    """
+    if not sync_status and not sync_stage:
+        return ""
+    if sync_status == "project_state_synced":
+        return "synced"
+    if sync_status == "not_requested_no_project":
+        return "skipped_no_project"
+    if sync_status:
+        return "sync_failed"
+    return ""
+
+
 def _project_lifecycle_sync_from_summary_or_state(
     summary: Mapping[str, Any] | None,
     state: Mapping[str, Any],
@@ -1604,10 +1653,18 @@ def _project_lifecycle_sync_from_summary_or_state(
         if isinstance(lifecycle, Mapping):
             copied = _mapping_copy(lifecycle)
             if copied:
+                if "signal" not in copied:
+                    copied["signal"] = _lifecycle_sync_signal(
+                        str(copied.get("status", "")).strip(),
+                        str(copied.get("stage", "")).strip(),
+                    )
                 return copied
+    _status = str(state.get("last_issue_centric_lifecycle_sync_status", "")).strip()
+    _stage = str(state.get("last_issue_centric_lifecycle_sync_stage", "")).strip()
     return {
-        "status": str(state.get("last_issue_centric_lifecycle_sync_status", "")).strip(),
-        "stage": str(state.get("last_issue_centric_lifecycle_sync_stage", "")).strip(),
+        "status": _status,
+        "stage": _stage,
+        "signal": _lifecycle_sync_signal(_status, _stage),
         "project_url": str(state.get("last_issue_centric_lifecycle_sync_project_url", "")).strip(),
         "project_item_id": str(state.get("last_issue_centric_lifecycle_sync_project_item_id", "")).strip(),
         "state_field": str(state.get("last_issue_centric_lifecycle_sync_state_field", "")).strip(),
