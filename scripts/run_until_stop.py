@@ -427,9 +427,11 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
             return f"{base}{suffix}"
         return "ChatGPT が Codex 不要と判断しました。人が次の判断を行ってください。"
     if action == "request_next_prompt":
+        _lc = bridge_lifecycle_sync_suffix(final_state)
         return (
             "Safari の current tab を対象チャットに合わせたまま再実行してください。"
             " 通常は current ready issue の参照で始め、ready issue を使えない時だけ free-form override を入力します。"
+            f"{_lc}"
         )
     if action == "fetch_next_prompt":
         route_note = issue_centric_route_note(final_state)
@@ -469,7 +471,8 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         route_note = issue_centric_route_note(final_state)
         return f"{base}{route_note}"
     if action == "completed":
-        return "追加の操作は不要です。"
+        _lc = bridge_lifecycle_sync_suffix(final_state)
+        return f"追加の操作は不要です。{_lc}"
     if action == "no_action":
         return "summary と doctor を確認し、必要なら原因を解消してから再開してください。"
     return "summary と doctor を確認してから再実行してください。"
