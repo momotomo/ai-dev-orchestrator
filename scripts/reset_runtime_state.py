@@ -8,8 +8,10 @@ old flow.
 
 What is reset:
   • bridge/state.json              → overwritten with DEFAULT_STATE (mode=idle)
-  • bridge/inbox/codex_prompt.md  → archived to logs/ if it contains content
-  • bridge/outbox/codex_report.md → archived to logs/ if it contains content
+  • bridge/inbox/codex_prompt.md  → archived to logs/ then removed if it has
+                                    content; removed (no archive) if empty
+  • bridge/outbox/codex_report.md → archived to logs/ then removed if it has
+                                    content; removed (no archive) if empty
   • bridge/STOP                   → removed if present
 
 What is preserved (durable config and history):
@@ -64,28 +66,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _archive_if_nonempty(
+def _archive_and_clear_artifact(
     src: Path,
     label: str,
     logs_dir: Path,
     stamp: str,
     dry_run: bool,
 ) -> str | None:
-    """Archive src to logs/ with a timestamped name if it has content.
+    """Archive src to logs/ if it has content, then remove the source file.
 
-    Returns the archive path string if archived (or would be archived), else None.
+    - If src does not exist: no-op, returns None.
+    - If src has meaningful content: archives to logs/, removes src, returns
+      the archive path string.
+    - If src is empty/whitespace-only: removes src (no archive), returns None.
+    - In dry-run mode: no files are modified or removed.
     """
     if not src.exists():
         return None
     content = src.read_text(encoding="utf-8")
     if not content.strip():
+        if dry_run:
+            print(f"  [dry-run] would remove (empty) {src}", flush=True)
+        else:
+            src.unlink()
         return None
     archive_path = logs_dir / f"{stamp}_{label}_{src.name}"
     if dry_run:
         print(f"  [dry-run] would archive {src} → {archive_path}", flush=True)
+        print(f"  [dry-run] would remove {src}", flush=True)
         return str(archive_path)
     logs_dir.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(content, encoding="utf-8")
+    src.unlink()
     return str(archive_path)
 
 
@@ -134,10 +146,10 @@ def run_reset(
     print(f"  before: mode={before_mode!r}", flush=True)
     print("", flush=True)
 
-    # --- Archive active artifacts ---
+    # --- Archive active artifacts and clear source files ---
     archived: list[str] = []
     for path, label in [(prompt_path, "inbox"), (report_path, "outbox")]:
-        result = _archive_if_nonempty(path, label, logs_dir, stamp, dry_run)
+        result = _archive_and_clear_artifact(path, label, logs_dir, stamp, dry_run)
         if result:
             archived.append(f"  archived: {path.name} → {result}")
 

@@ -154,6 +154,7 @@ class ResetArtifactArchivalTests(unittest.TestCase):
             archived = list((root / "logs").glob("*_inbox_codex_prompt.md"))
             self.assertEqual(len(archived), 1)
             self.assertEqual(archived[0].read_text(encoding="utf-8"), "# prompt content\n")
+            self.assertFalse(prompt_path.exists())
 
     def test_report_with_content_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,6 +168,7 @@ class ResetArtifactArchivalTests(unittest.TestCase):
             archived = list((root / "logs").glob("*_outbox_codex_report.md"))
             self.assertEqual(len(archived), 1)
             self.assertEqual(archived[0].read_text(encoding="utf-8"), "# report content\n")
+            self.assertFalse(report_path.exists())
 
     def test_whitespace_only_prompt_not_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,6 +181,8 @@ class ResetArtifactArchivalTests(unittest.TestCase):
 
             archived = list((root / "logs").glob("*_inbox_codex_prompt.md"))
             self.assertEqual(len(archived), 0)
+            # empty/whitespace source should be removed, not left as stale artifact
+            self.assertFalse(prompt_path.exists())
 
     def test_missing_prompt_not_archived(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -296,21 +300,22 @@ class ResetIdempotencyTests(unittest.TestCase):
             result = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(result["mode"], "idle")
 
-    def test_second_reset_does_not_re_archive_empty_prompt(self) -> None:
+    def test_second_reset_does_not_re_archive_removed_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = _make_bridge_env(root)
             prompt_path = root / "bridge" / "inbox" / "codex_prompt.md"
             prompt_path.write_text("# prompt\n", encoding="utf-8")
 
+            # First reset: archives and removes the source file.
             reset_runtime_state.run_reset(dry_run=False, config=config)
-            # After first reset, prompt is archived; file may still exist but
-            # the source still exists with original content. Run again to confirm
-            # it archives again (content still there) — no crash.
+            self.assertFalse(prompt_path.exists())
+
+            # Second reset: source is gone, nothing to archive again.
             reset_runtime_state.run_reset(dry_run=False, config=config)
 
             archived = list((root / "logs").glob("*_inbox_codex_prompt.md"))
-            self.assertGreaterEqual(len(archived), 1)
+            self.assertEqual(len(archived), 1)
 
 
 class ResetDryRunTests(unittest.TestCase):
@@ -342,6 +347,8 @@ class ResetDryRunTests(unittest.TestCase):
 
             archived = list((root / "logs").glob("*_inbox_codex_prompt.md"))
             self.assertEqual(len(archived), 0)
+            # dry-run must not remove the source file either
+            self.assertTrue(prompt_path.exists())
 
     def test_dry_run_does_not_remove_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -353,6 +360,18 @@ class ResetDryRunTests(unittest.TestCase):
             reset_runtime_state.run_reset(dry_run=True, config=config)
 
             self.assertTrue(stop_path.exists())
+
+    def test_dry_run_does_not_remove_empty_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _make_bridge_env(root)
+            prompt_path = root / "bridge" / "inbox" / "codex_prompt.md"
+            prompt_path.write_text("   \n\n", encoding="utf-8")
+
+            reset_runtime_state.run_reset(dry_run=True, config=config)
+
+            # dry-run must not remove the empty source file
+            self.assertTrue(prompt_path.exists())
 
     def test_dry_run_prints_dry_run_notice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
