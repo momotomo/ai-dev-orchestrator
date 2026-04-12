@@ -1589,5 +1589,221 @@ class IssueCentricNormalizedSummaryTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_wait_kind"], "send_prepared_request")
 
 
+class IssueCentricLifecycleSyncSurfacingTests(unittest.TestCase):
+    """#50: lifecycle sync surfacing in normalized summary and render output.
+
+    Tests that success / skipped_no_project / sync_failed signals are
+    correctly built, stored in project_lifecycle_sync, and rendered into
+    the operator-visible summary text.
+    """
+
+    def _build(
+        self,
+        *,
+        matrix_path: str = "no_action",
+        final_status: str = "completed",
+        action: str = "no_action",
+        sync_status: str = "",
+        sync_stage: str = "",
+    ) -> dict:
+        return issue_centric_normalized_summary.build_issue_centric_normalized_summary(
+            matrix_path=matrix_path,
+            final_status=final_status,
+            state={
+                "last_issue_centric_action": action,
+                "last_issue_centric_lifecycle_sync_status": sync_status,
+                "last_issue_centric_lifecycle_sync_stage": sync_stage,
+            },
+        )
+
+    def _render(self, summary: dict) -> str:
+        return issue_centric_normalized_summary.render_issue_centric_summary_for_request(summary)
+
+    # ---- signal helper ----
+
+    def test_signal_synced_when_project_state_synced(self) -> None:
+        from issue_centric_normalized_summary import _lifecycle_sync_signal
+
+        self.assertEqual(_lifecycle_sync_signal("project_state_synced", "done"), "synced")
+
+    def test_signal_skipped_no_project_when_not_requested(self) -> None:
+        from issue_centric_normalized_summary import _lifecycle_sync_signal
+
+        self.assertEqual(_lifecycle_sync_signal("not_requested_no_project", "followup_created"), "skipped_no_project")
+
+    def test_signal_sync_failed_for_any_other_non_empty_status(self) -> None:
+        from issue_centric_normalized_summary import _lifecycle_sync_signal
+
+        self.assertEqual(_lifecycle_sync_signal("blocked_project_preflight", "done"), "sync_failed")
+        self.assertEqual(_lifecycle_sync_signal("blocked_project_state_sync", "review"), "sync_failed")
+        self.assertEqual(_lifecycle_sync_signal("some_unknown_error", "in_progress"), "sync_failed")
+
+    def test_signal_empty_when_both_status_and_stage_are_empty(self) -> None:
+        from issue_centric_normalized_summary import _lifecycle_sync_signal
+
+        self.assertEqual(_lifecycle_sync_signal("", ""), "")
+
+    # ---- normalized summary project_lifecycle_sync dict ----
+
+    def test_summary_lifecycle_sync_contains_signal_synced(self) -> None:
+        summary = self._build(
+            sync_status="project_state_synced",
+            sync_stage="done",
+            matrix_path="no_action_close",
+            final_status="completed",
+        )
+        pls = summary["project_lifecycle_sync"]
+        self.assertEqual(pls["status"], "project_state_synced")
+        self.assertEqual(pls["stage"], "done")
+        self.assertEqual(pls["signal"], "synced")
+
+    def test_summary_lifecycle_sync_contains_signal_skipped_no_project(self) -> None:
+        summary = self._build(
+            sync_status="not_requested_no_project",
+            sync_stage="followup_created",
+            matrix_path="no_action_followup",
+            final_status="completed",
+        )
+        pls = summary["project_lifecycle_sync"]
+        self.assertEqual(pls["signal"], "skipped_no_project")
+
+    def test_summary_lifecycle_sync_contains_signal_sync_failed(self) -> None:
+        summary = self._build(
+            sync_status="blocked_project_preflight",
+            sync_stage="done",
+            matrix_path="no_action_close",
+            final_status="partial",
+        )
+        pls = summary["project_lifecycle_sync"]
+        self.assertEqual(pls["signal"], "sync_failed")
+
+    def test_summary_lifecycle_sync_signal_empty_when_no_sync(self) -> None:
+        summary = self._build(sync_status="", sync_stage="")
+        pls = summary["project_lifecycle_sync"]
+        self.assertEqual(pls["signal"], "")
+
+    # ---- render output ----
+
+    def test_render_shows_stage_and_signal_synced(self) -> None:
+        summary = self._build(
+            sync_status="project_state_synced",
+            sync_stage="followup_created",
+            matrix_path="no_action_followup",
+        )
+        rendered = self._render(summary)
+        self.assertIn("issue_centric_project_lifecycle_sync:", rendered)
+        self.assertIn("stage=followup_created", rendered)
+        self.assertIn("signal=synced", rendered)
+        # raw status string not present (replaced by signal)
+        self.assertNotIn("project_state_synced", rendered)
+
+    def test_render_shows_stage_and_signal_skipped_no_project(self) -> None:
+        summary = self._build(
+            sync_status="not_requested_no_project",
+            sync_stage="review",
+            matrix_path="human_review",
+        )
+        rendered = self._render(summary)
+        self.assertIn("stage=review", rendered)
+        self.assertIn("signal=skipped_no_project", rendered)
+
+    def test_render_shows_stage_signal_and_reason_for_failure(self) -> None:
+        summary = self._build(
+            sync_status="blocked_project_preflight",
+            sync_stage="done",
+            matrix_path="no_action_close",
+            final_status="partial",
+        )
+        rendered = self._render(summary)
+        self.assertIn("stage=done", rendered)
+        self.assertIn("signal=sync_failed", rendered)
+        self.assertIn("reason=blocked_project_preflight", rendered)
+
+    def test_render_omits_lifecycle_sync_line_when_no_sync(self) -> None:
+        """No sync at all → lifecycle sync line should not appear."""
+        summary = self._build(sync_status="", sync_stage="")
+        rendered = self._render(summary)
+        self.assertNotIn("issue_centric_project_lifecycle_sync", rendered)
+
+    # ---- project_lifecycle_sync_from_summary_or_state carries signal ----
+
+    def test_lifecycle_sync_from_state_includes_signal(self) -> None:
+        from issue_centric_normalized_summary import _project_lifecycle_sync_from_summary_or_state
+
+        result = _project_lifecycle_sync_from_summary_or_state(
+            None,
+            {
+                "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+                "last_issue_centric_lifecycle_sync_stage": "in_progress",
+            },
+        )
+        self.assertEqual(result["signal"], "synced")
+
+    def test_lifecycle_sync_from_summary_carries_existing_signal(self) -> None:
+        from issue_centric_normalized_summary import _project_lifecycle_sync_from_summary_or_state
+
+        result = _project_lifecycle_sync_from_summary_or_state(
+            {
+                "project_lifecycle_sync": {
+                    "status": "project_state_synced",
+                    "stage": "done",
+                    "signal": "synced",
+                }
+            },
+            {},
+        )
+        self.assertEqual(result["signal"], "synced")
+        self.assertEqual(result["stage"], "done")
+
+    def test_lifecycle_sync_from_summary_backfills_signal_if_absent(self) -> None:
+        from issue_centric_normalized_summary import _project_lifecycle_sync_from_summary_or_state
+
+        result = _project_lifecycle_sync_from_summary_or_state(
+            {
+                "project_lifecycle_sync": {
+                    "status": "not_requested_no_project",
+                    "stage": "followup_created",
+                    # no 'signal' key — simulates a saved summary from before this change
+                }
+            },
+            {},
+        )
+        self.assertEqual(result["signal"], "skipped_no_project")
+
+    # ---- existing behavior regression ----
+
+    def test_existing_codex_followup_close_lifecycle_sync_stage_still_present(self) -> None:
+        """Regression: existing test from base class still works with new signal field."""
+        summary = issue_centric_normalized_summary.build_issue_centric_normalized_summary(
+            matrix_path="codex_followup_close",
+            final_status="completed",
+            state={
+                "last_issue_centric_action": "codex_run",
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+                "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+                "last_issue_centric_lifecycle_sync_stage": "done",
+            },
+        )
+        self.assertEqual(summary["project_lifecycle_sync"]["stage"], "done")
+        self.assertEqual(summary["project_lifecycle_sync"]["signal"], "synced")
+
+    def test_partial_reason_and_sync_failed_coexist_in_render(self) -> None:
+        """Partial dispatch with sync failure: both partial_reason and sync signal visible."""
+        summary = issue_centric_normalized_summary.build_issue_centric_normalized_summary(
+            matrix_path="no_action_close",
+            final_status="partial",
+            state={
+                "last_issue_centric_action": "no_action",
+                "last_issue_centric_stop_reason": "lifecycle_sync_failed",
+                "last_issue_centric_lifecycle_sync_status": "blocked_project_state_sync",
+                "last_issue_centric_lifecycle_sync_stage": "in_progress",
+            },
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_summary_for_request(summary)
+        self.assertIn("signal=sync_failed", rendered)
+        self.assertIn("issue_centric_partial_reason: lifecycle_sync_failed", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
+
