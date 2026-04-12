@@ -1,5 +1,11 @@
 # Codex Prompt Sample
 
+> **Note:** The stability-first instruction and mandatory execution rules preamble is now
+> **repo-enforced** and automatically prepended before the prompt title by
+> `build_issue_centric_codex_prompt` in `scripts/issue_centric_codex_launch.py`.
+> Do not manually add the preamble to the request body — it is injected from
+> `COPILOT_STABILITY_PREAMBLE` (single source of truth).
+
 ## 目的
 
 - export 成功時 / 失敗時の表示文言だけを小さく整理する
