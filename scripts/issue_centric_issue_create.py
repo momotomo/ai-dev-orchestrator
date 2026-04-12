@@ -304,6 +304,11 @@ def execute_issue_create_draft(
         )
         execution_status = "blocked"
 
+    # Surface project sync signal in issue_create action human-facing text.
+    # Consistent with issue #50 signal model: synced | skipped_no_project | sync_failed.
+    if project_sync_status != "not_requested":
+        safe_stop_reason = safe_stop_reason + issue_create_project_sync_suffix(project_sync_status)
+
     execution_log = {
         "action": "issue_create",
         "execution_action": action_label,
@@ -399,3 +404,30 @@ def _render_issue_draft_markdown(draft: IssueCreateDraft) -> str:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def issue_create_project_sync_signal(project_sync_status: str) -> str:
+    """Map issue_create project_sync_status to the standard three-signal vocabulary.
+
+    Returns 'synced', 'skipped_no_project', or 'sync_failed'.
+    Consistent with the signal model introduced in issue #50.
+    Three signals: synced | skipped_no_project | sync_failed.
+    """
+    if project_sync_status == "project_state_synced":
+        return "synced"
+    if project_sync_status in ("issue_only_fallback", "not_requested"):
+        return "skipped_no_project"
+    return "sync_failed"
+
+
+def issue_create_project_sync_suffix(project_sync_status: str) -> str:
+    """Return a compact bracketed project sync suffix for issue_create action human-facing text.
+
+    Returns e.g. ' [project_sync: signal=synced]' or ' [project_sync: signal=skipped_no_project]'
+    or ' [project_sync: signal=sync_failed reason=...]'.
+    Consistent with the signal model introduced in issue #50.
+    """
+    signal = issue_create_project_sync_signal(project_sync_status)
+    if signal == "sync_failed":
+        return f" [project_sync: signal=sync_failed reason={project_sync_status}]"
+    return f" [project_sync: signal={signal}]"

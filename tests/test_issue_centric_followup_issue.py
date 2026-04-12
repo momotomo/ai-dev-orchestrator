@@ -854,5 +854,157 @@ class FetchNextPromptFollowupTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_close_status"], "not_attempted_followup_blocked")
 
 
+class FollowupIssueProjectSyncSignalTests(unittest.TestCase):
+    """Tests for lifecycle sync signal surfacing in follow-up action human-facing text (issue #65)."""
+
+    def _base_prepared(
+        self, *, target_issue: str = "#20", followup_text: str = "# Follow-up title\n\nBody paragraph.\n"
+    ) -> issue_centric_transport.PreparedIssueCentricDecision:
+        return issue_centric_transport.decode_issue_centric_decision(
+            build_decision(target_issue=target_issue, followup_text=followup_text)
+        )
+
+    def test_followup_safe_stop_reason_contains_synced_when_project_synced(self) -> None:
+        prepared = self._base_prepared()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "planned",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=111, url="https://github.com/example/repo/issues/111",
+                    title=title, repository=repo, node_id="NODE_111",
+                ),
+                project_state_resolver=lambda url, field, state, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p", project_url=url, project_title="Backlog",
+                    owner_login="example", owner_kind="users",
+                    state_field_id="FIELD_s", state_field_name=field,
+                    state_option_id="OPT_r", state_option_name=state,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_111", project_id=pid
+                ),
+                project_state_setter=lambda pid, iid, fid, oid, token: None,
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.project_sync_status, "project_state_synced")
+        self.assertIn("[project_sync: signal=synced]", result.safe_stop_reason)
+
+    def test_followup_safe_stop_reason_contains_skipped_no_project_when_no_project(self) -> None:
+        prepared = self._base_prepared()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=112, url="https://github.com/example/repo/issues/112",
+                    title=title, repository=repo, node_id="NODE_112",
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.project_sync_status, "issue_only_fallback")
+        self.assertIn("[project_sync: signal=skipped_no_project]", result.safe_stop_reason)
+
+    def test_followup_safe_stop_reason_contains_sync_failed_when_project_item_fails(self) -> None:
+        prepared = self._base_prepared()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "planned",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_github.CreatedGitHubIssue(
+                    number=113, url="https://github.com/example/repo/issues/113",
+                    title=title, repository=repo, node_id="NODE_113",
+                ),
+                project_state_resolver=lambda url, field, state, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p", project_url=url, project_title="Backlog",
+                    owner_login="example", owner_kind="users",
+                    state_field_id="FIELD_s", state_field_name=field,
+                    state_option_id="OPT_r", state_option_name=state,
+                ),
+                project_item_creator=lambda pid, nid, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("item create failed")
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        # status is blocked (project item creation failed), inner safe_stop_reason has sync_failed
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
+        # inner issue_create result safe_stop_reason is embedded in the followup safe_stop_reason
+        self.assertIn("sync_failed", result.safe_stop_reason)
+
+    def test_followup_no_sync_signal_regression_for_blocked_before_create(self) -> None:
+        """Regression: blocked-before-create followup should not have a spurious sync signal."""
+        prepared = issue_centric_transport.PreparedIssueCentricDecision(
+            decision=build_decision(
+                target_issue="#20",
+                followup_text="# Follow-up title\n\nBody paragraph.\n",
+            ),
+            issue_body=None,
+            codex_body=None,
+            review_body=None,
+            followup_issue_body=None,  # missing decoded body
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_followup_issue.execute_followup_issue_action(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.status, "blocked")
+        # No issue was created, no project sync occurred — safe_stop_reason should not contain sync suffix
+        self.assertNotIn("[project_sync:", result.safe_stop_reason)
+
+
 if __name__ == "__main__":
     unittest.main()

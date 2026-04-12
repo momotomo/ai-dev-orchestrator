@@ -867,5 +867,197 @@ class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_lifecycle_sync_state_value"], "done")
 
 
+class IssueCreateProjectSyncSignalTests(unittest.TestCase):
+    """Tests for issue_create_project_sync_signal and issue_create_project_sync_suffix (issue #65)."""
+
+    def test_signal_synced_for_project_state_synced(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("project_state_synced"),
+            "synced",
+        )
+
+    def test_signal_skipped_no_project_for_issue_only_fallback(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("issue_only_fallback"),
+            "skipped_no_project",
+        )
+
+    def test_signal_skipped_no_project_for_not_requested(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("not_requested"),
+            "skipped_no_project",
+        )
+
+    def test_signal_sync_failed_for_item_create_failed(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("issue_created_project_item_failed"),
+            "sync_failed",
+        )
+
+    def test_signal_sync_failed_for_state_set_failed(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("issue_created_project_state_failed"),
+            "sync_failed",
+        )
+
+    def test_signal_sync_failed_for_blocked_project_preflight(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("blocked_project_preflight"),
+            "sync_failed",
+        )
+
+    def test_suffix_format_synced(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_suffix("project_state_synced"),
+            " [project_sync: signal=synced]",
+        )
+
+    def test_suffix_format_skipped_no_project(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_suffix("issue_only_fallback"),
+            " [project_sync: signal=skipped_no_project]",
+        )
+
+    def test_suffix_format_sync_failed_includes_reason(self) -> None:
+        suffix = issue_centric_issue_create.issue_create_project_sync_suffix("issue_created_project_item_failed")
+        self.assertIn("signal=sync_failed", suffix)
+        self.assertIn("reason=issue_created_project_item_failed", suffix)
+
+    def test_safe_stop_reason_contains_synced_suffix_when_project_synced(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=101, url="https://github.com/example/repo/issues/101",
+                    title=title, repository=repo, node_id="NODE_101",
+                ),
+                project_state_resolver=lambda url, field, state, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p", project_url=url, project_title="Backlog",
+                    owner_login="example", owner_kind="users",
+                    state_field_id="FIELD_s", state_field_name=field,
+                    state_option_id="OPT_r", state_option_name=state,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_101", project_id=pid
+                ),
+                project_state_setter=lambda pid, iid, fid, oid, token: None,
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.project_sync_status, "project_state_synced")
+        self.assertIn("[project_sync: signal=synced]", result.safe_stop_reason)
+
+    def test_safe_stop_reason_contains_skipped_no_project_when_no_project_configured(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=102, url="https://github.com/example/repo/issues/102",
+                    title=title, repository=repo, node_id="NODE_102",
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.project_sync_status, "issue_only_fallback")
+        self.assertIn("[project_sync: signal=skipped_no_project]", result.safe_stop_reason)
+
+    def test_safe_stop_reason_contains_sync_failed_when_project_item_create_fails(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=103, url="https://github.com/example/repo/issues/103",
+                    title=title, repository=repo, node_id="NODE_103",
+                ),
+                project_state_resolver=lambda url, field, state, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p", project_url=url, project_title="Backlog",
+                    owner_login="example", owner_kind="users",
+                    state_field_id="FIELD_s", state_field_name=field,
+                    state_option_id="OPT_r", state_option_name=state,
+                ),
+                project_item_creator=lambda pid, nid, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("item failed")
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
+        self.assertIn("signal=sync_failed", result.safe_stop_reason)
+        self.assertIn("reason=issue_created_project_item_failed", result.safe_stop_reason)
+
+    def test_no_sync_suffix_when_issue_create_blocked_before_project_check(self) -> None:
+        """Regression: safe_stop_reason must not have a sync suffix when status is not_requested."""
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: (_ for _ in ()).throw(
+                    issue_centric_issue_create.IssueCentricIssueCreateError("boom")
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        # project_sync_status == "not_requested" (initial) — no suffix expected
+        self.assertEqual(result.project_sync_status, "not_requested")
+        self.assertNotIn("[project_sync:", result.safe_stop_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
