@@ -4801,5 +4801,86 @@ class DispatchSummaryLifecycleSyncSignalSurfacingTests(unittest.TestCase):
             self.assertEqual(summary["current_issue_lifecycle_sync_status"], "")
 
 
+class DispatchStopMessageLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 2 (#63): dispatch stop_message must include lifecycle sync suffix.
+
+    Covers IssueCentricDispatchResult.stop_message via _finalize_dispatch(), which is the
+    closeout-facing human text consumed by BridgeStop in fetch_next_prompt.run().
+    """
+
+    def _make_sync_fn(self, root: Path, sync_status: str, lifecycle_stage: str = "done"):
+        # status="not_requested" → _apply_current_issue_project_state_sync_state is skipped,
+        # so lifecycle fields in mutable_state stay empty.
+        # Use status="completed" for synced, status="blocked" for sync_failed.
+        if sync_status == "project_state_synced":
+            exec_status = "completed"
+        elif sync_status == "":
+            exec_status = "not_requested"
+        else:
+            exec_status = "blocked"
+
+        def fn(*args, **kwargs):
+            p = root / f"sync_{sync_status or 'empty'}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=exec_status,
+                sync_status=sync_status,
+                lifecycle_stage=lifecycle_stage,
+                resolved_issue=None,
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="lifecycle sync ok." if sync_status == "project_state_synced" else "sync note.",
+            )
+        return fn
+
+    def _dispatch(self, root: Path, sync_fn) -> "issue_centric_execution.IssueCentricDispatchResult":
+        helper = DispatchSummaryLifecycleSyncSignalSurfacingTests()
+        return helper._dispatch_no_action_close(root, sync_fn)
+
+    def test_stop_message_shows_lifecycle_sync_synced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._dispatch(root, self._make_sync_fn(root, "project_state_synced", "done"))
+            self.assertIn("lifecycle_sync", result.stop_message)
+            self.assertIn("signal=synced", result.stop_message)
+            self.assertIn("stage=done", result.stop_message)
+
+    def test_stop_message_shows_lifecycle_sync_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._dispatch(root, self._make_sync_fn(root, "blocked_project_preflight", "done"))
+            self.assertIn("lifecycle_sync", result.stop_message)
+            self.assertIn("signal=sync_failed", result.stop_message)
+            self.assertIn("reason=blocked_project_preflight", result.stop_message)
+
+    def test_stop_message_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def empty_sync_fn(*args, **kwargs):
+                p = root / "no_sync.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="not_requested",
+                    sync_status="",
+                    lifecycle_stage="",
+                    resolved_issue=None,
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="",
+                )
+
+            result = self._dispatch(root, empty_sync_fn)
+            self.assertNotIn("lifecycle_sync", result.stop_message)
+
+
 if __name__ == "__main__":
     unittest.main()

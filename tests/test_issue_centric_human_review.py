@@ -772,5 +772,122 @@ class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(saved["last_issue_centric_close_order"], "after_human_review_followup")
 
 
+class GitHubFacingReviewCommentLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 1B (#63): lifecycle sync outcomes are visible in review comment body and safe_stop_reason.
+
+    Covers execute_human_review_action() – review_text passed to comment_creator and
+    safe_stop_reason on the returned HumanReviewExecutionResult.
+    """
+
+    def _run_review(
+        self, prior_state: dict
+    ) -> "tuple[issue_centric_human_review.HumanReviewExecutionResult, list[str]]":
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision(target_issue="#20", review_text="## Review\n\n- Looks good\n")
+        )
+        captured_bodies: list[str] = []
+
+        def fake_comment_creator(
+            repository: str, issue_number: int, body: str, token: str
+        ) -> issue_centric_github.CreatedGitHubComment:
+            captured_bodies.append(body)
+            return issue_centric_github.CreatedGitHubComment(
+                comment_id=801,
+                url="https://github.com/example/repo/issues/20#issuecomment-801",
+                body=body,
+                repository=repository,
+                issue_number=issue_number,
+            )
+
+        full_state = dict(
+            prior_state,
+            last_issue_centric_resolved_issue="https://github.com/example/repo/issues/20",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_human_review.execute_human_review_action(
+                prepared,
+                prior_state=full_state,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_review.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Ready issue",
+                    repository=repository,
+                    state="open",
+                ),
+                comment_creator=fake_comment_creator,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+        return result, captured_bodies
+
+    # --- review comment body ---
+
+    def test_review_comment_body_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        result, bodies = self._run_review(state)
+        self.assertEqual(result.status, "completed")
+        self.assertGreater(len(bodies), 0)
+        self.assertIn("lifecycle_sync", bodies[0])
+        self.assertIn("signal=synced", bodies[0])
+        self.assertIn("stage=done", bodies[0])
+
+    def test_review_comment_body_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        result, bodies = self._run_review(state)
+        self.assertEqual(result.status, "completed")
+        self.assertGreater(len(bodies), 0)
+        self.assertIn("lifecycle_sync", bodies[0])
+        self.assertIn("signal=skipped_no_project", bodies[0])
+
+    def test_review_comment_body_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        result, bodies = self._run_review(state)
+        self.assertEqual(result.status, "completed")
+        self.assertGreater(len(bodies), 0)
+        self.assertIn("lifecycle_sync", bodies[0])
+        self.assertIn("signal=sync_failed", bodies[0])
+        self.assertIn("reason=blocked_project_preflight", bodies[0])
+
+    def test_review_comment_body_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state: dict = {}
+        result, bodies = self._run_review(state)
+        self.assertEqual(result.status, "completed")
+        self.assertGreater(len(bodies), 0)
+        self.assertNotIn("lifecycle_sync", bodies[0])
+
+    # --- safe_stop_reason ---
+
+    def test_safe_stop_reason_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        result, _ = self._run_review(state)
+        self.assertEqual(result.status, "completed")
+        self.assertIn("lifecycle_sync", result.safe_stop_reason)
+        self.assertIn("signal=synced", result.safe_stop_reason)
+
+    def test_safe_stop_reason_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state: dict = {}
+        result, _ = self._run_review(state)
+        self.assertEqual(result.status, "completed")
+        self.assertNotIn("lifecycle_sync", result.safe_stop_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
