@@ -5,7 +5,7 @@ import argparse
 import sys
 
 import run_until_stop
-from _bridge_common import clear_error_fields, save_state
+from _bridge_common import clear_error_fields, format_lifecycle_sync_state_note, save_state
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -155,6 +155,7 @@ def print_doctor(args: argparse.Namespace) -> None:
     print(f"  - pause: {'あり' if bool(state.get('pause')) else 'なし'}", flush=True)
     print(f"  - bridge_error: {'あり' if bool(state.get('error')) else 'なし'}", flush=True)
     print(f"  - state_backups: {backup_count} (削除不要)", flush=True)
+    print(f"  - lifecycle_sync_state: {format_lifecycle_sync_state_note(state)}", flush=True)
     print(f"- clear_error: {clear_error_status}", flush=True)
     print("- logs / history / prompt / report は doctor では変更しません。", flush=True)
 

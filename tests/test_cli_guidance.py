@@ -2146,5 +2146,350 @@ class BridgeHandoffBlockedWaitLifecycleSyncTests(unittest.TestCase):
         self.assertNotIn("lifecycle_sync", note)
 
 
+class StopSummaryLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 1: lifecycle sync outcomes are visible in format_operator_stop_note
+    remaining cases (completed, no_action, request_next_prompt) and in
+    format_lifecycle_sync_state_note diagnostic helper."""
+
+    # --- format_operator_stop_note: completed ---
+
+    def test_format_operator_stop_note_completed_shows_lifecycle_sync_synced(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+        self.assertIn("stage=closing", note)
+
+    def test_format_operator_stop_note_completed_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=skipped_no_project", note)
+
+    def test_format_operator_stop_note_completed_shows_lifecycle_sync_failed(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "transition_error",
+            "last_issue_centric_lifecycle_sync_stage": "opening",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=sync_failed", note)
+        self.assertIn("reason=transition_error", note)
+
+    def test_format_operator_stop_note_completed_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {"mode": "idle"}
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("不要", note)
+        self.assertNotIn("lifecycle_sync", note)
+
+    # --- format_operator_stop_note: no_action ---
+
+    def test_format_operator_stop_note_no_action_shows_lifecycle_sync_synced(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_codex_run": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_format_operator_stop_note_no_action_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_codex_run": True,
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=skipped_no_project", note)
+
+    # --- format_operator_stop_note: request_next_prompt ---
+
+    def test_format_operator_stop_note_request_next_prompt_shows_lifecycle_sync_synced(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "opening",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_format_operator_stop_note_request_next_prompt_no_src_when_no_sync_data(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {"mode": "idle", "need_chatgpt_prompt": True}
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("新規入口", note)
+        self.assertNotIn("lifecycle_sync", note)
+
+    # --- format_lifecycle_sync_state_note ---
+
+    def test_format_lifecycle_sync_state_note_synced(self) -> None:
+        from _bridge_common import format_lifecycle_sync_state_note
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = format_lifecycle_sync_state_note(state)
+        self.assertIn("signal=synced", note)
+        self.assertIn("stage=closing", note)
+        self.assertNotIn("[lifecycle_sync:", note)
+
+    def test_format_lifecycle_sync_state_note_skipped_no_project(self) -> None:
+        from _bridge_common import format_lifecycle_sync_state_note
+        state = {"last_issue_centric_lifecycle_sync_status": "not_requested_no_project"}
+        note = format_lifecycle_sync_state_note(state)
+        self.assertIn("signal=skipped_no_project", note)
+        self.assertNotEqual(note, "not_recorded")
+
+    def test_format_lifecycle_sync_state_note_sync_failed(self) -> None:
+        from _bridge_common import format_lifecycle_sync_state_note
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "mutation_error",
+            "last_issue_centric_lifecycle_sync_stage": "opening",
+        }
+        note = format_lifecycle_sync_state_note(state)
+        self.assertIn("signal=sync_failed", note)
+        self.assertIn("reason=mutation_error", note)
+        self.assertIn("stage=opening", note)
+
+    def test_format_lifecycle_sync_state_note_not_recorded(self) -> None:
+        from _bridge_common import format_lifecycle_sync_state_note
+        state = {}
+        note = format_lifecycle_sync_state_note(state)
+        self.assertEqual(note, "not_recorded")
+
+
+class DoctorStopSummaryDiagnosticsLifecycleSyncTests(unittest.TestCase):
+    """Phase 2: lifecycle sync outcomes are visible in suggested_next_note
+    (doctor/stop-summary note) and in print_doctor's detailed diagnostics."""
+
+    # --- suggested_next_note: human_review ---
+
+    def test_suggested_next_note_human_review_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "chatgpt_decision": "human_review",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_suggested_next_note_human_review_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "chatgpt_decision": "human_review",
+            "last_issue_centric_lifecycle_sync_status": "transition_error",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=sync_failed", note)
+
+    def test_suggested_next_note_human_review_decision_note_takes_priority(self) -> None:
+        state = {
+            "chatgpt_decision": "human_review",
+            "chatgpt_decision_note": "caller provided note",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("caller provided note", note)
+        self.assertNotIn("lifecycle_sync", note)
+
+    # --- suggested_next_note: need_info ---
+
+    def test_suggested_next_note_need_info_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "chatgpt_decision": "need_info",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=skipped_no_project", note)
+
+    # --- suggested_next_note: completed ---
+
+    def test_suggested_next_note_completed_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "chatgpt_decision": "completed",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_suggested_next_note_completed_decision_note_takes_priority(self) -> None:
+        state = {
+            "chatgpt_decision": "completed",
+            "chatgpt_decision_note": "all done note",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertEqual(note, "all done note")
+        self.assertNotIn("lifecycle_sync", note)
+
+    def test_suggested_next_note_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {"chatgpt_decision": "human_review"}
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("lifecycle_sync", note)
+        self.assertIn("bridge を再実行", note)
+
+    # --- print_doctor: lifecycle_sync_state in 詳細診断 ---
+
+    def test_doctor_output_shows_lifecycle_sync_state_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "error": False,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        args = make_args()
+        derived_args = argparse.Namespace()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            stop_path = temp_root / "STOP"
+            report_path = temp_root / "codex_report.md"
+            prompt_path = temp_root / "codex_prompt.md"
+            out = io.StringIO()
+            with (
+                patch.object(start_bridge.run_until_stop, "load_state", return_value=state),
+                patch.object(start_bridge, "build_derived_args", return_value=derived_args),
+                patch.object(start_bridge.run_until_stop, "start_bridge_mode", return_value="このまま再開できます"),
+                patch.object(
+                    start_bridge.run_until_stop,
+                    "start_bridge_resume_guidance",
+                    return_value=("ChatGPTへ依頼準備中", "次の依頼を送る準備ができています。", "目視確認してください。"),
+                ),
+                patch.object(
+                    start_bridge.run_until_stop,
+                    "recommended_operator_step",
+                    return_value=("そのまま再開", "python3 scripts/start_bridge.py --resume"),
+                ),
+                patch.object(start_bridge.run_until_stop, "codex_report_is_ready", return_value=False),
+                patch.object(start_bridge.run_until_stop, "runtime_report_path", return_value=report_path),
+                patch.object(start_bridge.run_until_stop, "runtime_prompt_path", return_value=prompt_path),
+                patch.object(start_bridge.run_until_stop, "runtime_stop_path", return_value=stop_path),
+                patch.object(start_bridge.run_until_stop, "bridge_runtime_root", return_value=temp_root),
+                patch.object(start_bridge.run_until_stop, "should_rotate_before_next_chat_request", return_value=False),
+                patch.object(start_bridge.run_until_stop, "should_prioritize_unarchived_report", return_value=False),
+                patch.object(start_bridge.run_until_stop, "is_apple_event_timeout_text", return_value=False),
+                redirect_stdout(out),
+            ):
+                start_bridge.print_doctor(args)
+        output = out.getvalue()
+        self.assertIn("lifecycle_sync_state:", output)
+        self.assertIn("signal=synced", output)
+        self.assertIn("stage=closing", output)
+
+    def test_doctor_output_shows_lifecycle_sync_state_not_recorded(self) -> None:
+        state = {"mode": "idle", "error": False}
+        args = make_args()
+        derived_args = argparse.Namespace()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            stop_path = temp_root / "STOP"
+            report_path = temp_root / "codex_report.md"
+            prompt_path = temp_root / "codex_prompt.md"
+            out = io.StringIO()
+            with (
+                patch.object(start_bridge.run_until_stop, "load_state", return_value=state),
+                patch.object(start_bridge, "build_derived_args", return_value=derived_args),
+                patch.object(start_bridge.run_until_stop, "start_bridge_mode", return_value="このまま再開できます"),
+                patch.object(
+                    start_bridge.run_until_stop,
+                    "start_bridge_resume_guidance",
+                    return_value=("ChatGPTへ依頼準備中", "次の依頼を送る準備ができています。", "目視確認してください。"),
+                ),
+                patch.object(
+                    start_bridge.run_until_stop,
+                    "recommended_operator_step",
+                    return_value=("そのまま再開", "python3 scripts/start_bridge.py --resume"),
+                ),
+                patch.object(start_bridge.run_until_stop, "codex_report_is_ready", return_value=False),
+                patch.object(start_bridge.run_until_stop, "runtime_report_path", return_value=report_path),
+                patch.object(start_bridge.run_until_stop, "runtime_prompt_path", return_value=prompt_path),
+                patch.object(start_bridge.run_until_stop, "runtime_stop_path", return_value=stop_path),
+                patch.object(start_bridge.run_until_stop, "bridge_runtime_root", return_value=temp_root),
+                patch.object(start_bridge.run_until_stop, "should_rotate_before_next_chat_request", return_value=False),
+                patch.object(start_bridge.run_until_stop, "should_prioritize_unarchived_report", return_value=False),
+                patch.object(start_bridge.run_until_stop, "is_apple_event_timeout_text", return_value=False),
+                redirect_stdout(out),
+            ):
+                start_bridge.print_doctor(args)
+        output = out.getvalue()
+        self.assertIn("lifecycle_sync_state:", output)
+        self.assertIn("not_recorded", output)
+
+    # --- consistency with prior surfaces ---
+
+    def test_stop_summary_includes_lifecycle_sync_state_field(self) -> None:
+        args = run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test stop",
+            steps=1,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+        )
+        self.assertIn("lifecycle_sync_state:", summary)
+        self.assertIn("signal=synced", summary)
+        self.assertIn("stage=closing", summary)
+
+    def test_stop_summary_lifecycle_sync_state_not_recorded_when_no_sync_data(self) -> None:
+        args = run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+        state = {"mode": "idle"}
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test stop",
+            steps=0,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+        )
+        self.assertIn("lifecycle_sync_state:", summary)
+        self.assertIn("not_recorded", summary)
+
+
 if __name__ == "__main__":
     unittest.main()
