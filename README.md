@@ -40,6 +40,19 @@ not markdown-lossless. The bounded feasibility verdict for a copy-response
 alternative is recorded in
 [docs/MARKDOWN_FIDELITY_FEASIBILITY.md](docs/MARKDOWN_FIDELITY_FEASIBILITY.md).
 
+## Fresh Target Repo Bootstrap
+
+If a fresh target repository does not yet contain repo-side agent guidance, use
+the required-files bootstrap pack before starting a bridge run.
+The pack builds a fixed Copilot-facing bootstrap artifact and can materialize
+the canonical minimum required files:
+
+- `AGENTS.md`
+- `.github/copilot-instructions.md`
+
+See [docs/REQUIRED_FILES_BOOTSTRAP_PACK.md](docs/REQUIRED_FILES_BOOTSTRAP_PACK.md)
+and `python3 scripts/required_files_bootstrap.py --help`.
+
 ## Normal Operator Entry During The Transition
 
 For normal operation, the operator should start here:
