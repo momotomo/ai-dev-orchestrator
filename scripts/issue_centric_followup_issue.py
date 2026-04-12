@@ -20,6 +20,7 @@ from issue_centric_issue_create import (
     IssueCreateExecutionResult,
     IssueCentricIssueCreateError,
     execute_issue_create_draft,
+    issue_create_project_sync_suffix,
     materialize_issue_draft_text,
 )
 from issue_centric_transport import PreparedIssueCentricDecision
@@ -191,6 +192,9 @@ def execute_followup_issue_action(
                     f"Created follow-up issue #{issue_create_result.created_issue.number} for current issue "
                     f"#{parent_issue.issue_number}. close_current_issue may run only after this follow-up creation path succeeds."
                 )
+            # Surface follow-up issue project sync signal in action human-facing text.
+            # Consistent with issue #50 signal model: synced | skipped_no_project | sync_failed.
+            safe_stop_reason = safe_stop_reason + issue_create_project_sync_suffix(issue_create_result.project_sync_status)
             execution_status = "completed"
         else:
             followup_status = issue_create_result.project_sync_status or "blocked"
