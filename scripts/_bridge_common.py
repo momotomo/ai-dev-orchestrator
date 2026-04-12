@@ -526,7 +526,8 @@ def present_bridge_status(
         return BridgeStatusView("異常", "まず stop summary と doctor を見て、必要なら詳しい error を確認してから再開します。")
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        return BridgeStatusView("人確認待ち", "まず stop summary の next step と note を確認してから再開します。")
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        return BridgeStatusView("人確認待ち", f"まず stop summary の next step と note を確認してから再開します。{_lc_suffix}")
 
     if has_pending_issue_centric_codex_dispatch(state):
         return BridgeStatusView(
@@ -542,7 +543,8 @@ def present_bridge_status(
     # Full cutover target: once lifecycle states are action-view equivalents in the state
     # machine, remove these arms and the is_blocked_codex_lifecycle_state() guard.
     if is_blocked_codex_lifecycle_state(state):
-        return BridgeStatusView("人確認待ち", "Codex 実行条件を確認してください。")
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        return BridgeStatusView("人確認待ち", f"Codex 実行条件を確認してください。{_lc_suffix}")
 
     if not is_normal_path_state(state):
         # Non-blocked lifecycle state: route by action key.
@@ -550,7 +552,8 @@ def present_bridge_status(
         if action == "launch_codex_once":
             return BridgeStatusView("Codex実行待ち", "次の prompt はそろっています。bridge が Codex worker を 1 回起動します。")
         if action == "wait_for_codex_report":
-            return BridgeStatusView("Codex実行中", "Codex worker の完了報告を待っています。")
+            _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+            return BridgeStatusView("Codex実行中", f"Codex worker の完了報告を待っています。{_lc_suffix}")
         if action == "archive_codex_report":
             return BridgeStatusView("完了報告整理中", "完了報告を整理して、次の ChatGPT 依頼へつなぎます。")
 
@@ -560,7 +563,9 @@ def present_bridge_status(
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
     if is_awaiting_user_supplement(state) or chatgpt_decision in {"human_review", "need_info"}:
-        detail = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        _base = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
+        detail = f"{_base}{_lc_suffix}" if not chatgpt_decision_note else _base
         return BridgeStatusView("人確認待ち", detail)
 
     # --- Normal path: dispatch plan is the primary routing authority ---
@@ -579,31 +584,27 @@ def present_bridge_status(
     if plan.next_action == "fetch_next_prompt":
         # issue-centric pending reply: distinct from legacy fetch substates.
         if plan.runtime_action == "pending_reply":
+            _lc_suffix = _bridge_lifecycle_sync_suffix(state)
             return BridgeStatusView(
                 "ChatGPT返答待ち",
-                "issue-centric pending generation に対する reply 回収を待っています。",
+                f"issue-centric pending generation に対する reply 回収を待っています。{_lc_suffix}",
             )
         pending_request_signal = str(state.get("pending_request_signal", "")).strip()
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
         if pending_request_signal == "submitted_unconfirmed":
-            return BridgeStatusView(
-                "ChatGPT返答待ち",
-                ic_delivery_pending_detail(
-                    "handoff 送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
-                    state,
-                    legacy_base_text="新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
-                ),
+            _base = ic_delivery_pending_detail(
+                "handoff 送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
+                state,
+                legacy_base_text="新しいチャットへの送信は通った可能性が高いため、同じ handoff は再送せず返答を待っています。",
             )
+            return BridgeStatusView("ChatGPT返答待ち", f"{_base}{_lc_suffix}")
         if is_fetch_extended_wait_state(state):
-            return BridgeStatusView(
-                "ChatGPT返答待ち",
-                ic_delivery_pending_detail("返答が重いため、追加待機しながら回収を続けています。", state),
-            )
+            _base = ic_delivery_pending_detail("返答が重いため、追加待機しながら回収を続けています。", state)
+            return BridgeStatusView("ChatGPT返答待ち", f"{_base}{_lc_suffix}")
         if is_fetch_late_completion_state(state):
-            return BridgeStatusView(
-                "ChatGPT返答待ち",
-                ic_delivery_pending_detail("返答が書き切られるまで監視し、その後で回収します。", state),
-            )
-        return BridgeStatusView("ChatGPT返答待ち", "返答から次の Codex 用 prompt を回収します。")
+            _base = ic_delivery_pending_detail("返答が書き切られるまで監視し、その後で回収します。", state)
+            return BridgeStatusView("ChatGPT返答待ち", f"{_base}{_lc_suffix}")
+        return BridgeStatusView("ChatGPT返答待ち", f"返答から次の Codex 用 prompt を回収します。{_lc_suffix}")
 
     if plan.next_action == "request_next_prompt":
         return BridgeStatusView(
@@ -685,15 +686,18 @@ def present_bridge_handoff(
         return BridgeHandoffView("完了しました。", detail)
 
     if chatgpt_decision == "human_review":
-        detail = suggested_note or "stop summary の案内に沿って、次の判断や補足を入れてください。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"stop summary の案内に沿って、次の判断や補足を入れてください。{_lc_suffix}"
         return BridgeHandoffView("人の判断が必要です。次の方針を決めてから再開してください。", detail)
 
     if chatgpt_decision == "need_info":
-        detail = suggested_note or "不足している情報を補ってから再開してください。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"不足している情報を補ってから再開してください。{_lc_suffix}"
         return BridgeHandoffView("情報が不足しています。入力内容を補って再開してください。", detail)
 
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
-        detail = suggested_note or "自動では進めません。stop summary の案内に沿って確認してください。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"自動では進めません。stop summary の案内に沿って確認してください。{_lc_suffix}"
         return BridgeHandoffView("自動では進めません。まず summary と doctor を確認してください。", detail)
 
     if normalized_reason.startswith("--max-steps="):
@@ -1668,9 +1672,10 @@ def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatch
             return f"safety fallback (legacy) route で次の ChatGPT 依頼を送ります。{_lc}"
         return f"issue-centric route で次の ChatGPT 依頼を送ります。{_lc}"
     if plan.next_action == "fetch_next_prompt":
+        _lc = _bridge_lifecycle_sync_suffix(state)
         if plan.is_fallback:
-            return "safety fallback (legacy) route で ChatGPT 返答を回収します。"
-        return "ChatGPT 返答を回収します。"
+            return f"safety fallback (legacy) route で ChatGPT 返答を回収します。{_lc}"
+        return f"ChatGPT 返答を回収します。{_lc}"
     # For less common next_action values, delegate to the dispatch note.
     return plan.note
 

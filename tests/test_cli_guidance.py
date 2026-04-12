@@ -1933,5 +1933,218 @@ class BridgeHandoffLifecycleSyncSurfacingTests(unittest.TestCase):
         self.assertNotIn("lifecycle_sync", note)
 
 
+class BridgeBlockedWaitLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 1 (#53): lifecycle sync signal in blocked / wait bridge status cases."""
+
+    def test_blocked_guard_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "pause": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        view = present_bridge_status(state, blocked=True)
+        self.assertEqual(view.label, "人確認待ち")
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=synced", view.detail)
+
+    def test_blocked_guard_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "pause": True,
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        view = present_bridge_status(state, blocked=True)
+        self.assertEqual(view.label, "人確認待ち")
+        self.assertIn("signal=skipped_no_project", view.detail)
+
+    def test_blocked_guard_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "pause": True,
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        view = present_bridge_status(state, blocked=True)
+        self.assertEqual(view.label, "人確認待ち")
+        self.assertIn("signal=sync_failed", view.detail)
+        self.assertIn("reason=blocked_project_preflight", view.detail)
+
+    def test_blocked_guard_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        view = present_bridge_status({"mode": "idle", "pause": True}, blocked=True)
+        self.assertEqual(view.label, "人確認待ち")
+        self.assertNotIn("lifecycle_sync", view.detail)
+
+    def test_awaiting_user_supplement_shows_lifecycle_sync_when_no_decision_note(self) -> None:
+        # When chatgpt_decision_note is absent, the default text gets the suffix appended.
+        state = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "human_review",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "review",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "人確認待ち")
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=synced", view.detail)
+
+    def test_awaiting_user_supplement_decision_note_takes_priority(self) -> None:
+        # When chatgpt_decision_note is set, that note is shown as-is (no suffix).
+        state = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "human_review",
+            "chatgpt_decision_note": "operator note here",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "人確認待ち")
+        self.assertEqual(view.detail, "operator note here")
+
+    def test_wait_state_fetch_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "extended_wait",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPT返答待ち")
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=synced", view.detail)
+
+    def test_wait_state_fetch_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "extended_wait",
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPT返答待ち")
+        self.assertIn("signal=sync_failed", view.detail)
+        self.assertIn("reason=blocked_project_preflight", view.detail)
+
+    def test_wait_state_fetch_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        view = present_bridge_status({"mode": "extended_wait"})
+        self.assertEqual(view.label, "ChatGPT返答待ち")
+        self.assertNotIn("lifecycle_sync", view.detail)
+
+    def test_wait_state_late_completion_shows_lifecycle_sync(self) -> None:
+        state = {
+            "mode": "await_late_completion",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPT返答待ち")
+        self.assertIn("signal=skipped_no_project", view.detail)
+
+
+class BridgeHandoffBlockedWaitLifecycleSyncTests(unittest.TestCase):
+    """Phase 2 (#53): lifecycle sync in present_bridge_handoff blocked/wait/recovery cases
+    and format_operator_stop_note fetch case."""
+
+    def test_handoff_human_review_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "human_review",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "人の判断が必要です。次の方針を決めてから再開してください。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+
+    def test_handoff_human_review_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "human_review",
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertIn("signal=sync_failed", handoff.detail)
+        self.assertIn("reason=blocked_project_preflight", handoff.detail)
+
+    def test_handoff_need_info_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "need_info",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "review",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "情報が不足しています。入力内容を補って再開してください。")
+        self.assertIn("signal=skipped_no_project", handoff.detail)
+
+    def test_handoff_blocked_guard_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "pause": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        handoff = present_bridge_handoff(state, blocked=True)
+        self.assertEqual(handoff.title, "自動では進めません。まず summary と doctor を確認してください。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+
+    def test_handoff_blocked_guard_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "pause": True,
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        handoff = present_bridge_handoff(state, blocked=True)
+        self.assertIn("signal=sync_failed", handoff.detail)
+        self.assertIn("reason=blocked_project_preflight", handoff.detail)
+
+    def test_handoff_decision_note_takes_priority_over_lifecycle_sync(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "human_review",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        handoff = present_bridge_handoff(state, suggested_note="caller override note")
+        self.assertEqual(handoff.detail, "caller override note")
+
+    def test_handoff_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {"mode": "idle", "chatgpt_decision": "human_review"}
+        handoff = present_bridge_handoff(state)
+        self.assertNotIn("lifecycle_sync", handoff.detail)
+
+    def test_format_stop_note_fetch_shows_lifecycle_sync_synced(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "extended_wait",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_format_stop_note_fetch_shows_lifecycle_sync_failed(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "extended_wait",
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("signal=sync_failed", note)
+        self.assertIn("reason=blocked_project_preflight", note)
+
+    def test_format_stop_note_fetch_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {"mode": "extended_wait"}
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("lifecycle_sync", note)
+
+
 if __name__ == "__main__":
     unittest.main()
