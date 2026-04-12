@@ -242,7 +242,8 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
         # non-handoff-rotation) case so route context is reflected via dispatch plan.
         return format_next_action_note(state, next_action="request_prompt_from_report", route_choice=resolve_issue_centric_route_choice(state))
     if action == "completed":
-        return "追加の操作は不要です。"
+        _lc = bridge_lifecycle_sync_suffix(state)
+        return f"追加の操作は不要です。{_lc}"
     return "summary と doctor を見て次の 1 手を判断してください。"
 
 
@@ -460,16 +461,17 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "archive_codex_report":
         return "report はそろっているので、archive と次 request へ進めるため再実行してください。"
     if action == "request_prompt_from_report":
+        _lc = bridge_lifecycle_sync_suffix(final_state)
         if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
             base = (
                 "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
                 " project ページの composer と送信可否を確認したまま再実行してください。"
             )
             route_note = issue_centric_route_note(final_state)
-            return f"{base}{route_note}"
+            return f"{base}{route_note}{_lc}"
         base = "Safari の current tab を対象チャットに合わせたまま再実行してください。"
         route_note = issue_centric_route_note(final_state)
-        return f"{base}{route_note}"
+        return f"{base}{route_note}{_lc}"
     if action == "completed":
         _lc = bridge_lifecycle_sync_suffix(final_state)
         return f"追加の操作は不要です。{_lc}"

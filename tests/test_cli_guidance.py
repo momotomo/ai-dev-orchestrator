@@ -2746,5 +2746,182 @@ class HandoffArtifactTextLifecycleSyncSurfacingTests(unittest.TestCase):
         self.assertEqual(handoff.detail, "operator note")
 
 
+class ConciseReviewSummaryLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 1 (#61): lifecycle sync outcomes are visible in concise review summary text.
+
+    Covers suggested_next_note() for request_prompt_from_report action paths
+    that were previously missing lifecycle sync surfacing.
+    """
+
+    # --- suggested_next_note: request_prompt_from_report (basic path) ---
+
+    def test_suggested_next_note_request_prompt_from_report_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+        self.assertIn("stage=closing", note)
+
+    def test_suggested_next_note_request_prompt_from_report_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=skipped_no_project", note)
+
+    def test_suggested_next_note_request_prompt_from_report_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "transition_error",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=sync_failed", note)
+        self.assertIn("reason=transition_error", note)
+
+    def test_suggested_next_note_request_prompt_from_report_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {"mode": "idle", "need_chatgpt_next": True}
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("lifecycle_sync", note)
+        self.assertIn("Safari", note)
+
+    # --- suggested_next_note: request_prompt_from_report (pending handoff rotation path) ---
+
+    def test_suggested_next_note_pending_handoff_rotation_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "next_request_requires_rotation": True,
+            "pending_handoff_log": "logs/handoff.md",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "review",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+        self.assertIn("handoff", note)
+
+    def test_suggested_next_note_pending_handoff_rotation_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "next_request_requires_rotation": True,
+            "pending_handoff_log": "logs/handoff.md",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("lifecycle_sync", note)
+        self.assertIn("handoff", note)
+
+
+class CloseoutFacingHumanTextLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 2 (#61): lifecycle sync outcomes are visible in closeout-facing human text.
+
+    Covers entry_guidance() for the completed action path (closeout text shown
+    at session or work-unit close) that was previously missing lifecycle sync surfacing.
+    """
+
+    def _make_args(self) -> "argparse.Namespace":
+        return run_until_stop.parse_args(
+            [
+                "--project-path",
+                "/tmp/repo",
+                "--max-execution-count",
+                "6",
+                "--entry-script",
+                "scripts/start_bridge.py",
+            ],
+            {},
+        )
+
+    # --- entry_guidance: completed ---
+
+    def test_entry_guidance_completed_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        args = self._make_args()
+        guidance = run_until_stop.entry_guidance(state, args)
+        self.assertIn("lifecycle_sync", guidance)
+        self.assertIn("signal=synced", guidance)
+        self.assertIn("stage=done", guidance)
+
+    def test_entry_guidance_completed_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        args = self._make_args()
+        guidance = run_until_stop.entry_guidance(state, args)
+        self.assertIn("lifecycle_sync", guidance)
+        self.assertIn("signal=skipped_no_project", guidance)
+
+    def test_entry_guidance_completed_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        args = self._make_args()
+        guidance = run_until_stop.entry_guidance(state, args)
+        self.assertIn("lifecycle_sync", guidance)
+        self.assertIn("signal=sync_failed", guidance)
+        self.assertIn("reason=blocked_project_preflight", guidance)
+
+    def test_entry_guidance_completed_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {"mode": "idle"}
+        args = self._make_args()
+        guidance = run_until_stop.entry_guidance(state, args)
+        self.assertNotIn("lifecycle_sync", guidance)
+        self.assertIn("追加の操作は不要です", guidance)
+
+    # --- run summary integration: suggested_next_note for request_prompt_from_report includes lifecycle_sync ---
+
+    def test_run_summary_suggested_note_includes_lifecycle_sync_for_request_prompt_from_report(self) -> None:
+        args = run_until_stop.parse_args(
+            [
+                "--project-path",
+                "/tmp/repo",
+                "--max-execution-count",
+                "6",
+                "--entry-script",
+                "scripts/start_bridge.py",
+            ],
+            {},
+        )
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note_override = run_until_stop.suggested_next_note(state)
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test stop",
+            steps=1,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+            suggested_next_note_override=note_override,
+        )
+        self.assertIn("lifecycle_sync_state:", summary)
+        self.assertIn("signal=synced", summary)
+        self.assertIn("補足:", summary)
+
+
 if __name__ == "__main__":
     unittest.main()
