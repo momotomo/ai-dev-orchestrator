@@ -2491,5 +2491,125 @@ class DoctorStopSummaryDiagnosticsLifecycleSyncTests(unittest.TestCase):
         self.assertIn("not_recorded", summary)
 
 
+class RunSummaryLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 1 (#59): lifecycle sync outcomes are visible in run summary text.
+
+    Covers suggested_next_note() for request_next_prompt and completed action paths
+    that were previously missing lifecycle sync surfacing.
+    """
+
+    # --- suggested_next_note: request_next_prompt ---
+
+    def test_suggested_next_note_request_next_prompt_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+        self.assertIn("stage=closing", note)
+
+    def test_suggested_next_note_request_next_prompt_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=skipped_no_project", note)
+
+    def test_suggested_next_note_request_next_prompt_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=sync_failed", note)
+        self.assertIn("reason=blocked_project_preflight", note)
+
+    def test_suggested_next_note_request_next_prompt_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {"mode": "idle", "need_chatgpt_prompt": True}
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("lifecycle_sync", note)
+        self.assertIn("Safari", note)
+
+    # --- suggested_next_note: completed action ---
+
+    def test_suggested_next_note_completed_action_shows_lifecycle_sync_synced(self) -> None:
+        # resolve_unified_next_action returns "completed" when mode=idle, no need_* flags,
+        # and no chatgpt_decision set (chatgpt_decision check fires first if set).
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_suggested_next_note_completed_action_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=skipped_no_project", note)
+
+    def test_suggested_next_note_completed_action_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "transition_error",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=sync_failed", note)
+        self.assertIn("reason=transition_error", note)
+
+    def test_suggested_next_note_completed_action_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        state = {"mode": "idle"}
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("lifecycle_sync", note)
+        self.assertIn("追加の操作は不要です", note)
+
+    # --- run summary (summarize_run) consistent with lifecycle_sync_state field ---
+
+    def test_run_summary_suggested_note_includes_lifecycle_sync_for_request_next_prompt(self) -> None:
+        """summarize_run - 補足 field carries lifecycle_sync when action=request_next_prompt."""
+        args = run_until_stop.parse_args(
+            ["--project-path", "/tmp/repo", "--max-execution-count", "6", "--entry-script", "scripts/start_bridge.py"],
+            {},
+        )
+        state = {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note_override = run_until_stop.suggested_next_note(state)
+        summary = run_until_stop.summarize_run(
+            args=args,
+            reason="test stop",
+            steps=1,
+            warnings=[],
+            initial_state=state,
+            final_state=state,
+            history=[],
+            suggested_next_note_override=note_override,
+        )
+        self.assertIn("lifecycle_sync_state:", summary)
+        self.assertIn("signal=synced", summary)
+        self.assertIn("補足:", summary)
+
+
 if __name__ == "__main__":
     unittest.main()
