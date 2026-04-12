@@ -1173,6 +1173,22 @@ def render_issue_centric_next_request_section(
         lines.append(f"- dispatch_result: {dispatch_result_path}")
     if fallback_reason:
         lines.append(f"- fallback_reason: {fallback_reason}")
+    project_lifecycle_sync = getattr(context, "project_lifecycle_sync", None)
+    if isinstance(project_lifecycle_sync, Mapping):
+        lc_status = str(project_lifecycle_sync.get("status", "")).strip()
+        lc_stage = str(project_lifecycle_sync.get("stage", "")).strip()
+        lc_signal = str(project_lifecycle_sync.get("signal", "")).strip() or _lifecycle_sync_signal(
+            lc_status, lc_stage
+        )
+        if lc_stage or lc_signal:
+            lc_parts: list[str] = []
+            if lc_stage:
+                lc_parts.append(f"stage={lc_stage}")
+            if lc_signal:
+                lc_parts.append(f"signal={lc_signal}")
+            if lc_signal == "sync_failed" and lc_status:
+                lc_parts.append(f"reason={lc_status}")
+            lines.append(f"- lifecycle_sync: {' '.join(lc_parts)}")
     return "\n".join(lines).strip() + "\n"
 
 

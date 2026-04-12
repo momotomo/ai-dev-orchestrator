@@ -1804,6 +1804,233 @@ class IssueCentricLifecycleSyncSurfacingTests(unittest.TestCase):
         self.assertIn("issue_centric_partial_reason: lifecycle_sync_failed", rendered)
 
 
+class IssueCentricLifecycleSyncNextRequestContextTests(unittest.TestCase):
+    """#50 Phase 2: lifecycle sync outcome in next-request context and continuation hints.
+
+    Tests that render_issue_centric_next_request_section surfaces lifecycle
+    sync signal when the context is an IssueCentricRuntimeSnapshot.
+    Also covers success / skipped / failure variants, and partial outcome
+    understandability.
+    """
+
+    def _make_snapshot(
+        self,
+        *,
+        action: str = "no_action",
+        dispatch_final_status: str = "completed",
+        next_request_hint: str = "continue_on_followup_issue",
+        principal_issue_kind: str = "followup_issue",
+        target_issue: str = "https://github.com/example/repo/issues/99",
+        fallback_reason: str = "",
+        project_lifecycle_sync: dict | None = None,
+    ) -> issue_centric_normalized_summary.IssueCentricRuntimeSnapshot:
+        return issue_centric_normalized_summary.IssueCentricRuntimeSnapshot(
+            snapshot_status="issue_centric_snapshot_ready",
+            snapshot_source="post_dispatch",
+            generation_id="test-gen",
+            action=action,
+            dispatch_final_status=dispatch_final_status,
+            route_selected="issue_centric",
+            route_fallback_reason="",
+            recovery_status="",
+            recovery_source="",
+            recovery_fallback_reason="",
+            fallback_reason=fallback_reason,
+            principal_issue=target_issue,
+            principal_issue_kind=principal_issue_kind,
+            target_issue=target_issue,
+            target_issue_source="normalized_summary",
+            next_request_hint=next_request_hint,
+            current_issue=None,
+            created_primary_issue=None,
+            created_followup_issue=None,
+            closed_issue=None,
+            codex_target_issue=None,
+            review_target_issue=None,
+            project_lifecycle_sync=project_lifecycle_sync or {},
+            normalized_summary_path="logs/summary.json",
+            dispatch_result_path="",
+            snapshot_path="",
+        )
+
+    # ---- success / synced ----
+
+    def test_next_request_section_shows_lifecycle_sync_synced(self) -> None:
+        snap = self._make_snapshot(
+            project_lifecycle_sync={
+                "status": "project_state_synced",
+                "stage": "followup_created",
+                "signal": "synced",
+            }
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("lifecycle_sync:", rendered)
+        self.assertIn("stage=followup_created", rendered)
+        self.assertIn("signal=synced", rendered)
+        # raw status not forwarded
+        self.assertNotIn("project_state_synced", rendered)
+
+    def test_next_request_section_shows_lifecycle_sync_review_stage(self) -> None:
+        snap = self._make_snapshot(
+            action="human_review_needed",
+            next_request_hint="review_current_issue",
+            principal_issue_kind="current_issue",
+            project_lifecycle_sync={
+                "status": "project_state_synced",
+                "stage": "review",
+                "signal": "synced",
+            },
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("stage=review", rendered)
+        self.assertIn("signal=synced", rendered)
+
+    def test_next_request_section_shows_lifecycle_sync_done_stage(self) -> None:
+        snap = self._make_snapshot(
+            principal_issue_kind="current_issue",
+            next_request_hint="continue_on_current_issue",
+            project_lifecycle_sync={
+                "status": "project_state_synced",
+                "stage": "done",
+                "signal": "synced",
+            },
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("stage=done", rendered)
+        self.assertIn("signal=synced", rendered)
+
+    # ---- skipped / no-project ----
+
+    def test_next_request_section_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        snap = self._make_snapshot(
+            project_lifecycle_sync={
+                "status": "not_requested_no_project",
+                "stage": "followup_created",
+                "signal": "skipped_no_project",
+            }
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("stage=followup_created", rendered)
+        self.assertIn("signal=skipped_no_project", rendered)
+        # not_requested does not pollute the output
+        self.assertNotIn("not_requested_no_project", rendered)
+
+    # ---- sync_failed ----
+
+    def test_next_request_section_shows_lifecycle_sync_failed_with_reason(self) -> None:
+        snap = self._make_snapshot(
+            dispatch_final_status="partial",
+            fallback_reason="lifecycle_sync_failed",
+            project_lifecycle_sync={
+                "status": "blocked_project_preflight",
+                "stage": "done",
+                "signal": "sync_failed",
+            },
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("stage=done", rendered)
+        self.assertIn("signal=sync_failed", rendered)
+        self.assertIn("reason=blocked_project_preflight", rendered)
+        self.assertIn("fallback_reason: lifecycle_sync_failed", rendered)
+
+    def test_next_request_section_partial_outcome_shows_both_fallback_and_sync_failed(self) -> None:
+        """Partial downgrade from sync failure: both fallback_reason and lifecycle_sync visible."""
+        snap = self._make_snapshot(
+            dispatch_final_status="partial",
+            fallback_reason="sync_blocked",
+            project_lifecycle_sync={
+                "status": "blocked_project_state_sync",
+                "stage": "review",
+                "signal": "sync_failed",
+            },
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("fallback_reason", rendered)
+        self.assertIn("signal=sync_failed", rendered)
+        self.assertIn("reason=blocked_project_state_sync", rendered)
+
+    # ---- no lifecycle sync ----
+
+    def test_next_request_section_no_lifecycle_sync_line_when_sync_absent(self) -> None:
+        """When project_lifecycle_sync is empty, no lifecycle_sync line appears."""
+        snap = self._make_snapshot(project_lifecycle_sync={})
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertNotIn("lifecycle_sync:", rendered)
+
+    def test_next_request_section_no_lifecycle_sync_line_for_non_snapshot_contexts(self) -> None:
+        """Non-snapshot contexts (e.g. IssueCentricNextRequestContext) don't carry lifecycle sync."""
+        ctx = issue_centric_normalized_summary.IssueCentricNextRequestContext(
+            target_issue="https://github.com/example/repo/issues/20",
+            target_issue_source="existing_state_fallback",
+            next_request_hint="continue_on_current_issue",
+            principal_issue_kind="current_issue",
+            used_normalized_summary=False,
+            fallback_reason="",
+            summary_path="",
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            ctx, repo_label="example/repo"
+        )
+        self.assertNotIn("lifecycle_sync:", rendered)
+
+    # ---- backfill signal ----
+
+    def test_next_request_section_backfills_signal_when_absent_from_snapshot(self) -> None:
+        """Snapshot has status/stage but no signal key (old format) — signal is computed dynamically."""
+        snap = self._make_snapshot(
+            project_lifecycle_sync={
+                "status": "project_state_synced",
+                "stage": "in_progress",
+                # no 'signal' key
+            }
+        )
+        rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("signal=synced", rendered)
+
+    # ---- summary + next-request alignment ----
+
+    def test_summary_render_and_next_request_section_show_consistent_signal(self) -> None:
+        """The same lifecycle sync signal appears in both summary render and next-request section."""
+        state = {
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        summary = issue_centric_normalized_summary.build_issue_centric_normalized_summary(
+            matrix_path="no_action_followup",
+            final_status="completed",
+            state=state,
+        )
+        summary_rendered = issue_centric_normalized_summary.render_issue_centric_summary_for_request(summary)
+        snap = self._make_snapshot(
+            project_lifecycle_sync=summary["project_lifecycle_sync"],
+        )
+        next_req_rendered = issue_centric_normalized_summary.render_issue_centric_next_request_section(
+            snap, repo_label="example/repo"
+        )
+        self.assertIn("signal=synced", summary_rendered)
+        self.assertIn("signal=synced", next_req_rendered)
+        self.assertIn("stage=followup_created", summary_rendered)
+        self.assertIn("stage=followup_created", next_req_rendered)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
