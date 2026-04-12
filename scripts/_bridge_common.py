@@ -474,6 +474,34 @@ def build_chatgpt_reply_contract_section() -> str:
     ).strip()
 
 
+def _bridge_lifecycle_sync_suffix(state: Mapping[str, Any]) -> str:
+    """Return a compact bracketed lifecycle sync suffix for bridge status/handoff detail text.
+
+    Returns '[lifecycle_sync: stage=X signal=synced]' or '' when no sync data is present.
+    Three signals: synced | skipped_no_project | sync_failed (+ reason for failures).
+    Consistent with the signal model introduced in issue #50.
+    """
+    sync_status = str(state.get("last_issue_centric_lifecycle_sync_status", "")).strip()
+    sync_stage = str(state.get("last_issue_centric_lifecycle_sync_stage", "")).strip()
+    if not sync_status and not sync_stage:
+        return ""
+    if sync_status == "project_state_synced":
+        signal = "synced"
+    elif sync_status == "not_requested_no_project":
+        signal = "skipped_no_project"
+    elif sync_status:
+        signal = "sync_failed"
+    else:
+        return ""
+    parts: list[str] = []
+    if sync_stage:
+        parts.append(f"stage={sync_stage}")
+    parts.append(f"signal={signal}")
+    if signal == "sync_failed" and sync_status:
+        parts.append(f"reason={sync_status}")
+    return f" [lifecycle_sync: {' '.join(parts)}]"
+
+
 def present_bridge_status(
     state: Mapping[str, Any],
     *,
@@ -584,11 +612,12 @@ def present_bridge_status(
         )
 
     if plan.next_action == "request_prompt_from_report":
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
         pending_handoff_log = str(state.get("pending_handoff_log", "")).strip()
         if pending_handoff_log and should_rotate_before_next_chat_request(state):
             return BridgeStatusView(
                 "ChatGPTへ依頼準備中",
-                "次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。",
+                f"次の依頼を送る前に新しいチャットへ切り替えます。再実行で入力確認と送信確認を再試行します。{_lc_suffix}",
             )
         if plan.is_fallback:
             # Safety fallback (legacy) route is active: degraded / unavailable / invalidated.
@@ -598,20 +627,20 @@ def present_bridge_status(
             if "invalidated" in gen_lifecycle:
                 return BridgeStatusView(
                     "ChatGPTへ依頼準備中",
-                    f"issue-centric generation は invalidated のため、safety fallback (legacy) route で次の依頼を準備します。理由: {route_reason}。",
+                    f"issue-centric generation は invalidated のため、safety fallback (legacy) route で次の依頼を準備します。理由: {route_reason}。{_lc_suffix}",
                 )
             return BridgeStatusView(
                 "ChatGPTへ依頼準備中",
-                f"safety fallback (legacy) route で次の依頼を準備します。理由: {route_reason}。",
+                f"safety fallback (legacy) route で次の依頼を準備します。理由: {route_reason}。{_lc_suffix}",
             )
         # issue-centric preferred route.
         target_issue = (plan.route_choice.target_issue if plan.route_choice else "") or ""
         if target_issue:
             return BridgeStatusView(
                 "ChatGPTへ依頼準備中",
-                f"issue-centric preferred route で次の依頼を準備します。target_issue は {target_issue} です。",
+                f"issue-centric preferred route で次の依頼を準備します。target_issue は {target_issue} です。{_lc_suffix}",
             )
-        return BridgeStatusView("ChatGPTへ依頼準備中", "issue-centric preferred route で次の依頼を準備します。")
+        return BridgeStatusView("ChatGPTへ依頼準備中", f"issue-centric preferred route で次の依頼を準備します。{_lc_suffix}")
 
     if plan.is_terminal:
         detail = chatgpt_decision_note or "追加の操作は不要です。"
@@ -651,7 +680,8 @@ def present_bridge_handoff(
     # is_completed_state() is NOT used here intentionally: it also matches
     # mode == "idle" and not need_*, which must fire AFTER the blocked guard below.
     if chatgpt_decision == "completed" or str(state.get("mode", "")) == "completed":
-        detail = suggested_note or "summary を確認し、必要なら report を見れば十分です。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"summary を確認し、必要なら report を見れば十分です。{_lc_suffix}"
         return BridgeHandoffView("完了しました。", detail)
 
     if chatgpt_decision == "human_review":
@@ -677,7 +707,8 @@ def present_bridge_handoff(
     # Normal path: effectively-idle completed state check.
     # blocked guard has already fired above, so is_completed_state() is safe here.
     if is_completed_state(state):
-        detail = suggested_note or "追加の操作は不要です。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"追加の操作は不要です。{_lc_suffix}"
         return BridgeHandoffView("完了しました。", detail)
 
     status = present_bridge_status(state, blocked=blocked, stale_codex_running=stale_codex_running)
@@ -1630,11 +1661,12 @@ def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatch
     if plan.next_action == "request_next_prompt":
         return "次の ChatGPT 依頼を送る新規入口へ進めます。"
     if plan.next_action == "request_prompt_from_report":
+        _lc = _bridge_lifecycle_sync_suffix(state)
         if is_awaiting_user_supplement(state):
-            return "補足入力を受けて次の ChatGPT 依頼へ進めます。"
+            return f"補足入力を受けて次の ChatGPT 依頼へ進めます。{_lc}"
         if plan.is_fallback:
-            return "safety fallback (legacy) route で次の ChatGPT 依頼を送ります。"
-        return "issue-centric route で次の ChatGPT 依頼を送ります。"
+            return f"safety fallback (legacy) route で次の ChatGPT 依頼を送ります。{_lc}"
+        return f"issue-centric route で次の ChatGPT 依頼を送ります。{_lc}"
     if plan.next_action == "fetch_next_prompt":
         if plan.is_fallback:
             return "safety fallback (legacy) route で ChatGPT 返答を回収します。"

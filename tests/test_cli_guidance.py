@@ -1731,5 +1731,207 @@ class StatusViewCutoverTest(unittest.TestCase):
                 )
 
 
+class BridgeStatusLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 1: lifecycle sync outcomes are visible in present_bridge_status() detail."""
+
+    _SNAPSHOT_BASE: dict[str, object] = {
+        "snapshot_status": "issue_centric_snapshot_ready",
+        "snapshot_source": "execution_finalize",
+        "action": "no_action",
+        "dispatch_final_status": "completed",
+        "route_selected": "issue_centric",
+        "route_fallback_reason": "",
+        "recovery_status": "",
+        "recovery_source": "",
+        "recovery_fallback_reason": "",
+        "fallback_reason": "",
+        "principal_issue": "https://github.com/example/repo/issues/81",
+        "principal_issue_kind": "followup_issue",
+        "target_issue": "https://github.com/example/repo/issues/81",
+        "target_issue_source": "normalized_summary",
+        "next_request_hint": "continue_on_followup_issue",
+        "current_issue": None,
+        "created_primary_issue": None,
+        "created_followup_issue": None,
+        "closed_issue": None,
+        "codex_target_issue": None,
+        "review_target_issue": None,
+        "project_lifecycle_sync": {},
+        "normalized_summary_path": "",
+        "dispatch_result_path": "",
+    }
+
+    def test_bridge_status_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=synced", view.detail)
+        self.assertIn("stage=followup_created", view.detail)
+
+    def test_bridge_status_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "review",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=skipped_no_project", view.detail)
+        self.assertIn("stage=review", view.detail)
+
+    def test_bridge_status_shows_lifecycle_sync_failed_with_reason(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=sync_failed", view.detail)
+        self.assertIn("reason=blocked_project_preflight", view.detail)
+        self.assertIn("stage=done", view.detail)
+
+    def test_bridge_status_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        # Regression: no lifecycle state fields → detail must not contain lifecycle_sync.
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertNotIn("lifecycle_sync", view.detail)
+
+    def test_bridge_status_lifecycle_sync_in_preferred_route_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot_path = Path(tmp) / "snapshot.json"
+            snap = dict(self._SNAPSHOT_BASE)
+            snap["snapshot_path"] = str(snapshot_path)
+            snapshot_path.write_text(json.dumps(snap), encoding="utf-8")
+            state = {
+                "mode": "idle",
+                "need_chatgpt_next": True,
+                "last_issue_centric_runtime_snapshot": str(snapshot_path),
+                "last_issue_centric_snapshot_status": "issue_centric_snapshot_ready",
+                "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+                "last_issue_centric_lifecycle_sync_stage": "followup_created",
+            }
+            view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("issue-centric preferred route", view.detail)
+        self.assertIn("lifecycle_sync", view.detail)
+        self.assertIn("signal=synced", view.detail)
+
+    def test_bridge_status_lifecycle_sync_missing_stage_shows_signal_only(self) -> None:
+        # Only sync_status set, stage absent — signal shown, no stage= in detail.
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        view = present_bridge_status(state)
+        self.assertEqual(view.label, "ChatGPTへ依頼準備中")
+        self.assertIn("signal=synced", view.detail)
+        self.assertNotIn("stage=", view.detail)
+
+
+class BridgeHandoffLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 2: lifecycle sync outcomes are visible in present_bridge_handoff() and format_operator_stop_note()."""
+
+    def test_handoff_completed_decision_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "completed",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "完了しました。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+
+    def test_handoff_completed_decision_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "completed",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "完了しました。")
+        self.assertIn("signal=skipped_no_project", handoff.detail)
+
+    def test_handoff_completed_decision_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "completed",
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "完了しました。")
+        self.assertIn("signal=sync_failed", handoff.detail)
+        self.assertIn("reason=blocked_project_preflight", handoff.detail)
+
+    def test_handoff_completed_idle_state_shows_lifecycle_sync(self) -> None:
+        # is_completed_state() path: mode="idle" with no need_* flags.
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "review",
+        }
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "完了しました。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+
+    def test_handoff_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        # Regression: no lifecycle state → detail must not contain lifecycle_sync.
+        state = {"mode": "idle", "chatgpt_decision": "completed"}
+        handoff = present_bridge_handoff(state)
+        self.assertEqual(handoff.title, "完了しました。")
+        self.assertNotIn("lifecycle_sync", handoff.detail)
+
+    def test_handoff_suggested_note_takes_priority_over_lifecycle_sync(self) -> None:
+        # When caller provides suggested_note, that takes precedence (no suffix appended).
+        state = {
+            "mode": "idle",
+            "chatgpt_decision": "completed",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        handoff = present_bridge_handoff(state, suggested_note="caller note")
+        self.assertEqual(handoff.title, "完了しました。")
+        self.assertEqual(handoff.detail, "caller note")
+
+    def test_format_stop_note_shows_lifecycle_sync_for_request_prompt_from_report(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=synced", note)
+
+    def test_format_stop_note_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {"mode": "idle", "need_chatgpt_next": True}
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("lifecycle_sync", note)
+
+
 if __name__ == "__main__":
     unittest.main()
