@@ -711,7 +711,8 @@ def present_bridge_handoff(
         return BridgeHandoffView("異常で止まりました。まず doctor と summary を確認してください。", detail)
 
     if cycle_boundary_stop:
-        detail = suggested_note or "この run は現在の cycle 完了までで止めました。次 cycle は次回実行で進めます。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"この run は現在の cycle 完了までで止めました。次 cycle は次回実行で進めます。{_lc_suffix}"
         return BridgeHandoffView("この run は cycle 完了で停止しました。", detail)
 
     # Explicit completion signals: chatgpt_decision == "completed" or mode == "completed".
@@ -738,11 +739,13 @@ def present_bridge_handoff(
         return BridgeHandoffView("自動では進めません。まず summary と doctor を確認してください。", detail)
 
     if normalized_reason.startswith("--max-steps="):
-        detail = suggested_note or "続けるなら summary のおすすめ 1 コマンドをそのまま使ってください。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"続けるなら summary のおすすめ 1 コマンドをそのまま使ってください。{_lc_suffix}"
         return BridgeHandoffView("上限回数に達したため、ここで一旦止めました。", detail)
 
     if normalized_reason.startswith("ユーザー中断"):
-        detail = suggested_note or "再開するか、このまま止めるかを summary を見て決めてください。"
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        detail = suggested_note or f"再開するか、このまま止めるかを summary を見て決めてください。{_lc_suffix}"
         return BridgeHandoffView("途中で停止しました。summary / note を確認してください。", detail)
 
     # Normal path: effectively-idle completed state check.

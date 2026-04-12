@@ -2611,5 +2611,140 @@ class RunSummaryLifecycleSyncSurfacingTests(unittest.TestCase):
         self.assertIn("補足:", summary)
 
 
+class HandoffArtifactTextLifecycleSyncSurfacingTests(unittest.TestCase):
+    """Phase 2 (#59): lifecycle sync outcomes are visible in handoff artifact text.
+
+    Covers present_bridge_handoff() paths that were previously missing lifecycle sync:
+    - cycle_boundary_stop
+    - --max-steps= stop reason
+    - ユーザー中断 stop reason
+    """
+
+    # --- cycle_boundary_stop ---
+
+    def test_handoff_cycle_boundary_stop_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        handoff = present_bridge_handoff(state, cycle_boundary_stop=True)
+        self.assertEqual(handoff.title, "この run は cycle 完了で停止しました。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+        self.assertIn("stage=closing", handoff.detail)
+
+    def test_handoff_cycle_boundary_stop_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_stage": "done",
+        }
+        handoff = present_bridge_handoff(state, cycle_boundary_stop=True)
+        self.assertEqual(handoff.title, "この run は cycle 完了で停止しました。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=skipped_no_project", handoff.detail)
+
+    def test_handoff_cycle_boundary_stop_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        handoff = present_bridge_handoff(state, cycle_boundary_stop=True)
+        self.assertEqual(handoff.title, "この run は cycle 完了で停止しました。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=sync_failed", handoff.detail)
+        self.assertIn("reason=blocked_project_preflight", handoff.detail)
+
+    def test_handoff_cycle_boundary_stop_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        handoff = present_bridge_handoff({"mode": "idle"}, cycle_boundary_stop=True)
+        self.assertEqual(handoff.title, "この run は cycle 完了で停止しました。")
+        self.assertNotIn("lifecycle_sync", handoff.detail)
+
+    def test_handoff_cycle_boundary_stop_suggested_note_takes_priority(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        handoff = present_bridge_handoff(state, cycle_boundary_stop=True, suggested_note="caller note")
+        self.assertEqual(handoff.detail, "caller note")
+
+    # --- --max-steps= stop reason ---
+
+    def test_handoff_max_steps_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "followup_created",
+        }
+        handoff = present_bridge_handoff(state, reason="--max-steps=6 に達しました")
+        self.assertEqual(handoff.title, "上限回数に達したため、ここで一旦止めました。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+
+    def test_handoff_max_steps_shows_lifecycle_sync_skipped_no_project(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "not_requested_no_project",
+        }
+        handoff = present_bridge_handoff(state, reason="--max-steps=6 に達しました")
+        self.assertEqual(handoff.title, "上限回数に達したため、ここで一旦止めました。")
+        self.assertIn("signal=skipped_no_project", handoff.detail)
+
+    def test_handoff_max_steps_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        handoff = present_bridge_handoff({"mode": "idle", "need_chatgpt_next": True}, reason="--max-steps=6 に達しました")
+        self.assertEqual(handoff.title, "上限回数に達したため、ここで一旦止めました。")
+        self.assertNotIn("lifecycle_sync", handoff.detail)
+
+    def test_handoff_max_steps_suggested_note_takes_priority(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        handoff = present_bridge_handoff(state, reason="--max-steps=6 に達しました", suggested_note="caller override")
+        self.assertEqual(handoff.detail, "caller override")
+
+    # --- ユーザー中断 stop reason ---
+
+    def test_handoff_user_interrupt_shows_lifecycle_sync_synced(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        handoff = present_bridge_handoff(state, reason="ユーザー中断")
+        self.assertEqual(handoff.title, "途中で停止しました。summary / note を確認してください。")
+        self.assertIn("lifecycle_sync", handoff.detail)
+        self.assertIn("signal=synced", handoff.detail)
+
+    def test_handoff_user_interrupt_shows_lifecycle_sync_failed(self) -> None:
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "last_issue_centric_lifecycle_sync_status": "blocked_project_preflight",
+        }
+        handoff = present_bridge_handoff(state, reason="ユーザー中断")
+        self.assertEqual(handoff.title, "途中で停止しました。summary / note を確認してください。")
+        self.assertIn("signal=sync_failed", handoff.detail)
+        self.assertIn("reason=blocked_project_preflight", handoff.detail)
+
+    def test_handoff_user_interrupt_no_lifecycle_sync_when_no_sync_data(self) -> None:
+        handoff = present_bridge_handoff({"mode": "idle", "need_chatgpt_next": True}, reason="ユーザー中断")
+        self.assertEqual(handoff.title, "途中で停止しました。summary / note を確認してください。")
+        self.assertNotIn("lifecycle_sync", handoff.detail)
+
+    def test_handoff_user_interrupt_suggested_note_takes_priority(self) -> None:
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        handoff = present_bridge_handoff(state, reason="ユーザー中断", suggested_note="operator note")
+        self.assertEqual(handoff.detail, "operator note")
+
+
 if __name__ == "__main__":
     unittest.main()
