@@ -8,6 +8,7 @@ from _bridge_common import (
     OUTBOX_PLACEHOLDER_TEXT,
     BridgeError,
     clear_error_fields,
+    format_lifecycle_sync_state_note,
     guarded_main,
     log_text,
     now_stamp,
@@ -51,6 +52,7 @@ def run(state: dict[str, object]) -> int:
                         f"archived_report: {repo_relative(archive_path)}",
                         f"source_launch_log: {state.get('last_issue_centric_launch_log', '')}",
                         f"source_continuation_log: {state.get('last_issue_centric_continuation_log', '')}",
+                        f"lifecycle_sync: {format_lifecycle_sync_state_note(state)}",
                     ]
                 ),
                 suffix="md",

@@ -1823,6 +1823,12 @@ def _finalize_dispatch(
         final_status=final_status,
         state=mutable_state,
     )
+    _normalized_lifecycle_sync = normalized_summary.get("project_lifecycle_sync")
+    _lifecycle_sync_signal = (
+        str(_normalized_lifecycle_sync.get("signal", "")).strip()
+        if isinstance(_normalized_lifecycle_sync, Mapping)
+        else ""
+    )
     summary = {
         "matrix_path": matrix_path,
         "action": str(mutable_state.get("last_issue_centric_action", "")).strip(),
@@ -1834,6 +1840,7 @@ def _finalize_dispatch(
         "current_issue_lifecycle_sync_stage": str(
             mutable_state.get("last_issue_centric_lifecycle_sync_stage", "")
         ).strip(),
+        "current_issue_lifecycle_sync_signal": _lifecycle_sync_signal,
         "final_status": final_status,
         "final_stop_reason": stop_reason,
         "step_sequence": [step.name for step in steps],

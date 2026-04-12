@@ -4553,5 +4553,253 @@ class IssueCentricLifecycleSyncIntegrationTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_lifecycle_sync_status"], "blocked_project_preflight")
 
 
+class DispatchSummaryLifecycleSyncSignalSurfacingTests(unittest.TestCase):
+    """Phase 2 of #57: dispatch summary JSON must include current_issue_lifecycle_sync_signal."""
+
+    def _close_fn(self, root: Path) -> object:
+        def fn(*args, **kwargs):
+            p = root / "close.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                close_status="completed",
+                close_order="after_no_action",
+                execution_log_path=p,
+                issue_before=SimpleNamespace(
+                    number=30,
+                    url="https://github.com/example/repo/issues/30",
+                    title="Issue 30",
+                    repository="example/repo",
+                    node_id="ISSUE_30",
+                    state="open",
+                ),
+                issue_after=SimpleNamespace(
+                    number=30,
+                    url="https://github.com/example/repo/issues/30",
+                    title="Issue 30",
+                    repository="example/repo",
+                    node_id="ISSUE_30",
+                    state="closed",
+                ),
+                safe_stop_reason="closed issue #30.",
+            )
+        return fn
+
+    def _dispatch_no_action_close(
+        self,
+        root: Path,
+        sync_fn,
+    ) -> "issue_centric_execution.IssueCentricDispatchResult":
+        decision = build_decision(
+            action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            close_current_issue=True,
+        )
+        mat = materialized_from_decision(decision, root=root)
+        state: dict[str, object] = {
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_target_issue": "https://github.com/example/repo/issues/30",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/30",
+            "last_issue_centric_stop_reason": "",
+            "chatgpt_decision_note": "",
+            "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
+            "last_issue_centric_close_order": "",
+            "last_issue_centric_execution_status": "",
+            "last_issue_centric_execution_log": "",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_created_issue_url": "",
+            "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
+            "last_issue_centric_project_sync_status": "",
+            "last_issue_centric_project_url": "",
+            "last_issue_centric_project_item_id": "",
+            "last_issue_centric_project_state_field": "",
+            "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
+            "last_issue_centric_followup_status": "",
+            "last_issue_centric_followup_log": "",
+            "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
+            "last_issue_centric_close_status": "",
+            "last_issue_centric_close_log": "",
+            "last_issue_centric_closed_issue_number": "",
+            "last_issue_centric_closed_issue_url": "",
+            "last_issue_centric_closed_issue_title": "",
+            "last_issue_centric_review_status": "",
+            "last_issue_centric_review_log": "",
+            "last_issue_centric_review_comment_id": "",
+            "last_issue_centric_review_comment_url": "",
+            "last_issue_centric_review_close_policy": "",
+        }
+        saved: list[dict] = []
+        log_writer = TempLogWriter(root)
+        return issue_centric_execution.dispatch_issue_centric_execution(
+            contract_decision=decision,
+            materialized=mat,
+            prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/30"},
+            mutable_state=state,
+            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            repo_path=REPO_ROOT,
+            source_raw_log="logs/raw.txt",
+            source_decision_log="logs/decision.md",
+            source_metadata_log="logs/metadata.json",
+            source_artifact_path="logs/artifact.md",
+            log_writer=log_writer,
+            repo_relative=lambda p: str(p),
+            load_state_fn=lambda: dict(saved[-1]) if saved else dict(state),
+            save_state_fn=lambda s: saved.append(dict(s)),
+            execute_issue_create_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("issue_create should not run")),
+            execute_codex_run_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("codex_run should not run")),
+            launch_issue_centric_codex_run_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("launch should not run")),
+            execute_human_review_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("review should not run")),
+            execute_close_current_issue_fn=self._close_fn(root),
+            execute_followup_issue_action_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("followup should not run")),
+            execute_current_issue_project_state_sync_fn=sync_fn,
+            launch_runner=lambda s, argv=None: 0,
+        )
+
+    def _read_dispatch_summary(self, result: "issue_centric_execution.IssueCentricDispatchResult") -> dict:
+        return json.loads(result.summary_log_path.read_text(encoding="utf-8"))
+
+    def test_dispatch_summary_lifecycle_sync_signal_synced(self) -> None:
+        """dispatch summary JSON: project_state_synced → current_issue_lifecycle_sync_signal=synced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def sync_fn(*args, **kwargs):
+                stage = kwargs.get("lifecycle_stage", "no_action")
+                p = root / f"sync_{stage}.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=stage,
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/30"),
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="https://github.com/users/example/projects/1",
+                    project_item_id="PVTI_example",
+                    project_state_field_name="Status",
+                    project_state_value_name=stage,
+                    safe_stop_reason=f"synced to {stage}",
+                )
+
+            result = self._dispatch_no_action_close(root, sync_fn)
+            summary = self._read_dispatch_summary(result)
+
+            self.assertEqual(summary["current_issue_lifecycle_sync_signal"], "synced")
+            self.assertEqual(summary["current_issue_lifecycle_sync_status"], "project_state_synced")
+
+    def test_dispatch_summary_lifecycle_sync_signal_sync_failed(self) -> None:
+        """dispatch summary JSON: blocked sync → current_issue_lifecycle_sync_signal=sync_failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def sync_fn(*args, **kwargs):
+                stage = kwargs.get("lifecycle_stage", "no_action")
+                p = root / f"sync_{stage}.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="blocked",
+                    sync_status="blocked_project_preflight",
+                    lifecycle_stage=stage,
+                    resolved_issue=None,
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason=f"project sync failed for stage {stage}",
+                )
+
+            result = self._dispatch_no_action_close(root, sync_fn)
+            summary = self._read_dispatch_summary(result)
+
+            self.assertEqual(summary["current_issue_lifecycle_sync_signal"], "sync_failed")
+            self.assertEqual(summary["current_issue_lifecycle_sync_status"], "blocked_project_preflight")
+
+    def test_dispatch_summary_lifecycle_sync_signal_empty_when_not_triggered(self) -> None:
+        """dispatch summary JSON: not_requested (no project) → current_issue_lifecycle_sync_signal=''."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            def sync_fn(*args, **kwargs):
+                stage = kwargs.get("lifecycle_stage", "no_action")
+                p = root / f"no_sync_{stage}.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="not_requested",
+                    sync_status="not_requested_no_project",
+                    lifecycle_stage=stage,
+                    resolved_issue=None,
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="No GitHub Project is configured.",
+                )
+
+            result = self._dispatch_no_action_close(root, sync_fn)
+            summary = self._read_dispatch_summary(result)
+
+            self.assertEqual(summary["current_issue_lifecycle_sync_signal"], "")
+            self.assertEqual(summary["current_issue_lifecycle_sync_status"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

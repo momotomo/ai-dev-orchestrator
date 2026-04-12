@@ -676,5 +676,74 @@ class IssueCentricContinuationArchiveTests(unittest.TestCase):
             self.assertIn("last_issue_centric_report_status: archived", request)
 
 
+class IssueCentricArchiveLifecycleSyncSurfacingTests(unittest.TestCase):
+    def _run_archive(self, state: dict) -> str:
+        """Run archive and return the content written to the archive log."""
+        log_contents: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            outbox_path = temp_root / "codex_report.md"
+            history_dir = temp_root / "history"
+            outbox_path.write_text("# Report\n\nbody\n", encoding="utf-8")
+
+            def fake_log_text(prefix: str, content: str, suffix: str = "md") -> Path:
+                log_contents.append(content)
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(content, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(archive_codex_report, "runtime_report_path", return_value=outbox_path),
+                patch.object(archive_codex_report, "runtime_history_dir", return_value=history_dir),
+                patch.object(archive_codex_report, "save_state", side_effect=lambda s: None),
+                patch.object(archive_codex_report, "log_text", side_effect=fake_log_text),
+            ):
+                archive_codex_report.run(dict(state))
+
+        return log_contents[0] if log_contents else ""
+
+    def _base_state(self) -> dict:
+        return {
+            "mode": "codex_done",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "cycle": 3,
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_trigger_comment_url": "https://github.com/example/repo/issues/20#issuecomment-701",
+            "last_issue_centric_launch_status": "launched",
+            "last_issue_centric_launch_log": "logs/launch.json",
+            "last_issue_centric_continuation_log": "logs/continuation.json",
+        }
+
+    def test_archive_log_includes_lifecycle_sync_synced(self) -> None:
+        state = self._base_state()
+        state["last_issue_centric_lifecycle_sync_status"] = "project_state_synced"
+        state["last_issue_centric_lifecycle_sync_stage"] = "closed"
+        content = self._run_archive(state)
+        self.assertIn("lifecycle_sync: stage=closed signal=synced", content)
+
+    def test_archive_log_includes_lifecycle_sync_skipped_no_project(self) -> None:
+        state = self._base_state()
+        state["last_issue_centric_lifecycle_sync_status"] = "not_requested_no_project"
+        state["last_issue_centric_lifecycle_sync_stage"] = ""
+        content = self._run_archive(state)
+        self.assertIn("lifecycle_sync: signal=skipped_no_project", content)
+
+    def test_archive_log_includes_lifecycle_sync_sync_failed(self) -> None:
+        state = self._base_state()
+        state["last_issue_centric_lifecycle_sync_status"] = "api_error"
+        state["last_issue_centric_lifecycle_sync_stage"] = "in_review"
+        content = self._run_archive(state)
+        self.assertIn("lifecycle_sync: stage=in_review signal=sync_failed reason=api_error", content)
+
+    def test_archive_log_lifecycle_sync_not_recorded_when_no_sync_data(self) -> None:
+        state = self._base_state()
+        content = self._run_archive(state)
+        self.assertIn("lifecycle_sync: not_recorded", content)
+
+
 if __name__ == "__main__":
     unittest.main()
