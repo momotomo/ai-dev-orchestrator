@@ -363,6 +363,12 @@ def run_rotated_report_request(
                 f"title: {rotated_chat.get('title', '')}",
                 f"signal: {rotation_signal}",
                 f"delivery_mode: {'soft_success_wait' if soft_wait else 'confirmed_send'}",
+                f"github_source_attach_status: {rotated_chat.get('github_source_attach_status', '')}",
+                f"github_source_attach_boundary: {rotated_chat.get('github_source_attach_boundary', '')}",
+                f"github_source_attach_detail: {rotated_chat.get('github_source_attach_detail', '')}",
+                f"github_source_attach_log: {rotated_chat.get('github_source_attach_log', '')}",
+                "request_send_continued_without_github_source: "
+                f"{bool(rotated_chat.get('request_send_continued_without_github_source'))}",
                 f"match_kind: {rotated_chat.get('match_kind', '')}",
                 f"matched_hint: {rotated_chat.get('matched_hint', '')}",
                 f"project_name: {rotated_chat.get('project_name', '')}",
@@ -394,6 +400,14 @@ def run_rotated_report_request(
             "pending_request_log": repo_relative(request_log),
             "pending_request_signal": rotation_signal,
             "current_chat_session": rotated_chat.get("url", ""),
+            "github_source_attach_status": str(rotated_chat.get("github_source_attach_status", "")),
+            "github_source_attach_boundary": str(rotated_chat.get("github_source_attach_boundary", "")),
+            "github_source_attach_detail": str(rotated_chat.get("github_source_attach_detail", "")),
+            "github_source_attach_context": str(rotated_chat.get("github_source_attach_context", "")),
+            "github_source_attach_log": str(rotated_chat.get("github_source_attach_log", "")),
+            "request_send_continued_without_github_source": bool(
+                rotated_chat.get("request_send_continued_without_github_source")
+            ),
         }
     )
     if issue_centric_runtime_snapshot is not None:

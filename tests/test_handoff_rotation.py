@@ -100,6 +100,8 @@ class HandoffRotationTests(unittest.TestCase):
             result = _bridge_common.rotate_chat_with_handoff("handoff body")
 
         self.assertEqual(send_mock.call_count, 1)
+        self.assertTrue(send_mock.call_args.kwargs["project_page_mode"])
+        self.assertEqual(send_mock.call_args.kwargs["send_context"], "rotation_handoff")
         self.assertEqual(result["signal"], "submitted_unconfirmed")
         self.assertEqual(result["url"], project_url)
 
@@ -172,6 +174,12 @@ class HandoffWaitTransitionTests(unittest.TestCase):
                     "title": "ChatGPT",
                     "signal": "submitted_unconfirmed",
                     "warning": "新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。",
+                    "github_source_attach_status": "probe_failed",
+                    "github_source_attach_boundary": "composer_more_submenu_not_open",
+                    "github_source_attach_detail": "connector submenu を確認できませんでした。",
+                    "github_source_attach_context": "rotation_handoff",
+                    "github_source_attach_log": "logs/project_page_github_source_attach_rotation.md",
+                    "request_send_continued_without_github_source": True,
                     "match_kind": "preferred_hint",
                     "matched_hint": "作曲アプリ開発 内の新しいチャット",
                     "project_name": "作曲アプリ開発",
@@ -190,6 +198,8 @@ class HandoffWaitTransitionTests(unittest.TestCase):
         self.assertNotIn("sent_prompt_request_from_report", logged_prefixes)
         saved_state = save_mock.call_args.args[0]
         self.assertEqual(saved_state["pending_request_signal"], "submitted_unconfirmed")
+        self.assertEqual(saved_state["github_source_attach_status"], "probe_failed")
+        self.assertTrue(saved_state["request_send_continued_without_github_source"])
 
 
 if __name__ == "__main__":

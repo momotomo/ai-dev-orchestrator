@@ -77,6 +77,8 @@ copy-response 経路の feasibility verdict は
 - report ベース継続は通常、同じチャットで続ける。左上のグローバル新規チャットは使わない
 - handoff が必要な時だけ、project ページの「＜ChatGPT 上の project 名＞ 内の新しいチャット」composer へローテーションする
 - handoff/new chat 送信中は `/c/` 会話 URL ではなく `/project` ページ自体を有効な対象面として扱い、そこに新規 composer が見つかれば入力へ進む
+- project ページ送信時の GitHub source attach は既定で best-effort。attach 失敗だけでは request 送信を止めず、status / boundary / detail / continued フラグを log と state に残す
+- GitHub source attach を hard requirement に戻したい時だけ、`bridge/browser_config.json` で `require_github_source=true` を使う
 
 ### handoff 再開
 

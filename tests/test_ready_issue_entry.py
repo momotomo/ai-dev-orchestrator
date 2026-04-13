@@ -622,6 +622,103 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         self.assertEqual(events, ["preflight", "fill", "submit"])
         self.assertEqual(result["signal"], "conversation_url")
 
+    def test_send_path_continues_when_attach_fails_in_best_effort_mode(self) -> None:
+        events: list[str] = []
+
+        class FakePage:
+            front_tab = {"url": "https://chatgpt.com/g/g-p-123/project", "title": "ChatGPT - Project"}
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        fake_page = FakePage()
+        config = {
+            "chat_url_prefix": "https://chatgpt.com/",
+            "conversation_url_keywords": ["/c/"],
+            "project_page_url": "",
+            "require_github_source": False,
+        }
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, fake_page, config, fake_page.front_tab
+
+        def fake_fill_chatgpt_composer(*args: object, **kwargs: object) -> dict[str, object]:
+            events.append("fill")
+            return {"matchKind": "project_hint", "matchedHint": "内の新しいチャット", "projectName": "demo"}
+
+        def fake_submit_chatgpt_message(_page: object) -> None:
+            events.append("submit")
+
+        attach_outcome = _bridge_common.ProjectPageGithubSourceAttachOutcome(
+            status="probe_failed",
+            boundary="composer_more_submenu_not_open",
+            detail="connector submenu を確認できませんでした。",
+            context="initial_request",
+            attempted=True,
+            continued_without_github_source=True,
+            probe_log="logs/probe.md",
+            raw_dump="logs/dump.txt",
+        )
+
+        with (
+            patch.object(_bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                _bridge_common,
+                "ensure_project_page_github_source_ready_for_send",
+                side_effect=lambda *args, **kwargs: events.append("preflight") or attach_outcome,
+            ),
+            patch.object(
+                _bridge_common,
+                "_log_project_page_github_source_attach_outcome",
+                return_value=Path("/tmp/project_page_github_source_attach_initial.json"),
+            ),
+            patch.object(_bridge_common, "fill_chatgpt_composer", side_effect=fake_fill_chatgpt_composer),
+            patch.object(_bridge_common, "submit_chatgpt_message", side_effect=fake_submit_chatgpt_message),
+            patch.object(
+                _bridge_common,
+                "_read_post_send_state",
+                return_value=(
+                    {"url": "https://chatgpt.com/c/abc", "title": "ChatGPT"},
+                    {"bodyContainsExpected": False, "composerEmpty": False},
+                ),
+            ),
+            patch("builtins.print"),
+        ):
+            result = _bridge_common.send_to_chatgpt_in_current_surface(
+                "hello",
+                require_conversation=False,
+                require_target_chat=False,
+                project_page_mode=True,
+            )
+        self.assertEqual(events, ["preflight", "fill", "submit"])
+        self.assertEqual(result["signal"], "conversation_url")
+        self.assertEqual(result["github_source_attach_status"], "probe_failed")
+        self.assertEqual(result["github_source_attach_boundary"], "composer_more_submenu_not_open")
+        self.assertTrue(result["request_send_continued_without_github_source"])
+
+    def test_attach_failure_still_stops_in_strict_mode(self) -> None:
+        result = _bridge_common.ProjectPageGithubSourcePreflightResult(
+            status="unavailable",
+            boundary="github_item_missing",
+            detail="GitHub は見つかりませんでした。",
+        )
+        error = _bridge_common.ProjectPageGithubSourcePreflightError(
+            "GitHub source preflight に失敗しました。",
+            result=result,
+            payload={},
+            probe_path=Path("/tmp/probe.md"),
+            dump_path=Path("/tmp/dump.txt"),
+        )
+
+        with patch.object(_bridge_common, "ensure_project_page_github_source_ready", side_effect=error):
+            with self.assertRaises(_bridge_common.ProjectPageGithubSourcePreflightError):
+                _bridge_common.ensure_project_page_github_source_ready_for_send(
+                    object(),
+                    {"require_github_source": True},
+                    send_context="initial_request",
+                )
+
     def test_preflight_tries_multiple_more_open_strategies_until_submenu_appears(self) -> None:
         class FakePage:
             def __init__(self) -> None:

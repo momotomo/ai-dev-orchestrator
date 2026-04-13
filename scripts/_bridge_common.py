@@ -70,6 +70,12 @@ DEFAULT_STATE: dict[str, Any] = {
     "pending_request_source": "",
     "pending_request_log": "",
     "pending_request_signal": "",
+    "github_source_attach_status": "",
+    "github_source_attach_boundary": "",
+    "github_source_attach_detail": "",
+    "github_source_attach_context": "",
+    "github_source_attach_log": "",
+    "request_send_continued_without_github_source": False,
     "pending_handoff_hash": "",
     "pending_handoff_source": "",
     "pending_handoff_log": "",
@@ -206,6 +212,7 @@ DEFAULT_BROWSER_CONFIG: dict[str, Any] = {
     "runner_heartbeat_seconds": 10,
     "extended_fetch_timeout_seconds": 600,
     "project_page_url": "",
+    "require_github_source": False,
 }
 
 DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
@@ -1053,6 +1060,12 @@ def clear_pending_request_fields(state: dict[str, Any]) -> dict[str, Any]:
     state["pending_request_source"] = ""
     state["pending_request_log"] = ""
     state["pending_request_signal"] = ""
+    state["github_source_attach_status"] = ""
+    state["github_source_attach_boundary"] = ""
+    state["github_source_attach_detail"] = ""
+    state["github_source_attach_context"] = ""
+    state["github_source_attach_log"] = ""
+    state["request_send_continued_without_github_source"] = False
     return state
 
 
@@ -3743,6 +3756,36 @@ class ProjectPageGithubSourcePreflightResult:
     detail: str
 
 
+@dataclass(frozen=True)
+class ProjectPageGithubSourceAttachOutcome:
+    status: str
+    boundary: str
+    detail: str
+    context: str
+    attempted: bool
+    continued_without_github_source: bool
+    probe_log: str = ""
+    raw_dump: str = ""
+    final_confirmation_kind: str = ""
+
+
+class ProjectPageGithubSourcePreflightError(BridgeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: ProjectPageGithubSourcePreflightResult,
+        payload: Mapping[str, Any],
+        probe_path: Path | None,
+        dump_path: Path | None,
+    ) -> None:
+        super().__init__(message)
+        self.result = result
+        self.payload = dict(payload)
+        self.probe_path = probe_path
+        self.dump_path = dump_path
+
+
 def classify_project_page_github_source_preflight(
     payload: Mapping[str, Any],
 ) -> ProjectPageGithubSourcePreflightResult:
@@ -4406,13 +4449,17 @@ def _raise_project_page_github_source_preflight_error(
     probe_path = _log_project_page_github_source_probe("project_page_github_source_probe", payload)
     dump_path = log_page_dump(page, prefix="project_page_github_source_dump")
     dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
-    raise BridgeError(
+    raise ProjectPageGithubSourcePreflightError(
         "GitHub source preflight に失敗しました。"
         f" status={result.status}"
         f" boundary={result.boundary}"
         f" detail={result.detail}"
         f" probe: {repo_relative(probe_path)}"
-        f"{dump_note}"
+        f"{dump_note}",
+        result=result,
+        payload=payload,
+        probe_path=probe_path,
+        dump_path=dump_path,
     )
 
 
@@ -4594,6 +4641,78 @@ def ensure_project_page_github_source_ready(
     _github_attach_phase_boundary_check(page, payload, phase_name="github_attach_complete")
     payload["attachOperationCompleted"] = True
     return payload
+
+
+def github_source_attach_required(config: Mapping[str, Any]) -> bool:
+    return bool(config.get("require_github_source"))
+
+
+def _project_page_github_source_attach_prefix(send_context: str) -> str:
+    if send_context == "rotation_handoff":
+        return "project_page_github_source_attach_rotation"
+    return "project_page_github_source_attach_initial"
+
+
+def _log_project_page_github_source_attach_outcome(
+    send_context: str,
+    outcome: ProjectPageGithubSourceAttachOutcome,
+) -> Path:
+    snapshot = {
+        "github_source_attach_status": outcome.status,
+        "github_source_attach_boundary": outcome.boundary,
+        "github_source_attach_detail": outcome.detail,
+        "github_source_attach_context": outcome.context,
+        "github_source_attach_attempted": outcome.attempted,
+        "request_send_continued_without_github_source": outcome.continued_without_github_source,
+        "github_source_attach_probe_log": outcome.probe_log,
+        "github_source_attach_raw_dump": outcome.raw_dump,
+        "finalAttachConfirmationKind": outcome.final_confirmation_kind,
+    }
+    return log_text(
+        _project_page_github_source_attach_prefix(send_context),
+        json.dumps(snapshot, ensure_ascii=False, indent=2),
+    )
+
+
+def ensure_project_page_github_source_ready_for_send(
+    page: SafariChatPage,
+    config: Mapping[str, Any],
+    *,
+    preferred_hint: str | None = None,
+    send_context: str,
+) -> ProjectPageGithubSourceAttachOutcome:
+    require_github_source = github_source_attach_required(config)
+    try:
+        payload = ensure_project_page_github_source_ready(page, preferred_hint=preferred_hint)
+    except ProjectPageGithubSourcePreflightError as exc:
+        if require_github_source:
+            raise
+        return ProjectPageGithubSourceAttachOutcome(
+            status=exc.result.status,
+            boundary=exc.result.boundary,
+            detail=exc.result.detail,
+            context=send_context,
+            attempted=True,
+            continued_without_github_source=True,
+            probe_log=repo_relative(exc.probe_path) if exc.probe_path else "",
+            raw_dump=repo_relative(exc.dump_path) if exc.dump_path else "",
+            final_confirmation_kind=str(exc.payload.get("finalAttachConfirmationKind", "")),
+        )
+
+    result = classify_project_page_github_source_preflight(payload)
+    if bool(payload.get("githubSelectedLike")):
+        status = "attached"
+    else:
+        status = "unconfirmed"
+    return ProjectPageGithubSourceAttachOutcome(
+        status=status,
+        boundary=result.boundary,
+        detail=result.detail,
+        context=send_context,
+        attempted=True,
+        continued_without_github_source=(status != "attached"),
+        final_confirmation_kind=str(payload.get("finalAttachConfirmationKind", "")),
+    )
 
 
 def _read_post_send_state(
@@ -4788,25 +4907,53 @@ def send_to_chatgpt(text: str) -> None:
         submit_chatgpt_message(page)
 
 
-def send_initial_request_to_chatgpt(text: str) -> None:
+def _attach_outcome_fields(outcome: ProjectPageGithubSourceAttachOutcome | None) -> dict[str, Any]:
+    if outcome is None:
+        return {
+            "github_source_attach_status": "skipped",
+            "github_source_attach_boundary": "",
+            "github_source_attach_detail": "",
+            "github_source_attach_context": "",
+            "github_source_attach_log": "",
+            "request_send_continued_without_github_source": False,
+        }
+    return {
+        "github_source_attach_status": outcome.status,
+        "github_source_attach_boundary": outcome.boundary,
+        "github_source_attach_detail": outcome.detail,
+        "github_source_attach_context": outcome.context,
+        "github_source_attach_log": "",
+        "request_send_continued_without_github_source": outcome.continued_without_github_source,
+    }
+
+
+def send_initial_request_to_chatgpt(text: str) -> dict[str, Any]:
     config = load_browser_config()
     front_tab = frontmost_safari_tab_info(config, require_conversation=False)
     current_url = front_tab.get("url", "")
     if _conversation_url_matches(current_url, config):
         send_to_chatgpt(text)
-        return
+        return {
+            "url": current_url,
+            "title": front_tab.get("title", ""),
+            "signal": "conversation_url",
+            "match_kind": "",
+            "matched_hint": "",
+            "project_name": "",
+            **_attach_outcome_fields(None),
+        }
     if _project_page_url_matches(current_url, config):
         last_error = ""
         for hint in PROJECT_CHAT_COMPOSER_HINTS + ("",):
             try:
-                send_to_chatgpt_in_current_surface(
+                return send_to_chatgpt_in_current_surface(
                     text,
                     require_conversation=False,
                     require_target_chat=False,
                     preferred_hint=hint or None,
                     project_page_mode=True,
+                    send_context="initial_request",
                 )
-                return
             except BridgeError as exc:
                 last_error = str(exc)
         raise BridgeError(
@@ -4826,7 +4973,8 @@ def send_to_chatgpt_in_current_surface(
     require_target_chat: bool = False,
     preferred_hint: str | None = None,
     project_page_mode: bool = False,
-) -> dict[str, str]:
+    send_context: str = "initial_request",
+) -> dict[str, Any]:
     surface_label = "project ページ" if project_page_mode else ("対象チャット" if require_conversation else "ChatGPT ページ")
     with open_chatgpt_page(
         reset_chat=False,
@@ -4834,11 +4982,26 @@ def send_to_chatgpt_in_current_surface(
         require_target_chat=require_target_chat,
         surface_label=surface_label,
     ) as (_, page, config, _):
+        attach_outcome: ProjectPageGithubSourceAttachOutcome | None = None
         if project_page_mode:
-            ensure_project_page_github_source_ready(
+            attach_outcome = ensure_project_page_github_source_ready_for_send(
                 page,
+                config,
                 preferred_hint=preferred_hint,
+                send_context=send_context,
             )
+            attach_log = _log_project_page_github_source_attach_outcome(send_context, attach_outcome)
+            if attach_outcome.continued_without_github_source:
+                print(
+                    "note: GitHub source attach は未確認のままです。"
+                    f" status={attach_outcome.status}"
+                    f" boundary={attach_outcome.boundary}"
+                    " best-effort で request 送信を続けます。"
+                )
+            attach_fields = _attach_outcome_fields(attach_outcome)
+            attach_fields["github_source_attach_log"] = repo_relative(attach_log)
+        else:
+            attach_fields = _attach_outcome_fields(None)
         composer_state = fill_chatgpt_composer(
             page,
             text,
@@ -4875,6 +5038,7 @@ def send_to_chatgpt_in_current_surface(
                     "match_kind": str(composer_state.get("matchKind", "")),
                     "matched_hint": str(composer_state.get("matchedHint", "")),
                     "project_name": str(composer_state.get("projectName", "")),
+                    **attach_fields,
                 }
             if bool(payload.get("bodyContainsExpected")):
                 return {
@@ -4884,6 +5048,7 @@ def send_to_chatgpt_in_current_surface(
                     "match_kind": str(composer_state.get("matchKind", "")),
                     "matched_hint": str(composer_state.get("matchedHint", "")),
                     "project_name": str(composer_state.get("projectName", "")),
+                    **attach_fields,
                 }
             if bool(payload.get("composerEmpty")):
                 return {
@@ -4893,6 +5058,7 @@ def send_to_chatgpt_in_current_surface(
                     "match_kind": str(composer_state.get("matchKind", "")),
                     "matched_hint": str(composer_state.get("matchedHint", "")),
                     "project_name": str(composer_state.get("projectName", "")),
+                    **attach_fields,
                 }
             time.sleep(0.5)
 
@@ -4906,6 +5072,7 @@ def send_to_chatgpt_in_current_surface(
                 "matched_hint": str(composer_state.get("matchedHint", "")),
                 "project_name": str(composer_state.get("projectName", "")),
                 "warning": last_probe_error,
+                **attach_fields,
             }
 
         dump_text = _body_text_unchecked()
@@ -4987,6 +5154,7 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
     last_info: dict[str, str] | None = None
     last_signal = ""
     last_warning = ""
+    last_send_result: dict[str, Any] = {}
     for attempt in range(1, 3):
         navigate_current_chatgpt_tab(project_page_url)
         try:
@@ -4999,7 +5167,9 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                         require_target_chat=False,
                         preferred_hint=hint or None,
                         project_page_mode=True,
+                        send_context="rotation_handoff",
                     )
+                    last_send_result = dict(send_result)
                     last_signal = str(send_result.get("signal", "")).strip()
                     last_warning = str(send_result.get("warning", "")).strip()
                     sent = True
@@ -5036,6 +5206,10 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
                     info["signal"] = last_signal
                 if last_warning:
                     info["warning"] = last_warning
+                info.update(_attach_outcome_fields(None))
+                for key, value in last_send_result.items():
+                    if key.startswith("github_source_attach_") or key == "request_send_continued_without_github_source":
+                        info[key] = value
                 return info
             time.sleep(0.5)
 
@@ -5048,6 +5222,10 @@ def rotate_chat_with_handoff(handoff_text: str) -> dict[str, str]:
             info["signal"] = last_signal
             if last_warning:
                 info["warning"] = last_warning
+            info.update(_attach_outcome_fields(None))
+            for key, value in last_send_result.items():
+                if key.startswith("github_source_attach_") or key == "request_send_continued_without_github_source":
+                    info[key] = value
             return info
 
         if attempt < 2:

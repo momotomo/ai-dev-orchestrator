@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -298,7 +299,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     save_state(prepared_state)
 
     try:
-        send_initial_request_to_chatgpt(request_text)
+        send_result = send_initial_request_to_chatgpt(request_text)
     except Exception:
         retry_state = clear_error_fields(dict(state))
         stage_prepared_request(
@@ -311,6 +312,29 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         save_state(retry_state)
         raise
 
+    transport_log = log_text(
+        f"{sent_prefix}_transport",
+        json.dumps(
+            {
+                "signal": str(send_result.get("signal", "")),
+                "url": str(send_result.get("url", "")),
+                "title": str(send_result.get("title", "")),
+                "match_kind": str(send_result.get("match_kind", "")),
+                "matched_hint": str(send_result.get("matched_hint", "")),
+                "project_name": str(send_result.get("project_name", "")),
+                "github_source_attach_status": str(send_result.get("github_source_attach_status", "")),
+                "github_source_attach_boundary": str(send_result.get("github_source_attach_boundary", "")),
+                "github_source_attach_detail": str(send_result.get("github_source_attach_detail", "")),
+                "github_source_attach_context": str(send_result.get("github_source_attach_context", "")),
+                "github_source_attach_log": str(send_result.get("github_source_attach_log", "")),
+                "request_send_continued_without_github_source": bool(
+                    send_result.get("request_send_continued_without_github_source")
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
     request_log = log_text(sent_prefix, request_text)
     mutable_state = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable_state)
@@ -321,9 +345,24 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         request_source=request_source,
         request_log=repo_relative(request_log),
     )
+    mutable_state.update(
+        {
+            "pending_request_signal": str(send_result.get("signal", "")),
+            "current_chat_session": str(send_result.get("url", "")),
+            "github_source_attach_status": str(send_result.get("github_source_attach_status", "")),
+            "github_source_attach_boundary": str(send_result.get("github_source_attach_boundary", "")),
+            "github_source_attach_detail": str(send_result.get("github_source_attach_detail", "")),
+            "github_source_attach_context": str(send_result.get("github_source_attach_context", "")),
+            "github_source_attach_log": str(repo_relative(transport_log)),
+            "request_send_continued_without_github_source": bool(
+                send_result.get("request_send_continued_without_github_source")
+            ),
+        }
+    )
     save_state(mutable_state)
 
     print(f"sent: {request_log}")
+    print(f"request transport: {transport_log}")
     return 0
 
 
