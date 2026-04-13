@@ -547,6 +547,27 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         self.assertEqual(result.status, "available")
         self.assertEqual(result.boundary, "github_click_confirmed")
 
+    def test_non_click_more_strategy_counts_as_action_performed(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
+                "moreFound": True,
+                "moreClicked": False,
+                "moreActionPerformed": True,
+                "submenuOpened": True,
+                "sourceAddFound": True,
+                "githubFound": True,
+                "githubClicked": True,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": True,
+            }
+        )
+        self.assertEqual(result.status, "available")
+        self.assertEqual(result.boundary, "github_click_confirmed")
+
     def test_send_path_runs_github_preflight_before_filling_project_page_composer(self) -> None:
         events: list[str] = []
 
@@ -600,6 +621,146 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
             )
         self.assertEqual(events, ["preflight", "fill", "submit"])
         self.assertEqual(result["signal"], "conversation_url")
+
+    def test_preflight_tries_multiple_more_open_strategies_until_submenu_appears(self) -> None:
+        class FakePage:
+            def __init__(self) -> None:
+                self.waits: list[int] = []
+
+            def wait_for_timeout(self, milliseconds: int) -> None:
+                self.waits.append(milliseconds)
+
+        fake_page = FakePage()
+        probe_sequence = [
+            self._base_payload(),
+            self._base_payload(
+                action="click_plus",
+                plusClicked=True,
+                plusAriaLabel="ファイルの追加など",
+                beforeVisibleLabels=["ファイルの追加など"],
+                afterVisibleLabels=["ファイルの追加など"],
+            ),
+            self._base_payload(
+                menuOpened=True,
+                menuItems=[{"text": "さらに表示", "role": "menuitem"}],
+                menuCandidateLabels=["さらに表示"],
+                moreFound=True,
+                moreLabel="さらに表示",
+                visibleLabels=["さらに表示"],
+            ),
+            self._base_payload(
+                action="open_more_click",
+                plusClicked=True,
+                menuOpened=True,
+                menuItems=[{"text": "さらに表示", "role": "menuitem"}],
+                moreFound=True,
+                moreLabel="さらに表示",
+                moreClicked=True,
+                moreActionPerformed=True,
+                moreTargetText="さらに表示",
+            ),
+        ]
+        for _ in range(_bridge_common.PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_ATTEMPTS):
+            probe_sequence.append(
+                self._base_payload(
+                    plusClicked=True,
+                    menuOpened=True,
+                    moreFound=True,
+                    submenuOpened=False,
+                    visibleLabels=["さらに表示"],
+                )
+            )
+        probe_sequence.extend(
+            [
+            self._base_payload(
+                action="open_more_focus",
+                plusClicked=True,
+                menuOpened=True,
+                menuItems=[{"text": "さらに表示", "role": "menuitem"}],
+                moreFound=True,
+                moreLabel="さらに表示",
+                moreActionPerformed=True,
+                moreTargetText="さらに表示",
+            ),
+            self._base_payload(
+                plusClicked=True,
+                menuOpened=True,
+                moreFound=True,
+                submenuOpened=True,
+                submenuItems=[
+                    {"text": "情報源を追加する", "role": "menuitem"},
+                    {"text": "GitHub", "role": "menuitem"},
+                ],
+                submenuCandidateLabels=["情報源を追加する", "GitHub"],
+                submenuProbeMenuishLabels=["情報源を追加する", "GitHub"],
+                submenuProbeOverlayLabels=[],
+                sourceAddFound=True,
+                githubFound=True,
+                githubLabel="GitHub",
+                githubFoundContext="submenu",
+                visibleLabels=["GitHub"],
+            ),
+            self._base_payload(
+                action="click_github",
+                plusClicked=True,
+                menuOpened=True,
+                moreFound=True,
+                submenuOpened=True,
+                submenuItems=[
+                    {"text": "情報源を追加する", "role": "menuitem"},
+                    {"text": "GitHub", "role": "menuitem"},
+                ],
+                sourceAddFound=True,
+                githubFound=True,
+                githubLabel="GitHub",
+                githubClicked=True,
+                githubClickConfirmed=True,
+                githubFoundContext="submenu",
+            ),
+            self._base_payload(
+                plusClicked=True,
+                menuOpened=True,
+                moreFound=True,
+                submenuOpened=True,
+                submenuItems=[
+                    {"text": "情報源を追加する", "role": "menuitem"},
+                    {"text": "GitHub", "role": "menuitem"},
+                ],
+                sourceAddFound=True,
+                githubFound=True,
+                githubLabel="GitHub",
+                githubSelectedLike=True,
+                githubFoundContext="submenu",
+                composerScopeText="GitHub",
+            ),
+            ]
+        )
+        with patch.object(_bridge_common, "_probe_project_page_github_source", side_effect=probe_sequence):
+            payload = _bridge_common.ensure_project_page_github_source_ready(fake_page)
+        self.assertEqual(payload["moreOpenStrategiesTried"], ["click", "focus"])
+        self.assertEqual(payload["moreOpenStrategySucceeded"], "focus")
+        self.assertEqual(payload["githubFoundContext"], "submenu")
+
+    def test_overlay_submenu_payload_counts_as_open(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
+                "moreFound": True,
+                "moreActionPerformed": True,
+                "submenuOpened": True,
+                "submenuProbeOverlayLabels": ["GitHub"],
+                "sourceAddFound": False,
+                "githubFound": True,
+                "githubClicked": True,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": True,
+            }
+        )
+        self.assertEqual(result.status, "available")
+        self.assertEqual(result.boundary, "github_click_confirmed")
 
 
 class OrchestratorArgForwardingTests(unittest.TestCase):

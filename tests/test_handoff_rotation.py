@@ -34,6 +34,11 @@ class HandoffRotationTests(unittest.TestCase):
             patch.object(_bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
             patch.object(
                 _bridge_common,
+                "ensure_project_page_github_source_ready",
+                return_value={"githubClickConfirmed": True},
+            ),
+            patch.object(
+                _bridge_common,
                 "fill_chatgpt_composer",
                 return_value={"matchKind": "preferred_hint", "matchedHint": "作曲アプリ開発 内の新しいチャット", "projectName": "作曲アプリ開発"},
             ),

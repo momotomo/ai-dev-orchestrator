@@ -272,6 +272,14 @@ PROJECT_CHAT_GITHUB_LABELS = (
 )
 PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_MS = 250
 PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_ATTEMPTS = 5
+PROJECT_CHAT_MORE_OPEN_STRATEGIES = (
+    "click",
+    "focus",
+    "hover",
+    "keyboard_enter",
+    "keyboard_space",
+    "keyboard_arrow_right",
+)
 PROJECT_NAME_HEADING_SELECTORS = [
     "main h1",
     "main h2",
@@ -3754,11 +3762,11 @@ def classify_project_page_github_source_preflight(
             boundary="composer_more_missing",
             detail="composer のメニューは見えましたが `さらに表示` が見つかりませんでした。",
         )
-    if not bool(payload.get("moreClicked")):
+    if not bool(payload.get("moreActionPerformed") or payload.get("moreClicked")):
         return ProjectPageGithubSourcePreflightResult(
             status="probe_failed",
             boundary="composer_more_click_failed",
-            detail="`さらに表示` をクリックできませんでした。",
+            detail="`さらに表示` を開く操作を実行できませんでした。",
         )
     if not bool(payload.get("submenuOpened")):
         return ProjectPageGithubSourcePreflightResult(
@@ -3896,6 +3904,13 @@ def _build_project_page_github_source_probe_script(
       isTargetEntry(entry, targetLabels)
     ))
     .sort((left, right) => distanceScore(left) - distanceScore(right));
+  const overlayEntries = (entries) => entries
+    .filter((entry) => !nearComposer(entry) && (
+      menuRoles.has(entry.role) ||
+      menuRoles.has(entry.parentRole) ||
+      isTargetEntry(entry, targetLabels)
+    ))
+    .sort((left, right) => distanceScore(left) - distanceScore(right));
   const renderEntries = (entries) => entries.map((entry) => {{
     return {{
       text: entry.text,
@@ -3922,22 +3937,70 @@ def _build_project_page_github_source_probe_script(
     entry.node.dispatchEvent?.(new MouseEvent("pointerup", {{bubbles: true}}));
     return true;
   }};
+  const focusEntry = (entry) => {{
+    if (!entry?.node) return false;
+    entry.node.scrollIntoView?.({{block: "center"}});
+    entry.node.focus?.();
+    entry.node.dispatchEvent?.(new FocusEvent("focus", {{bubbles: true}}));
+    entry.node.dispatchEvent?.(new FocusEvent("focusin", {{bubbles: true}}));
+    return document.activeElement === entry.node || entry.node.contains?.(document.activeElement);
+  }};
+  const hoverEntry = (entry) => {{
+    if (!entry?.node) return false;
+    entry.node.scrollIntoView?.({{block: "center"}});
+    for (const type of ["pointerover", "mouseover", "mouseenter", "pointermove", "mousemove"]) {{
+      entry.node.dispatchEvent?.(new MouseEvent(type, {{bubbles: true}}));
+    }}
+    return true;
+  }};
+  const keyboardEntry = (entry, key) => {{
+    if (!entry?.node) return false;
+    entry.node.scrollIntoView?.({{block: "center"}});
+    entry.node.focus?.();
+    const code = key === " " ? "Space" : key;
+    for (const type of ["keydown", "keyup"]) {{
+      entry.node.dispatchEvent?.(new KeyboardEvent(type, {{key, code, bubbles: true}}));
+    }}
+    return true;
+  }};
+  const performMoreStrategy = (entry, strategy) => {{
+    if (!entry?.node) return false;
+    if (strategy === "click") return clickEntry(entry);
+    if (strategy === "focus") return focusEntry(entry);
+    if (strategy === "hover") return hoverEntry(entry);
+    if (strategy === "keyboard_enter") return keyboardEntry(entry, "Enter");
+    if (strategy === "keyboard_space") return keyboardEntry(entry, " ");
+    if (strategy === "keyboard_arrow_right") return keyboardEntry(entry, "ArrowRight");
+    return false;
+  }};
   const beforeEntries = globalEntries();
   const plusEntry = pickEntry(plusLabels, beforeEntries, {{preferScoped: true}});
-  const moreEntryBefore = pickEntry(moreLabels, beforeEntries);
-  const sourceAddEntryBefore = pickEntry(addSourceLabels, beforeEntries);
-  const githubEntryBefore = pickEntry(githubLabels, beforeEntries);
+  const menuEntriesBefore = contextualMenuEntries(beforeEntries);
+  const overlayEntriesBefore = overlayEntries(beforeEntries);
+  const moreEntryBefore = pickEntry(moreLabels, menuEntriesBefore) || pickEntry(moreLabels, beforeEntries);
+  const sourceAddEntryBefore = pickEntry(addSourceLabels, menuEntriesBefore) || pickEntry(addSourceLabels, overlayEntriesBefore) || pickEntry(addSourceLabels, beforeEntries);
+  const githubEntryBefore = pickEntry(githubLabels, menuEntriesBefore) || pickEntry(githubLabels, overlayEntriesBefore) || pickEntry(githubLabels, beforeEntries);
   const plusClicked = action === "click_plus" ? clickEntry(plusEntry) : false;
-  const moreClicked = action === "click_more" ? clickEntry(moreEntryBefore) : false;
+  const moreStrategy = action.startsWith("open_more_") ? action.slice("open_more_".length) : "";
+  const moreActionPerformed = moreStrategy ? performMoreStrategy(moreEntryBefore, moreStrategy) : false;
   const githubClicked = action === "click_github" ? clickEntry(githubEntryBefore) : false;
   const afterEntries = globalEntries();
-  const menuEntriesBefore = contextualMenuEntries(beforeEntries);
   const menuEntriesAfter = contextualMenuEntries(afterEntries);
   const menuEntries = menuEntriesAfter.length ? menuEntriesAfter : menuEntriesBefore;
-  const moreEntry = pickEntry(moreLabels, afterEntries) || moreEntryBefore;
-  const sourceAddEntry = pickEntry(addSourceLabels, afterEntries) || sourceAddEntryBefore;
-  const githubEntry = pickEntry(githubLabels, afterEntries) || githubEntryBefore;
-  const submenuEntries = [sourceAddEntry, githubEntry].filter(Boolean);
+  const overlayEntriesAfter = overlayEntries(afterEntries);
+  const moreEntry = pickEntry(moreLabels, menuEntriesAfter) || pickEntry(moreLabels, afterEntries) || moreEntryBefore;
+  const sourceAddEntry = pickEntry(addSourceLabels, menuEntriesAfter) || pickEntry(addSourceLabels, overlayEntriesAfter) || pickEntry(addSourceLabels, afterEntries) || sourceAddEntryBefore;
+  const githubEntry = pickEntry(githubLabels, menuEntriesAfter) || pickEntry(githubLabels, overlayEntriesAfter) || pickEntry(githubLabels, afterEntries) || githubEntryBefore;
+  const submenuContextEntries = dedupe([
+    ...renderLabels(menuEntriesAfter),
+    ...renderLabels(overlayEntriesAfter),
+  ]);
+  const submenuEntries = [
+    ...menuEntriesAfter.filter((entry) => isTargetEntry(entry, addSourceLabels) || isTargetEntry(entry, githubLabels)),
+    ...overlayEntriesAfter.filter((entry) => isTargetEntry(entry, addSourceLabels) || isTargetEntry(entry, githubLabels)),
+    sourceAddEntry,
+    githubEntry,
+  ].filter((entry, index, items) => !!entry && items.findIndex((candidate) => candidate?.node === entry?.node) === index);
   const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 1200));
   const githubSelectedLike = !!githubEntry && (
     githubEntry.selected === "true" ||
@@ -3946,6 +4009,12 @@ def _build_project_page_github_source_probe_script(
     githubEntry.current === "true" ||
     ["open", "checked", "active", "selected"].includes(githubEntry.state)
   ) || (githubClicked && composerScopeText.includes("GitHub"));
+  const githubFoundContext = !githubEntry ? "" : (
+    menuEntriesAfter.some((entry) => entry.node === githubEntry.node) ? "submenu" :
+    overlayEntriesAfter.some((entry) => entry.node === githubEntry.node) ? "overlay" :
+    renderLabels(afterEntries).includes("GitHub") ? "visible_labels_only" :
+    "menu"
+  );
   return JSON.stringify({{
     composerFound: !!composer,
     projectName: payload.projectName || "",
@@ -3966,10 +4035,17 @@ def _build_project_page_github_source_probe_script(
     moreFound: !!moreEntry,
     moreLabel: moreEntry?.text || "",
     moreAriaLabel: moreEntry?.ariaLabel || "",
-    moreClicked,
-    submenuOpened: !!sourceAddEntry || !!githubEntry || submenuEntries.length > 0,
+    moreClicked: action === "open_more_click" ? moreActionPerformed : false,
+    moreActionPerformed,
+    moreOpenStrategyAttempted: moreStrategy,
+    moreTargetText: moreEntry?.text || "",
+    moreTargetAriaLabel: moreEntry?.ariaLabel || "",
+    submenuOpened: !!sourceAddEntry || !!githubEntry || submenuEntries.length > 0 || submenuContextEntries.length > 0,
     submenuItems: renderEntries(submenuEntries).slice(0, 20),
     submenuCandidateLabels: renderLabels(submenuEntries).slice(0, 20),
+    submenuProbeVisibleLabels: renderLabels(afterEntries).slice(0, 60),
+    submenuProbeMenuishLabels: renderLabels(menuEntriesAfter).slice(0, 40),
+    submenuProbeOverlayLabels: renderLabels(overlayEntriesAfter).slice(0, 40),
     sourceAddFound: !!sourceAddEntry,
     githubFound: !!githubEntry,
     githubLabel: githubEntry?.text || "",
@@ -3977,6 +4053,7 @@ def _build_project_page_github_source_probe_script(
     githubClicked,
     githubSelectedLike,
     githubClickConfirmed: githubClicked,
+    githubFoundContext,
     visibleLabels: renderLabels(afterEntries).slice(0, 60),
     composerScopeText,
   }});
@@ -4117,11 +4194,20 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "moreLabel": str(payload.get("moreLabel", "")),
         "moreAriaLabel": str(payload.get("moreAriaLabel", "")),
         "moreClicked": bool(payload.get("moreClicked")),
+        "moreActionPerformed": bool(payload.get("moreActionPerformed")),
+        "moreOpenStrategiesTried": list(payload.get("moreOpenStrategiesTried", [])),
+        "moreOpenStrategySucceeded": str(payload.get("moreOpenStrategySucceeded", "")),
+        "moreOpenStrategySeenLabels": list(payload.get("moreOpenStrategySeenLabels", [])),
+        "moreTargetText": str(payload.get("moreTargetText", "")),
+        "moreTargetAriaLabel": str(payload.get("moreTargetAriaLabel", "")),
         "moreCandidatesBefore": list(payload.get("moreCandidatesBefore", [])),
         "moreCandidatesAfter": list(payload.get("moreCandidatesAfter", [])),
         "submenuOpened": bool(payload.get("submenuOpened")),
         "submenuItems": list(payload.get("submenuItems", [])),
         "submenuCandidateLabels": list(payload.get("submenuCandidateLabels", [])),
+        "submenuProbeVisibleLabels": list(payload.get("submenuProbeVisibleLabels", [])),
+        "submenuProbeMenuishLabels": list(payload.get("submenuProbeMenuishLabels", [])),
+        "submenuProbeOverlayLabels": list(payload.get("submenuProbeOverlayLabels", [])),
         "submenuWaitAttempts": int(payload.get("submenuWaitAttempts", 0) or 0),
         "submenuWaitElapsedMs": int(payload.get("submenuWaitElapsedMs", 0) or 0),
         "submenuWaitSeenItems": list(payload.get("submenuWaitSeenItems", [])),
@@ -4132,6 +4218,7 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "githubClicked": bool(payload.get("githubClicked")),
         "githubSelectedLike": bool(payload.get("githubSelectedLike")),
         "githubClickConfirmed": bool(payload.get("githubClickConfirmed")),
+        "githubFoundContext": str(payload.get("githubFoundContext", "")),
         "githubCandidatesBefore": list(payload.get("githubCandidatesBefore", [])),
         "githubCandidatesAfter": list(payload.get("githubCandidatesAfter", [])),
         "githubConfirmAttempts": int(payload.get("githubConfirmAttempts", 0) or 0),
@@ -4198,33 +4285,65 @@ def ensure_project_page_github_source_ready(
     if result.boundary == "composer_menu_not_open":
         _raise_project_page_github_source_preflight_error(page, result, payload)
 
-    more_click_payload = _probe_project_page_github_source(
-        page,
-        preferred_hint=preferred_hint,
-        action="click_more",
-    )
-    payload = _merge_project_page_github_source_payload(payload, more_click_payload)
-    payload["moreCandidatesBefore"] = list(more_click_payload.get("beforeVisibleLabels", []))
-    payload["moreCandidatesAfter"] = list(more_click_payload.get("afterVisibleLabels", []))
-    result = classify_project_page_github_source_preflight(payload)
-    if result.boundary in {"composer_more_missing", "composer_more_click_failed"}:
-        _raise_project_page_github_source_preflight_error(page, result, payload)
+    payload["moreOpenStrategiesTried"] = []
+    payload["moreOpenStrategySeenLabels"] = []
+    strategy_succeeded = ""
+    strategy_seen_logs: list[dict[str, Any]] = []
 
-    submenu_payload, submenu_attempts, submenu_elapsed_ms, submenu_seen = _wait_for_project_page_github_source_probe(
-        page,
-        preferred_hint=preferred_hint,
-        wait_before_first_probe=True,
-        stop_when=lambda current: bool(current.get("submenuOpened"))
-        or bool(current.get("sourceAddFound"))
-        or bool(current.get("githubFound")),
-        seen_keys=("submenuItems", "submenuCandidateLabels", "visibleLabels", "githubLabel", "githubAriaLabel"),
-    )
-    payload = _merge_project_page_github_source_payload(payload, submenu_payload)
-    payload["submenuWaitAttempts"] = submenu_attempts
-    payload["submenuWaitElapsedMs"] = submenu_elapsed_ms
-    payload["submenuWaitSeenItems"] = submenu_seen
+    for strategy in PROJECT_CHAT_MORE_OPEN_STRATEGIES:
+        more_open_payload = _probe_project_page_github_source(
+            page,
+            preferred_hint=preferred_hint,
+            action=f"open_more_{strategy}",
+        )
+        payload = _merge_project_page_github_source_payload(payload, more_open_payload)
+        payload["moreCandidatesBefore"] = list(more_open_payload.get("beforeVisibleLabels", []))
+        payload["moreCandidatesAfter"] = list(more_open_payload.get("afterVisibleLabels", []))
+        tried = list(payload.get("moreOpenStrategiesTried", []))
+        tried.append(strategy)
+        payload["moreOpenStrategiesTried"] = tried
+        result = classify_project_page_github_source_preflight(payload)
+        if result.boundary == "composer_more_missing":
+            _raise_project_page_github_source_preflight_error(page, result, payload)
+        if not bool(payload.get("moreActionPerformed") or payload.get("moreClicked")):
+            continue
+
+        submenu_payload, submenu_attempts, submenu_elapsed_ms, submenu_seen = _wait_for_project_page_github_source_probe(
+            page,
+            preferred_hint=preferred_hint,
+            wait_before_first_probe=True,
+            stop_when=lambda current: bool(current.get("submenuOpened"))
+            or bool(current.get("sourceAddFound"))
+            or bool(current.get("githubFound")),
+            seen_keys=(
+                "submenuItems",
+                "submenuCandidateLabels",
+                "submenuProbeVisibleLabels",
+                "submenuProbeMenuishLabels",
+                "submenuProbeOverlayLabels",
+                "visibleLabels",
+                "githubLabel",
+                "githubAriaLabel",
+            ),
+        )
+        payload = _merge_project_page_github_source_payload(payload, submenu_payload)
+        payload["submenuWaitAttempts"] = submenu_attempts
+        payload["submenuWaitElapsedMs"] = submenu_elapsed_ms
+        payload["submenuWaitSeenItems"] = submenu_seen
+        strategy_seen_logs.append({"strategy": strategy, "seenLabels": submenu_seen})
+        payload["moreOpenStrategySeenLabels"] = strategy_seen_logs
+        result = classify_project_page_github_source_preflight(payload)
+        if result.boundary not in {"composer_more_submenu_not_open", "github_item_missing"}:
+            strategy_succeeded = strategy
+            break
+
+    payload["moreOpenStrategySucceeded"] = strategy_succeeded
     result = classify_project_page_github_source_preflight(payload)
-    if result.boundary in {"composer_more_submenu_not_open", "github_item_missing"}:
+    if result.boundary in {
+        "composer_more_click_failed",
+        "composer_more_submenu_not_open",
+        "github_item_missing",
+    }:
         _raise_project_page_github_source_preflight_error(page, result, payload)
 
     github_click_payload = _probe_project_page_github_source(
