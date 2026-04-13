@@ -3746,6 +3746,9 @@ class ProjectPageGithubSourcePreflightResult:
 def classify_project_page_github_source_preflight(
     payload: Mapping[str, Any],
 ) -> ProjectPageGithubSourcePreflightResult:
+    connector_submenu_detected = _connector_submenu_detected(payload)
+    connector_labels = _connector_submenu_labels(payload)
+    submenu_classifier_reason = str(payload.get("submenuClassifierReason", "")).strip()
     if not bool(payload.get("composerFound")):
         return ProjectPageGithubSourcePreflightResult(
             status="probe_failed",
@@ -3782,17 +3785,23 @@ def classify_project_page_github_source_preflight(
             boundary="composer_more_click_failed",
             detail="`さらに表示` を開く操作を実行できませんでした。",
         )
-    if not bool(payload.get("submenuOpened")):
+    if not connector_submenu_detected:
+        detail = "`さらに表示` を押した後の connector submenu を確認できませんでした。"
+        if submenu_classifier_reason:
+            detail += f" classifier={submenu_classifier_reason}."
         return ProjectPageGithubSourcePreflightResult(
             status="probe_failed",
             boundary="composer_more_submenu_not_open",
-            detail="`さらに表示` を押した後のサブメニューを確認できませんでした。",
+            detail=detail,
         )
     if not bool(payload.get("githubFound")):
+        detail = "connector submenu までは到達しましたが、`GitHub` は見つかりませんでした。"
+        if connector_labels:
+            detail += f" connector_labels={','.join(connector_labels[:5])}."
         return ProjectPageGithubSourcePreflightResult(
             status="unavailable",
             boundary="github_item_missing",
-            detail="`さらに表示` サブメニューには到達しましたが、`GitHub` は見つかりませんでした。",
+            detail=detail,
         )
     if not bool(payload.get("githubClicked")):
         return ProjectPageGithubSourcePreflightResult(
@@ -3832,7 +3841,8 @@ def _build_project_page_github_source_probe_script(
   const moreLabels = {json.dumps(list(PROJECT_CHAT_MORE_LABELS), ensure_ascii=False)};
   const addSourceLabels = {json.dumps(list(PROJECT_CHAT_ADD_SOURCE_LABELS), ensure_ascii=False)};
   const githubLabels = {json.dumps(list(PROJECT_CHAT_GITHUB_LABELS), ensure_ascii=False)};
-  const targetLabels = [...moreLabels, ...addSourceLabels, ...githubLabels];
+  const connectorTargetLabels = [...addSourceLabels, ...githubLabels];
+  const targetLabels = [...moreLabels, ...connectorTargetLabels];
   const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
   const isVisible = (el) => {{
     if (!el) return false;
@@ -3895,16 +3905,29 @@ def _build_project_page_github_source_probe_script(
     const dy = Math.abs((entry.rectTop || 0) - composerRect.top);
     return dx + dy;
   }};
+  const uniqueEntriesByNode = (entries) => {{
+    const out = [];
+    const seen = new Set();
+    for (const entry of entries) {{
+      const node = entry?.node;
+      if (!node || seen.has(node)) continue;
+      seen.add(node);
+      out.push(entry);
+    }}
+    return out;
+  }};
+  const matchingEntries = (labels, entries) => uniqueEntriesByNode(
+    entries
+      .filter((entry) => labels.some((label) => entry.labels.includes(label)))
+      .sort((left, right) => distanceScore(left) - distanceScore(right))
+  );
   const pickEntry = (labels, entries, options = {{}}) => {{
     const preferScoped = !!options.preferScoped;
-    const choose = (items) => items
-      .filter((entry) => labels.some((label) => entry.labels.includes(label)))
-      .sort((left, right) => distanceScore(left) - distanceScore(right))[0] || null;
     if (preferScoped) {{
-      const scoped = choose(scopedEntries());
+      const scoped = matchingEntries(labels, scopedEntries())[0] || null;
       if (scoped) return scoped;
     }}
-    return choose(entries);
+    return matchingEntries(labels, entries)[0] || null;
   }};
   const isTargetEntry = (entry, labels) => labels.some((label) => entry.labels.includes(label));
   const nearComposer = (entry) => {{
@@ -3991,7 +4014,13 @@ def _build_project_page_github_source_probe_script(
   const plusEntry = pickEntry(plusLabels, beforeEntries, {{preferScoped: true}});
   const menuEntriesBefore = contextualMenuEntries(beforeEntries);
   const overlayEntriesBefore = overlayEntries(beforeEntries);
-  const moreEntryBefore = pickEntry(moreLabels, menuEntriesBefore) || pickEntry(moreLabels, beforeEntries);
+  const menuMoreCandidatesBefore = matchingEntries(moreLabels, menuEntriesBefore);
+  const globalMoreCandidatesBefore = matchingEntries(moreLabels, beforeEntries);
+  const allMoreCandidatesBefore = uniqueEntriesByNode([...menuMoreCandidatesBefore, ...globalMoreCandidatesBefore]);
+  const moreEntryBefore = allMoreCandidatesBefore[0] || null;
+  const chosenMoreCandidateIndex = moreEntryBefore
+    ? allMoreCandidatesBefore.findIndex((entry) => entry.node === moreEntryBefore.node)
+    : -1;
   const sourceAddEntryBefore = pickEntry(addSourceLabels, menuEntriesBefore) || pickEntry(addSourceLabels, overlayEntriesBefore) || pickEntry(addSourceLabels, beforeEntries);
   const githubEntryBefore = pickEntry(githubLabels, menuEntriesBefore) || pickEntry(githubLabels, overlayEntriesBefore) || pickEntry(githubLabels, beforeEntries);
   const plusClicked = action === "click_plus" ? clickEntry(plusEntry) : false;
@@ -4002,19 +4031,45 @@ def _build_project_page_github_source_probe_script(
   const menuEntriesAfter = contextualMenuEntries(afterEntries);
   const menuEntries = menuEntriesAfter.length ? menuEntriesAfter : menuEntriesBefore;
   const overlayEntriesAfter = overlayEntries(afterEntries);
-  const moreEntry = pickEntry(moreLabels, menuEntriesAfter) || pickEntry(moreLabels, afterEntries) || moreEntryBefore;
+  const menuMoreCandidatesAfter = matchingEntries(moreLabels, menuEntriesAfter);
+  const globalMoreCandidatesAfter = matchingEntries(moreLabels, afterEntries);
+  const allMoreCandidatesAfter = uniqueEntriesByNode([...menuMoreCandidatesAfter, ...globalMoreCandidatesAfter]);
+  const moreEntry = allMoreCandidatesAfter[0] || moreEntryBefore;
   const sourceAddEntry = pickEntry(addSourceLabels, menuEntriesAfter) || pickEntry(addSourceLabels, overlayEntriesAfter) || pickEntry(addSourceLabels, afterEntries) || sourceAddEntryBefore;
   const githubEntry = pickEntry(githubLabels, menuEntriesAfter) || pickEntry(githubLabels, overlayEntriesAfter) || pickEntry(githubLabels, afterEntries) || githubEntryBefore;
-  const submenuContextEntries = dedupe([
-    ...renderLabels(menuEntriesAfter),
-    ...renderLabels(overlayEntriesAfter),
-  ]);
+  const connectorMenuEntries = menuEntriesAfter.filter((entry) => isTargetEntry(entry, connectorTargetLabels));
+  const connectorOverlayEntries = overlayEntriesAfter.filter((entry) => isTargetEntry(entry, connectorTargetLabels));
   const submenuEntries = [
-    ...menuEntriesAfter.filter((entry) => isTargetEntry(entry, addSourceLabels) || isTargetEntry(entry, githubLabels)),
-    ...overlayEntriesAfter.filter((entry) => isTargetEntry(entry, addSourceLabels) || isTargetEntry(entry, githubLabels)),
+    ...connectorMenuEntries,
+    ...connectorOverlayEntries,
     sourceAddEntry,
     githubEntry,
   ].filter((entry, index, items) => !!entry && items.findIndex((candidate) => candidate?.node === entry?.node) === index);
+  const connectorLikeLabelsSeen = dedupe([
+    ...renderLabels(connectorMenuEntries),
+    ...renderLabels(connectorOverlayEntries),
+    ...renderLabels(submenuEntries),
+  ]);
+  const genericOverlayLabelsSeen = renderLabels(overlayEntriesAfter)
+    .filter((label) => !connectorLikeLabelsSeen.includes(label));
+  const connectorSubmenuDetected = !!sourceAddEntry || !!githubEntry || connectorLikeLabelsSeen.length > 0;
+  const submenuClassifier = connectorSubmenuDetected
+    ? "connector_submenu"
+    : (renderLabels(overlayEntriesAfter).length > 0
+        ? "generic_overlay_only"
+        : (renderLabels(menuEntriesAfter).length > 0 ? "base_menu_only" : "no_submenu"));
+  const submenuClassifierReason = connectorSubmenuDetected
+    ? "connector_like_labels_seen"
+    : (renderLabels(overlayEntriesAfter).length > 0
+        ? "overlay_labels_without_connector_evidence"
+        : (renderLabels(menuEntriesAfter).length > 0
+            ? "base_menu_labels_without_connector_evidence"
+            : "no_submenu_candidates"));
+  const submenuCandidateGroups = [
+    {{group: "menuish", labels: renderLabels(menuEntriesAfter).slice(0, 40)}},
+    {{group: "overlay", labels: renderLabels(overlayEntriesAfter).slice(0, 40)}},
+    {{group: "connector_like", labels: connectorLikeLabelsSeen.slice(0, 40)}},
+  ];
   const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 1200));
   const githubSelectedLike = !!githubEntry && (
     githubEntry.selected === "true" ||
@@ -4054,9 +4109,18 @@ def _build_project_page_github_source_probe_script(
     moreOpenStrategyAttempted: moreStrategy,
     moreTargetText: moreEntry?.text || "",
     moreTargetAriaLabel: moreEntry?.ariaLabel || "",
-    submenuOpened: !!sourceAddEntry || !!githubEntry || submenuEntries.length > 0 || submenuContextEntries.length > 0,
+    chosenMoreCandidateIndex,
+    chosenMoreCandidateLabels: moreEntryBefore?.labels || [],
+    allMoreCandidates: renderEntries(allMoreCandidatesBefore).slice(0, 10),
+    submenuOpened: connectorSubmenuDetected,
     submenuItems: renderEntries(submenuEntries).slice(0, 20),
     submenuCandidateLabels: renderLabels(submenuEntries).slice(0, 20),
+    submenuClassifier,
+    submenuClassifierReason,
+    connectorSubmenuDetected,
+    submenuCandidateGroups,
+    connectorLikeLabelsSeen: connectorLikeLabelsSeen.slice(0, 40),
+    genericOverlayLabelsSeen: genericOverlayLabelsSeen.slice(0, 40),
     submenuProbeVisibleLabels: renderLabels(afterEntries).slice(0, 60),
     submenuProbeMenuishLabels: renderLabels(menuEntriesAfter).slice(0, 40),
     submenuProbeOverlayLabels: renderLabels(overlayEntriesAfter).slice(0, 40),
@@ -4149,6 +4213,27 @@ def _collect_project_page_probe_labels(payload: Mapping[str, Any], *keys: str) -
         else:
             add(value)
     return labels
+
+
+def _connector_submenu_labels(payload: Mapping[str, Any]) -> list[str]:
+    connector_targets = set(PROJECT_CHAT_ADD_SOURCE_LABELS) | set(PROJECT_CHAT_GITHUB_LABELS)
+    labels = _collect_project_page_probe_labels(
+        payload,
+        "connectorLikeLabelsSeen",
+        "submenuItems",
+        "submenuCandidateLabels",
+        "submenuProbeMenuishLabels",
+        "submenuProbeOverlayLabels",
+    )
+    return [label for label in labels if label in connector_targets]
+
+
+def _connector_submenu_detected(payload: Mapping[str, Any]) -> bool:
+    if "connectorSubmenuDetected" in payload:
+        return bool(payload.get("connectorSubmenuDetected"))
+    if bool(payload.get("sourceAddFound")) or bool(payload.get("githubFound")):
+        return True
+    return bool(_connector_submenu_labels(payload))
 
 
 def _wait_for_project_page_github_source_probe(
@@ -4273,11 +4358,20 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "moreOpenStrategySeenLabels": list(payload.get("moreOpenStrategySeenLabels", [])),
         "moreTargetText": str(payload.get("moreTargetText", "")),
         "moreTargetAriaLabel": str(payload.get("moreTargetAriaLabel", "")),
+        "chosenMoreCandidateIndex": int(payload.get("chosenMoreCandidateIndex", -1) or -1),
+        "chosenMoreCandidateLabels": list(payload.get("chosenMoreCandidateLabels", [])),
+        "allMoreCandidates": list(payload.get("allMoreCandidates", [])),
         "moreCandidatesBefore": list(payload.get("moreCandidatesBefore", [])),
         "moreCandidatesAfter": list(payload.get("moreCandidatesAfter", [])),
         "submenuOpened": bool(payload.get("submenuOpened")),
         "submenuItems": list(payload.get("submenuItems", [])),
         "submenuCandidateLabels": list(payload.get("submenuCandidateLabels", [])),
+        "submenuClassifier": str(payload.get("submenuClassifier", "")),
+        "submenuClassifierReason": str(payload.get("submenuClassifierReason", "")),
+        "connectorSubmenuDetected": bool(payload.get("connectorSubmenuDetected")),
+        "submenuCandidateGroups": list(payload.get("submenuCandidateGroups", [])),
+        "connectorLikeLabelsSeen": list(payload.get("connectorLikeLabelsSeen", [])),
+        "genericOverlayLabelsSeen": list(payload.get("genericOverlayLabelsSeen", [])),
         "submenuProbeVisibleLabels": list(payload.get("submenuProbeVisibleLabels", [])),
         "submenuProbeMenuishLabels": list(payload.get("submenuProbeMenuishLabels", [])),
         "submenuProbeOverlayLabels": list(payload.get("submenuProbeOverlayLabels", [])),

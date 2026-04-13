@@ -769,6 +769,55 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         self.assertEqual(result.status, "available")
         self.assertEqual(result.boundary, "github_click_confirmed")
 
+    def test_generic_overlay_does_not_count_as_connector_submenu(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
+                "moreFound": True,
+                "moreActionPerformed": True,
+                "submenuOpened": True,
+                "submenuClassifier": "generic_overlay_only",
+                "submenuClassifierReason": "overlay_labels_without_connector_evidence",
+                "submenuProbeMenuishLabels": [
+                    "写真とファイルをアップロードする ⌘ U",
+                    "最近のファイル",
+                    "さらに表示",
+                ],
+                "submenuProbeOverlayLabels": [],
+                "submenuProbeVisibleLabels": ["サイドバーを開く", "新しいチャット"],
+                "sourceAddFound": False,
+                "githubFound": False,
+            }
+        )
+        self.assertEqual(result.status, "probe_failed")
+        self.assertEqual(result.boundary, "composer_more_submenu_not_open")
+
+    def test_github_item_missing_requires_connector_submenu_evidence(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
+                "moreFound": True,
+                "moreActionPerformed": True,
+                "submenuOpened": True,
+                "submenuItems": [{"text": "情報源を追加する", "role": "menuitem"}],
+                "submenuCandidateLabels": ["情報源を追加する"],
+                "submenuClassifier": "connector_submenu",
+                "submenuClassifierReason": "connector_like_labels_seen",
+                "connectorSubmenuDetected": True,
+                "connectorLikeLabelsSeen": ["情報源を追加する"],
+                "sourceAddFound": True,
+                "githubFound": False,
+            }
+        )
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.boundary, "github_item_missing")
+
     def test_attach_timeout_becomes_bounded_error(self) -> None:
         class FakePage:
             def wait_for_timeout(self, _milliseconds: int) -> None:
