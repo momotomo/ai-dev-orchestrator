@@ -626,9 +626,13 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         class FakePage:
             def __init__(self) -> None:
                 self.waits: list[int] = []
+                self.boundary_checks = 0
 
             def wait_for_timeout(self, milliseconds: int) -> None:
                 self.waits.append(milliseconds)
+
+            def assert_same_front_tab(self) -> None:
+                self.boundary_checks += 1
 
         fake_page = FakePage()
         probe_sequence = [
@@ -740,6 +744,9 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         self.assertEqual(payload["moreOpenStrategiesTried"], ["click", "focus"])
         self.assertEqual(payload["moreOpenStrategySucceeded"], "focus")
         self.assertEqual(payload["githubFoundContext"], "submenu")
+        self.assertEqual(payload["phaseBoundaryChecks"], ["github_attach_start", "github_attach_complete"])
+        self.assertEqual(fake_page.boundary_checks, 2)
+        self.assertGreater(payload["uncheckedProbeCount"], 0)
 
     def test_overlay_submenu_payload_counts_as_open(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(
@@ -761,6 +768,41 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "available")
         self.assertEqual(result.boundary, "github_click_confirmed")
+
+    def test_attach_timeout_becomes_bounded_error(self) -> None:
+        class FakePage:
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+            def assert_same_front_tab(self) -> None:
+                return None
+
+        fake_page = FakePage()
+        probe_sequence = [
+            self._base_payload(),
+            self._base_payload(
+                action="click_plus",
+                plusClicked=True,
+                plusAriaLabel="ファイルの追加など",
+            ),
+        ]
+        with (
+            patch.object(_bridge_common, "_probe_project_page_github_source", side_effect=probe_sequence),
+            patch.object(_bridge_common, "PROJECT_CHAT_GITHUB_ATTACH_PHASE_TIMEOUT_SECONDS", 0.0),
+            patch.object(
+                _bridge_common,
+                "_log_project_page_github_source_probe",
+                return_value=Path("/tmp/project_page_github_source_probe.json"),
+            ),
+            patch.object(
+                _bridge_common,
+                "log_page_dump",
+                return_value=Path("/tmp/project_page_github_source_dump.txt"),
+            ),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as ctx:
+                _bridge_common.ensure_project_page_github_source_ready(fake_page)
+        self.assertIn("boundary=github_attach_phase_timeout", str(ctx.exception))
 
 
 class OrchestratorArgForwardingTests(unittest.TestCase):

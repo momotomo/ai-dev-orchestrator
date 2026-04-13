@@ -280,6 +280,7 @@ PROJECT_CHAT_MORE_OPEN_STRATEGIES = (
     "keyboard_space",
     "keyboard_arrow_right",
 )
+PROJECT_CHAT_GITHUB_ATTACH_PHASE_TIMEOUT_SECONDS = 20.0
 PROJECT_NAME_HEADING_SELECTORS = [
     "main h1",
     "main h2",
@@ -325,6 +326,9 @@ class SafariChatPage:
 
     def evaluate(self, script: str) -> str:
         self.assert_same_front_tab()
+        return _run_safari_javascript(script)
+
+    def evaluate_unchecked(self, script: str) -> str:
         return _run_safari_javascript(script)
 
     def assert_same_front_tab(self) -> None:
@@ -3618,6 +3622,16 @@ def _evaluate_json(page: SafariChatPage, script: str, failure_label: str) -> dic
         raise BridgeError(f"{failure_label}: JSON として読めませんでした。") from exc
 
 
+def _evaluate_json_unchecked(page: SafariChatPage, script: str, failure_label: str) -> dict[str, Any]:
+    raw = page.evaluate_unchecked(script).strip()
+    if not raw:
+        raise BridgeError(f"{failure_label}: Safari から空の応答が返りました。")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BridgeError(f"{failure_label}: JSON として読めませんでした。") from exc
+
+
 def _body_text(page: SafariChatPage) -> str:
     return page.evaluate(_build_visible_text_script(["body"])).strip()
 
@@ -4066,8 +4080,10 @@ def _probe_project_page_github_source(
     *,
     preferred_hint: str | None = None,
     action: str = "probe",
+    assert_front_tab: bool = True,
 ) -> dict[str, Any]:
-    return _evaluate_json(
+    evaluator = _evaluate_json if assert_front_tab else _evaluate_json_unchecked
+    return evaluator(
         page,
         _build_project_page_github_source_probe_script(
             preferred_hint=preferred_hint,
@@ -4136,25 +4152,33 @@ def _collect_project_page_probe_labels(payload: Mapping[str, Any], *keys: str) -
 
 
 def _wait_for_project_page_github_source_probe(
-    page: SafariChatPage,
     *,
-    preferred_hint: str | None,
+    probe: Callable[[], dict[str, Any]],
     wait_before_first_probe: bool,
     stop_when: Callable[[Mapping[str, Any]], bool],
     seen_keys: Sequence[str],
+    wait: Callable[[int], None],
     attempts: int = PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_ATTEMPTS,
     settle_ms: int = PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_MS,
-) -> tuple[dict[str, Any], int, int, list[str]]:
+    deadline: float | None = None,
+) -> tuple[dict[str, Any], int, int, list[str], bool]:
     last_payload: dict[str, Any] = {}
     seen_labels: list[str] = []
     seen_set: set[str] = set()
     attempt_count = 0
     started = time.monotonic()
+    timed_out = False
 
     for attempt in range(1, attempts + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
         if attempt > 1 or wait_before_first_probe:
-            page.wait_for_timeout(settle_ms)
-        payload = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+            wait(settle_ms)
+        if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
+            break
+        payload = probe()
         last_payload = payload
         attempt_count = attempt
         for label in _collect_project_page_probe_labels(payload, *seen_keys):
@@ -4166,11 +4190,60 @@ def _wait_for_project_page_github_source_probe(
             break
 
     elapsed_ms = int(round((time.monotonic() - started) * 1000))
-    return last_payload, attempt_count, elapsed_ms, seen_labels
+    return last_payload, attempt_count, elapsed_ms, seen_labels, timed_out
+
+
+def _github_attach_phase_boundary_check(
+    page: SafariChatPage,
+    payload: dict[str, Any],
+    *,
+    phase_name: str,
+) -> None:
+    checks = list(payload.get("phaseBoundaryChecks", []))
+    checks.append(phase_name)
+    payload["phaseBoundaryChecks"] = checks
+    if not hasattr(page, "assert_same_front_tab"):
+        return
+    try:
+        page.assert_same_front_tab()
+    except BridgeError as exc:
+        payload["phaseFailureBoundary"] = "github_attach_phase_tab_drift"
+        payload["phaseFailurePhase"] = phase_name
+        raise BridgeError(
+            "GitHub attach phase boundary check に失敗しました。"
+            f" boundary=github_attach_phase_tab_drift"
+            f" phase={phase_name}"
+            f" detail={exc}"
+        ) from exc
+
+
+def _raise_project_page_github_attach_timeout(
+    page: SafariChatPage,
+    payload: dict[str, Any],
+    *,
+    phase_name: str,
+    started_at: float,
+) -> None:
+    payload["phaseFailureBoundary"] = "github_attach_phase_timeout"
+    payload["phaseFailurePhase"] = phase_name
+    payload["phaseTimeoutMs"] = int(round((time.monotonic() - started_at) * 1000))
+    result = ProjectPageGithubSourcePreflightResult(
+        status="probe_failed",
+        boundary="github_attach_phase_timeout",
+        detail=f"GitHub attach operation が phase={phase_name} でタイムアウトしました。",
+    )
+    _raise_project_page_github_source_preflight_error(page, result, payload)
 
 
 def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any]) -> Path:
     snapshot = {
+        "attachOperationStarted": bool(payload.get("attachOperationStarted")),
+        "attachOperationCompleted": bool(payload.get("attachOperationCompleted")),
+        "phaseBoundaryChecks": list(payload.get("phaseBoundaryChecks", [])),
+        "uncheckedProbeCount": int(payload.get("uncheckedProbeCount", 0) or 0),
+        "phaseTimeoutMs": int(payload.get("phaseTimeoutMs", 0) or 0),
+        "phaseFailureBoundary": str(payload.get("phaseFailureBoundary", "")),
+        "phaseFailurePhase": str(payload.get("phaseFailurePhase", "")),
         "composerFound": bool(payload.get("composerFound")),
         "projectName": str(payload.get("projectName", "")),
         "matchKind": str(payload.get("matchKind", "")),
@@ -4225,6 +4298,7 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "githubConfirmElapsedMs": int(payload.get("githubConfirmElapsedMs", 0) or 0),
         "githubConfirmSeenItems": list(payload.get("githubConfirmSeenItems", [])),
         "githubConfirmationKind": str(payload.get("githubConfirmationKind", "")),
+        "finalAttachConfirmationKind": str(payload.get("finalAttachConfirmationKind", "")),
         "visibleLabels": list(payload.get("visibleLabels", [])),
     }
     return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
@@ -4253,16 +4327,39 @@ def ensure_project_page_github_source_ready(
     *,
     preferred_hint: str | None = None,
 ) -> dict[str, Any]:
-    payload = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+    operation_started = time.monotonic()
+    operation_deadline = operation_started + PROJECT_CHAT_GITHUB_ATTACH_PHASE_TIMEOUT_SECONDS
+    payload: dict[str, Any] = {
+        "attachOperationStarted": True,
+        "attachOperationCompleted": False,
+        "phaseBoundaryChecks": [],
+        "uncheckedProbeCount": 0,
+        "phaseTimeoutMs": int(PROJECT_CHAT_GITHUB_ATTACH_PHASE_TIMEOUT_SECONDS * 1000),
+        "phaseFailureBoundary": "",
+        "phaseFailurePhase": "",
+        "moreOpenStrategiesTried": [],
+        "moreOpenStrategySucceeded": "",
+        "moreOpenStrategySeenLabels": [],
+        "finalAttachConfirmationKind": "",
+    }
+
+    _github_attach_phase_boundary_check(page, payload, phase_name="github_attach_start")
+
+    def run_unchecked_probe(*, action: str = "probe") -> dict[str, Any]:
+        payload["uncheckedProbeCount"] = int(payload.get("uncheckedProbeCount", 0)) + 1
+        return _probe_project_page_github_source(
+            page,
+            preferred_hint=preferred_hint,
+            action=action,
+            assert_front_tab=False,
+        )
+
+    payload = _merge_project_page_github_source_payload(payload, run_unchecked_probe(action="probe"))
     result = classify_project_page_github_source_preflight(payload)
     if result.boundary in {"composer_missing", "composer_plus_missing"}:
         _raise_project_page_github_source_preflight_error(page, result, payload)
 
-    plus_click_payload = _probe_project_page_github_source(
-        page,
-        preferred_hint=preferred_hint,
-        action="click_plus",
-    )
+    plus_click_payload = run_unchecked_probe(action="click_plus")
     payload = _merge_project_page_github_source_payload(payload, plus_click_payload)
     payload["plusCandidatesBefore"] = list(plus_click_payload.get("beforeVisibleLabels", []))
     payload["plusCandidatesAfter"] = list(plus_click_payload.get("afterVisibleLabels", []))
@@ -4270,17 +4367,25 @@ def ensure_project_page_github_source_ready(
     if result.boundary in {"composer_missing", "composer_plus_missing", "composer_plus_click_failed"}:
         _raise_project_page_github_source_preflight_error(page, result, payload)
 
-    menu_payload, menu_attempts, menu_elapsed_ms, menu_seen = _wait_for_project_page_github_source_probe(
-        page,
-        preferred_hint=preferred_hint,
+    menu_payload, menu_attempts, menu_elapsed_ms, menu_seen, menu_timed_out = _wait_for_project_page_github_source_probe(
+        probe=lambda: run_unchecked_probe(action="probe"),
         wait_before_first_probe=True,
         stop_when=lambda current: bool(current.get("menuOpened")) or bool(current.get("moreFound")),
         seen_keys=("menuItems", "menuCandidateLabels", "visibleLabels", "moreLabel", "moreAriaLabel"),
+        wait=page.wait_for_timeout,
+        deadline=operation_deadline,
     )
     payload = _merge_project_page_github_source_payload(payload, menu_payload)
     payload["menuWaitAttempts"] = menu_attempts
     payload["menuWaitElapsedMs"] = menu_elapsed_ms
     payload["menuWaitSeenItems"] = menu_seen
+    if menu_timed_out:
+        _raise_project_page_github_attach_timeout(
+            page,
+            payload,
+            phase_name="github_attach_menu_wait",
+            started_at=operation_started,
+        )
     result = classify_project_page_github_source_preflight(payload)
     if result.boundary == "composer_menu_not_open":
         _raise_project_page_github_source_preflight_error(page, result, payload)
@@ -4291,11 +4396,14 @@ def ensure_project_page_github_source_ready(
     strategy_seen_logs: list[dict[str, Any]] = []
 
     for strategy in PROJECT_CHAT_MORE_OPEN_STRATEGIES:
-        more_open_payload = _probe_project_page_github_source(
-            page,
-            preferred_hint=preferred_hint,
-            action=f"open_more_{strategy}",
-        )
+        if time.monotonic() >= operation_deadline:
+            _raise_project_page_github_attach_timeout(
+                page,
+                payload,
+                phase_name="github_attach_more_open",
+                started_at=operation_started,
+            )
+        more_open_payload = run_unchecked_probe(action=f"open_more_{strategy}")
         payload = _merge_project_page_github_source_payload(payload, more_open_payload)
         payload["moreCandidatesBefore"] = list(more_open_payload.get("beforeVisibleLabels", []))
         payload["moreCandidatesAfter"] = list(more_open_payload.get("afterVisibleLabels", []))
@@ -4308,9 +4416,8 @@ def ensure_project_page_github_source_ready(
         if not bool(payload.get("moreActionPerformed") or payload.get("moreClicked")):
             continue
 
-        submenu_payload, submenu_attempts, submenu_elapsed_ms, submenu_seen = _wait_for_project_page_github_source_probe(
-            page,
-            preferred_hint=preferred_hint,
+        submenu_payload, submenu_attempts, submenu_elapsed_ms, submenu_seen, submenu_timed_out = _wait_for_project_page_github_source_probe(
+            probe=lambda: run_unchecked_probe(action="probe"),
             wait_before_first_probe=True,
             stop_when=lambda current: bool(current.get("submenuOpened"))
             or bool(current.get("sourceAddFound"))
@@ -4325,6 +4432,8 @@ def ensure_project_page_github_source_ready(
                 "githubLabel",
                 "githubAriaLabel",
             ),
+            wait=page.wait_for_timeout,
+            deadline=operation_deadline,
         )
         payload = _merge_project_page_github_source_payload(payload, submenu_payload)
         payload["submenuWaitAttempts"] = submenu_attempts
@@ -4332,6 +4441,13 @@ def ensure_project_page_github_source_ready(
         payload["submenuWaitSeenItems"] = submenu_seen
         strategy_seen_logs.append({"strategy": strategy, "seenLabels": submenu_seen})
         payload["moreOpenStrategySeenLabels"] = strategy_seen_logs
+        if submenu_timed_out:
+            _raise_project_page_github_attach_timeout(
+                page,
+                payload,
+                phase_name="github_attach_submenu_wait",
+                started_at=operation_started,
+            )
         result = classify_project_page_github_source_preflight(payload)
         if result.boundary not in {"composer_more_submenu_not_open", "github_item_missing"}:
             strategy_succeeded = strategy
@@ -4346,11 +4462,7 @@ def ensure_project_page_github_source_ready(
     }:
         _raise_project_page_github_source_preflight_error(page, result, payload)
 
-    github_click_payload = _probe_project_page_github_source(
-        page,
-        preferred_hint=preferred_hint,
-        action="click_github",
-    )
+    github_click_payload = run_unchecked_probe(action="click_github")
     payload = _merge_project_page_github_source_payload(payload, github_click_payload)
     payload["githubCandidatesBefore"] = list(github_click_payload.get("beforeVisibleLabels", []))
     payload["githubCandidatesAfter"] = list(github_click_payload.get("afterVisibleLabels", []))
@@ -4358,13 +4470,14 @@ def ensure_project_page_github_source_ready(
     if result.boundary == "github_click_failed":
         _raise_project_page_github_source_preflight_error(page, result, payload)
 
-    confirm_payload, confirm_attempts, confirm_elapsed_ms, confirm_seen = _wait_for_project_page_github_source_probe(
-        page,
-        preferred_hint=preferred_hint,
+    confirm_payload, confirm_attempts, confirm_elapsed_ms, confirm_seen, confirm_timed_out = _wait_for_project_page_github_source_probe(
+        probe=lambda: run_unchecked_probe(action="probe"),
         wait_before_first_probe=True,
         stop_when=lambda current: bool(current.get("githubSelectedLike"))
         or ("GitHub" in str(current.get("composerScopeText", ""))),
         seen_keys=("submenuItems", "submenuCandidateLabels", "visibleLabels", "githubLabel", "githubAriaLabel"),
+        wait=page.wait_for_timeout,
+        deadline=operation_deadline,
     )
     payload = _merge_project_page_github_source_payload(payload, confirm_payload)
     payload["githubConfirmAttempts"] = confirm_attempts
@@ -4373,9 +4486,19 @@ def ensure_project_page_github_source_ready(
     payload["githubConfirmationKind"] = (
         "selected_like" if bool(payload.get("githubSelectedLike")) else "click_confirmed"
     )
+    payload["finalAttachConfirmationKind"] = payload["githubConfirmationKind"]
+    if confirm_timed_out:
+        _raise_project_page_github_attach_timeout(
+            page,
+            payload,
+            phase_name="github_attach_confirm",
+            started_at=operation_started,
+        )
     result = classify_project_page_github_source_preflight(payload)
     if result.status != "available":
         _raise_project_page_github_source_preflight_error(page, result, payload)
+    _github_attach_phase_boundary_check(page, payload, phase_name="github_attach_complete")
+    payload["attachOperationCompleted"] = True
     return payload
 
 
