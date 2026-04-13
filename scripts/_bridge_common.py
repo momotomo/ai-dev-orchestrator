@@ -270,6 +270,8 @@ PROJECT_CHAT_ADD_SOURCE_LABELS = (
 PROJECT_CHAT_GITHUB_LABELS = (
     "GitHub",
 )
+PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_MS = 250
+PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_ATTEMPTS = 5
 PROJECT_NAME_HEADING_SELECTORS = [
     "main h1",
     "main h2",
@@ -3798,14 +3800,17 @@ def classify_project_page_github_source_preflight(
 def _build_project_page_github_source_probe_script(
     *,
     preferred_hint: str | None = None,
+    action: str = "probe",
 ) -> str:
     return f"""
 (() => {{
   {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=True)}
+  const action = {json.dumps(action)};
   const plusLabels = {json.dumps(list(PROJECT_CHAT_PLUS_BUTTON_LABELS), ensure_ascii=False)};
   const moreLabels = {json.dumps(list(PROJECT_CHAT_MORE_LABELS), ensure_ascii=False)};
   const addSourceLabels = {json.dumps(list(PROJECT_CHAT_ADD_SOURCE_LABELS), ensure_ascii=False)};
   const githubLabels = {json.dumps(list(PROJECT_CHAT_GITHUB_LABELS), ensure_ascii=False)};
+  const targetLabels = [...moreLabels, ...addSourceLabels, ...githubLabels];
   const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
   const isVisible = (el) => {{
     if (!el) return false;
@@ -3862,10 +3867,6 @@ def _build_project_page_github_source_probe_script(
   const collectEntries = (root) => Array.from(root.querySelectorAll(interactiveSelector)).filter(isVisible).map(toEntry);
   const scopedEntries = () => collectEntries(composerScope);
   const globalEntries = () => collectEntries(document);
-  const exactMatch = (node, labels) => {{
-    const candidates = labelsFor(node);
-    return labels.some((label) => candidates.includes(label));
-  }};
   const distanceScore = (entry) => {{
     if (!composerRect) return 999999;
     const dx = Math.abs((entry.rectLeft || 0) - composerRect.left);
@@ -3883,14 +3884,18 @@ def _build_project_page_github_source_probe_script(
     }}
     return choose(entries);
   }};
-  const menuishEntries = (entries, baseline) => entries.filter((entry) => {{
-    const isMenuish = menuRoles.has(entry.role) || menuRoles.has(entry.parentRole);
-    const isTarget = moreLabels.some((label) => entry.labels.includes(label)) ||
-      addSourceLabels.some((label) => entry.labels.includes(label)) ||
-      githubLabels.some((label) => entry.labels.includes(label));
-    const isNew = !baseline.some((item) => item.node === entry.node);
-    return isNew && (isMenuish || isTarget);
-  }});
+  const isTargetEntry = (entry, labels) => labels.some((label) => entry.labels.includes(label));
+  const nearComposer = (entry) => {{
+    if (!composerRect) return true;
+    return Math.abs((entry.rectTop || 0) - composerRect.top) <= 520;
+  }};
+  const contextualMenuEntries = (entries) => entries
+    .filter((entry) => nearComposer(entry) && (
+      menuRoles.has(entry.role) ||
+      menuRoles.has(entry.parentRole) ||
+      isTargetEntry(entry, targetLabels)
+    ))
+    .sort((left, right) => distanceScore(left) - distanceScore(right));
   const renderEntries = (entries) => entries.map((entry) => {{
     return {{
       text: entry.text,
@@ -3906,6 +3911,7 @@ def _build_project_page_github_source_probe_script(
       state: entry.state,
     }};
   }});
+  const renderLabels = (entries) => dedupe(entries.flatMap((entry) => entry.labels));
   const clickEntry = (entry) => {{
     if (!entry?.node) return false;
     entry.node.scrollIntoView?.({{block: "center"}});
@@ -3916,57 +3922,62 @@ def _build_project_page_github_source_probe_script(
     entry.node.dispatchEvent?.(new MouseEvent("pointerup", {{bubbles: true}}));
     return true;
   }};
-  const baselineEntries = globalEntries();
-  const plusEntry = pickEntry(plusLabels, baselineEntries, {{preferScoped: true}});
-  const plusClicked = clickEntry(plusEntry);
-  const afterPlusEntries = globalEntries();
-  const menuEntries = menuishEntries(afterPlusEntries, baselineEntries);
-  const menuOpened = menuEntries.length > 0;
-  const moreEntry = pickEntry(moreLabels, menuEntries);
-  const moreClicked = clickEntry(moreEntry);
-  const afterMoreEntries = globalEntries();
-  const submenuEntries = menuishEntries(afterMoreEntries, afterPlusEntries);
-  const submenuOpened = submenuEntries.length > 0;
-  const sourceAddEntry = pickEntry(addSourceLabels, submenuEntries);
-  const githubEntry = pickEntry(githubLabels, submenuEntries);
-  const githubClicked = clickEntry(githubEntry);
-  const afterGithubEntries = globalEntries();
-  const githubAfterClick = pickEntry(githubLabels, afterGithubEntries);
+  const beforeEntries = globalEntries();
+  const plusEntry = pickEntry(plusLabels, beforeEntries, {{preferScoped: true}});
+  const moreEntryBefore = pickEntry(moreLabels, beforeEntries);
+  const sourceAddEntryBefore = pickEntry(addSourceLabels, beforeEntries);
+  const githubEntryBefore = pickEntry(githubLabels, beforeEntries);
+  const plusClicked = action === "click_plus" ? clickEntry(plusEntry) : false;
+  const moreClicked = action === "click_more" ? clickEntry(moreEntryBefore) : false;
+  const githubClicked = action === "click_github" ? clickEntry(githubEntryBefore) : false;
+  const afterEntries = globalEntries();
+  const menuEntriesBefore = contextualMenuEntries(beforeEntries);
+  const menuEntriesAfter = contextualMenuEntries(afterEntries);
+  const menuEntries = menuEntriesAfter.length ? menuEntriesAfter : menuEntriesBefore;
+  const moreEntry = pickEntry(moreLabels, afterEntries) || moreEntryBefore;
+  const sourceAddEntry = pickEntry(addSourceLabels, afterEntries) || sourceAddEntryBefore;
+  const githubEntry = pickEntry(githubLabels, afterEntries) || githubEntryBefore;
+  const submenuEntries = [sourceAddEntry, githubEntry].filter(Boolean);
   const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 1200));
-  const githubSelectedLike = !!githubAfterClick && (
-    githubAfterClick.selected === "true" ||
-    githubAfterClick.checked === "true" ||
-    githubAfterClick.pressed === "true" ||
-    githubAfterClick.current === "true" ||
-    ["open", "checked", "active", "selected"].includes(githubAfterClick.state)
+  const githubSelectedLike = !!githubEntry && (
+    githubEntry.selected === "true" ||
+    githubEntry.checked === "true" ||
+    githubEntry.pressed === "true" ||
+    githubEntry.current === "true" ||
+    ["open", "checked", "active", "selected"].includes(githubEntry.state)
   ) || (githubClicked && composerScopeText.includes("GitHub"));
-  const githubClickConfirmed = githubClicked;
   return JSON.stringify({{
     composerFound: !!composer,
     projectName: payload.projectName || "",
     matchKind: payload.matchKind || "",
     matchedHint: payload.matchedHint || "",
+    action,
     plusFound: !!plusEntry,
     plusLabel: plusEntry?.text || "",
     plusAriaLabel: plusEntry?.ariaLabel || "",
     plusTitle: plusEntry?.title || "",
     plusClicked,
-    menuOpened,
+    plusCandidates: renderLabels(beforeEntries.filter((entry) => isTargetEntry(entry, plusLabels))).slice(0, 20),
+    beforeVisibleLabels: renderLabels(beforeEntries).slice(0, 60),
+    afterVisibleLabels: renderLabels(afterEntries).slice(0, 60),
+    menuOpened: !!moreEntry || menuEntries.length > 0,
     menuItems: renderEntries(menuEntries).slice(0, 20),
+    menuCandidateLabels: renderLabels(menuEntries).slice(0, 20),
     moreFound: !!moreEntry,
     moreLabel: moreEntry?.text || "",
     moreAriaLabel: moreEntry?.ariaLabel || "",
     moreClicked,
-    submenuOpened,
+    submenuOpened: !!sourceAddEntry || !!githubEntry || submenuEntries.length > 0,
     submenuItems: renderEntries(submenuEntries).slice(0, 20),
+    submenuCandidateLabels: renderLabels(submenuEntries).slice(0, 20),
     sourceAddFound: !!sourceAddEntry,
     githubFound: !!githubEntry,
     githubLabel: githubEntry?.text || "",
     githubAriaLabel: githubEntry?.ariaLabel || "",
     githubClicked,
     githubSelectedLike,
-    githubClickConfirmed,
-    visibleLabels: dedupe(afterGithubEntries.flatMap((entry) => entry.labels)).slice(0, 40),
+    githubClickConfirmed: githubClicked,
+    visibleLabels: renderLabels(afterEntries).slice(0, 60),
     composerScopeText,
   }});
 }})();
@@ -3977,14 +3988,108 @@ def _probe_project_page_github_source(
     page: SafariChatPage,
     *,
     preferred_hint: str | None = None,
+    action: str = "probe",
 ) -> dict[str, Any]:
     return _evaluate_json(
         page,
         _build_project_page_github_source_probe_script(
             preferred_hint=preferred_hint,
+            action=action,
         ),
         "GitHub source preflight probe に失敗しました",
     )
+
+
+def _merge_project_page_github_source_payload(
+    base: dict[str, Any],
+    update: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in update.items():
+        if isinstance(value, bool):
+            merged[key] = bool(merged.get(key)) or value
+            continue
+        if isinstance(value, str):
+            if value:
+                merged[key] = value
+            else:
+                merged.setdefault(key, "")
+            continue
+        if isinstance(value, list):
+            if value:
+                merged[key] = value
+            else:
+                merged.setdefault(key, [])
+            continue
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def _collect_project_page_probe_labels(payload: Mapping[str, Any], *keys: str) -> list[str]:
+    labels: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        text = str(value).strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        labels.append(text)
+
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, Mapping):
+                    add(item.get("text", ""))
+                    add(item.get("ariaLabel", ""))
+                    add(item.get("title", ""))
+                    add(item.get("testId", ""))
+                else:
+                    add(item)
+        elif isinstance(value, Mapping):
+            add(value.get("text", ""))
+            add(value.get("ariaLabel", ""))
+            add(value.get("title", ""))
+            add(value.get("testId", ""))
+        else:
+            add(value)
+    return labels
+
+
+def _wait_for_project_page_github_source_probe(
+    page: SafariChatPage,
+    *,
+    preferred_hint: str | None,
+    wait_before_first_probe: bool,
+    stop_when: Callable[[Mapping[str, Any]], bool],
+    seen_keys: Sequence[str],
+    attempts: int = PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_ATTEMPTS,
+    settle_ms: int = PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_MS,
+) -> tuple[dict[str, Any], int, int, list[str]]:
+    last_payload: dict[str, Any] = {}
+    seen_labels: list[str] = []
+    seen_set: set[str] = set()
+    attempt_count = 0
+    started = time.monotonic()
+
+    for attempt in range(1, attempts + 1):
+        if attempt > 1 or wait_before_first_probe:
+            page.wait_for_timeout(settle_ms)
+        payload = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+        last_payload = payload
+        attempt_count = attempt
+        for label in _collect_project_page_probe_labels(payload, *seen_keys):
+            if label in seen_set:
+                continue
+            seen_set.add(label)
+            seen_labels.append(label)
+        if stop_when(payload):
+            break
+
+    elapsed_ms = int(round((time.monotonic() - started) * 1000))
+    return last_payload, attempt_count, elapsed_ms, seen_labels
 
 
 def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any]) -> Path:
@@ -3993,19 +4098,33 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "projectName": str(payload.get("projectName", "")),
         "matchKind": str(payload.get("matchKind", "")),
         "matchedHint": str(payload.get("matchedHint", "")),
+        "action": str(payload.get("action", "")),
         "plusFound": bool(payload.get("plusFound")),
         "plusLabel": str(payload.get("plusLabel", "")),
         "plusAriaLabel": str(payload.get("plusAriaLabel", "")),
         "plusTitle": str(payload.get("plusTitle", "")),
         "plusClicked": bool(payload.get("plusClicked")),
+        "plusCandidates": list(payload.get("plusCandidates", [])),
+        "plusCandidatesBefore": list(payload.get("plusCandidatesBefore", [])),
+        "plusCandidatesAfter": list(payload.get("plusCandidatesAfter", [])),
         "menuOpened": bool(payload.get("menuOpened")),
         "menuItems": list(payload.get("menuItems", [])),
+        "menuCandidateLabels": list(payload.get("menuCandidateLabels", [])),
+        "menuWaitAttempts": int(payload.get("menuWaitAttempts", 0) or 0),
+        "menuWaitElapsedMs": int(payload.get("menuWaitElapsedMs", 0) or 0),
+        "menuWaitSeenItems": list(payload.get("menuWaitSeenItems", [])),
         "moreFound": bool(payload.get("moreFound")),
         "moreLabel": str(payload.get("moreLabel", "")),
         "moreAriaLabel": str(payload.get("moreAriaLabel", "")),
         "moreClicked": bool(payload.get("moreClicked")),
+        "moreCandidatesBefore": list(payload.get("moreCandidatesBefore", [])),
+        "moreCandidatesAfter": list(payload.get("moreCandidatesAfter", [])),
         "submenuOpened": bool(payload.get("submenuOpened")),
         "submenuItems": list(payload.get("submenuItems", [])),
+        "submenuCandidateLabels": list(payload.get("submenuCandidateLabels", [])),
+        "submenuWaitAttempts": int(payload.get("submenuWaitAttempts", 0) or 0),
+        "submenuWaitElapsedMs": int(payload.get("submenuWaitElapsedMs", 0) or 0),
+        "submenuWaitSeenItems": list(payload.get("submenuWaitSeenItems", [])),
         "sourceAddFound": bool(payload.get("sourceAddFound")),
         "githubFound": bool(payload.get("githubFound")),
         "githubLabel": str(payload.get("githubLabel", "")),
@@ -4013,6 +4132,12 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "githubClicked": bool(payload.get("githubClicked")),
         "githubSelectedLike": bool(payload.get("githubSelectedLike")),
         "githubClickConfirmed": bool(payload.get("githubClickConfirmed")),
+        "githubCandidatesBefore": list(payload.get("githubCandidatesBefore", [])),
+        "githubCandidatesAfter": list(payload.get("githubCandidatesAfter", [])),
+        "githubConfirmAttempts": int(payload.get("githubConfirmAttempts", 0) or 0),
+        "githubConfirmElapsedMs": int(payload.get("githubConfirmElapsedMs", 0) or 0),
+        "githubConfirmSeenItems": list(payload.get("githubConfirmSeenItems", [])),
+        "githubConfirmationKind": str(payload.get("githubConfirmationKind", "")),
         "visibleLabels": list(payload.get("visibleLabels", [])),
     }
     return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
@@ -4041,7 +4166,94 @@ def ensure_project_page_github_source_ready(
     *,
     preferred_hint: str | None = None,
 ) -> dict[str, Any]:
-    payload = _probe_project_page_github_source(page, preferred_hint=preferred_hint)
+    payload = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+    result = classify_project_page_github_source_preflight(payload)
+    if result.boundary in {"composer_missing", "composer_plus_missing"}:
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+
+    plus_click_payload = _probe_project_page_github_source(
+        page,
+        preferred_hint=preferred_hint,
+        action="click_plus",
+    )
+    payload = _merge_project_page_github_source_payload(payload, plus_click_payload)
+    payload["plusCandidatesBefore"] = list(plus_click_payload.get("beforeVisibleLabels", []))
+    payload["plusCandidatesAfter"] = list(plus_click_payload.get("afterVisibleLabels", []))
+    result = classify_project_page_github_source_preflight(payload)
+    if result.boundary in {"composer_missing", "composer_plus_missing", "composer_plus_click_failed"}:
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+
+    menu_payload, menu_attempts, menu_elapsed_ms, menu_seen = _wait_for_project_page_github_source_probe(
+        page,
+        preferred_hint=preferred_hint,
+        wait_before_first_probe=True,
+        stop_when=lambda current: bool(current.get("menuOpened")) or bool(current.get("moreFound")),
+        seen_keys=("menuItems", "menuCandidateLabels", "visibleLabels", "moreLabel", "moreAriaLabel"),
+    )
+    payload = _merge_project_page_github_source_payload(payload, menu_payload)
+    payload["menuWaitAttempts"] = menu_attempts
+    payload["menuWaitElapsedMs"] = menu_elapsed_ms
+    payload["menuWaitSeenItems"] = menu_seen
+    result = classify_project_page_github_source_preflight(payload)
+    if result.boundary == "composer_menu_not_open":
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+
+    more_click_payload = _probe_project_page_github_source(
+        page,
+        preferred_hint=preferred_hint,
+        action="click_more",
+    )
+    payload = _merge_project_page_github_source_payload(payload, more_click_payload)
+    payload["moreCandidatesBefore"] = list(more_click_payload.get("beforeVisibleLabels", []))
+    payload["moreCandidatesAfter"] = list(more_click_payload.get("afterVisibleLabels", []))
+    result = classify_project_page_github_source_preflight(payload)
+    if result.boundary in {"composer_more_missing", "composer_more_click_failed"}:
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+
+    submenu_payload, submenu_attempts, submenu_elapsed_ms, submenu_seen = _wait_for_project_page_github_source_probe(
+        page,
+        preferred_hint=preferred_hint,
+        wait_before_first_probe=True,
+        stop_when=lambda current: bool(current.get("submenuOpened"))
+        or bool(current.get("sourceAddFound"))
+        or bool(current.get("githubFound")),
+        seen_keys=("submenuItems", "submenuCandidateLabels", "visibleLabels", "githubLabel", "githubAriaLabel"),
+    )
+    payload = _merge_project_page_github_source_payload(payload, submenu_payload)
+    payload["submenuWaitAttempts"] = submenu_attempts
+    payload["submenuWaitElapsedMs"] = submenu_elapsed_ms
+    payload["submenuWaitSeenItems"] = submenu_seen
+    result = classify_project_page_github_source_preflight(payload)
+    if result.boundary in {"composer_more_submenu_not_open", "github_item_missing"}:
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+
+    github_click_payload = _probe_project_page_github_source(
+        page,
+        preferred_hint=preferred_hint,
+        action="click_github",
+    )
+    payload = _merge_project_page_github_source_payload(payload, github_click_payload)
+    payload["githubCandidatesBefore"] = list(github_click_payload.get("beforeVisibleLabels", []))
+    payload["githubCandidatesAfter"] = list(github_click_payload.get("afterVisibleLabels", []))
+    result = classify_project_page_github_source_preflight(payload)
+    if result.boundary == "github_click_failed":
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+
+    confirm_payload, confirm_attempts, confirm_elapsed_ms, confirm_seen = _wait_for_project_page_github_source_probe(
+        page,
+        preferred_hint=preferred_hint,
+        wait_before_first_probe=True,
+        stop_when=lambda current: bool(current.get("githubSelectedLike"))
+        or ("GitHub" in str(current.get("composerScopeText", ""))),
+        seen_keys=("submenuItems", "submenuCandidateLabels", "visibleLabels", "githubLabel", "githubAriaLabel"),
+    )
+    payload = _merge_project_page_github_source_payload(payload, confirm_payload)
+    payload["githubConfirmAttempts"] = confirm_attempts
+    payload["githubConfirmElapsedMs"] = confirm_elapsed_ms
+    payload["githubConfirmSeenItems"] = confirm_seen
+    payload["githubConfirmationKind"] = (
+        "selected_like" if bool(payload.get("githubSelectedLike")) else "click_confirmed"
+    )
     result = classify_project_page_github_source_preflight(payload)
     if result.status != "available":
         _raise_project_page_github_source_preflight_error(page, result, payload)
