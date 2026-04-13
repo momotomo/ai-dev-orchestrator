@@ -80,6 +80,11 @@ class IssueCentricReplyReadiness:
     thinking_visible: bool
     decision_marker_present: bool
     contract_parse_attempted: bool
+    # True only when the assistant area contains final reply content
+    # (not just meta-only UI labels).
+    assistant_final_content_present: bool = False
+    # True when assistant area has text but it is all meta-only UI labels.
+    assistant_meta_only: bool = False
     decision: IssueCentricDecision | None = None
 
 
@@ -92,14 +97,53 @@ class IssueCentricReplyNotReady(BridgeError):
         self.thinking_visible = readiness.thinking_visible
         self.decision_marker_present = readiness.decision_marker_present
         self.contract_parse_attempted = readiness.contract_parse_attempted
+        self.assistant_final_content_present = readiness.assistant_final_content_present
+        self.assistant_meta_only = readiness.assistant_meta_only
 
 
+import re as _re
+
+# Markers that indicate the assistant area shows only in-progress UI metadata
+# (thinking spinners, source pills, connector labels) and not final reply content.
 _THINKING_MARKERS = (
     "思考中",
     "じっくり思考",
     "Thinking",
     "Reasoning",
 )
+# Additional UI-only labels that mean the reply is not yet final.
+# These are matched as whole-line exact strings (after strip) or via regex.
+_META_ONLY_EXACT = frozenset(
+    [
+        "GitHub",
+        "Deep research",
+        "ウェブ検索",
+        "思考中",
+        "じっくり思考",
+        "Thinking",
+        "Reasoning",
+        "ChatGPT",
+    ]
+)
+# Regex patterns matched against individual stripped lines.
+_META_ONLY_PATTERNS = (
+    _re.compile(r"^Thought for \d+ seconds?$"),
+    _re.compile(r"^Thought for \d+s$"),
+    _re.compile(r"^Searched \d+ sites?$"),
+    _re.compile(r"^読み込み中"),
+    _re.compile(r"^Loading"),
+)
+
+
+def _line_is_meta_only(line: str) -> bool:
+    """Return True if a stripped non-empty line is a UI metadata label only."""
+    if line in _META_ONLY_EXACT:
+        return True
+    if any(marker in line for marker in _THINKING_MARKERS):
+        return True
+    return any(pat.search(line) for pat in _META_ONLY_PATTERNS)
+
+
 _NON_FINAL_ASSISTANT_LINE_MARKERS = (
     "ChatGPT の回答は必ずしも正しいとは限りません。",
     "重要な情報は確認するようにしてください。",
@@ -156,10 +200,23 @@ def _assistant_lines_for_readiness(raw_text: str, after_text: str | None = None)
     return filtered_lines
 
 
-def _lines_are_reply_not_ready(lines: list[str]) -> bool:
-    if not lines:
-        return True
-    return all(any(marker in line for marker in _THINKING_MARKERS) for line in lines)
+def _split_meta_content_lines(
+    lines: list[str],
+) -> tuple[list[str], list[str]]:
+    """Split lines into (meta_only_lines, final_content_lines).
+
+    meta_only_lines: lines that are UI metadata labels only (thinking spinners,
+        source pills, connector names – not real reply content).
+    final_content_lines: lines that contain actual reply content.
+    """
+    meta: list[str] = []
+    content: list[str] = []
+    for line in lines:
+        if _line_is_meta_only(line):
+            meta.append(line)
+        else:
+            content.append(line)
+    return meta, content
 
 
 def classify_issue_centric_reply_readiness(
@@ -170,6 +227,9 @@ def classify_issue_centric_reply_readiness(
     assistant_segment = _assistant_segment_after_text(raw_text, after_text)
     assistant_lines = _assistant_lines_for_readiness(raw_text, after_text)
     assistant_text_present = bool(assistant_lines)
+    meta_lines, content_lines = _split_meta_content_lines(assistant_lines)
+    assistant_final_content_present = bool(content_lines)
+    assistant_meta_only = assistant_text_present and not assistant_final_content_present
     thinking_visible = any(
         any(marker in line for marker in _THINKING_MARKERS) for line in assistant_lines
     )
@@ -184,16 +244,23 @@ def classify_issue_centric_reply_readiness(
             thinking_visible=False,
             decision_marker_present=False,
             contract_parse_attempted=False,
+            assistant_final_content_present=False,
+            assistant_meta_only=False,
         )
 
-    if not decision_marker_present and _lines_are_reply_not_ready(assistant_lines):
+    # If all visible assistant lines are meta-only labels (thinking spinners,
+    # source pills, connector names) and the decision marker is absent, the
+    # reply is not yet final — treat as not-ready rather than invalid stop.
+    if not decision_marker_present and assistant_meta_only:
         return IssueCentricReplyReadiness(
             status="reply_not_ready",
-            reason="assistant reply is still in thinking/loading state.",
+            reason="assistant area shows only UI metadata labels (not final reply content).",
             assistant_text_present=True,
             thinking_visible=thinking_visible,
             decision_marker_present=False,
             contract_parse_attempted=False,
+            assistant_final_content_present=False,
+            assistant_meta_only=True,
         )
 
     if legacy_marker_present:
@@ -204,9 +271,24 @@ def classify_issue_centric_reply_readiness(
             thinking_visible=thinking_visible,
             decision_marker_present=False,
             contract_parse_attempted=False,
+            assistant_final_content_present=assistant_final_content_present,
+            assistant_meta_only=assistant_meta_only,
         )
 
     if not decision_marker_present:
+        # Only treat as invalid stop when final reply content is actually present.
+        # If somehow no final content lines remain here (edge case), stay safe.
+        if not assistant_final_content_present:
+            return IssueCentricReplyReadiness(
+                status="reply_not_ready",
+                reason="assistant area has no final content lines; waiting for reply.",
+                assistant_text_present=True,
+                thinking_visible=thinking_visible,
+                decision_marker_present=False,
+                contract_parse_attempted=False,
+                assistant_final_content_present=False,
+                assistant_meta_only=assistant_meta_only,
+            )
         return IssueCentricReplyReadiness(
             status="reply_complete_no_marker",
             reason="assistant final reply is visible but issue-centric decision markers are missing.",
@@ -214,6 +296,8 @@ def classify_issue_centric_reply_readiness(
             thinking_visible=thinking_visible,
             decision_marker_present=False,
             contract_parse_attempted=False,
+            assistant_final_content_present=True,
+            assistant_meta_only=False,
         )
 
     try:
@@ -226,6 +310,8 @@ def classify_issue_centric_reply_readiness(
             thinking_visible=thinking_visible,
             decision_marker_present=True,
             contract_parse_attempted=True,
+            assistant_final_content_present=assistant_final_content_present,
+            assistant_meta_only=assistant_meta_only,
         )
     except IssueCentricContractError as exc:
         return IssueCentricReplyReadiness(
@@ -235,6 +321,8 @@ def classify_issue_centric_reply_readiness(
             thinking_visible=thinking_visible,
             decision_marker_present=True,
             contract_parse_attempted=True,
+            assistant_final_content_present=assistant_final_content_present,
+            assistant_meta_only=assistant_meta_only,
         )
 
     return IssueCentricReplyReadiness(
@@ -244,6 +332,8 @@ def classify_issue_centric_reply_readiness(
         thinking_visible=thinking_visible,
         decision_marker_present=True,
         contract_parse_attempted=True,
+        assistant_final_content_present=assistant_final_content_present,
+        assistant_meta_only=assistant_meta_only,
         decision=decision,
     )
 
@@ -292,6 +382,8 @@ def stop_for_invalid_issue_centric_contract(
                 f"- reply_readiness_status: {readiness.status}",
                 f"- reply_readiness_reason: {readiness.reason}",
                 f"- assistant_text_present: {readiness.assistant_text_present}",
+                f"- assistant_final_content_present: {readiness.assistant_final_content_present}",
+                f"- assistant_meta_only: {readiness.assistant_meta_only}",
                 f"- thinking_visible: {readiness.thinking_visible}",
                 f"- decision_marker_present: {readiness.decision_marker_present}",
                 f"- contract_parse_attempted: {readiness.contract_parse_attempted}",
@@ -330,6 +422,8 @@ def stop_for_invalid_issue_centric_contract(
             "reply_readiness_status": readiness.status if readiness is not None else "",
             "reply_readiness_reason": readiness.reason if readiness is not None else "",
             "assistant_text_present": readiness.assistant_text_present if readiness is not None else False,
+            "assistant_final_content_present": readiness.assistant_final_content_present if readiness is not None else False,
+            "assistant_meta_only": readiness.assistant_meta_only if readiness is not None else False,
             "thinking_visible": readiness.thinking_visible if readiness is not None else False,
             "decision_marker_present": readiness.decision_marker_present if readiness is not None else False,
             "contract_parse_attempted": readiness.contract_parse_attempted if readiness is not None else False,
@@ -394,6 +488,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "reply_readiness_status": str(event_details.get("reply_readiness_status", "")).strip(),
                     "reply_readiness_reason": str(event_details.get("reply_readiness_reason", "")).strip(),
                     "assistant_text_present": bool(event_details.get("assistant_text_present", False)),
+                    "assistant_final_content_present": bool(event_details.get("assistant_final_content_present", False)),
+                    "assistant_meta_only": bool(event_details.get("assistant_meta_only", False)),
                     "thinking_visible": bool(event_details.get("thinking_visible", False)),
                     "decision_marker_present": bool(event_details.get("decision_marker_present", False)),
                     "contract_parse_attempted": bool(event_details.get("contract_parse_attempted", False)),
