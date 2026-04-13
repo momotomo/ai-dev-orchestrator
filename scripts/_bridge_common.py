@@ -252,6 +252,22 @@ PROJECT_CHAT_COMPOSER_HINTS = (
     "このプロジェクト内で新しいチャット",
     "プロジェクト内の新しいチャット",
 )
+PROJECT_CHAT_PLUS_BUTTON_LABELS = (
+    "+",
+    "＋",
+)
+PROJECT_CHAT_MORE_LABELS = (
+    "さらに表示",
+    "More",
+    "See more",
+)
+PROJECT_CHAT_ADD_SOURCE_LABELS = (
+    "情報源を追加する",
+    "Add sources",
+)
+PROJECT_CHAT_GITHUB_LABELS = (
+    "GitHub",
+)
 PROJECT_NAME_HEADING_SELECTORS = [
     "main h1",
     "main h2",
@@ -3694,6 +3710,316 @@ def _log_composer_probe(prefix: str, payload: Mapping[str, Any]) -> Path:
     return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
 
 
+@dataclass(frozen=True)
+class ProjectPageGithubSourcePreflightResult:
+    status: str
+    boundary: str
+    detail: str
+
+
+def classify_project_page_github_source_preflight(
+    payload: Mapping[str, Any],
+    *,
+    phase: str,
+) -> ProjectPageGithubSourcePreflightResult:
+    if not bool(payload.get("composerFound")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="probe_failed",
+            boundary="composer_missing",
+            detail="brand-new chat composer を特定できませんでした。",
+        )
+    if not bool(payload.get("plusFound")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="probe_failed",
+            boundary="composer_plus_missing",
+            detail="composer の `＋` ボタンが見つかりませんでした。",
+        )
+    if phase == "initial":
+        return ProjectPageGithubSourcePreflightResult(
+            status="available",
+            boundary="composer_plus_ready",
+            detail="composer の `＋` ボタンを確認できました。",
+        )
+    if phase == "after_plus":
+        if not bool(payload.get("moreFound")):
+            return ProjectPageGithubSourcePreflightResult(
+                status="probe_failed",
+                boundary="composer_more_missing",
+                detail="`＋` メニューは開きましたが `さらに表示` が見つかりませんでした。",
+            )
+        return ProjectPageGithubSourcePreflightResult(
+            status="available",
+            boundary="composer_more_ready",
+            detail="`さらに表示` を開く前提までは確認できました。",
+        )
+    if phase == "after_more":
+        if bool(payload.get("githubFound")):
+            return ProjectPageGithubSourcePreflightResult(
+                status="available",
+                boundary="github_item_found",
+                detail="`さらに表示` サブメニューに `GitHub` が見つかりました。",
+            )
+        if bool(payload.get("sourceAddFound")):
+            return ProjectPageGithubSourcePreflightResult(
+                status="unavailable",
+                boundary="github_item_missing",
+                detail="`さらに表示` サブメニューには到達しましたが、`GitHub` は見つかりませんでした。",
+            )
+        return ProjectPageGithubSourcePreflightResult(
+            status="probe_failed",
+            boundary="composer_more_submenu_not_open",
+            detail="`さらに表示` を押した後のサブメニューを確認できませんでした。",
+        )
+    if phase == "after_github_click":
+        if bool(payload.get("githubSelectedLike")):
+            return ProjectPageGithubSourcePreflightResult(
+                status="available",
+                boundary="github_selected_like",
+                detail="`GitHub` source が選択済み相当になったことを確認できました。",
+            )
+        if bool(payload.get("githubClickConfirmed")):
+            return ProjectPageGithubSourcePreflightResult(
+                status="available",
+                boundary="github_click_confirmed",
+                detail="`GitHub` click 自体は確認できました。",
+            )
+        return ProjectPageGithubSourcePreflightResult(
+            status="probe_failed",
+            boundary="github_click_unconfirmed",
+            detail="`GitHub` は見つかりましたが、クリック後の状態確認ができませんでした。",
+        )
+    raise BridgeError(f"unknown GitHub source preflight phase: {phase}")
+
+
+def _build_project_page_github_source_probe_script(
+    *,
+    action: str = "probe",
+    preferred_hint: str | None = None,
+) -> str:
+    return f"""
+(() => {{
+  const action = {json.dumps(action, ensure_ascii=False)};
+  {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=True)}
+  const plusLabels = {json.dumps(list(PROJECT_CHAT_PLUS_BUTTON_LABELS), ensure_ascii=False)};
+  const moreLabels = {json.dumps(list(PROJECT_CHAT_MORE_LABELS), ensure_ascii=False)};
+  const addSourceLabels = {json.dumps(list(PROJECT_CHAT_ADD_SOURCE_LABELS), ensure_ascii=False)};
+  const githubLabels = {json.dumps(list(PROJECT_CHAT_GITHUB_LABELS), ensure_ascii=False)};
+  const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+  const isVisible = (el) => {{
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return false;
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0;
+  }};
+  const composerRect = composer?.getBoundingClientRect?.() || null;
+  const composerScope = composer?.closest?.("form") || composer?.closest?.("section") || composer?.closest?.("main") || document.querySelector("main") || document.body;
+  const interactiveSelector = "button,[role='button'],[role='menuitem'],[role='menuitemradio'],[role='option'],a";
+  const scopedNodes = Array.from(composerScope.querySelectorAll(interactiveSelector)).filter(isVisible);
+  const globalNodes = Array.from(document.querySelectorAll(interactiveSelector)).filter(isVisible);
+  const dedupe = (values) => {{
+    const out = [];
+    const seen = new Set();
+    for (const value of values) {{
+      const normalized = normalize(value);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      out.push(normalized);
+    }}
+    return out;
+  }};
+  const labelsFor = (node) => dedupe([
+    node?.innerText,
+    node?.textContent,
+    node?.getAttribute?.("aria-label"),
+    node?.getAttribute?.("title"),
+    node?.getAttribute?.("data-testid"),
+  ]);
+  const exactMatch = (node, labels) => {{
+    const candidates = labelsFor(node);
+    return labels.some((label) => candidates.includes(label));
+  }};
+  const distanceScore = (node) => {{
+    if (!composerRect || !node?.getBoundingClientRect) return 999999;
+    const rect = node.getBoundingClientRect();
+    const dx = Math.abs(rect.left - composerRect.left);
+    const dy = Math.abs(rect.top - composerRect.top);
+    return dx + dy;
+  }};
+  const pickNode = (labels, options = {{}}) => {{
+    const preferScoped = !!options.preferScoped;
+    const choose = (nodes) => nodes
+      .filter((node) => exactMatch(node, labels))
+      .sort((left, right) => distanceScore(left) - distanceScore(right))[0] || null;
+    if (preferScoped) {{
+      const scoped = choose(scopedNodes);
+      if (scoped) return scoped;
+    }}
+    return choose(globalNodes);
+  }};
+  const plusNode = pickNode(plusLabels, {preferScoped: true});
+  const moreNode = pickNode(moreLabels, {preferScoped: false});
+  const sourceAddNode = pickNode(addSourceLabels, {preferScoped: false});
+  const githubNode = pickNode(githubLabels, {preferScoped: false});
+  const clickNode = (node) => {{
+    if (!node) return false;
+    node.scrollIntoView?.({{block: "center"}});
+    node.click?.();
+    return true;
+  }};
+  let actionResult = "noop";
+  if (action === "click_plus") {{
+    actionResult = clickNode(plusNode) ? "clicked" : "missing";
+  }} else if (action === "click_more") {{
+    actionResult = clickNode(moreNode) ? "clicked" : "missing";
+  }} else if (action === "click_github") {{
+    actionResult = clickNode(githubNode) ? "clicked" : "missing";
+  }}
+  const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 800));
+  const githubSelectedLike = composerScopeText.includes("GitHub") && !exactMatch(githubNode, githubLabels);
+  return JSON.stringify({{
+    composerFound: !!composer,
+    projectName: payload.projectName || "",
+    matchKind: payload.matchKind || "",
+    matchedHint: payload.matchedHint || "",
+    plusFound: !!plusNode,
+    moreFound: !!moreNode,
+    sourceAddFound: !!sourceAddNode,
+    githubFound: !!githubNode,
+    githubSelectedLike,
+    githubClickConfirmed: action === "click_github" ? actionResult === "clicked" : false,
+    action,
+    actionResult,
+    visibleLabels: dedupe(globalNodes.flatMap((node) => labelsFor(node))).slice(0, 30),
+  }});
+}})();
+"""
+
+
+def _probe_project_page_github_source(
+    page: SafariChatPage,
+    *,
+    preferred_hint: str | None = None,
+    action: str = "probe",
+) -> dict[str, Any]:
+    return _evaluate_json(
+        page,
+        _build_project_page_github_source_probe_script(
+            action=action,
+            preferred_hint=preferred_hint,
+        ),
+        "GitHub source preflight probe に失敗しました",
+    )
+
+
+def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any]) -> Path:
+    snapshot = {
+        "composerFound": bool(payload.get("composerFound")),
+        "projectName": str(payload.get("projectName", "")),
+        "matchKind": str(payload.get("matchKind", "")),
+        "matchedHint": str(payload.get("matchedHint", "")),
+        "plusFound": bool(payload.get("plusFound")),
+        "moreFound": bool(payload.get("moreFound")),
+        "sourceAddFound": bool(payload.get("sourceAddFound")),
+        "githubFound": bool(payload.get("githubFound")),
+        "githubSelectedLike": bool(payload.get("githubSelectedLike")),
+        "githubClickConfirmed": bool(payload.get("githubClickConfirmed")),
+        "action": str(payload.get("action", "")),
+        "actionResult": str(payload.get("actionResult", "")),
+        "visibleLabels": list(payload.get("visibleLabels", [])),
+    }
+    return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
+
+
+def _raise_project_page_github_source_preflight_error(
+    page: SafariChatPage,
+    result: ProjectPageGithubSourcePreflightResult,
+    payload: Mapping[str, Any],
+) -> None:
+    probe_path = _log_project_page_github_source_probe("project_page_github_source_probe", payload)
+    dump_path = log_page_dump(page, prefix="project_page_github_source_dump")
+    dump_note = f" raw dump: {repo_relative(dump_path)}" if dump_path else ""
+    raise BridgeError(
+        "GitHub source preflight に失敗しました。"
+        f" status={result.status}"
+        f" boundary={result.boundary}"
+        f" detail={result.detail}"
+        f" probe: {repo_relative(probe_path)}"
+        f"{dump_note}"
+    )
+
+
+def ensure_project_page_github_source_ready(
+    page: SafariChatPage,
+    *,
+    preferred_hint: str | None = None,
+) -> dict[str, Any]:
+    initial = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+    initial_result = classify_project_page_github_source_preflight(initial, phase="initial")
+    if initial_result.status != "available":
+        _raise_project_page_github_source_preflight_error(page, initial_result, initial)
+
+    plus_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="click_plus")
+    if str(plus_click.get("actionResult", "")).strip() != "clicked":
+        _raise_project_page_github_source_preflight_error(
+            page,
+            ProjectPageGithubSourcePreflightResult(
+                status="probe_failed",
+                boundary="composer_plus_click_failed",
+                detail="composer の `＋` ボタンをクリックできませんでした。",
+            ),
+            plus_click,
+        )
+    page.wait_for_timeout(300)
+
+    after_plus = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+    after_plus_result = classify_project_page_github_source_preflight(after_plus, phase="after_plus")
+    if after_plus_result.status != "available":
+        _raise_project_page_github_source_preflight_error(page, after_plus_result, after_plus)
+
+    more_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="click_more")
+    if str(more_click.get("actionResult", "")).strip() != "clicked":
+        _raise_project_page_github_source_preflight_error(
+            page,
+            ProjectPageGithubSourcePreflightResult(
+                status="probe_failed",
+                boundary="composer_more_click_failed",
+                detail="`さらに表示` をクリックできませんでした。",
+            ),
+            more_click,
+        )
+    page.wait_for_timeout(300)
+
+    after_more = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+    after_more_result = classify_project_page_github_source_preflight(after_more, phase="after_more")
+    if after_more_result.status != "available":
+        _raise_project_page_github_source_preflight_error(page, after_more_result, after_more)
+
+    github_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="click_github")
+    if str(github_click.get("actionResult", "")).strip() != "clicked":
+        _raise_project_page_github_source_preflight_error(
+            page,
+            ProjectPageGithubSourcePreflightResult(
+                status="probe_failed",
+                boundary="github_click_failed",
+                detail="`GitHub` は見つかりましたがクリックできませんでした。",
+            ),
+            github_click,
+        )
+    page.wait_for_timeout(300)
+
+    after_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
+    after_click = dict(after_click)
+    after_click["githubClickConfirmed"] = bool(github_click.get("actionResult") == "clicked")
+    after_click_result = classify_project_page_github_source_preflight(after_click, phase="after_github_click")
+    if after_click_result.status != "available":
+        _raise_project_page_github_source_preflight_error(page, after_click_result, after_click)
+    return after_click
+
+
 def _read_post_send_state(
     config: Mapping[str, Any],
     *,
@@ -3932,6 +4258,11 @@ def send_to_chatgpt_in_current_surface(
         require_target_chat=require_target_chat,
         surface_label=surface_label,
     ) as (_, page, config, _):
+        if project_page_mode:
+            ensure_project_page_github_source_ready(
+                page,
+                preferred_hint=preferred_hint,
+            )
         composer_state = fill_chatgpt_composer(
             page,
             text,

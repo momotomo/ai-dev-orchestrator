@@ -6,7 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -194,6 +194,168 @@ class InitialRequestSurfaceTests(unittest.TestCase):
         with patch.object(request_next_prompt, "read_prepared_request_text", return_value="request text"):
             retryable = request_next_prompt.load_retryable_initial_request(state)
         self.assertEqual(retryable, ("request text", "hash123", "ready_issue:abc"))
+
+
+class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
+    def test_project_level_source_dialog_like_payload_does_not_become_unavailable(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": False,
+                "sourceAddFound": True,
+                "githubFound": False,
+            },
+            phase="after_plus",
+        )
+        self.assertEqual(result.status, "probe_failed")
+        self.assertEqual(result.boundary, "composer_more_missing")
+
+    def test_github_and_add_sources_are_treated_as_parallel_items(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": True,
+                "sourceAddFound": True,
+                "githubFound": True,
+            },
+            phase="after_more",
+        )
+        self.assertEqual(result.status, "available")
+        self.assertEqual(result.boundary, "github_item_found")
+
+    def test_missing_github_under_more_is_unavailable(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": True,
+                "sourceAddFound": True,
+                "githubFound": False,
+            },
+            phase="after_more",
+        )
+        self.assertEqual(result.status, "unavailable")
+        self.assertEqual(result.boundary, "github_item_missing")
+
+    def test_missing_more_is_probe_failed(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": False,
+                "sourceAddFound": False,
+                "githubFound": False,
+            },
+            phase="after_plus",
+        )
+        self.assertEqual(result.status, "probe_failed")
+        self.assertEqual(result.boundary, "composer_more_missing")
+
+    def test_preflight_error_reports_exact_boundary(self) -> None:
+        class FakePage:
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        fake_page = FakePage()
+        probe_sequence = [
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": False,
+                "sourceAddFound": False,
+                "githubFound": False,
+                "action": "probe",
+            },
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": False,
+                "sourceAddFound": False,
+                "githubFound": False,
+                "action": "click_plus",
+                "actionResult": "clicked",
+            },
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "moreFound": False,
+                "sourceAddFound": False,
+                "githubFound": False,
+                "action": "probe",
+            },
+        ]
+        with (
+            patch.object(_bridge_common, "_probe_project_page_github_source", side_effect=probe_sequence),
+            patch.object(
+                _bridge_common,
+                "_log_project_page_github_source_probe",
+                return_value=Path("/tmp/project_page_github_source_probe.json"),
+            ),
+            patch.object(
+                _bridge_common,
+                "log_page_dump",
+                return_value=Path("/tmp/project_page_github_source_dump.txt"),
+            ),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as ctx:
+                _bridge_common.ensure_project_page_github_source_ready(fake_page)
+        self.assertIn("boundary=composer_more_missing", str(ctx.exception))
+
+    def test_send_path_runs_github_preflight_before_filling_project_page_composer(self) -> None:
+        events: list[str] = []
+
+        class FakePage:
+            front_tab = {"url": "https://chatgpt.com/g/g-p-123/project", "title": "ChatGPT - Project"}
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        fake_page = FakePage()
+        config = {
+            "chat_url_prefix": "https://chatgpt.com/",
+            "conversation_url_keywords": ["/c/"],
+            "project_page_url": "",
+        }
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, fake_page, config, fake_page.front_tab
+
+        def fake_fill_chatgpt_composer(*args: object, **kwargs: object) -> dict[str, object]:
+            events.append("fill")
+            return {"matchKind": "project_hint", "matchedHint": "内の新しいチャット", "projectName": "demo"}
+
+        def fake_submit_chatgpt_message(_page: object) -> None:
+            events.append("submit")
+
+        with (
+            patch.object(_bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                _bridge_common,
+                "ensure_project_page_github_source_ready",
+                side_effect=lambda *args, **kwargs: events.append("preflight") or {"githubClickConfirmed": True},
+            ),
+            patch.object(_bridge_common, "fill_chatgpt_composer", side_effect=fake_fill_chatgpt_composer),
+            patch.object(_bridge_common, "submit_chatgpt_message", side_effect=fake_submit_chatgpt_message),
+            patch.object(
+                _bridge_common,
+                "_read_post_send_state",
+                return_value=(
+                    {"url": "https://chatgpt.com/c/abc", "title": "ChatGPT"},
+                    {"bodyContainsExpected": False, "composerEmpty": False},
+                ),
+            ),
+        ):
+            result = _bridge_common.send_to_chatgpt_in_current_surface(
+                "hello",
+                require_conversation=False,
+                require_target_chat=False,
+                project_page_mode=True,
+            )
+        self.assertEqual(events, ["preflight", "fill", "submit"])
+        self.assertEqual(result["signal"], "conversation_url")
 
 
 class OrchestratorArgForwardingTests(unittest.TestCase):
