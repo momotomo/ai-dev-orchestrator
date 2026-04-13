@@ -5443,6 +5443,18 @@ def _wait_for_chatgpt_reply_text(
                         "decision_marker_present": bool(
                             getattr(exc, "decision_marker_present", False)
                         ),
+                        "body_block_start_present": bool(
+                            getattr(exc, "body_block_start_present", False)
+                        ),
+                        "body_block_end_present": bool(
+                            getattr(exc, "body_block_end_present", False)
+                        ),
+                        "partial_body_block_detected": bool(
+                            getattr(exc, "partial_body_block_detected", False)
+                        ),
+                        "open_body_blocks": list(
+                            getattr(exc, "open_body_blocks", []) or []
+                        ),
                         "contract_parse_attempted": bool(
                             getattr(exc, "contract_parse_attempted", False)
                         ),
@@ -5456,6 +5468,10 @@ def _wait_for_chatgpt_reply_text(
                             str(readiness_details["assistant_meta_only"]),
                             str(readiness_details["thinking_visible"]),
                             str(readiness_details["decision_marker_present"]),
+                            str(readiness_details["body_block_start_present"]),
+                            str(readiness_details["body_block_end_present"]),
+                            str(readiness_details["partial_body_block_detected"]),
+                            str(readiness_details["open_body_blocks"]),
                             str(readiness_details["contract_parse_attempted"]),
                         ]
                     )

@@ -85,6 +85,15 @@ class IssueCentricReplyReadiness:
     assistant_final_content_present: bool = False
     # True when assistant area has text but it is all meta-only UI labels.
     assistant_meta_only: bool = False
+    # True when at least one body block start marker is visible.
+    body_block_start_present: bool = False
+    # True when at least one body block end marker is visible.
+    body_block_end_present: bool = False
+    # True when a body block start marker is present but its end marker is not
+    # yet present — the reply is still being generated.
+    partial_body_block_detected: bool = False
+    # Names of open (start-only) body blocks, e.g. ["===CHATGPT_CODEX_BODY==="]
+    open_body_blocks: tuple[str, ...] = ()
     decision: IssueCentricDecision | None = None
 
 
@@ -99,6 +108,10 @@ class IssueCentricReplyNotReady(BridgeError):
         self.contract_parse_attempted = readiness.contract_parse_attempted
         self.assistant_final_content_present = readiness.assistant_final_content_present
         self.assistant_meta_only = readiness.assistant_meta_only
+        self.body_block_start_present = readiness.body_block_start_present
+        self.body_block_end_present = readiness.body_block_end_present
+        self.partial_body_block_detected = readiness.partial_body_block_detected
+        self.open_body_blocks = readiness.open_body_blocks
 
 
 import re as _re
@@ -151,6 +164,35 @@ _NON_FINAL_ASSISTANT_LINE_MARKERS = (
     "ChatGPT can make mistakes.",
     "Check important info.",
 )
+
+# Body block start/end pairs.  Used to detect partial (open) blocks that
+# indicate the reply is still being generated.
+_BODY_BLOCK_PAIRS: tuple[tuple[str, str], ...] = (
+    ("===CHATGPT_CODEX_BODY===", "===END_CODEX_BODY==="),
+    ("===CHATGPT_ISSUE_BODY===", "===END_ISSUE_BODY==="),
+    ("===CHATGPT_REVIEW===", "===END_REVIEW==="),
+    ("===CHATGPT_FOLLOWUP_ISSUE_BODY===", "===END_FOLLOWUP_ISSUE_BODY==="),
+)
+
+
+def _detect_partial_body_blocks(
+    segment: str,
+) -> tuple[list[str], list[str]]:
+    """Return (open_blocks, closed_blocks).
+
+    open_blocks: body blocks where start marker is present but end marker is
+        not yet present — the reply is still being generated.
+    closed_blocks: body blocks where both start and end markers are present.
+    """
+    open_blocks: list[str] = []
+    closed_blocks: list[str] = []
+    for start, end in _BODY_BLOCK_PAIRS:
+        if start in segment:
+            if end in segment:
+                closed_blocks.append(start)
+            else:
+                open_blocks.append(start)
+    return open_blocks, closed_blocks
 _LEGACY_REPLY_MARKERS = (
     "===CHATGPT_PROMPT_REPLY===",
     "===CHATGPT_NO_CODEX===",
@@ -300,6 +342,33 @@ def classify_issue_centric_reply_readiness(
             assistant_meta_only=False,
         )
 
+    open_blocks, closed_blocks = _detect_partial_body_blocks(assistant_segment)
+    partial_body_block = bool(open_blocks)
+    body_block_start_present = bool(open_blocks) or bool(closed_blocks)
+    body_block_end_present = bool(closed_blocks)
+
+    # If a body block start marker is present but its end marker is not yet
+    # visible, the reply is still being generated — treat as not-ready rather
+    # than invalid stop.
+    if partial_body_block:
+        return IssueCentricReplyReadiness(
+            status="reply_not_ready",
+            reason=(
+                "body block generation in progress"
+                f" (open_blocks={open_blocks})."
+            ),
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=decision_marker_present,
+            contract_parse_attempted=False,
+            assistant_final_content_present=assistant_final_content_present,
+            assistant_meta_only=assistant_meta_only,
+            body_block_start_present=True,
+            body_block_end_present=body_block_end_present,
+            partial_body_block_detected=True,
+            open_body_blocks=tuple(open_blocks),
+        )
+
     try:
         decision = parse_issue_centric_reply(assistant_segment)
     except IssueCentricContractNotFound as exc:
@@ -312,6 +381,9 @@ def classify_issue_centric_reply_readiness(
             contract_parse_attempted=True,
             assistant_final_content_present=assistant_final_content_present,
             assistant_meta_only=assistant_meta_only,
+            body_block_start_present=body_block_start_present,
+            body_block_end_present=body_block_end_present,
+            partial_body_block_detected=False,
         )
     except IssueCentricContractError as exc:
         return IssueCentricReplyReadiness(
@@ -323,6 +395,9 @@ def classify_issue_centric_reply_readiness(
             contract_parse_attempted=True,
             assistant_final_content_present=assistant_final_content_present,
             assistant_meta_only=assistant_meta_only,
+            body_block_start_present=body_block_start_present,
+            body_block_end_present=body_block_end_present,
+            partial_body_block_detected=False,
         )
 
     return IssueCentricReplyReadiness(
@@ -334,6 +409,9 @@ def classify_issue_centric_reply_readiness(
         contract_parse_attempted=True,
         assistant_final_content_present=assistant_final_content_present,
         assistant_meta_only=assistant_meta_only,
+        body_block_start_present=body_block_start_present,
+        body_block_end_present=body_block_end_present,
+        partial_body_block_detected=False,
         decision=decision,
     )
 
@@ -386,6 +464,10 @@ def stop_for_invalid_issue_centric_contract(
                 f"- assistant_meta_only: {readiness.assistant_meta_only}",
                 f"- thinking_visible: {readiness.thinking_visible}",
                 f"- decision_marker_present: {readiness.decision_marker_present}",
+                f"- body_block_start_present: {readiness.body_block_start_present}",
+                f"- body_block_end_present: {readiness.body_block_end_present}",
+                f"- partial_body_block_detected: {readiness.partial_body_block_detected}",
+                f"- open_body_blocks: {list(readiness.open_body_blocks)}",
                 f"- contract_parse_attempted: {readiness.contract_parse_attempted}",
             ]
         )
@@ -426,6 +508,10 @@ def stop_for_invalid_issue_centric_contract(
             "assistant_meta_only": readiness.assistant_meta_only if readiness is not None else False,
             "thinking_visible": readiness.thinking_visible if readiness is not None else False,
             "decision_marker_present": readiness.decision_marker_present if readiness is not None else False,
+            "body_block_start_present": readiness.body_block_start_present if readiness is not None else False,
+            "body_block_end_present": readiness.body_block_end_present if readiness is not None else False,
+            "partial_body_block_detected": readiness.partial_body_block_detected if readiness is not None else False,
+            "open_body_blocks": list(readiness.open_body_blocks) if readiness is not None else [],
             "contract_parse_attempted": readiness.contract_parse_attempted if readiness is not None else False,
         }
     )
@@ -492,6 +578,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "assistant_meta_only": bool(event_details.get("assistant_meta_only", False)),
                     "thinking_visible": bool(event_details.get("thinking_visible", False)),
                     "decision_marker_present": bool(event_details.get("decision_marker_present", False)),
+                    "body_block_start_present": bool(event_details.get("body_block_start_present", False)),
+                    "body_block_end_present": bool(event_details.get("body_block_end_present", False)),
+                    "partial_body_block_detected": bool(event_details.get("partial_body_block_detected", False)),
+                    "open_body_blocks": list(event_details.get("open_body_blocks", [])),
                     "contract_parse_attempted": bool(event_details.get("contract_parse_attempted", False)),
                 }
             )
