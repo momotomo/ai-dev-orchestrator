@@ -1891,5 +1891,122 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
                 )
 
 
+class MetaOnlyReplyNotReadyTests(unittest.TestCase):
+    """Verify that meta-only UI labels in the assistant area are classified as
+    reply_not_ready and never trigger an invalid stop."""
+
+    def _make_raw(self, *assistant_lines: str) -> str:
+        return "\n".join(
+            ["あなた:", "request body", "ChatGPT:", ""] + list(assistant_lines)
+        )
+
+    # ------------------------------------------------------------------
+    # classify_issue_centric_reply_readiness
+    # ------------------------------------------------------------------
+
+    def test_thought_for_39s_is_not_ready(self) -> None:
+        raw = self._make_raw("Thought for 39s", "じっくり思考", "GitHub")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_text_present)
+        self.assertTrue(readiness.assistant_meta_only)
+        self.assertFalse(readiness.assistant_final_content_present)
+
+    def test_thought_for_120_seconds_is_not_ready(self) -> None:
+        raw = self._make_raw("Thought for 120 seconds", "GitHub")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+        self.assertFalse(readiness.assistant_final_content_present)
+
+    def test_github_pill_only_is_not_ready(self) -> None:
+        raw = self._make_raw("GitHub")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+
+    def test_deep_research_label_is_not_ready(self) -> None:
+        raw = self._make_raw("Deep research")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+
+    def test_thinking_marker_only_is_not_ready(self) -> None:
+        raw = self._make_raw("思考中")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+
+    def test_actual_reply_body_with_no_marker_is_invalid_stop(self) -> None:
+        raw = self._make_raw("了解しました。次の変更を進めます。")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertTrue(readiness.assistant_final_content_present)
+        self.assertFalse(readiness.assistant_meta_only)
+
+    def test_mixed_meta_and_content_lines_is_invalid_stop(self) -> None:
+        raw = self._make_raw("Thought for 5s", "了解しました。次の変更を進めます。")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        # Has actual content + no marker → invalid stop
+        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertTrue(readiness.assistant_final_content_present)
+        self.assertFalse(readiness.assistant_meta_only)
+
+    def test_assistant_meta_only_flag_set_correctly(self) -> None:
+        raw_meta = self._make_raw("Thought for 1s", "GitHub")
+        r = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw_meta, after_text="request body"
+        )
+        self.assertTrue(r.assistant_meta_only)
+        self.assertFalse(r.assistant_final_content_present)
+
+        raw_content = self._make_raw("Here is the plan.")
+        r2 = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw_content, after_text="request body"
+        )
+        self.assertFalse(r2.assistant_meta_only)
+        self.assertTrue(r2.assistant_final_content_present)
+
+    # ------------------------------------------------------------------
+    # parse_issue_centric_reply_for_fetch raises IssueCentricReplyNotReady
+    # ------------------------------------------------------------------
+
+    def test_parse_for_fetch_raises_not_ready_for_thought_for_seconds(self) -> None:
+        raw = self._make_raw("Thought for 39s", "じっくり思考", "GitHub")
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady) as ctx:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+        self.assertEqual(ctx.exception.reply_readiness_status, "reply_not_ready")
+        self.assertTrue(ctx.exception.assistant_meta_only)
+        self.assertFalse(ctx.exception.assistant_final_content_present)
+
+    def test_parse_for_fetch_does_not_raise_invalid_for_meta_only(self) -> None:
+        raw = self._make_raw("GitHub", "Thought for 5s")
+        try:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+            self.fail("expected IssueCentricReplyNotReady")
+        except fetch_next_prompt.IssueCentricReplyNotReady:
+            pass  # correct
+        except fetch_next_prompt.IssueCentricReplyInvalid:
+            self.fail("meta-only dump must not raise IssueCentricReplyInvalid")
+
+
 if __name__ == "__main__":
     unittest.main()

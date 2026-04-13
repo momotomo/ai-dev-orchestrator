@@ -5433,6 +5433,12 @@ def _wait_for_chatgpt_reply_text(
                         "assistant_text_present": bool(
                             getattr(exc, "assistant_text_present", False)
                         ),
+                        "assistant_final_content_present": bool(
+                            getattr(exc, "assistant_final_content_present", False)
+                        ),
+                        "assistant_meta_only": bool(
+                            getattr(exc, "assistant_meta_only", False)
+                        ),
                         "thinking_visible": bool(getattr(exc, "thinking_visible", False)),
                         "decision_marker_present": bool(
                             getattr(exc, "decision_marker_present", False)
@@ -5446,6 +5452,8 @@ def _wait_for_chatgpt_reply_text(
                             readiness_details["reply_readiness_status"],
                             readiness_details["reply_readiness_reason"],
                             str(readiness_details["assistant_text_present"]),
+                            str(readiness_details["assistant_final_content_present"]),
+                            str(readiness_details["assistant_meta_only"]),
                             str(readiness_details["thinking_visible"]),
                             str(readiness_details["decision_marker_present"]),
                             str(readiness_details["contract_parse_attempted"]),
