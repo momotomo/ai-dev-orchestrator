@@ -140,7 +140,20 @@ class HandoffWaitTransitionTests(unittest.TestCase):
 
         with (
             patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request text"),
-            patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value="raw reply text") as wait_mock,
+            patch.object(
+                fetch_next_prompt,
+                "wait_for_plan_a_or_prompt_reply_text",
+                return_value="\n".join(
+                    [
+                        "あなた:",
+                        "request text",
+                        "ChatGPT:",
+                        "===CHATGPT_PROMPT_REPLY===",
+                        "Phase: next prompt",
+                        "===END_REPLY===",
+                    ]
+                ),
+            ) as wait_mock,
             patch.object(fetch_next_prompt, "log_text", side_effect=["raw-log", "prompt-log"]),
             patch.object(fetch_next_prompt, "extract_last_chatgpt_reply", return_value=decision),
             patch.object(fetch_next_prompt, "runtime_prompt_path", return_value=REPO_ROOT / "tests" / "tmp_prompt.md"),

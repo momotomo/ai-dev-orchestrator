@@ -496,6 +496,7 @@ class CodexProgressSnapshot:
 class ChatGPTWaitEvent:
     name: str
     latest_text: str
+    details: Mapping[str, Any] | None = None
 
 
 def build_chatgpt_reply_contract_section() -> str:
@@ -5390,6 +5391,7 @@ def _wait_for_chatgpt_reply_text(
         latest_text = ""
         timeout_attempts = 0
         stage = "initial"
+        last_reply_readiness_signature = ""
         while True:
             try:
                 latest_text = read_chatgpt_conversation_dom(page)
@@ -5420,7 +5422,48 @@ def _wait_for_chatgpt_reply_text(
                         flush=True,
                     )
                 return latest_text
-            except BridgeError:
+            except BridgeError as exc:
+                readiness_status = str(getattr(exc, "reply_readiness_status", "")).strip()
+                if readiness_status:
+                    readiness_details = {
+                        "reply_readiness_status": readiness_status,
+                        "reply_readiness_reason": str(
+                            getattr(exc, "reply_readiness_reason", "")
+                        ).strip(),
+                        "assistant_text_present": bool(
+                            getattr(exc, "assistant_text_present", False)
+                        ),
+                        "thinking_visible": bool(getattr(exc, "thinking_visible", False)),
+                        "decision_marker_present": bool(
+                            getattr(exc, "decision_marker_present", False)
+                        ),
+                        "contract_parse_attempted": bool(
+                            getattr(exc, "contract_parse_attempted", False)
+                        ),
+                    }
+                    signature = "|".join(
+                        [
+                            readiness_details["reply_readiness_status"],
+                            readiness_details["reply_readiness_reason"],
+                            str(readiness_details["assistant_text_present"]),
+                            str(readiness_details["thinking_visible"]),
+                            str(readiness_details["decision_marker_present"]),
+                            str(readiness_details["contract_parse_attempted"]),
+                        ]
+                    )
+                    if (
+                        stage_callback is not None
+                        and signature
+                        and signature != last_reply_readiness_signature
+                    ):
+                        stage_callback(
+                            ChatGPTWaitEvent(
+                                "reply_not_ready",
+                                latest_text,
+                                readiness_details,
+                            )
+                        )
+                        last_reply_readiness_signature = signature
                 pass
 
             now = time.time()
@@ -5473,7 +5516,9 @@ def wait_for_plan_a_or_prompt_reply_text(
     def combined_extractor(raw_text: str, after_text: str | None) -> Any:
         try:
             return plan_a_extractor(raw_text, after_text)
-        except BridgeError:
+        except BridgeError as exc:
+            if str(getattr(exc, "reply_readiness_status", "")).strip() == "reply_not_ready":
+                raise
             pass
         return extract_last_chatgpt_reply(raw_text, after_text=after_text)
 

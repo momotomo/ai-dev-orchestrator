@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1420,8 +1421,9 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
                 "No contract markers here yet.",
             ]
         )
-        with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が見つかりませんでした"):
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyInvalid) as ctx:
             fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw, after_text="request body")
+        self.assertIn("issue-centric decision markers are missing", str(ctx.exception))
 
     def test_parse_issue_centric_reply_for_fetch_stops_when_marker_is_present_but_invalid(self) -> None:
         raw = build_raw_reply(
@@ -1629,6 +1631,233 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
 
 
 class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
+    def test_classifies_thinking_reply_as_not_ready(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "",
+                "思考中",
+                "",
+                "じっくり思考",
+                "",
+                "ChatGPT の回答は必ずしも正しいとは限りません。重要な情報は確認するようにしてください。cookie の設定を参照してください。",
+            ]
+        )
+
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw,
+            after_text="request body",
+        )
+
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_text_present)
+        self.assertTrue(readiness.thinking_visible)
+        self.assertFalse(readiness.decision_marker_present)
+        self.assertFalse(readiness.contract_parse_attempted)
+
+    def test_parse_for_fetch_raises_not_ready_for_thinking_reply(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "",
+                "思考中",
+                "",
+                "じっくり思考",
+            ]
+        )
+
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady) as ctx:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw, after_text="request body")
+
+        self.assertEqual(ctx.exception.reply_readiness_status, "reply_not_ready")
+        self.assertTrue(ctx.exception.thinking_visible)
+        self.assertFalse(ctx.exception.decision_marker_present)
+
+    def test_classifies_completed_reply_without_marker_as_invalid_stop(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "",
+                "了解しました。次の変更を進めます。",
+            ]
+        )
+
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw,
+            after_text="request body",
+        )
+
+        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertTrue(readiness.assistant_text_present)
+        self.assertFalse(readiness.thinking_visible)
+        self.assertFalse(readiness.decision_marker_present)
+
+    def test_classifies_invalid_contract_when_decision_json_is_broken(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                issue_centric_contract.DECISION_JSON_START,
+                "not json",
+                issue_centric_contract.DECISION_JSON_END,
+            ]
+        )
+
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw,
+            after_text="request body",
+        )
+
+        self.assertEqual(readiness.status, "reply_complete_invalid_contract")
+        self.assertTrue(readiness.decision_marker_present)
+        self.assertTrue(readiness.contract_parse_attempted)
+
+    def test_classifies_valid_contract_and_returns_decision(self) -> None:
+        codex_payload = b64("Codex body")
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#123",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Run Codex.",
+            },
+            parts=[
+                block("codex", codex_payload),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": "#123",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Run Codex.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw,
+            after_text="request body",
+        )
+
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertIsNotNone(readiness.decision)
+        self.assertEqual(
+            readiness.decision.action,
+            issue_centric_contract.IssueCentricAction.CODEX_RUN,
+        )
+
+    def test_legacy_visible_text_reply_still_uses_fallback_path(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "===CHATGPT_PROMPT_REPLY===",
+                "Next phase prompt",
+                "===END_REPLY===",
+            ]
+        )
+
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw,
+            after_text="request body",
+        )
+
+        self.assertEqual(readiness.status, "reply_complete_legacy_contract")
+        with self.assertRaises(BridgeError):
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw, after_text="request body")
+
+    def test_wait_continues_when_reply_is_still_thinking(self) -> None:
+        raw_not_ready = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "",
+                "思考中",
+                "",
+                "じっくり思考",
+            ]
+        )
+        raw_valid = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#2",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Run Codex.",
+            },
+            parts=[
+                block("codex", b64("Codex body")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": "#2",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Run Codex.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+
+        class _DummyPage:
+            def __init__(self) -> None:
+                self.wait_calls = 0
+
+            def wait_for_timeout(self, _: int) -> None:
+                self.wait_calls += 1
+
+        page = _DummyPage()
+        events: list[bridge_common.ChatGPTWaitEvent] = []
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {"poll_interval_seconds": 0}, {"url": "https://chatgpt.com/c/demo", "title": "ChatGPT"}
+
+        with (
+            patch.object(bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                bridge_common,
+                "read_chatgpt_conversation_dom",
+                side_effect=[raw_not_ready, raw_valid],
+            ),
+        ):
+            result = bridge_common.wait_for_plan_a_or_prompt_reply_text(
+                plan_a_extractor=(
+                    lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                        raw_text,
+                        after_text=after_text,
+                    )
+                ),
+                request_text="request body",
+                stage_callback=events.append,
+            )
+
+        self.assertEqual(result, raw_valid)
+        self.assertEqual(page.wait_calls, 1)
+        self.assertTrue(events)
+        self.assertEqual(events[0].name, "reply_not_ready")
+        self.assertEqual(events[0].details["reply_readiness_status"], "reply_not_ready")
+        self.assertTrue(events[0].details["thinking_visible"])
+
     def test_propagates_non_bridgeerror_from_plan_a_extractor(self) -> None:
         raw = build_raw_reply(
             {

@@ -92,6 +92,7 @@ copy-response 経路の feasibility verdict は
 - current initial request / issue-centric preferred route では `===CHATGPT_DECISION_JSON=== ... ===END_DECISION_JSON===` を先頭に置く issue-centric contract を返す
 - body が必要な場合だけ `CHATGPT_ISSUE_BODY` / `CHATGPT_CODEX_BODY` / `CHATGPT_REVIEW` / `CHATGPT_FOLLOWUP_ISSUE_BODY` の base64 block を続ける
 - legacy visible-text contract `===CHATGPT_PROMPT_REPLY=== ... ===END_REPLY===` と `===CHATGPT_NO_CODEX=== ... ===END_NO_CODEX===` は legacy fallback / older recovery path 用にだけ残る
+- 返答がまだ `思考中` などの未完成状態なら invalid ではなく wait 継続に戻し、assistant final text が完成した後にだけ contract の valid / invalid を判定する
 - blocked や retry 未回復は ChatGPT 返答契約ではなく、bridge 側の `人確認待ち` / `異常` 停止として扱う
 
 ## Codex worker が最初に確認する固定 docs

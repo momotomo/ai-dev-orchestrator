@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import launch_codex_once
@@ -39,10 +40,12 @@ from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
+    CHATGPT_TURN_MARKER,
     IssueCentricAction,
     IssueCentricContractError,
     IssueCentricContractNotFound,
-    contains_issue_centric_contract_marker,
+    IssueCentricDecision,
+    USER_TURN_MARKER,
     parse_issue_centric_reply,
 )
 from issue_centric_codex_run import execute_codex_run_action
@@ -56,10 +59,193 @@ from issue_centric_transport import (
 
 
 class IssueCentricReplyInvalid(Exception):
-    def __init__(self, detail: str, *, raw_text: str) -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        raw_text: str,
+        readiness: "IssueCentricReplyReadiness | None" = None,
+    ) -> None:
         super().__init__(detail)
         self.detail = detail
         self.raw_text = raw_text
+        self.readiness = readiness
+
+
+@dataclass(frozen=True)
+class IssueCentricReplyReadiness:
+    status: str
+    reason: str
+    assistant_text_present: bool
+    thinking_visible: bool
+    decision_marker_present: bool
+    contract_parse_attempted: bool
+    decision: IssueCentricDecision | None = None
+
+
+class IssueCentricReplyNotReady(BridgeError):
+    def __init__(self, readiness: IssueCentricReplyReadiness) -> None:
+        super().__init__(readiness.reason)
+        self.reply_readiness_status = readiness.status
+        self.reply_readiness_reason = readiness.reason
+        self.assistant_text_present = readiness.assistant_text_present
+        self.thinking_visible = readiness.thinking_visible
+        self.decision_marker_present = readiness.decision_marker_present
+        self.contract_parse_attempted = readiness.contract_parse_attempted
+
+
+_THINKING_MARKERS = (
+    "思考中",
+    "じっくり思考",
+    "Thinking",
+    "Reasoning",
+)
+_NON_FINAL_ASSISTANT_LINE_MARKERS = (
+    "ChatGPT の回答は必ずしも正しいとは限りません。",
+    "重要な情報は確認するようにしてください。",
+    "cookie の設定を参照してください。",
+    "ChatGPT can make mistakes.",
+    "Check important info.",
+)
+_LEGACY_REPLY_MARKERS = (
+    "===CHATGPT_PROMPT_REPLY===",
+    "===CHATGPT_NO_CODEX===",
+)
+
+
+def _reply_search_start_index(raw_text: str, after_text: str | None = None) -> int:
+    search_start = 0
+    if after_text:
+        anchor = raw_text.rfind(after_text)
+        if anchor != -1:
+            search_start = anchor + len(after_text)
+    if search_start == 0:
+        last_user_turn = raw_text.rfind(USER_TURN_MARKER)
+        if last_user_turn != -1:
+            search_start = last_user_turn
+    return search_start
+
+
+def _assistant_segment_after_text(raw_text: str, after_text: str | None = None) -> str:
+    search_start = _reply_search_start_index(raw_text, after_text)
+    assistant_start = raw_text.find(CHATGPT_TURN_MARKER, search_start)
+    if assistant_start == -1:
+        assistant_start = raw_text.rfind(CHATGPT_TURN_MARKER)
+    if assistant_start == -1:
+        return ""
+    next_user_turn = raw_text.find(USER_TURN_MARKER, assistant_start + len(CHATGPT_TURN_MARKER))
+    segment_end = next_user_turn if next_user_turn != -1 else len(raw_text)
+    return raw_text[assistant_start:segment_end]
+
+
+def _assistant_lines_for_readiness(raw_text: str, after_text: str | None = None) -> list[str]:
+    segment = _assistant_segment_after_text(raw_text, after_text)
+    if not segment:
+        return []
+    body = segment
+    if body.startswith(CHATGPT_TURN_MARKER):
+        body = body[len(CHATGPT_TURN_MARKER) :]
+    filtered_lines: list[str] = []
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if any(marker in line for marker in _NON_FINAL_ASSISTANT_LINE_MARKERS):
+            continue
+        filtered_lines.append(line)
+    return filtered_lines
+
+
+def _lines_are_reply_not_ready(lines: list[str]) -> bool:
+    if not lines:
+        return True
+    return all(any(marker in line for marker in _THINKING_MARKERS) for line in lines)
+
+
+def classify_issue_centric_reply_readiness(
+    raw_text: str,
+    *,
+    after_text: str | None = None,
+) -> IssueCentricReplyReadiness:
+    assistant_segment = _assistant_segment_after_text(raw_text, after_text)
+    assistant_lines = _assistant_lines_for_readiness(raw_text, after_text)
+    assistant_text_present = bool(assistant_lines)
+    thinking_visible = any(
+        any(marker in line for marker in _THINKING_MARKERS) for line in assistant_lines
+    )
+    decision_marker_present = "===CHATGPT_DECISION_JSON===" in assistant_segment
+    legacy_marker_present = any(marker in assistant_segment for marker in _LEGACY_REPLY_MARKERS)
+
+    if not assistant_text_present:
+        return IssueCentricReplyReadiness(
+            status="reply_not_ready",
+            reason="assistant final reply is not visible yet.",
+            assistant_text_present=False,
+            thinking_visible=False,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+
+    if not decision_marker_present and _lines_are_reply_not_ready(assistant_lines):
+        return IssueCentricReplyReadiness(
+            status="reply_not_ready",
+            reason="assistant reply is still in thinking/loading state.",
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+
+    if legacy_marker_present:
+        return IssueCentricReplyReadiness(
+            status="reply_complete_legacy_contract",
+            reason="legacy visible-text reply contract is present.",
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+
+    if not decision_marker_present:
+        return IssueCentricReplyReadiness(
+            status="reply_complete_no_marker",
+            reason="assistant final reply is visible but issue-centric decision markers are missing.",
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+
+    try:
+        decision = parse_issue_centric_reply(assistant_segment)
+    except IssueCentricContractNotFound as exc:
+        return IssueCentricReplyReadiness(
+            status="reply_complete_invalid_contract",
+            reason=str(exc),
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+        )
+    except IssueCentricContractError as exc:
+        return IssueCentricReplyReadiness(
+            status="reply_complete_invalid_contract",
+            reason=str(exc),
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+        )
+
+    return IssueCentricReplyReadiness(
+        status="reply_complete_valid_contract",
+        reason="issue-centric contract parsed successfully.",
+        assistant_text_present=True,
+        thinking_visible=thinking_visible,
+        decision_marker_present=True,
+        contract_parse_attempted=True,
+        decision=decision,
+    )
 
 
 def parse_issue_centric_reply_for_fetch(
@@ -67,17 +253,26 @@ def parse_issue_centric_reply_for_fetch(
     *,
     after_text: str | None = None,
 ) -> object:
-    try:
-        return parse_issue_centric_reply(raw_text, after_text=after_text)
-    except IssueCentricContractNotFound as exc:
-        if contains_issue_centric_contract_marker(raw_text, after_text=after_text):
-            raise IssueCentricReplyInvalid(
-                "issue-centric contract marker は見つかりましたが、decision JSON か body block を最後まで抽出できませんでした。",
-                raw_text=raw_text,
-            ) from exc
-        raise BridgeError("issue-centric contract reply が見つかりませんでした") from exc
-    except IssueCentricContractError as exc:
-        raise IssueCentricReplyInvalid(str(exc), raw_text=raw_text) from exc
+    readiness = classify_issue_centric_reply_readiness(raw_text, after_text=after_text)
+    if readiness.status == "reply_not_ready":
+        raise IssueCentricReplyNotReady(readiness)
+    if readiness.status == "reply_complete_no_marker":
+        raise IssueCentricReplyInvalid(
+            readiness.reason,
+            raw_text=raw_text,
+            readiness=readiness,
+        )
+    if readiness.status == "reply_complete_legacy_contract":
+        raise BridgeError("issue-centric contract reply が見つかりませんでした")
+    if readiness.status == "reply_complete_invalid_contract":
+        raise IssueCentricReplyInvalid(
+            readiness.reason,
+            raw_text=raw_text,
+            readiness=readiness,
+        )
+    if readiness.decision is None:
+        raise BridgeError("issue-centric contract reply が見つかりませんでした")
+    return readiness.decision
 
 
 def stop_for_invalid_issue_centric_contract(
@@ -87,8 +282,21 @@ def stop_for_invalid_issue_centric_contract(
     detail: str,
     pending_request_source: str,
     raw_log_path: Path | None = None,
+    readiness: IssueCentricReplyReadiness | None = None,
 ) -> None:
     raw_log = raw_log_path or log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
+    readiness_lines: list[str] = []
+    if readiness is not None:
+        readiness_lines.extend(
+            [
+                f"- reply_readiness_status: {readiness.status}",
+                f"- reply_readiness_reason: {readiness.reason}",
+                f"- assistant_text_present: {readiness.assistant_text_present}",
+                f"- thinking_visible: {readiness.thinking_visible}",
+                f"- decision_marker_present: {readiness.decision_marker_present}",
+                f"- contract_parse_attempted: {readiness.contract_parse_attempted}",
+            ]
+        )
     invalid_summary = "\n".join(
         [
             "# Invalid Issue-Centric Contract",
@@ -96,6 +304,7 @@ def stop_for_invalid_issue_centric_contract(
             f"- error: {detail}",
             f"- raw_dump: {repo_relative(raw_log)}",
             f"- pending_request_source: {pending_request_source or 'unknown'}",
+            *readiness_lines,
         ]
     ).strip() + "\n"
     invalid_log = log_text("invalid_issue_centric_contract", invalid_summary, suffix="md")
@@ -118,6 +327,12 @@ def stop_for_invalid_issue_centric_contract(
             "last_issue_centric_decision_log": repo_relative(invalid_log),
             "last_issue_centric_metadata_log": "",
             "last_issue_centric_artifact_file": "",
+            "reply_readiness_status": readiness.status if readiness is not None else "",
+            "reply_readiness_reason": readiness.reason if readiness is not None else "",
+            "assistant_text_present": readiness.assistant_text_present if readiness is not None else False,
+            "thinking_visible": readiness.thinking_visible if readiness is not None else False,
+            "decision_marker_present": readiness.decision_marker_present if readiness is not None else False,
+            "contract_parse_attempted": readiness.contract_parse_attempted if readiness is not None else False,
         }
     )
     save_state(failed_state)
@@ -163,6 +378,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         nonlocal rotation_requested, rotation_reason
         event_name = str(getattr(event, "name", "")).strip()
         latest_text = str(getattr(event, "latest_text", "") or "")
+        event_details = dict(getattr(event, "details", {}) or {})
         mutable_state = clear_error_fields(dict(load_state()))
         if event_name == "timeout_first":
             mutable_state["mode"] = "extended_wait"
@@ -171,6 +387,18 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             rotation_requested = True
             rotation_reason = "late_completion"
             mark_next_request_requires_rotation(mutable_state, rotation_reason)
+        elif event_name == "reply_not_ready":
+            mutable_state.update(
+                {
+                    "mode": "waiting_prompt_reply",
+                    "reply_readiness_status": str(event_details.get("reply_readiness_status", "")).strip(),
+                    "reply_readiness_reason": str(event_details.get("reply_readiness_reason", "")).strip(),
+                    "assistant_text_present": bool(event_details.get("assistant_text_present", False)),
+                    "thinking_visible": bool(event_details.get("thinking_visible", False)),
+                    "decision_marker_present": bool(event_details.get("decision_marker_present", False)),
+                    "contract_parse_attempted": bool(event_details.get("contract_parse_attempted", False)),
+                }
+            )
         save_state(mutable_state)
         stage_log = log_text(event_name, latest_text, suffix="txt")
         print(f"{event_name}: {stage_log}")
@@ -199,18 +427,28 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 pending_request_source=pending_request_source,
             )
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
-    try:
-        contract_decision = parse_issue_centric_reply_for_fetch(raw_text, after_text=request_text or None)
-    except BridgeError:
-        contract_decision = None
-    except IssueCentricReplyInvalid as exc:
+    readiness = classify_issue_centric_reply_readiness(raw_text, after_text=request_text or None)
+    if readiness.status == "reply_not_ready":
+        raise BridgeError("ChatGPT reply はまだ未完成です。もう一度 fetch を待ってください。")
+    if readiness.status == "reply_complete_no_marker":
         stop_for_invalid_issue_centric_contract(
             dict(state),
-            raw_text=exc.raw_text,
-            detail=exc.detail,
+            raw_text=raw_text,
+            detail=readiness.reason,
             pending_request_source=pending_request_source,
             raw_log_path=raw_log,
+            readiness=readiness,
         )
+    if readiness.status == "reply_complete_invalid_contract":
+        stop_for_invalid_issue_centric_contract(
+            dict(state),
+            raw_text=raw_text,
+            detail=readiness.reason,
+            pending_request_source=pending_request_source,
+            raw_log_path=raw_log,
+            readiness=readiness,
+        )
+    contract_decision = readiness.decision
     if contract_decision is not None:
         decision_log = log_text(
             "extracted_issue_centric_contract",
@@ -370,6 +608,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_review_comment_url": "",
                 "last_issue_centric_review_close_policy": "",
                 "last_issue_centric_stop_reason": materialized.safe_stop_reason,
+                "reply_readiness_status": readiness.status,
+                "reply_readiness_reason": readiness.reason,
+                "assistant_text_present": readiness.assistant_text_present,
+                "thinking_visible": readiness.thinking_visible,
+                "decision_marker_present": readiness.decision_marker_present,
+                "contract_parse_attempted": readiness.contract_parse_attempted,
             }
         )
         if contract_decision.action is IssueCentricAction.CODEX_RUN:
