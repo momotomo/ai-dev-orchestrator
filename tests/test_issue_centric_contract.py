@@ -2008,5 +2008,212 @@ class MetaOnlyReplyNotReadyTests(unittest.TestCase):
             self.fail("meta-only dump must not raise IssueCentricReplyInvalid")
 
 
+class PartialBodyBlockNotReadyTests(unittest.TestCase):
+    """Verify that a partial issue-centric body block (start marker present,
+    end marker absent) is classified as reply_not_ready and never triggers
+    an invalid stop."""
+
+    _DECISION_COMPLETE = "\n".join(
+        [
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"codex_run","target_issue":"#3","summary":"test"}',
+            "===END_DECISION_JSON===",
+        ]
+    )
+
+    def _make_raw(self, *assistant_lines: str) -> str:
+        return "\n".join(
+            ["あなた:", "request body", "ChatGPT:", ""] + list(assistant_lines)
+        )
+
+    # ------------------------------------------------------------------
+    # _detect_partial_body_blocks
+    # ------------------------------------------------------------------
+
+    def test_detect_open_codex_body_block(self) -> None:
+        segment = "===CHATGPT_CODEX_BODY===\naGVsbG8="
+        open_b, closed_b = fetch_next_prompt._detect_partial_body_blocks(segment)
+        self.assertIn("===CHATGPT_CODEX_BODY===", open_b)
+        self.assertEqual(closed_b, [])
+
+    def test_detect_closed_codex_body_block(self) -> None:
+        segment = "===CHATGPT_CODEX_BODY===\naGVsbG8=\n===END_CODEX_BODY==="
+        open_b, closed_b = fetch_next_prompt._detect_partial_body_blocks(segment)
+        self.assertEqual(open_b, [])
+        self.assertIn("===CHATGPT_CODEX_BODY===", closed_b)
+
+    def test_detect_open_issue_body_block(self) -> None:
+        segment = "===CHATGPT_ISSUE_BODY===\naGVsbG8="
+        open_b, closed_b = fetch_next_prompt._detect_partial_body_blocks(segment)
+        self.assertIn("===CHATGPT_ISSUE_BODY===", open_b)
+        self.assertEqual(closed_b, [])
+
+    def test_detect_open_review_body_block(self) -> None:
+        segment = "===CHATGPT_REVIEW===\naGVsbG8="
+        open_b, closed_b = fetch_next_prompt._detect_partial_body_blocks(segment)
+        self.assertIn("===CHATGPT_REVIEW===", open_b)
+        self.assertEqual(closed_b, [])
+
+    def test_detect_no_body_blocks(self) -> None:
+        segment = "===CHATGPT_DECISION_JSON===\n{}\n===END_DECISION_JSON==="
+        open_b, closed_b = fetch_next_prompt._detect_partial_body_blocks(segment)
+        self.assertEqual(open_b, [])
+        self.assertEqual(closed_b, [])
+
+    # ------------------------------------------------------------------
+    # classify_issue_centric_reply_readiness — partial CODEX_BODY
+    # ------------------------------------------------------------------
+
+    def test_partial_codex_body_is_not_ready(self) -> None:
+        """DECISION_JSON complete + CODEX_BODY start only → reply_not_ready."""
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_CODEX_BODY===",
+            "aGVsbG8=",
+            "じっくり思考",
+            "GitHub",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.partial_body_block_detected)
+        self.assertTrue(readiness.body_block_start_present)
+        self.assertFalse(readiness.body_block_end_present)
+        self.assertIn("===CHATGPT_CODEX_BODY===", readiness.open_body_blocks)
+
+    def test_partial_codex_body_partial_body_block_detected_flag(self) -> None:
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_CODEX_BODY===",
+            "dGVzdA==",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertTrue(readiness.partial_body_block_detected)
+        self.assertFalse(readiness.body_block_end_present)
+
+    def test_partial_codex_body_does_not_trigger_invalid_stop(self) -> None:
+        """A partial CODEX_BODY must not be classified as reply_complete_invalid_contract."""
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_CODEX_BODY===",
+            "aGVsbG8=",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertNotEqual(readiness.status, "reply_complete_invalid_contract")
+
+    def test_partial_issue_body_is_not_ready(self) -> None:
+        """DECISION_JSON complete + ISSUE_BODY start only → reply_not_ready."""
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_ISSUE_BODY===",
+            "cGFydGlhbA==",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.partial_body_block_detected)
+        self.assertIn("===CHATGPT_ISSUE_BODY===", readiness.open_body_blocks)
+
+    def test_partial_review_body_is_not_ready(self) -> None:
+        """DECISION_JSON complete + REVIEW start only → reply_not_ready."""
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_REVIEW===",
+            "cmV2aWV3",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.partial_body_block_detected)
+
+    def test_completed_codex_body_still_goes_to_parse(self) -> None:
+        """Complete CODEX_BODY block pairing must pass through to contract parse."""
+        import base64
+        codex_payload = base64.b64encode(b"do the thing").decode()
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_CODEX_BODY===",
+            codex_payload,
+            "===END_CODEX_BODY===",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        # Must not be partial; contract parse should be attempted.
+        self.assertFalse(readiness.partial_body_block_detected)
+        self.assertTrue(readiness.body_block_start_present)
+        self.assertTrue(readiness.body_block_end_present)
+        # If parse succeeded: valid; if parse failed: invalid. Either is fine
+        # as long as partial_body_block_detected is False.
+        self.assertIn(
+            readiness.status,
+            ["reply_complete_valid_contract", "reply_complete_invalid_contract"],
+        )
+
+    # ------------------------------------------------------------------
+    # parse_issue_centric_reply_for_fetch — partial CODEX_BODY
+    # ------------------------------------------------------------------
+
+    def test_parse_for_fetch_raises_not_ready_for_partial_codex_body(self) -> None:
+        """parse_for_fetch must raise IssueCentricReplyNotReady, not Invalid."""
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_CODEX_BODY===",
+            "aGVsbG8=",
+            "じっくり思考",
+            "GitHub",
+        )
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady) as ctx:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+        self.assertEqual(ctx.exception.reply_readiness_status, "reply_not_ready")
+        self.assertTrue(ctx.exception.partial_body_block_detected)
+
+    def test_parse_for_fetch_does_not_raise_invalid_for_partial_codex_body(self) -> None:
+        """Partial CODEX_BODY must never raise IssueCentricReplyInvalid."""
+        raw = self._make_raw(
+            self._DECISION_COMPLETE,
+            "===CHATGPT_CODEX_BODY===",
+            "aGVsbG8=",
+        )
+        try:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+            self.fail("expected IssueCentricReplyNotReady")
+        except fetch_next_prompt.IssueCentricReplyNotReady:
+            pass  # correct
+        except fetch_next_prompt.IssueCentricReplyInvalid:
+            self.fail("partial body block must not raise IssueCentricReplyInvalid")
+
+    # ------------------------------------------------------------------
+    # confirm meta-only and no-marker paths are still intact
+    # ------------------------------------------------------------------
+
+    def test_meta_only_still_not_ready(self) -> None:
+        raw = self._make_raw("じっくり思考", "GitHub")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.partial_body_block_detected)
+
+    def test_completed_no_marker_still_invalid_stop(self) -> None:
+        raw = self._make_raw("This is a complete reply with no markers at all.")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertFalse(readiness.partial_body_block_detected)
+
+
 if __name__ == "__main__":
     unittest.main()
