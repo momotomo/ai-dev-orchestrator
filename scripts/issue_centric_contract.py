@@ -125,6 +125,24 @@ class IssueCentricDecision:
         return "\n".join(lines).strip() + "\n"
 
 
+def build_issue_centric_reply_contract_section() -> str:
+    actions = " / ".join(f"`{action.value}`" for action in IssueCentricAction)
+    return "\n".join(
+        [
+            "## issue-centric reply contract",
+            "",
+            "bridge が返答を機械処理するため、前置きや補足説明、コードフェンスを付けず、issue-centric contract only で返答してください。",
+            "legacy visible-text fallback は使わないでください。",
+            "",
+            f"返答は必ず先頭に `{DECISION_JSON_START}` と `{DECISION_JSON_END}` で囲った JSON を置いてください。",
+            f"body が必要な場合だけ `{ISSUE_BODY_START} ... {ISSUE_BODY_END}`、`{CODEX_BODY_START} ... {CODEX_BODY_END}`、`{REVIEW_BODY_START} ... {REVIEW_BODY_END}`、`{FOLLOWUP_ISSUE_BODY_START} ... {FOLLOWUP_ISSUE_BODY_END}` のいずれかを続けてください。",
+            "各 body block の payload は BASE64 で返してください。",
+            f"`action` は {actions} のいずれかだけを使ってください。",
+            "`summary` は短くしてください。",
+        ]
+    ).strip()
+
+
 @dataclass(frozen=True)
 class _LocatedMatch:
     start: int

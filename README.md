@@ -432,22 +432,19 @@ The bridge may fail or behave unexpectedly if you try to use it as if ordinary n
 
 ## ChatGPT Reply Contract
 
-The bridge expects ChatGPT to return one of these two formats:
+The current initial-request path expects ChatGPT to return the issue-centric contract:
+
+- `===CHATGPT_DECISION_JSON=== ... ===END_DECISION_JSON===`
+- optional base64 body blocks such as `===CHATGPT_CODEX_BODY=== ... ===END_CODEX_BODY===`
+
+For initial requests, the bridge now asks for issue-centric contract only and does not append the legacy visible-text reply contract.
+
+The legacy visible-text contract
 
 - `===CHATGPT_PROMPT_REPLY=== ... ===END_REPLY===`
 - `===CHATGPT_NO_CODEX=== ... ===END_NO_CODEX===`
 
-`CHATGPT_NO_CODEX` must begin with one of:
-
-- `completed`
-- `human_review`
-- `need_info`
-
-The bridge handles those as:
-
-- `completed`: no more Codex work needed right now
-- `human_review`: a human decision is needed
-- `need_info`: additional user input is needed
+is kept only for legacy fallback / older recovery paths.
 
 ## Human Review Behavior
 

@@ -32,6 +32,10 @@ class RequestNextPromptTests(unittest.TestCase):
         self.assertIn("ready issue を今回の実行単位正本として使う", request_text)
         self.assertTrue(request_hash)
         self.assertTrue(request_source.startswith("ready_issue:"))
+        self.assertIn("===CHATGPT_DECISION_JSON===", request_text)
+        self.assertIn("===CHATGPT_CODEX_BODY===", request_text)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", request_text)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", request_text)
 
     def test_build_initial_request_uses_override_source_for_request_body(self) -> None:
         args = argparse.Namespace(
@@ -42,6 +46,34 @@ class RequestNextPromptTests(unittest.TestCase):
         request_text, _, request_source = request_next_prompt.build_initial_request(args)
         self.assertIn("Override reason: recovery", request_text)
         self.assertTrue(request_source.startswith("override:"))
+        self.assertIn("===CHATGPT_DECISION_JSON===", request_text)
+        self.assertIn("===CHATGPT_CODEX_BODY===", request_text)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", request_text)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", request_text)
+
+    def test_compose_ready_issue_request_text_requires_issue_centric_contract_only(self) -> None:
+        request_text = request_next_prompt.compose_ready_issue_request_text(
+            "#2 Ready: add rehearsal marker and completion note",
+            Path("/tmp/repo"),
+        )
+        self.assertIn("current ready issue: #2 Ready: add rehearsal marker and completion note", request_text)
+        self.assertIn("issue-centric contract only", request_text)
+        self.assertIn("===CHATGPT_DECISION_JSON===", request_text)
+        self.assertIn("===END_DECISION_JSON===", request_text)
+        self.assertIn("===CHATGPT_CODEX_BODY===", request_text)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", request_text)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", request_text)
+
+    def test_compose_override_request_text_requires_issue_centric_contract_only(self) -> None:
+        request_text = request_next_prompt.compose_override_request_text(
+            "repo: /tmp/repo\ntarget_issue: #2\nrequest: keep this bounded"
+        )
+        self.assertIn("issue-centric contract only", request_text)
+        self.assertIn("===CHATGPT_DECISION_JSON===", request_text)
+        self.assertIn("===END_DECISION_JSON===", request_text)
+        self.assertIn("===CHATGPT_CODEX_BODY===", request_text)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", request_text)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", request_text)
 
     def test_build_initial_request_rejects_ambiguous_entry_flags(self) -> None:
         args = argparse.Namespace(

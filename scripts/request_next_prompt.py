@@ -7,7 +7,6 @@ from pathlib import Path
 
 from _bridge_common import (
     BridgeError,
-    build_chatgpt_reply_contract_section,
     can_reuse_prepared_request,
     clear_error_fields,
     clear_pending_request_fields,
@@ -24,6 +23,7 @@ from _bridge_common import (
     stable_text_hash,
     worker_repo_path,
 )
+from issue_centric_contract import build_issue_centric_reply_contract_section
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -31,7 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "通常入口では current ready issue の参照を受け取り、"
-            "bridge が最小の初回 request と固定の返答契約を Safari の現在 ChatGPT タブへ送信します。"
+            "bridge が最小の初回 request と issue-centric 返答契約を Safari の現在 ChatGPT タブへ送信します。"
             " free-form 初回本文は override 用にだけ残します。"
         )
     )
@@ -77,7 +77,7 @@ def build_override_example_templates(project_path: Path) -> list[str]:
                 "override 理由: runtime recovery のため今回だけ短い補足を足したい",
                 "今回やってほしいこと: sample browser の軽い UI polish に留める",
                 "触らないこと: schema / resolver / preview / playback / export",
-                "次の 1 フェーズ分の Codex 用 prompt を返してください。",
+                "bridge が機械処理できる現行 issue-centric contract で返答してください。",
             ]
         ),
         "\n".join(
@@ -86,7 +86,7 @@ def build_override_example_templates(project_path: Path) -> list[str]:
                 "backlog home: #10 runtime touchpoint migration",
                 "override 理由: ready issue を切る前に 1 回だけ探索したい",
                 "今回やってほしいこと: current runtime の initial entry boundary だけ確認したい",
-                "次の Codex 用 1 フェーズ prompt を返してください。",
+                "bridge が機械処理できる現行 issue-centric contract で返答してください。",
             ]
         ),
         "\n".join(
@@ -96,7 +96,7 @@ def build_override_example_templates(project_path: Path) -> list[str]:
                 "override 理由: urgent one-point correction",
                 "今回やってほしいこと: [ここを短く入力]",
                 "触らないこと: [あれば短く入力]",
-                "次の 1 フェーズ分の Codex 用 prompt を返してください。",
+                "bridge が機械処理できる現行 issue-centric contract で返答してください。",
             ]
         ),
     ]
@@ -106,7 +106,7 @@ def prompt_ready_issue_reference(project_path: Path) -> str:
     print("通常入口では、current ready issue の参照を 1 行で入力してください。", flush=True)
     print(f"target repo: {project_path}", flush=True)
     print("例: #123 sample browser wording cleanup", flush=True)
-    print("この参照をもとに、bridge が最小の初回 request を組み立てて固定の返答契約を追記します。", flush=True)
+    print("この参照をもとに、bridge が最小の初回 request を組み立てて issue-centric 返答契約を追記します。", flush=True)
     print("free-form 初回本文は通常入口ではありません。ready issue を使えない時だけ空入力で override へ進んでください。", flush=True)
     try:
         return input().strip()
@@ -119,7 +119,7 @@ def prompt_override_request_body(example_texts: list[str]) -> str:
     print("これは exception / recovery / override 用です。通常入口の代わりとしては使いません。", flush=True)
     print("open ready issue があるなら本文内でもそれを指してください。", flush=True)
     print("ここで入力した本文がそのまま ChatGPT へ送られます。これが override request の runtime 入力正本です。", flush=True)
-    print("bridge は本文を改変せず、送信直前に固定の返答契約だけを追記します。", flush=True)
+    print("bridge は本文を改変せず、送信直前に issue-centric 返答契約だけを追記します。", flush=True)
     print("これは初回 request 専用で、human_review / need_info 再開時の補足入力とは別です。", flush=True)
     print("返答フォーマット指定まで自分で書く必要はありません。進めたい内容だけを書いてください。", flush=True)
     print("以下の短い override 例文を、そのまま少し書き換えて使えます。", flush=True)
@@ -128,7 +128,7 @@ def prompt_override_request_body(example_texts: list[str]) -> str:
         print(f"[例 {index}]", flush=True)
         print(example_text, flush=True)
         print("", flush=True)
-    print("bridge が固定の返答契約を自動で付けるので、本文には今回進めたいことだけを入れてください。", flush=True)
+    print("bridge が issue-centric 返答契約を自動で付けるので、本文には今回進めたいことだけを入れてください。", flush=True)
     print("入力後は Safari の current tab へ送信し、続けて返答待ちへ進みます。", flush=True)
     print("入力終了は Ctrl-D、または空行を 2 回です。空入力では進みません。", flush=True)
 
@@ -154,14 +154,15 @@ def compose_ready_issue_request_text(ready_issue_ref: str, project_path: Path) -
     if not normalized_ref:
         raise BridgeError("current ready issue 参照が空です。")
     project_name = project_path.name or project_path.as_posix()
-    contract_section = build_chatgpt_reply_contract_section()
+    contract_section = build_issue_centric_reply_contract_section()
     body = "\n".join(
         [
             f"対象案件: {project_name}",
             f"対象 repo: {project_path}",
             f"current ready issue: {normalized_ref}",
             "ready issue を今回の実行単位正本として使う",
-            "この ready issue の範囲から広げず、次の 1 フェーズ分の Codex 用 prompt を返してください。",
+            "この ready issue の範囲から広げず、次の 1 回分だけ判断してください。",
+            "必要なら `codex_run` を選び、`target_issue` には current ready issue を使ってください。",
         ]
     )
     return f"{body}\n\n{contract_section}\n"
@@ -171,7 +172,7 @@ def compose_override_request_text(user_body: str) -> str:
     body = user_body.strip()
     if not body:
         raise BridgeError("override request 本文が空です。")
-    contract_section = build_chatgpt_reply_contract_section()
+    contract_section = build_issue_centric_reply_contract_section()
     return f"{body}\n\n{contract_section}\n"
 
 
