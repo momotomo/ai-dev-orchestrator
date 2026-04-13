@@ -255,6 +255,8 @@ PROJECT_CHAT_COMPOSER_HINTS = (
 PROJECT_CHAT_PLUS_BUTTON_LABELS = (
     "+",
     "＋",
+    "ファイルの追加など",
+    "Add files and more",
 )
 PROJECT_CHAT_MORE_LABELS = (
     "さらに表示",
@@ -3719,8 +3721,6 @@ class ProjectPageGithubSourcePreflightResult:
 
 def classify_project_page_github_source_preflight(
     payload: Mapping[str, Any],
-    *,
-    phase: str,
 ) -> ProjectPageGithubSourcePreflightResult:
     if not bool(payload.get("composerFound")):
         return ProjectPageGithubSourcePreflightResult(
@@ -3734,71 +3734,73 @@ def classify_project_page_github_source_preflight(
             boundary="composer_plus_missing",
             detail="composer の `＋` ボタンが見つかりませんでした。",
         )
-    if phase == "initial":
+    if not bool(payload.get("plusClicked")):
         return ProjectPageGithubSourcePreflightResult(
-            status="available",
-            boundary="composer_plus_ready",
-            detail="composer の `＋` ボタンを確認できました。",
+            status="probe_failed",
+            boundary="composer_plus_click_failed",
+            detail="composer の `＋` ボタンをクリックできませんでした。",
         )
-    if phase == "after_plus":
-        if not bool(payload.get("moreFound")):
-            return ProjectPageGithubSourcePreflightResult(
-                status="probe_failed",
-                boundary="composer_more_missing",
-                detail="`＋` メニューは開きましたが `さらに表示` が見つかりませんでした。",
-            )
+    if not bool(payload.get("menuOpened")):
         return ProjectPageGithubSourcePreflightResult(
-            status="available",
-            boundary="composer_more_ready",
-            detail="`さらに表示` を開く前提までは確認できました。",
+            status="probe_failed",
+            boundary="composer_menu_not_open",
+            detail="composer の `＋` を押した後にメニューを確認できませんでした。",
         )
-    if phase == "after_more":
-        if bool(payload.get("githubFound")):
-            return ProjectPageGithubSourcePreflightResult(
-                status="available",
-                boundary="github_item_found",
-                detail="`さらに表示` サブメニューに `GitHub` が見つかりました。",
-            )
-        if bool(payload.get("sourceAddFound")):
-            return ProjectPageGithubSourcePreflightResult(
-                status="unavailable",
-                boundary="github_item_missing",
-                detail="`さらに表示` サブメニューには到達しましたが、`GitHub` は見つかりませんでした。",
-            )
+    if not bool(payload.get("moreFound")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="probe_failed",
+            boundary="composer_more_missing",
+            detail="composer のメニューは見えましたが `さらに表示` が見つかりませんでした。",
+        )
+    if not bool(payload.get("moreClicked")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="probe_failed",
+            boundary="composer_more_click_failed",
+            detail="`さらに表示` をクリックできませんでした。",
+        )
+    if not bool(payload.get("submenuOpened")):
         return ProjectPageGithubSourcePreflightResult(
             status="probe_failed",
             boundary="composer_more_submenu_not_open",
             detail="`さらに表示` を押した後のサブメニューを確認できませんでした。",
         )
-    if phase == "after_github_click":
-        if bool(payload.get("githubSelectedLike")):
-            return ProjectPageGithubSourcePreflightResult(
-                status="available",
-                boundary="github_selected_like",
-                detail="`GitHub` source が選択済み相当になったことを確認できました。",
-            )
-        if bool(payload.get("githubClickConfirmed")):
-            return ProjectPageGithubSourcePreflightResult(
-                status="available",
-                boundary="github_click_confirmed",
-                detail="`GitHub` click 自体は確認できました。",
-            )
+    if not bool(payload.get("githubFound")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="unavailable",
+            boundary="github_item_missing",
+            detail="`さらに表示` サブメニューには到達しましたが、`GitHub` は見つかりませんでした。",
+        )
+    if not bool(payload.get("githubClicked")):
         return ProjectPageGithubSourcePreflightResult(
             status="probe_failed",
-            boundary="github_click_unconfirmed",
-            detail="`GitHub` は見つかりましたが、クリック後の状態確認ができませんでした。",
+            boundary="github_click_failed",
+            detail="`GitHub` は見つかりましたがクリックできませんでした。",
         )
-    raise BridgeError(f"unknown GitHub source preflight phase: {phase}")
+    if bool(payload.get("githubSelectedLike")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="available",
+            boundary="github_selected_like",
+            detail="`GitHub` source が選択済み相当になったことを確認できました。",
+        )
+    if bool(payload.get("githubClickConfirmed")):
+        return ProjectPageGithubSourcePreflightResult(
+            status="available",
+            boundary="github_click_confirmed",
+            detail="`GitHub` click 自体は確認できました。",
+        )
+    return ProjectPageGithubSourcePreflightResult(
+        status="probe_failed",
+        boundary="github_click_unconfirmed",
+        detail="`GitHub` は見つかりましたが、クリック後の状態確認ができませんでした。",
+    )
 
 
 def _build_project_page_github_source_probe_script(
     *,
-    action: str = "probe",
     preferred_hint: str | None = None,
 ) -> str:
     return f"""
 (() => {{
-  const action = {json.dumps(action, ensure_ascii=False)};
   {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=True)}
   const plusLabels = {json.dumps(list(PROJECT_CHAT_PLUS_BUTTON_LABELS), ensure_ascii=False)};
   const moreLabels = {json.dumps(list(PROJECT_CHAT_MORE_LABELS), ensure_ascii=False)};
@@ -3818,8 +3820,7 @@ def _build_project_page_github_source_probe_script(
   const composerRect = composer?.getBoundingClientRect?.() || null;
   const composerScope = composer?.closest?.("form") || composer?.closest?.("section") || composer?.closest?.("main") || document.querySelector("main") || document.body;
   const interactiveSelector = "button,[role='button'],[role='menuitem'],[role='menuitemradio'],[role='option'],a";
-  const scopedNodes = Array.from(composerScope.querySelectorAll(interactiveSelector)).filter(isVisible);
-  const globalNodes = Array.from(document.querySelectorAll(interactiveSelector)).filter(isVisible);
+  const menuRoles = new Set(["menuitem", "menuitemradio", "option"]);
   const dedupe = (values) => {{
     const out = [];
     const seen = new Set();
@@ -3838,62 +3839,135 @@ def _build_project_page_github_source_probe_script(
     node?.getAttribute?.("title"),
     node?.getAttribute?.("data-testid"),
   ]);
+  const toEntry = (node) => {{
+    const labels = labelsFor(node);
+    return {{
+      node,
+      labels,
+      text: labels[0] || "",
+      ariaLabel: normalize(node?.getAttribute?.("aria-label") || ""),
+      title: normalize(node?.getAttribute?.("title") || ""),
+      role: normalize(node?.getAttribute?.("role") || ""),
+      parentRole: normalize(node?.parentElement?.getAttribute?.("role") || ""),
+      testId: normalize(node?.getAttribute?.("data-testid") || ""),
+      selected: normalize(node?.getAttribute?.("aria-selected") || ""),
+      checked: normalize(node?.getAttribute?.("aria-checked") || ""),
+      pressed: normalize(node?.getAttribute?.("aria-pressed") || ""),
+      current: normalize(node?.getAttribute?.("aria-current") || ""),
+      state: normalize(node?.getAttribute?.("data-state") || ""),
+      rectTop: Math.round(node?.getBoundingClientRect?.().top || 0),
+      rectLeft: Math.round(node?.getBoundingClientRect?.().left || 0),
+    }};
+  }};
+  const collectEntries = (root) => Array.from(root.querySelectorAll(interactiveSelector)).filter(isVisible).map(toEntry);
+  const scopedEntries = () => collectEntries(composerScope);
+  const globalEntries = () => collectEntries(document);
   const exactMatch = (node, labels) => {{
     const candidates = labelsFor(node);
     return labels.some((label) => candidates.includes(label));
   }};
-  const distanceScore = (node) => {{
-    if (!composerRect || !node?.getBoundingClientRect) return 999999;
-    const rect = node.getBoundingClientRect();
-    const dx = Math.abs(rect.left - composerRect.left);
-    const dy = Math.abs(rect.top - composerRect.top);
+  const distanceScore = (entry) => {{
+    if (!composerRect) return 999999;
+    const dx = Math.abs((entry.rectLeft || 0) - composerRect.left);
+    const dy = Math.abs((entry.rectTop || 0) - composerRect.top);
     return dx + dy;
   }};
-  const pickNode = (labels, options = {{}}) => {{
+  const pickEntry = (labels, entries, options = {{}}) => {{
     const preferScoped = !!options.preferScoped;
-    const choose = (nodes) => nodes
-      .filter((node) => exactMatch(node, labels))
+    const choose = (items) => items
+      .filter((entry) => labels.some((label) => entry.labels.includes(label)))
       .sort((left, right) => distanceScore(left) - distanceScore(right))[0] || null;
     if (preferScoped) {{
-      const scoped = choose(scopedNodes);
+      const scoped = choose(scopedEntries());
       if (scoped) return scoped;
     }}
-    return choose(globalNodes);
+    return choose(entries);
   }};
-  const plusNode = pickNode(plusLabels, {preferScoped: true});
-  const moreNode = pickNode(moreLabels, {preferScoped: false});
-  const sourceAddNode = pickNode(addSourceLabels, {preferScoped: false});
-  const githubNode = pickNode(githubLabels, {preferScoped: false});
-  const clickNode = (node) => {{
-    if (!node) return false;
-    node.scrollIntoView?.({{block: "center"}});
-    node.click?.();
+  const menuishEntries = (entries, baseline) => entries.filter((entry) => {{
+    const isMenuish = menuRoles.has(entry.role) || menuRoles.has(entry.parentRole);
+    const isTarget = moreLabels.some((label) => entry.labels.includes(label)) ||
+      addSourceLabels.some((label) => entry.labels.includes(label)) ||
+      githubLabels.some((label) => entry.labels.includes(label));
+    const isNew = !baseline.some((item) => item.node === entry.node);
+    return isNew && (isMenuish || isTarget);
+  }});
+  const renderEntries = (entries) => entries.map((entry) => {{
+    return {{
+      text: entry.text,
+      ariaLabel: entry.ariaLabel,
+      title: entry.title,
+      role: entry.role,
+      parentRole: entry.parentRole,
+      testId: entry.testId,
+      selected: entry.selected,
+      checked: entry.checked,
+      pressed: entry.pressed,
+      current: entry.current,
+      state: entry.state,
+    }};
+  }});
+  const clickEntry = (entry) => {{
+    if (!entry?.node) return false;
+    entry.node.scrollIntoView?.({{block: "center"}});
+    entry.node.dispatchEvent?.(new MouseEvent("pointerdown", {{bubbles: true}}));
+    entry.node.dispatchEvent?.(new MouseEvent("mousedown", {{bubbles: true}}));
+    entry.node.click?.();
+    entry.node.dispatchEvent?.(new MouseEvent("mouseup", {{bubbles: true}}));
+    entry.node.dispatchEvent?.(new MouseEvent("pointerup", {{bubbles: true}}));
     return true;
   }};
-  let actionResult = "noop";
-  if (action === "click_plus") {{
-    actionResult = clickNode(plusNode) ? "clicked" : "missing";
-  }} else if (action === "click_more") {{
-    actionResult = clickNode(moreNode) ? "clicked" : "missing";
-  }} else if (action === "click_github") {{
-    actionResult = clickNode(githubNode) ? "clicked" : "missing";
-  }}
-  const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 800));
-  const githubSelectedLike = composerScopeText.includes("GitHub") && !exactMatch(githubNode, githubLabels);
+  const baselineEntries = globalEntries();
+  const plusEntry = pickEntry(plusLabels, baselineEntries, {{preferScoped: true}});
+  const plusClicked = clickEntry(plusEntry);
+  const afterPlusEntries = globalEntries();
+  const menuEntries = menuishEntries(afterPlusEntries, baselineEntries);
+  const menuOpened = menuEntries.length > 0;
+  const moreEntry = pickEntry(moreLabels, menuEntries);
+  const moreClicked = clickEntry(moreEntry);
+  const afterMoreEntries = globalEntries();
+  const submenuEntries = menuishEntries(afterMoreEntries, afterPlusEntries);
+  const submenuOpened = submenuEntries.length > 0;
+  const sourceAddEntry = pickEntry(addSourceLabels, submenuEntries);
+  const githubEntry = pickEntry(githubLabels, submenuEntries);
+  const githubClicked = clickEntry(githubEntry);
+  const afterGithubEntries = globalEntries();
+  const githubAfterClick = pickEntry(githubLabels, afterGithubEntries);
+  const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 1200));
+  const githubSelectedLike = !!githubAfterClick && (
+    githubAfterClick.selected === "true" ||
+    githubAfterClick.checked === "true" ||
+    githubAfterClick.pressed === "true" ||
+    githubAfterClick.current === "true" ||
+    ["open", "checked", "active", "selected"].includes(githubAfterClick.state)
+  ) || (githubClicked && composerScopeText.includes("GitHub"));
+  const githubClickConfirmed = githubClicked;
   return JSON.stringify({{
     composerFound: !!composer,
     projectName: payload.projectName || "",
     matchKind: payload.matchKind || "",
     matchedHint: payload.matchedHint || "",
-    plusFound: !!plusNode,
-    moreFound: !!moreNode,
-    sourceAddFound: !!sourceAddNode,
-    githubFound: !!githubNode,
+    plusFound: !!plusEntry,
+    plusLabel: plusEntry?.text || "",
+    plusAriaLabel: plusEntry?.ariaLabel || "",
+    plusTitle: plusEntry?.title || "",
+    plusClicked,
+    menuOpened,
+    menuItems: renderEntries(menuEntries).slice(0, 20),
+    moreFound: !!moreEntry,
+    moreLabel: moreEntry?.text || "",
+    moreAriaLabel: moreEntry?.ariaLabel || "",
+    moreClicked,
+    submenuOpened,
+    submenuItems: renderEntries(submenuEntries).slice(0, 20),
+    sourceAddFound: !!sourceAddEntry,
+    githubFound: !!githubEntry,
+    githubLabel: githubEntry?.text || "",
+    githubAriaLabel: githubEntry?.ariaLabel || "",
+    githubClicked,
     githubSelectedLike,
-    githubClickConfirmed: action === "click_github" ? actionResult === "clicked" : false,
-    action,
-    actionResult,
-    visibleLabels: dedupe(globalNodes.flatMap((node) => labelsFor(node))).slice(0, 30),
+    githubClickConfirmed,
+    visibleLabels: dedupe(afterGithubEntries.flatMap((entry) => entry.labels)).slice(0, 40),
+    composerScopeText,
   }});
 }})();
 """
@@ -3903,12 +3977,10 @@ def _probe_project_page_github_source(
     page: SafariChatPage,
     *,
     preferred_hint: str | None = None,
-    action: str = "probe",
 ) -> dict[str, Any]:
     return _evaluate_json(
         page,
         _build_project_page_github_source_probe_script(
-            action=action,
             preferred_hint=preferred_hint,
         ),
         "GitHub source preflight probe に失敗しました",
@@ -3922,13 +3994,25 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "matchKind": str(payload.get("matchKind", "")),
         "matchedHint": str(payload.get("matchedHint", "")),
         "plusFound": bool(payload.get("plusFound")),
+        "plusLabel": str(payload.get("plusLabel", "")),
+        "plusAriaLabel": str(payload.get("plusAriaLabel", "")),
+        "plusTitle": str(payload.get("plusTitle", "")),
+        "plusClicked": bool(payload.get("plusClicked")),
+        "menuOpened": bool(payload.get("menuOpened")),
+        "menuItems": list(payload.get("menuItems", [])),
         "moreFound": bool(payload.get("moreFound")),
+        "moreLabel": str(payload.get("moreLabel", "")),
+        "moreAriaLabel": str(payload.get("moreAriaLabel", "")),
+        "moreClicked": bool(payload.get("moreClicked")),
+        "submenuOpened": bool(payload.get("submenuOpened")),
+        "submenuItems": list(payload.get("submenuItems", [])),
         "sourceAddFound": bool(payload.get("sourceAddFound")),
         "githubFound": bool(payload.get("githubFound")),
+        "githubLabel": str(payload.get("githubLabel", "")),
+        "githubAriaLabel": str(payload.get("githubAriaLabel", "")),
+        "githubClicked": bool(payload.get("githubClicked")),
         "githubSelectedLike": bool(payload.get("githubSelectedLike")),
         "githubClickConfirmed": bool(payload.get("githubClickConfirmed")),
-        "action": str(payload.get("action", "")),
-        "actionResult": str(payload.get("actionResult", "")),
         "visibleLabels": list(payload.get("visibleLabels", [])),
     }
     return log_text(prefix, json.dumps(snapshot, ensure_ascii=False, indent=2))
@@ -3957,67 +4041,11 @@ def ensure_project_page_github_source_ready(
     *,
     preferred_hint: str | None = None,
 ) -> dict[str, Any]:
-    initial = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
-    initial_result = classify_project_page_github_source_preflight(initial, phase="initial")
-    if initial_result.status != "available":
-        _raise_project_page_github_source_preflight_error(page, initial_result, initial)
-
-    plus_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="click_plus")
-    if str(plus_click.get("actionResult", "")).strip() != "clicked":
-        _raise_project_page_github_source_preflight_error(
-            page,
-            ProjectPageGithubSourcePreflightResult(
-                status="probe_failed",
-                boundary="composer_plus_click_failed",
-                detail="composer の `＋` ボタンをクリックできませんでした。",
-            ),
-            plus_click,
-        )
-    page.wait_for_timeout(300)
-
-    after_plus = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
-    after_plus_result = classify_project_page_github_source_preflight(after_plus, phase="after_plus")
-    if after_plus_result.status != "available":
-        _raise_project_page_github_source_preflight_error(page, after_plus_result, after_plus)
-
-    more_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="click_more")
-    if str(more_click.get("actionResult", "")).strip() != "clicked":
-        _raise_project_page_github_source_preflight_error(
-            page,
-            ProjectPageGithubSourcePreflightResult(
-                status="probe_failed",
-                boundary="composer_more_click_failed",
-                detail="`さらに表示` をクリックできませんでした。",
-            ),
-            more_click,
-        )
-    page.wait_for_timeout(300)
-
-    after_more = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
-    after_more_result = classify_project_page_github_source_preflight(after_more, phase="after_more")
-    if after_more_result.status != "available":
-        _raise_project_page_github_source_preflight_error(page, after_more_result, after_more)
-
-    github_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="click_github")
-    if str(github_click.get("actionResult", "")).strip() != "clicked":
-        _raise_project_page_github_source_preflight_error(
-            page,
-            ProjectPageGithubSourcePreflightResult(
-                status="probe_failed",
-                boundary="github_click_failed",
-                detail="`GitHub` は見つかりましたがクリックできませんでした。",
-            ),
-            github_click,
-        )
-    page.wait_for_timeout(300)
-
-    after_click = _probe_project_page_github_source(page, preferred_hint=preferred_hint, action="probe")
-    after_click = dict(after_click)
-    after_click["githubClickConfirmed"] = bool(github_click.get("actionResult") == "clicked")
-    after_click_result = classify_project_page_github_source_preflight(after_click, phase="after_github_click")
-    if after_click_result.status != "available":
-        _raise_project_page_github_source_preflight_error(page, after_click_result, after_click)
-    return after_click
+    payload = _probe_project_page_github_source(page, preferred_hint=preferred_hint)
+    result = classify_project_page_github_source_preflight(payload)
+    if result.status != "available":
+        _raise_project_page_github_source_preflight_error(page, result, payload)
+    return payload
 
 
 def _read_post_send_state(

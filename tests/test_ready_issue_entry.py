@@ -202,92 +202,133 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
             {
                 "composerFound": True,
                 "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": False,
                 "moreFound": False,
+                "moreClicked": False,
+                "submenuOpened": False,
                 "sourceAddFound": True,
                 "githubFound": False,
-            },
-            phase="after_plus",
+                "githubClicked": False,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": False,
+            }
         )
         self.assertEqual(result.status, "probe_failed")
-        self.assertEqual(result.boundary, "composer_more_missing")
+        self.assertEqual(result.boundary, "composer_menu_not_open")
 
     def test_github_and_add_sources_are_treated_as_parallel_items(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(
             {
                 "composerFound": True,
                 "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
                 "moreFound": True,
+                "moreClicked": True,
+                "submenuOpened": True,
                 "sourceAddFound": True,
                 "githubFound": True,
-            },
-            phase="after_more",
+                "githubClicked": True,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": True,
+            }
         )
         self.assertEqual(result.status, "available")
-        self.assertEqual(result.boundary, "github_item_found")
+        self.assertEqual(result.boundary, "github_click_confirmed")
 
     def test_missing_github_under_more_is_unavailable(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(
             {
                 "composerFound": True,
                 "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
                 "moreFound": True,
+                "moreClicked": True,
+                "submenuOpened": True,
                 "sourceAddFound": True,
                 "githubFound": False,
-            },
-            phase="after_more",
+                "githubClicked": False,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": False,
+            }
         )
         self.assertEqual(result.status, "unavailable")
         self.assertEqual(result.boundary, "github_item_missing")
 
-    def test_missing_more_is_probe_failed(self) -> None:
+    def test_missing_more_after_menu_open_is_probe_failed(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(
             {
                 "composerFound": True,
                 "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": True,
                 "moreFound": False,
+                "moreClicked": False,
+                "submenuOpened": False,
                 "sourceAddFound": False,
                 "githubFound": False,
-            },
-            phase="after_plus",
+                "githubClicked": False,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": False,
+            }
         )
         self.assertEqual(result.status, "probe_failed")
         self.assertEqual(result.boundary, "composer_more_missing")
 
+    def test_missing_menu_after_plus_click_is_probe_failed(self) -> None:
+        result = _bridge_common.classify_project_page_github_source_preflight(
+            {
+                "composerFound": True,
+                "plusFound": True,
+                "plusClicked": True,
+                "menuOpened": False,
+                "moreFound": False,
+                "moreClicked": False,
+                "submenuOpened": False,
+                "sourceAddFound": False,
+                "githubFound": False,
+                "githubClicked": False,
+                "githubSelectedLike": False,
+                "githubClickConfirmed": False,
+            }
+        )
+        self.assertEqual(result.status, "probe_failed")
+        self.assertEqual(result.boundary, "composer_menu_not_open")
+
+    def test_builder_includes_real_plus_trigger_label(self) -> None:
+        script = _bridge_common._build_project_page_github_source_probe_script()
+        self.assertIn("ファイルの追加など", script)
+
+    def test_builder_includes_github_and_add_sources_as_parallel_items(self) -> None:
+        script = _bridge_common._build_project_page_github_source_probe_script()
+        self.assertIn("情報源を追加する", script)
+        self.assertIn("GitHub", script)
+
     def test_preflight_error_reports_exact_boundary(self) -> None:
         class FakePage:
-            def wait_for_timeout(self, _milliseconds: int) -> None:
-                return None
+            pass
 
         fake_page = FakePage()
-        probe_sequence = [
-            {
-                "composerFound": True,
-                "plusFound": True,
-                "moreFound": False,
-                "sourceAddFound": False,
-                "githubFound": False,
-                "action": "probe",
-            },
-            {
-                "composerFound": True,
-                "plusFound": True,
-                "moreFound": False,
-                "sourceAddFound": False,
-                "githubFound": False,
-                "action": "click_plus",
-                "actionResult": "clicked",
-            },
-            {
-                "composerFound": True,
-                "plusFound": True,
-                "moreFound": False,
-                "sourceAddFound": False,
-                "githubFound": False,
-                "action": "probe",
-            },
-        ]
+        payload = {
+            "composerFound": True,
+            "plusFound": True,
+            "plusClicked": True,
+            "menuOpened": True,
+            "menuItems": [{"text": "さらに表示", "role": "menuitem"}],
+            "moreFound": True,
+            "moreClicked": True,
+            "submenuOpened": False,
+            "submenuItems": [],
+            "sourceAddFound": False,
+            "githubFound": False,
+            "githubClicked": False,
+            "githubSelectedLike": False,
+            "githubClickConfirmed": False,
+        }
         with (
-            patch.object(_bridge_common, "_probe_project_page_github_source", side_effect=probe_sequence),
+            patch.object(_bridge_common, "_probe_project_page_github_source", return_value=payload),
             patch.object(
                 _bridge_common,
                 "_log_project_page_github_source_probe",
@@ -301,7 +342,34 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         ):
             with self.assertRaises(_bridge_common.BridgeError) as ctx:
                 _bridge_common.ensure_project_page_github_source_ready(fake_page)
-        self.assertIn("boundary=composer_more_missing", str(ctx.exception))
+        self.assertIn("boundary=composer_more_submenu_not_open", str(ctx.exception))
+
+    def test_single_pass_payload_can_reach_github_from_transient_more_submenu(self) -> None:
+        payload = {
+            "composerFound": True,
+            "plusFound": True,
+            "plusLabel": "",
+            "plusAriaLabel": "ファイルの追加など",
+            "plusClicked": True,
+            "menuOpened": True,
+            "menuItems": [{"text": "さらに表示", "role": "menuitem"}],
+            "moreFound": True,
+            "moreClicked": True,
+            "submenuOpened": True,
+            "submenuItems": [
+                {"text": "情報源を追加する", "role": "menuitem"},
+                {"text": "GitHub", "role": "menuitem"},
+            ],
+            "sourceAddFound": True,
+            "githubFound": True,
+            "githubLabel": "GitHub",
+            "githubClicked": True,
+            "githubSelectedLike": False,
+            "githubClickConfirmed": True,
+        }
+        result = _bridge_common.classify_project_page_github_source_preflight(payload)
+        self.assertEqual(result.status, "available")
+        self.assertEqual(result.boundary, "github_click_confirmed")
 
     def test_send_path_runs_github_preflight_before_filling_project_page_composer(self) -> None:
         events: list[str] = []
