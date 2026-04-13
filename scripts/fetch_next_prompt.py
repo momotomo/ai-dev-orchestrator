@@ -136,6 +136,10 @@ _META_ONLY_EXACT = frozenset(
         "Thinking",
         "Reasoning",
         "ChatGPT",
+        # Tool-call status labels shown while ChatGPT is executing an app/plugin.
+        "Running app request",
+        "Running app response",
+        "Received app response",
     ]
 )
 # Regex patterns matched against individual stripped lines.
@@ -145,6 +149,9 @@ _META_ONLY_PATTERNS = (
     _re.compile(r"^Searched \d+ sites?$"),
     _re.compile(r"^読み込み中"),
     _re.compile(r"^Loading"),
+    # Catch future variants of tool-call status labels.
+    _re.compile(r"^Running app "),
+    _re.compile(r"^Received app "),
 )
 
 

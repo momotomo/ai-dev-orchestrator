@@ -2215,5 +2215,119 @@ class PartialBodyBlockNotReadyTests(unittest.TestCase):
         self.assertFalse(readiness.partial_body_block_detected)
 
 
+class RunningAppMetaOnlyTests(unittest.TestCase):
+    """Verify that tool-call status labels (Running app request / response,
+    Received app response) are treated as meta-only UI labels and never
+    trigger an invalid stop."""
+
+    def _make_raw(self, *assistant_lines: str) -> str:
+        return "\n".join(
+            ["あなた:", "request body", "ChatGPT:", ""] + list(assistant_lines)
+        )
+
+    # ------------------------------------------------------------------
+    # classify_issue_centric_reply_readiness
+    # ------------------------------------------------------------------
+
+    def test_running_app_request_alone_is_not_ready(self) -> None:
+        raw = self._make_raw("Running app request")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+        self.assertFalse(readiness.assistant_final_content_present)
+
+    def test_running_app_response_alone_is_not_ready(self) -> None:
+        raw = self._make_raw("Running app response")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+
+    def test_received_app_response_alone_is_not_ready(self) -> None:
+        raw = self._make_raw("Received app response")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+
+    def test_running_app_request_with_thinking_is_not_ready(self) -> None:
+        """Running app request + じっくり思考 → reply_not_ready."""
+        raw = self._make_raw("Running app request", "じっくり思考")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+        self.assertFalse(readiness.assistant_final_content_present)
+
+    def test_running_app_with_real_content_is_not_meta_only(self) -> None:
+        """Running app request + real sentence → final content present."""
+        raw = self._make_raw(
+            "Running app request",
+            "This is actual reply content from ChatGPT.",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertFalse(readiness.assistant_meta_only)
+        self.assertTrue(readiness.assistant_final_content_present)
+
+    def test_completed_no_marker_still_invalid_stop(self) -> None:
+        """Complete reply without markers must remain reply_complete_no_marker."""
+        raw = self._make_raw("This is a complete reply with no markers at all.")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_no_marker")
+
+    # ------------------------------------------------------------------
+    # parse_issue_centric_reply_for_fetch
+    # ------------------------------------------------------------------
+
+    def test_parse_for_fetch_raises_not_ready_for_running_app_request(self) -> None:
+        raw = self._make_raw("Running app request", "じっくり思考")
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady) as ctx:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+        self.assertEqual(ctx.exception.reply_readiness_status, "reply_not_ready")
+        self.assertTrue(ctx.exception.assistant_meta_only)
+
+    def test_parse_for_fetch_does_not_raise_invalid_for_running_app(self) -> None:
+        """Running app labels must never raise IssueCentricReplyInvalid."""
+        raw = self._make_raw("Running app request", "Received app response")
+        try:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+            self.fail("expected IssueCentricReplyNotReady")
+        except fetch_next_prompt.IssueCentricReplyNotReady:
+            pass  # correct
+        except fetch_next_prompt.IssueCentricReplyInvalid:
+            self.fail("tool-call labels must not raise IssueCentricReplyInvalid")
+
+    # ------------------------------------------------------------------
+    # partial body block path is not disrupted
+    # ------------------------------------------------------------------
+
+    def test_partial_body_block_still_not_ready(self) -> None:
+        """Partial CODEX_BODY with Running app label still not-ready."""
+        decision = "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"codex_run","target_issue":"#3","summary":"t"}',
+            "===END_DECISION_JSON===",
+        ])
+        raw = self._make_raw(decision, "===CHATGPT_CODEX_BODY===", "Running app request")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.partial_body_block_detected)
+
+
 if __name__ == "__main__":
     unittest.main()
