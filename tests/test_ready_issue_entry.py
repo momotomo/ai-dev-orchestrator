@@ -213,6 +213,10 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
             "sourceAddFound": False,
             "githubFound": False,
             "githubClicked": False,
+            "githubPillConfirmed": False,
+            "githubPillRemoveButtonFound": False,
+            "githubPillVisible": False,
+            "githubPillLabels": [],
             "githubSelectedLike": False,
             "githubClickConfirmed": False,
             "visibleLabels": [],
@@ -255,12 +259,12 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 "sourceAddFound": True,
                 "githubFound": True,
                 "githubClicked": True,
-                "githubSelectedLike": False,
-                "githubClickConfirmed": True,
+                "githubPillConfirmed": True,
+                "githubPillRemoveButtonFound": True,
             }
         )
         self.assertEqual(result.status, "available")
-        self.assertEqual(result.boundary, "github_click_confirmed")
+        self.assertEqual(result.boundary, "github_pill_confirmed")
 
     def test_missing_github_under_more_is_unavailable(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(
@@ -324,12 +328,16 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
 
     def test_builder_includes_real_plus_trigger_label(self) -> None:
         script = _bridge_common._build_project_page_github_source_probe_script()
+        self.assertIn("#composer-plus-btn", script)
+        self.assertIn("[data-testid='composer-plus-btn']", script)
         self.assertIn("ファイルの追加など", script)
 
     def test_builder_includes_github_and_add_sources_as_parallel_items(self) -> None:
         script = _bridge_common._build_project_page_github_source_probe_script()
         self.assertIn("情報源を追加する", script)
         self.assertIn("GitHub", script)
+        self.assertIn("aria-controls", script)
+        self.assertIn("GitHub：クリックして削除", script)
 
     def test_preflight_error_reports_exact_boundary(self) -> None:
         class FakePage:
@@ -419,6 +427,7 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                     {"text": "GitHub", "role": "menuitem"},
                 ],
                 submenuCandidateLabels=["情報源を追加する", "GitHub"],
+                moreControlledId="menu-demo",
                 sourceAddFound=True,
                 githubFound=True,
                 githubLabel="GitHub",
@@ -438,7 +447,7 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 githubFound=True,
                 githubLabel="GitHub",
                 githubClicked=True,
-                githubClickConfirmed=True,
+                moreControlledId="menu-demo",
                 beforeVisibleLabels=["GitHub"],
                 afterVisibleLabels=["GitHub"],
                 visibleLabels=["GitHub"],
@@ -450,14 +459,19 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 submenuOpened=True,
                 submenuItems=[
                     {"text": "情報源を追加する", "role": "menuitem"},
-                    {"text": "GitHub", "role": "menuitem", "selected": "true"},
+                    {"text": "GitHub", "role": "menuitem"},
                 ],
                 sourceAddFound=True,
                 githubFound=True,
                 githubLabel="GitHub",
-                githubSelectedLike=True,
+                moreControlledId="menu-demo",
+                githubPillConfirmed=True,
+                githubPillRemoveButtonFound=True,
+                githubPillVisible=True,
+                githubPillLabels=["GitHub：クリックして削除"],
                 visibleLabels=["GitHub"],
                 composerScopeText="GitHub",
+                finalAttachConfirmationKind="github_pill_remove_button",
             ),
         ]
         with patch.object(_bridge_common, "_probe_project_page_github_source", side_effect=probe_sequence):
@@ -465,7 +479,7 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
         self.assertEqual(payload["menuWaitAttempts"], 2)
         self.assertEqual(payload["submenuWaitAttempts"], 2)
         self.assertEqual(payload["githubConfirmAttempts"], 1)
-        self.assertEqual(payload["githubConfirmationKind"], "selected_like")
+        self.assertEqual(payload["githubConfirmationKind"], "github_pill_remove_button")
         self.assertEqual(
             fake_page.waits,
             [
@@ -540,12 +554,12 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
             "githubFound": True,
             "githubLabel": "GitHub",
             "githubClicked": True,
-            "githubSelectedLike": False,
-            "githubClickConfirmed": True,
+            "githubPillConfirmed": True,
+            "githubPillVisible": True,
         }
         result = _bridge_common.classify_project_page_github_source_preflight(payload)
         self.assertEqual(result.status, "available")
-        self.assertEqual(result.boundary, "github_click_confirmed")
+        self.assertEqual(result.boundary, "github_pill_confirmed")
 
     def test_non_click_more_strategy_counts_as_action_performed(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(
@@ -561,12 +575,12 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 "sourceAddFound": True,
                 "githubFound": True,
                 "githubClicked": True,
-                "githubSelectedLike": False,
-                "githubClickConfirmed": True,
+                "githubPillConfirmed": True,
+                "githubPillVisible": True,
             }
         )
         self.assertEqual(result.status, "available")
-        self.assertEqual(result.boundary, "github_click_confirmed")
+        self.assertEqual(result.boundary, "github_pill_confirmed")
 
     def test_send_path_runs_github_preflight_before_filling_project_page_composer(self) -> None:
         events: list[str] = []
@@ -600,7 +614,21 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
             patch.object(
                 _bridge_common,
                 "ensure_project_page_github_source_ready",
-                side_effect=lambda *args, **kwargs: events.append("preflight") or {"githubClickConfirmed": True},
+                side_effect=lambda *args, **kwargs: events.append("preflight") or {
+                    "composerFound": True,
+                    "plusFound": True,
+                    "plusClicked": True,
+                    "menuOpened": True,
+                    "moreFound": True,
+                    "moreActionPerformed": True,
+                    "submenuOpened": True,
+                    "sourceAddFound": True,
+                    "githubFound": True,
+                    "githubClicked": True,
+                    "githubPillConfirmed": True,
+                    "githubPillRemoveButtonFound": True,
+                    "finalAttachConfirmationKind": "github_pill_remove_button",
+                },
             ),
             patch.object(_bridge_common, "fill_chatgpt_composer", side_effect=fake_fill_chatgpt_composer),
             patch.object(_bridge_common, "submit_chatgpt_message", side_effect=fake_submit_chatgpt_message),
@@ -795,6 +823,7 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 submenuCandidateLabels=["情報源を追加する", "GitHub"],
                 submenuProbeMenuishLabels=["情報源を追加する", "GitHub"],
                 submenuProbeOverlayLabels=[],
+                moreControlledId="menu-demo",
                 sourceAddFound=True,
                 githubFound=True,
                 githubLabel="GitHub",
@@ -815,7 +844,7 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 githubFound=True,
                 githubLabel="GitHub",
                 githubClicked=True,
-                githubClickConfirmed=True,
+                moreControlledId="menu-demo",
                 githubFoundContext="submenu",
             ),
             self._base_payload(
@@ -830,17 +859,23 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 sourceAddFound=True,
                 githubFound=True,
                 githubLabel="GitHub",
-                githubSelectedLike=True,
+                moreControlledId="menu-demo",
+                githubPillConfirmed=True,
+                githubPillRemoveButtonFound=True,
+                githubPillVisible=True,
+                githubPillLabels=["GitHub：クリックして削除"],
                 githubFoundContext="submenu",
                 composerScopeText="GitHub",
+                finalAttachConfirmationKind="github_pill_remove_button",
             ),
             ]
         )
         with patch.object(_bridge_common, "_probe_project_page_github_source", side_effect=probe_sequence):
             payload = _bridge_common.ensure_project_page_github_source_ready(fake_page)
-        self.assertEqual(payload["moreOpenStrategiesTried"], ["click", "focus"])
+        self.assertEqual(payload["moreOpenStrategiesTried"], ["hover", "focus"])
         self.assertEqual(payload["moreOpenStrategySucceeded"], "focus")
         self.assertEqual(payload["githubFoundContext"], "submenu")
+        self.assertTrue(payload["githubPillConfirmed"])
         self.assertEqual(payload["phaseBoundaryChecks"], ["github_attach_start", "github_attach_complete"])
         self.assertEqual(fake_page.boundary_checks, 2)
         self.assertGreater(payload["uncheckedProbeCount"], 0)
@@ -856,15 +891,16 @@ class ProjectPageGithubSourcePreflightTests(unittest.TestCase):
                 "moreActionPerformed": True,
                 "submenuOpened": True,
                 "submenuProbeOverlayLabels": ["GitHub"],
+                "connectorSubmenuDetected": True,
                 "sourceAddFound": False,
                 "githubFound": True,
                 "githubClicked": True,
-                "githubSelectedLike": False,
-                "githubClickConfirmed": True,
+                "githubPillConfirmed": True,
+                "githubPillVisible": True,
             }
         )
         self.assertEqual(result.status, "available")
-        self.assertEqual(result.boundary, "github_click_confirmed")
+        self.assertEqual(result.boundary, "github_pill_confirmed")
 
     def test_generic_overlay_does_not_count_as_connector_submenu(self) -> None:
         result = _bridge_common.classify_project_page_github_source_preflight(

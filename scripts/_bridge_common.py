@@ -265,6 +265,10 @@ PROJECT_CHAT_PLUS_BUTTON_LABELS = (
     "ファイルの追加など",
     "Add files and more",
 )
+PROJECT_CHAT_PLUS_BUTTON_SELECTORS = (
+    "#composer-plus-btn",
+    "[data-testid='composer-plus-btn']",
+)
 PROJECT_CHAT_MORE_LABELS = (
     "さらに表示",
     "More",
@@ -277,15 +281,19 @@ PROJECT_CHAT_ADD_SOURCE_LABELS = (
 PROJECT_CHAT_GITHUB_LABELS = (
     "GitHub",
 )
+PROJECT_CHAT_GITHUB_PILL_REMOVE_LABELS = (
+    "GitHub：クリックして削除",
+    "GitHub: click to remove",
+)
 PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_MS = 250
 PROJECT_CHAT_GITHUB_PREFLIGHT_SETTLE_ATTEMPTS = 5
 PROJECT_CHAT_MORE_OPEN_STRATEGIES = (
-    "click",
-    "focus",
     "hover",
+    "focus",
     "keyboard_enter",
     "keyboard_space",
     "keyboard_arrow_right",
+    "click",
 )
 PROJECT_CHAT_GITHUB_ATTACH_PHASE_TIMEOUT_SECONDS = 20.0
 PROJECT_NAME_HEADING_SELECTORS = [
@@ -3792,6 +3800,7 @@ def classify_project_page_github_source_preflight(
     connector_submenu_detected = _connector_submenu_detected(payload)
     connector_labels = _connector_submenu_labels(payload)
     submenu_classifier_reason = str(payload.get("submenuClassifierReason", "")).strip()
+    final_confirmation_kind = str(payload.get("finalAttachConfirmationKind", "")).strip()
     if not bool(payload.get("composerFound")):
         return ProjectPageGithubSourcePreflightResult(
             status="probe_failed",
@@ -3852,22 +3861,19 @@ def classify_project_page_github_source_preflight(
             boundary="github_click_failed",
             detail="`GitHub` は見つかりましたがクリックできませんでした。",
         )
-    if bool(payload.get("githubSelectedLike")):
+    if bool(payload.get("githubPillConfirmed")):
+        detail = "`GitHub` pill が composer 上に追加されたことを確認できました。"
+        if final_confirmation_kind == "github_pill_remove_button":
+            detail = "`GitHub：クリックして削除` remove button で composer 上の GitHub pill を確認できました。"
         return ProjectPageGithubSourcePreflightResult(
             status="available",
-            boundary="github_selected_like",
-            detail="`GitHub` source が選択済み相当になったことを確認できました。",
-        )
-    if bool(payload.get("githubClickConfirmed")):
-        return ProjectPageGithubSourcePreflightResult(
-            status="available",
-            boundary="github_click_confirmed",
-            detail="`GitHub` click 自体は確認できました。",
+            boundary="github_pill_confirmed",
+            detail=detail,
         )
     return ProjectPageGithubSourcePreflightResult(
         status="probe_failed",
         boundary="github_click_unconfirmed",
-        detail="`GitHub` は見つかりましたが、クリック後の状態確認ができませんでした。",
+        detail="`GitHub` menu item は押しましたが、composer 上の GitHub pill を確認できませんでした。",
     )
 
 
@@ -3881,11 +3887,12 @@ def _build_project_page_github_source_probe_script(
   {_build_composer_lookup_script(preferred_hint=preferred_hint, project_page_mode=True)}
   const action = {json.dumps(action)};
   const plusLabels = {json.dumps(list(PROJECT_CHAT_PLUS_BUTTON_LABELS), ensure_ascii=False)};
+  const plusSelectors = {json.dumps(list(PROJECT_CHAT_PLUS_BUTTON_SELECTORS), ensure_ascii=False)};
   const moreLabels = {json.dumps(list(PROJECT_CHAT_MORE_LABELS), ensure_ascii=False)};
   const addSourceLabels = {json.dumps(list(PROJECT_CHAT_ADD_SOURCE_LABELS), ensure_ascii=False)};
   const githubLabels = {json.dumps(list(PROJECT_CHAT_GITHUB_LABELS), ensure_ascii=False)};
+  const githubPillRemoveLabels = {json.dumps(list(PROJECT_CHAT_GITHUB_PILL_REMOVE_LABELS), ensure_ascii=False)};
   const connectorTargetLabels = [...addSourceLabels, ...githubLabels];
-  const targetLabels = [...moreLabels, ...connectorTargetLabels];
   const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
   const isVisible = (el) => {{
     if (!el) return false;
@@ -3937,6 +3944,8 @@ def _build_project_page_github_source_probe_script(
       state: normalize(node?.getAttribute?.("data-state") || ""),
       rectTop: Math.round(node?.getBoundingClientRect?.().top || 0),
       rectLeft: Math.round(node?.getBoundingClientRect?.().left || 0),
+      controls: normalize(node?.getAttribute?.("aria-controls") || ""),
+      hasSubmenu: node?.hasAttribute?.("data-has-submenu") || normalize(node?.getAttribute?.("aria-haspopup") || "") === "menu",
     }};
   }};
   const collectEntries = (root) => Array.from(root.querySelectorAll(interactiveSelector)).filter(isVisible).map(toEntry);
@@ -3981,14 +3990,7 @@ def _build_project_page_github_source_probe_script(
     .filter((entry) => nearComposer(entry) && (
       menuRoles.has(entry.role) ||
       menuRoles.has(entry.parentRole) ||
-      isTargetEntry(entry, targetLabels)
-    ))
-    .sort((left, right) => distanceScore(left) - distanceScore(right));
-  const overlayEntries = (entries) => entries
-    .filter((entry) => !nearComposer(entry) && (
-      menuRoles.has(entry.role) ||
-      menuRoles.has(entry.parentRole) ||
-      isTargetEntry(entry, targetLabels)
+      isTargetEntry(entry, moreLabels)
     ))
     .sort((left, right) => distanceScore(left) - distanceScore(right));
   const renderEntries = (entries) => entries.map((entry) => {{
@@ -4004,9 +4006,87 @@ def _build_project_page_github_source_probe_script(
       pressed: entry.pressed,
       current: entry.current,
       state: entry.state,
+      controls: entry.controls,
+      hasSubmenu: entry.hasSubmenu,
     }};
   }});
   const renderLabels = (entries) => dedupe(entries.flatMap((entry) => entry.labels));
+  const nonMenuVisibleLabels = (entries) => renderLabels(
+    entries.filter((entry) => !menuRoles.has(entry.role) && !menuRoles.has(entry.parentRole))
+  );
+  const isInsideMenu = (node) => {{
+    const directRole = normalize(node?.getAttribute?.("role") || "");
+    if (menuRoles.has(directRole)) return true;
+    return !!node?.closest?.("[role='menu']");
+  }};
+  const exactVisibleSelectorEntries = (selectors, root) => {{
+    const entries = [];
+    if (!root) return entries;
+    for (const selector of selectors) {{
+      try {{
+        const node = root.querySelector(selector);
+        if (node && isVisible(node)) entries.push(toEntry(node));
+      }} catch (error) {{
+        // ignore invalid selector while probing
+      }}
+    }}
+    return uniqueEntriesByNode(entries);
+  }};
+  const pickPreferredPlusEntry = (entries) => {{
+    const scopedPreferred = exactVisibleSelectorEntries(plusSelectors, composerScope);
+    if (scopedPreferred[0]) return scopedPreferred[0];
+    const globalPreferred = exactVisibleSelectorEntries(plusSelectors, document);
+    if (globalPreferred[0]) return globalPreferred[0];
+    const scopedAriaPreferred = uniqueEntriesByNode(
+      scopedEntries().filter((entry) => plusLabels.includes(entry.ariaLabel)).sort((left, right) => distanceScore(left) - distanceScore(right))
+    );
+    if (scopedAriaPreferred[0]) return scopedAriaPreferred[0];
+    return pickEntry(plusLabels, entries, {{preferScoped: true}});
+  }};
+  const scoreMoreEntry = (entry) => {{
+    const hasControlsScore = entry.controls ? 0 : 1000;
+    const hasSubmenuScore = entry.hasSubmenu ? 0 : 100;
+    return hasControlsScore + hasSubmenuScore + distanceScore(entry);
+  }};
+  const pickPreferredMoreCandidates = (entries) => uniqueEntriesByNode(
+    matchingEntries(moreLabels, entries).sort((left, right) => scoreMoreEntry(left) - scoreMoreEntry(right))
+  );
+  const readControlledSubmenuState = (entry) => {{
+    const controlledId = normalize(entry?.controls || entry?.node?.getAttribute?.("aria-controls") || "");
+    if (!controlledId) {{
+      return {{
+        controlledId: "",
+        entries: [],
+        labels: [],
+        connectorEntries: [],
+        sourceAddEntry: null,
+        githubEntry: null,
+      }};
+    }}
+    const root = document.getElementById(controlledId);
+    if (!root || !isVisible(root)) {{
+      return {{
+        controlledId,
+        entries: [],
+        labels: [],
+        connectorEntries: [],
+        sourceAddEntry: null,
+        githubEntry: null,
+      }};
+    }}
+    const entries = collectEntries(root);
+    const connectorEntries = entries.filter((candidate) => isTargetEntry(candidate, connectorTargetLabels));
+    const sourceAddEntry = connectorEntries.find((candidate) => isTargetEntry(candidate, addSourceLabels)) || null;
+    const githubEntry = connectorEntries.find((candidate) => isTargetEntry(candidate, githubLabels)) || null;
+    return {{
+      controlledId,
+      entries,
+      labels: renderLabels(entries),
+      connectorEntries,
+      sourceAddEntry,
+      githubEntry,
+    }};
+  }};
   const clickEntry = (entry) => {{
     if (!entry?.node) return false;
     entry.node.scrollIntoView?.({{block: "center"}});
@@ -4053,19 +4133,45 @@ def _build_project_page_github_source_probe_script(
     if (strategy === "keyboard_arrow_right") return keyboardEntry(entry, "ArrowRight");
     return false;
   }};
+  const findComposerGithubPillState = () => {{
+    const root = composerScope || composer || document.body;
+    const removeButtons = Array.from(root.querySelectorAll("button,[role='button']")).filter((node) => {{
+      if (!isVisible(node) || isInsideMenu(node)) return false;
+      return githubPillRemoveLabels.includes(normalize(node.getAttribute("aria-label") || ""));
+    }});
+    const pillNodes = Array.from(root.querySelectorAll("button,[role='button'],span,div")).filter((node) => {{
+      if (!isVisible(node) || isInsideMenu(node)) return false;
+      if (node === composer || node.contains?.(composer)) return false;
+      return normalize(node.textContent || "") === "GitHub";
+    }});
+    const githubPillRemoveButtonFound = removeButtons.length > 0;
+    const githubPillVisible = githubPillRemoveButtonFound || pillNodes.length > 0;
+    return {{
+      githubPillConfirmed: githubPillVisible,
+      githubPillRemoveButtonFound,
+      githubPillVisible,
+      githubPillLabels: dedupe([
+        ...removeButtons.map((node) => normalize(node.getAttribute("aria-label") || "")),
+        ...pillNodes.map((node) => normalize(node.textContent || "")),
+      ]),
+      finalAttachConfirmationKind: githubPillRemoveButtonFound
+        ? "github_pill_remove_button"
+        : (pillNodes.length > 0 ? "github_pill_visible" : ""),
+    }};
+  }};
   const beforeEntries = globalEntries();
-  const plusEntry = pickEntry(plusLabels, beforeEntries, {{preferScoped: true}});
+  const plusEntry = pickPreferredPlusEntry(beforeEntries);
   const menuEntriesBefore = contextualMenuEntries(beforeEntries);
-  const overlayEntriesBefore = overlayEntries(beforeEntries);
-  const menuMoreCandidatesBefore = matchingEntries(moreLabels, menuEntriesBefore);
-  const globalMoreCandidatesBefore = matchingEntries(moreLabels, beforeEntries);
+  const menuMoreCandidatesBefore = pickPreferredMoreCandidates(menuEntriesBefore);
+  const globalMoreCandidatesBefore = pickPreferredMoreCandidates(beforeEntries);
   const allMoreCandidatesBefore = uniqueEntriesByNode([...menuMoreCandidatesBefore, ...globalMoreCandidatesBefore]);
   const moreEntryBefore = allMoreCandidatesBefore[0] || null;
   const chosenMoreCandidateIndex = moreEntryBefore
     ? allMoreCandidatesBefore.findIndex((entry) => entry.node === moreEntryBefore.node)
     : -1;
-  const sourceAddEntryBefore = pickEntry(addSourceLabels, menuEntriesBefore) || pickEntry(addSourceLabels, overlayEntriesBefore) || pickEntry(addSourceLabels, beforeEntries);
-  const githubEntryBefore = pickEntry(githubLabels, menuEntriesBefore) || pickEntry(githubLabels, overlayEntriesBefore) || pickEntry(githubLabels, beforeEntries);
+  const submenuStateBefore = readControlledSubmenuState(moreEntryBefore);
+  const sourceAddEntryBefore = submenuStateBefore.sourceAddEntry;
+  const githubEntryBefore = submenuStateBefore.githubEntry;
   const plusClicked = action === "click_plus" ? clickEntry(plusEntry) : false;
   const moreStrategy = action.startsWith("open_more_") ? action.slice("open_more_".length) : "";
   const moreActionPerformed = moreStrategy ? performMoreStrategy(moreEntryBefore, moreStrategy) : false;
@@ -4073,60 +4179,44 @@ def _build_project_page_github_source_probe_script(
   const afterEntries = globalEntries();
   const menuEntriesAfter = contextualMenuEntries(afterEntries);
   const menuEntries = menuEntriesAfter.length ? menuEntriesAfter : menuEntriesBefore;
-  const overlayEntriesAfter = overlayEntries(afterEntries);
-  const menuMoreCandidatesAfter = matchingEntries(moreLabels, menuEntriesAfter);
-  const globalMoreCandidatesAfter = matchingEntries(moreLabels, afterEntries);
+  const menuMoreCandidatesAfter = pickPreferredMoreCandidates(menuEntriesAfter);
+  const globalMoreCandidatesAfter = pickPreferredMoreCandidates(afterEntries);
   const allMoreCandidatesAfter = uniqueEntriesByNode([...menuMoreCandidatesAfter, ...globalMoreCandidatesAfter]);
   const moreEntry = allMoreCandidatesAfter[0] || moreEntryBefore;
-  const sourceAddEntry = pickEntry(addSourceLabels, menuEntriesAfter) || pickEntry(addSourceLabels, overlayEntriesAfter) || pickEntry(addSourceLabels, afterEntries) || sourceAddEntryBefore;
-  const githubEntry = pickEntry(githubLabels, menuEntriesAfter) || pickEntry(githubLabels, overlayEntriesAfter) || pickEntry(githubLabels, afterEntries) || githubEntryBefore;
-  const connectorMenuEntries = menuEntriesAfter.filter((entry) => isTargetEntry(entry, connectorTargetLabels));
-  const connectorOverlayEntries = overlayEntriesAfter.filter((entry) => isTargetEntry(entry, connectorTargetLabels));
-  const submenuEntries = [
-    ...connectorMenuEntries,
-    ...connectorOverlayEntries,
-    sourceAddEntry,
-    githubEntry,
-  ].filter((entry, index, items) => !!entry && items.findIndex((candidate) => candidate?.node === entry?.node) === index);
-  const connectorLikeLabelsSeen = dedupe([
-    ...renderLabels(connectorMenuEntries),
-    ...renderLabels(connectorOverlayEntries),
-    ...renderLabels(submenuEntries),
+  const submenuStateAfter = readControlledSubmenuState(moreEntry || moreEntryBefore);
+  const sourceAddEntry = submenuStateAfter.sourceAddEntry || sourceAddEntryBefore;
+  const githubEntry = submenuStateAfter.githubEntry || githubEntryBefore;
+  const connectorEntries = uniqueEntriesByNode([
+    ...(submenuStateAfter.connectorEntries || []),
+    ...(submenuStateBefore.connectorEntries || []),
   ]);
-  const genericOverlayLabelsSeen = renderLabels(overlayEntriesAfter)
-    .filter((label) => !connectorLikeLabelsSeen.includes(label));
+  const submenuLabels = renderLabels(submenuStateAfter.entries || submenuStateBefore.entries || []);
+  const connectorLikeLabelsSeen = dedupe([
+    ...renderLabels(connectorEntries),
+    ...renderLabels((submenuStateAfter.entries || []).filter((entry) => isTargetEntry(entry, connectorTargetLabels))),
+    ...renderLabels((submenuStateBefore.entries || []).filter((entry) => isTargetEntry(entry, connectorTargetLabels))),
+  ]);
   const connectorSubmenuDetected = !!sourceAddEntry || !!githubEntry || connectorLikeLabelsSeen.length > 0;
   const submenuClassifier = connectorSubmenuDetected
     ? "connector_submenu"
-    : (renderLabels(overlayEntriesAfter).length > 0
-        ? "generic_overlay_only"
-        : (renderLabels(menuEntriesAfter).length > 0 ? "base_menu_only" : "no_submenu"));
+    : (submenuLabels.length > 0
+        ? "controlled_submenu_without_connector_labels"
+        : "no_submenu");
   const submenuClassifierReason = connectorSubmenuDetected
-    ? "connector_like_labels_seen"
-    : (renderLabels(overlayEntriesAfter).length > 0
-        ? "overlay_labels_without_connector_evidence"
-        : (renderLabels(menuEntriesAfter).length > 0
-            ? "base_menu_labels_without_connector_evidence"
-            : "no_submenu_candidates"));
+    ? "controlled_submenu_connector_labels_seen"
+    : (submenuLabels.length > 0
+        ? "controlled_submenu_without_connector_labels"
+        : "no_submenu_candidates");
   const submenuCandidateGroups = [
     {{group: "menuish", labels: renderLabels(menuEntriesAfter).slice(0, 40)}},
-    {{group: "overlay", labels: renderLabels(overlayEntriesAfter).slice(0, 40)}},
+    {{group: "controlled_submenu", labels: submenuLabels.slice(0, 40)}},
     {{group: "connector_like", labels: connectorLikeLabelsSeen.slice(0, 40)}},
   ];
+  const genericOverlayLabelsSeen = nonMenuVisibleLabels(afterEntries)
+    .filter((label) => !connectorLikeLabelsSeen.includes(label) && !plusLabels.includes(label));
   const composerScopeText = normalize((composerScope?.innerText || "").slice(0, 1200));
-  const githubSelectedLike = !!githubEntry && (
-    githubEntry.selected === "true" ||
-    githubEntry.checked === "true" ||
-    githubEntry.pressed === "true" ||
-    githubEntry.current === "true" ||
-    ["open", "checked", "active", "selected"].includes(githubEntry.state)
-  ) || (githubClicked && composerScopeText.includes("GitHub"));
-  const githubFoundContext = !githubEntry ? "" : (
-    menuEntriesAfter.some((entry) => entry.node === githubEntry.node) ? "submenu" :
-    overlayEntriesAfter.some((entry) => entry.node === githubEntry.node) ? "overlay" :
-    renderLabels(afterEntries).includes("GitHub") ? "visible_labels_only" :
-    "menu"
-  );
+  const pillState = findComposerGithubPillState();
+  const githubFoundContext = githubEntry ? "controlled_submenu" : "";
   return JSON.stringify({{
     composerFound: !!composer,
     projectName: payload.projectName || "",
@@ -4152,12 +4242,13 @@ def _build_project_page_github_source_probe_script(
     moreOpenStrategyAttempted: moreStrategy,
     moreTargetText: moreEntry?.text || "",
     moreTargetAriaLabel: moreEntry?.ariaLabel || "",
+    moreControlledId: submenuStateAfter.controlledId || submenuStateBefore.controlledId || "",
     chosenMoreCandidateIndex,
     chosenMoreCandidateLabels: moreEntryBefore?.labels || [],
     allMoreCandidates: renderEntries(allMoreCandidatesBefore).slice(0, 10),
     submenuOpened: connectorSubmenuDetected,
-    submenuItems: renderEntries(submenuEntries).slice(0, 20),
-    submenuCandidateLabels: renderLabels(submenuEntries).slice(0, 20),
+    submenuItems: renderEntries(connectorEntries).slice(0, 20),
+    submenuCandidateLabels: connectorLikeLabelsSeen.slice(0, 20),
     submenuClassifier,
     submenuClassifierReason,
     connectorSubmenuDetected,
@@ -4166,15 +4257,20 @@ def _build_project_page_github_source_probe_script(
     genericOverlayLabelsSeen: genericOverlayLabelsSeen.slice(0, 40),
     submenuProbeVisibleLabels: renderLabels(afterEntries).slice(0, 60),
     submenuProbeMenuishLabels: renderLabels(menuEntriesAfter).slice(0, 40),
-    submenuProbeOverlayLabels: renderLabels(overlayEntriesAfter).slice(0, 40),
+    submenuProbeOverlayLabels: submenuLabels.slice(0, 40),
     sourceAddFound: !!sourceAddEntry,
     githubFound: !!githubEntry,
     githubLabel: githubEntry?.text || "",
     githubAriaLabel: githubEntry?.ariaLabel || "",
     githubClicked,
-    githubSelectedLike,
+    githubPillConfirmed: pillState.githubPillConfirmed,
+    githubPillRemoveButtonFound: pillState.githubPillRemoveButtonFound,
+    githubPillVisible: pillState.githubPillVisible,
+    githubPillLabels: pillState.githubPillLabels.slice(0, 10),
+    githubSelectedLike: pillState.githubPillConfirmed,
     githubClickConfirmed: githubClicked,
     githubFoundContext,
+    finalAttachConfirmationKind: pillState.finalAttachConfirmationKind,
     visibleLabels: renderLabels(afterEntries).slice(0, 60),
     composerScopeText,
   }});
@@ -4265,7 +4361,6 @@ def _connector_submenu_labels(payload: Mapping[str, Any]) -> list[str]:
         "connectorLikeLabelsSeen",
         "submenuItems",
         "submenuCandidateLabels",
-        "submenuProbeMenuishLabels",
         "submenuProbeOverlayLabels",
     )
     return [label for label in labels if label in connector_targets]
@@ -4426,9 +4521,14 @@ def _log_project_page_github_source_probe(prefix: str, payload: Mapping[str, Any
         "githubLabel": str(payload.get("githubLabel", "")),
         "githubAriaLabel": str(payload.get("githubAriaLabel", "")),
         "githubClicked": bool(payload.get("githubClicked")),
+        "githubPillConfirmed": bool(payload.get("githubPillConfirmed")),
+        "githubPillRemoveButtonFound": bool(payload.get("githubPillRemoveButtonFound")),
+        "githubPillVisible": bool(payload.get("githubPillVisible")),
+        "githubPillLabels": list(payload.get("githubPillLabels", [])),
         "githubSelectedLike": bool(payload.get("githubSelectedLike")),
         "githubClickConfirmed": bool(payload.get("githubClickConfirmed")),
         "githubFoundContext": str(payload.get("githubFoundContext", "")),
+        "moreControlledId": str(payload.get("moreControlledId", "")),
         "githubCandidatesBefore": list(payload.get("githubCandidatesBefore", [])),
         "githubCandidatesAfter": list(payload.get("githubCandidatesAfter", [])),
         "githubConfirmAttempts": int(payload.get("githubConfirmAttempts", 0) or 0),
@@ -4614,9 +4714,15 @@ def ensure_project_page_github_source_ready(
     confirm_payload, confirm_attempts, confirm_elapsed_ms, confirm_seen, confirm_timed_out = _wait_for_project_page_github_source_probe(
         probe=lambda: run_unchecked_probe(action="probe"),
         wait_before_first_probe=True,
-        stop_when=lambda current: bool(current.get("githubSelectedLike"))
-        or ("GitHub" in str(current.get("composerScopeText", ""))),
-        seen_keys=("submenuItems", "submenuCandidateLabels", "visibleLabels", "githubLabel", "githubAriaLabel"),
+        stop_when=lambda current: bool(current.get("githubPillConfirmed")),
+        seen_keys=(
+            "submenuItems",
+            "submenuCandidateLabels",
+            "visibleLabels",
+            "githubLabel",
+            "githubAriaLabel",
+            "githubPillLabels",
+        ),
         wait=page.wait_for_timeout,
         deadline=operation_deadline,
     )
@@ -4624,10 +4730,7 @@ def ensure_project_page_github_source_ready(
     payload["githubConfirmAttempts"] = confirm_attempts
     payload["githubConfirmElapsedMs"] = confirm_elapsed_ms
     payload["githubConfirmSeenItems"] = confirm_seen
-    payload["githubConfirmationKind"] = (
-        "selected_like" if bool(payload.get("githubSelectedLike")) else "click_confirmed"
-    )
-    payload["finalAttachConfirmationKind"] = payload["githubConfirmationKind"]
+    payload["githubConfirmationKind"] = str(payload.get("finalAttachConfirmationKind", ""))
     if confirm_timed_out:
         _raise_project_page_github_attach_timeout(
             page,
@@ -4700,7 +4803,7 @@ def ensure_project_page_github_source_ready_for_send(
         )
 
     result = classify_project_page_github_source_preflight(payload)
-    if bool(payload.get("githubSelectedLike")):
+    if bool(payload.get("githubPillConfirmed")):
         status = "attached"
     else:
         status = "unconfirmed"

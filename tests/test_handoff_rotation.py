@@ -35,7 +35,21 @@ class HandoffRotationTests(unittest.TestCase):
             patch.object(
                 _bridge_common,
                 "ensure_project_page_github_source_ready",
-                return_value={"githubClickConfirmed": True},
+                return_value={
+                    "composerFound": True,
+                    "plusFound": True,
+                    "plusClicked": True,
+                    "menuOpened": True,
+                    "moreFound": True,
+                    "moreActionPerformed": True,
+                    "submenuOpened": True,
+                    "sourceAddFound": True,
+                    "githubFound": True,
+                    "githubClicked": True,
+                    "githubPillConfirmed": True,
+                    "githubPillRemoveButtonFound": True,
+                    "finalAttachConfirmationKind": "github_pill_remove_button",
+                },
             ),
             patch.object(
                 _bridge_common,
