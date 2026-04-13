@@ -16,6 +16,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import fetch_next_prompt  # noqa: E402
 import issue_centric_contract  # noqa: E402
 import issue_centric_transport  # noqa: E402
+import _bridge_common as bridge_common  # noqa: E402
 from _bridge_common import BridgeError, BridgeStop  # noqa: E402
 
 
@@ -231,6 +232,37 @@ class IssueCentricContractParserTests(unittest.TestCase):
         decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
         self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.CODEX_RUN)
         self.assertEqual(decision.target_issue, "#123")
+        self.assertEqual(decision.codex_body_base64, codex_payload)
+
+    def test_parses_near_miss_codex_run_with_preface_and_missing_optional_flags(self) -> None:
+        codex_payload = b64("Implement the bounded rehearsal task.\n")
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": 2,
+                "summary": "Add rehearsal marker and README completion note.",
+            },
+            parts=[
+                block("codex", codex_payload),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": 2,
+                            "summary": "Add rehearsal marker and README completion note.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+            extra_before="短い前置きが marker の前にあります。",
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.CODEX_RUN)
+        self.assertEqual(decision.target_issue, "2")
+        self.assertFalse(decision.close_current_issue)
+        self.assertFalse(decision.create_followup_issue)
         self.assertEqual(decision.codex_body_base64, codex_payload)
 
     def test_rejects_codex_run_with_target_issue_none(self) -> None:
@@ -504,6 +536,33 @@ class IssueCentricContractParserTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(issue_centric_contract.IssueCentricContractError, "close_current_issue must be a boolean"):
             issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+
+    def test_rejects_integer_optional_flags_even_after_near_miss_relaxation(self) -> None:
+        for field_name, field_value in (("close_current_issue", 1), ("create_followup_issue", 0)):
+            with self.subTest(field_name=field_name, field_value=field_value):
+                raw = build_raw_reply(
+                    {
+                        "action": "no_action",
+                        "target_issue": "none",
+                        "close_current_issue": False,
+                        "create_followup_issue": False,
+                        "summary": "Invalid bool-like integer.",
+                    }
+                )
+                envelope = {
+                    "action": "no_action",
+                    "target_issue": "none",
+                    "close_current_issue": False,
+                    "create_followup_issue": False,
+                    "summary": "Invalid bool-like integer.",
+                }
+                envelope[field_name] = field_value
+                raw = build_raw_reply(envelope)
+                with self.assertRaisesRegex(
+                    issue_centric_contract.IssueCentricContractError,
+                    f"{field_name} must be a boolean",
+                ):
+                    issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
 
     def test_accepts_body_blocks_in_any_order_and_ignores_extra_text(self) -> None:
         issue_payload = b64("Issue body")
@@ -1326,6 +1385,116 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
             self.assertEqual(metadata["prepared_artifact"]["kind"], "codex_body")
 
 
+class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
+    def _build_near_miss_raw(self) -> str:
+        codex_payload = b64("Implement the bounded rehearsal task.\n")
+        return build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": 2,
+                "summary": "Add rehearsal marker and README completion note.",
+            },
+            parts=[
+                block("codex", codex_payload),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": 2,
+                            "summary": "Add rehearsal marker and README completion note.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+            extra_before="短い自然文の前置きです。",
+        )
+
+    def test_parse_issue_centric_reply_for_fetch_waits_when_marker_is_absent(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "No contract markers here yet.",
+            ]
+        )
+        with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が見つかりませんでした"):
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw, after_text="request body")
+
+    def test_parse_issue_centric_reply_for_fetch_stops_when_marker_is_present_but_invalid(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#2",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Missing codex body should stay invalid.",
+            },
+            extra_before="marker はあるが contract は不正です。",
+        )
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyInvalid) as cm:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw, after_text="request body")
+        self.assertIn("requires CHATGPT_CODEX_BODY", str(cm.exception))
+
+    def test_parse_issue_centric_reply_for_fetch_accepts_near_miss_contract(self) -> None:
+        decision = fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+            self._build_near_miss_raw(),
+            after_text="request body",
+        )
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.CODEX_RUN)
+        self.assertEqual(decision.target_issue, "2")
+        self.assertFalse(decision.close_current_issue)
+        self.assertFalse(decision.create_followup_issue)
+
+    def test_fetch_run_stops_immediately_for_invalid_issue_centric_contract(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#2",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#2",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Still invalid because the codex body is missing.",
+            },
+            extra_before="marker は見つかったが contract が不正です。",
+        )
+        saved_states: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            ):
+                with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が不正でした"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(len(saved_states), 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["mode"], "awaiting_user")
+            self.assertTrue(bool(saved["error"]))
+            self.assertEqual(saved["chatgpt_decision"], "issue_centric_invalid_contract")
+            self.assertIn("raw_chatgpt_prompt_dump", str(saved["error_message"]))
+            self.assertIn("invalid_issue_centric_contract", str(saved["error_message"]))
+
+
 class PlanAFetchPrimaryPathTests(unittest.TestCase):
     """Tests for Plan A BODY base64 transport as the primary fetch path.
 
@@ -1457,6 +1626,40 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
             saved = saved_states[0]
             self.assertEqual(saved["mode"], "ready_for_codex")
             self.assertTrue(bool(saved.get("need_codex_run")))
+
+
+class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
+    def test_propagates_non_bridgeerror_from_plan_a_extractor(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#2",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Missing codex body should surface as invalid.",
+            }
+        )
+
+        def fake_wait_for_chatgpt_reply_text(**kwargs: object) -> str:
+            extractor = kwargs["extractor"]
+            return extractor(raw, "request body")
+
+        def plan_a_extractor(_: str, __: str | None) -> None:
+            raise fetch_next_prompt.IssueCentricReplyInvalid(
+                "requires CHATGPT_CODEX_BODY",
+                raw_text=raw,
+            )
+
+        with patch.object(
+            bridge_common,
+            "_wait_for_chatgpt_reply_text",
+            side_effect=fake_wait_for_chatgpt_reply_text,
+        ):
+            with self.assertRaises(fetch_next_prompt.IssueCentricReplyInvalid):
+                bridge_common.wait_for_plan_a_or_prompt_reply_text(
+                    plan_a_extractor=plan_a_extractor,
+                    request_text="request body",
+                )
 
 
 if __name__ == "__main__":

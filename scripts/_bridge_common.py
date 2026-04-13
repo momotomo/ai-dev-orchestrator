@@ -4276,15 +4276,16 @@ def wait_for_plan_a_or_prompt_reply_text(
     or the visible DOM text (prompt/no-codex) extractor.
 
     ``plan_a_extractor`` is tried first (primary path).  If it raises
-    :class:`BridgeError` or any exception, the visible DOM text extractor is
-    tried as a safety fallback.  Polling continues until either extractor
-    succeeds or the extended timeout / late-completion deadline is reached.
+    :class:`BridgeError`, the visible DOM text extractor is tried as a safety
+    fallback.  Other exceptions are treated as hard Plan A failures and are
+    propagated to the caller. Polling continues until an extractor succeeds or
+    the extended timeout / late-completion deadline is reached.
     """
 
     def combined_extractor(raw_text: str, after_text: str | None) -> Any:
         try:
             return plan_a_extractor(raw_text, after_text)
-        except Exception:
+        except BridgeError:
             pass
         return extract_last_chatgpt_reply(raw_text, after_text=after_text)
 

@@ -41,7 +41,9 @@ from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
     IssueCentricAction,
     IssueCentricContractError,
-    maybe_parse_issue_centric_reply,
+    IssueCentricContractNotFound,
+    contains_issue_centric_contract_marker,
+    parse_issue_centric_reply,
 )
 from issue_centric_codex_run import execute_codex_run_action
 from issue_centric_execution import dispatch_issue_centric_execution
@@ -51,6 +53,75 @@ from issue_centric_transport import (
     IssueCentricTransportError,
     materialize_issue_centric_decision,
 )
+
+
+class IssueCentricReplyInvalid(Exception):
+    def __init__(self, detail: str, *, raw_text: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.raw_text = raw_text
+
+
+def parse_issue_centric_reply_for_fetch(
+    raw_text: str,
+    *,
+    after_text: str | None = None,
+) -> object:
+    try:
+        return parse_issue_centric_reply(raw_text, after_text=after_text)
+    except IssueCentricContractNotFound as exc:
+        if contains_issue_centric_contract_marker(raw_text, after_text=after_text):
+            raise IssueCentricReplyInvalid(
+                "issue-centric contract marker は見つかりましたが、decision JSON か body block を最後まで抽出できませんでした。",
+                raw_text=raw_text,
+            ) from exc
+        raise BridgeError("issue-centric contract reply が見つかりませんでした") from exc
+    except IssueCentricContractError as exc:
+        raise IssueCentricReplyInvalid(str(exc), raw_text=raw_text) from exc
+
+
+def stop_for_invalid_issue_centric_contract(
+    state: dict[str, object],
+    *,
+    raw_text: str,
+    detail: str,
+    pending_request_source: str,
+    raw_log_path: Path | None = None,
+) -> None:
+    raw_log = raw_log_path or log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
+    invalid_summary = "\n".join(
+        [
+            "# Invalid Issue-Centric Contract",
+            "",
+            f"- error: {detail}",
+            f"- raw_dump: {repo_relative(raw_log)}",
+            f"- pending_request_source: {pending_request_source or 'unknown'}",
+        ]
+    ).strip() + "\n"
+    invalid_log = log_text("invalid_issue_centric_contract", invalid_summary, suffix="md")
+    failed_state = dict(state)
+    failed_state.update(
+        {
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "error": True,
+            "error_message": (
+                "issue-centric contract reply が不正でした: "
+                f"{detail}"
+                f" raw dump: {repo_relative(raw_log)}"
+                f" invalid log: {repo_relative(invalid_log)}"
+            ),
+            "chatgpt_decision": "issue_centric_invalid_contract",
+            "chatgpt_decision_note": detail,
+            "last_issue_centric_decision_log": repo_relative(invalid_log),
+            "last_issue_centric_metadata_log": "",
+            "last_issue_centric_artifact_file": "",
+        }
+    )
+    save_state(failed_state)
+    raise BridgeError(str(failed_state["error_message"]))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -110,22 +181,36 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             raise ValueError(f"raw file を読めませんでした: {args.raw_file}")
     else:
         def _plan_a_extractor(raw: str, after: str | None) -> None:
-            result = maybe_parse_issue_centric_reply(raw, after_text=after)
-            if result is None:
-                raise BridgeError("issue-centric contract reply が見つかりませんでした")
+            parse_issue_centric_reply_for_fetch(raw, after_text=after)
 
-        raw_text = wait_for_plan_a_or_prompt_reply_text(
-            plan_a_extractor=_plan_a_extractor,
-            timeout_seconds=args.timeout_seconds or None,
-            request_text=request_text or None,
-            stage_callback=handle_wait_event,
-            allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
-        )
+        try:
+            raw_text = wait_for_plan_a_or_prompt_reply_text(
+                plan_a_extractor=_plan_a_extractor,
+                timeout_seconds=args.timeout_seconds or None,
+                request_text=request_text or None,
+                stage_callback=handle_wait_event,
+                allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
+            )
+        except IssueCentricReplyInvalid as exc:
+            stop_for_invalid_issue_centric_contract(
+                dict(state),
+                raw_text=exc.raw_text,
+                detail=exc.detail,
+                pending_request_source=pending_request_source,
+            )
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     try:
-        contract_decision = maybe_parse_issue_centric_reply(raw_text, after_text=request_text or None)
-    except IssueCentricContractError as exc:
-        raise BridgeError(f"issue-centric contract reply が不正でした: {exc}") from exc
+        contract_decision = parse_issue_centric_reply_for_fetch(raw_text, after_text=request_text or None)
+    except BridgeError:
+        contract_decision = None
+    except IssueCentricReplyInvalid as exc:
+        stop_for_invalid_issue_centric_contract(
+            dict(state),
+            raw_text=exc.raw_text,
+            detail=exc.detail,
+            pending_request_source=pending_request_source,
+            raw_log_path=raw_log,
+        )
     if contract_decision is not None:
         decision_log = log_text(
             "extracted_issue_centric_contract",

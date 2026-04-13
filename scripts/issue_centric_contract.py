@@ -260,6 +260,13 @@ def _require_bool(envelope: Mapping[str, Any], field: str) -> bool:
     return value
 
 
+def _require_optional_bool(envelope: Mapping[str, Any], field: str, *, default: bool = False) -> bool:
+    value = envelope.get(field, default)
+    if type(value) is not bool:
+        raise IssueCentricContractError(f"{field} must be a boolean.")
+    return value
+
+
 def _require_string(envelope: Mapping[str, Any], field: str) -> str:
     value = envelope.get(field)
     if not isinstance(value, str):
@@ -268,6 +275,18 @@ def _require_string(envelope: Mapping[str, Any], field: str) -> str:
     if not normalized:
         raise IssueCentricContractError(f"{field} must not be empty.")
     return normalized
+
+
+def _require_target_issue_scalar(envelope: Mapping[str, Any], field: str) -> str:
+    value = envelope.get(field)
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized:
+            raise IssueCentricContractError(f"{field} must not be empty.")
+        return normalized
+    if type(value) is int:
+        return str(value)
+    raise IssueCentricContractError(f"{field} must be a string or integer.")
 
 
 def _normalize_target_issue(raw_target_issue: str) -> str | None:
@@ -282,6 +301,30 @@ def _normalize_target_issue(raw_target_issue: str) -> str | None:
         'cross-repo reference ("owner/repo#42"), '
         'or full GitHub issue URL ("https://github.com/owner/repo/issues/42").'
     )
+
+
+_CONTRACT_MARKERS = (
+    DECISION_JSON_START,
+    DECISION_JSON_END,
+    ISSUE_BODY_START,
+    ISSUE_BODY_END,
+    CODEX_BODY_START,
+    CODEX_BODY_END,
+    REVIEW_BODY_START,
+    REVIEW_BODY_END,
+    FOLLOWUP_ISSUE_BODY_START,
+    FOLLOWUP_ISSUE_BODY_END,
+)
+
+
+def contains_issue_centric_contract_marker(
+    raw_text: str,
+    *,
+    after_text: str | None = None,
+) -> bool:
+    search_start = _search_start_index(raw_text, after_text)
+    segment = raw_text[search_start:]
+    return any(marker in segment for marker in _CONTRACT_MARKERS)
 
 
 def extract_issue_centric_reply(
@@ -339,7 +382,7 @@ def extract_issue_centric_reply(
         normalize_base64=True,
     )
 
-    raw_target_issue = _require_string(envelope, "target_issue")
+    raw_target_issue = _require_target_issue_scalar(envelope, "target_issue")
     return ExtractedIssueCentricReply(
         envelope=envelope,
         raw_json=raw_json,
@@ -363,8 +406,8 @@ def normalize_issue_centric_reply(extracted: ExtractedIssueCentricReply) -> Issu
     decision = IssueCentricDecision(
         action=action,
         target_issue=_normalize_target_issue(extracted.target_issue_raw),
-        close_current_issue=_require_bool(envelope, "close_current_issue"),
-        create_followup_issue=_require_bool(envelope, "create_followup_issue"),
+        close_current_issue=_require_optional_bool(envelope, "close_current_issue"),
+        create_followup_issue=_require_optional_bool(envelope, "create_followup_issue"),
         summary=_require_string(envelope, "summary"),
         issue_body_base64=extracted.issue_body_base64,
         codex_body_base64=extracted.codex_body_base64,
