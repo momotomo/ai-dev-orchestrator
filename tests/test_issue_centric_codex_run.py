@@ -598,6 +598,176 @@ class PreparedCodexDispatchResumeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         dispatch_mock.assert_called_once()
 
+    # --- fallback: metadata + artifact (no raw log) ---
+
+    def _build_pending_state_no_raw_log(
+        self,
+        root: Path,
+        *,
+        artifact_text: str,
+        target_issue: str = "#20",
+    ) -> tuple[dict[str, object], Path]:
+        """Build pending state whose metadata has NO raw_response_log entry."""
+        artifact_log = root / "prepared_issue_centric_codex_body.md"
+        artifact_log.write_text(artifact_text, encoding="utf-8")
+        metadata_log = root / "metadata.json"
+        metadata_log.write_text(
+            json.dumps(
+                {
+                    "action": "codex_run",
+                    "target_issue": target_issue,
+                    "close_current_issue": False,
+                    "create_followup_issue": False,
+                    "summary": "resume fallback test",
+                    "raw_response_log": "",
+                    "prepared_artifact": {
+                        "kind": "codex_body",
+                        "path": str(artifact_log),
+                    },
+                },
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        state = {
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "issue_centric:codex_run",
+            "chatgpt_decision_note": "prepared for later dispatch",
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_target_issue": target_issue,
+            "last_issue_centric_artifact_kind": "codex_body",
+            "last_issue_centric_artifact_file": str(artifact_log),
+            "last_issue_centric_metadata_log": str(metadata_log),
+            "last_issue_centric_decision_log": "",
+            "last_issue_centric_execution_status": "",
+        }
+        return state, artifact_log
+
+    def test_resume_succeeds_without_raw_log_using_artifact_fallback(self) -> None:
+        """After max-execution-count stop, resume must not need the raw response log."""
+        artifact_text = "# Codex instruction\n\nDo the task.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state, artifact_log = self._build_pending_state_no_raw_log(
+                root, artifact_text=artifact_text
+            )
+            decision, materialized, raw_log_ref, _, _ = (
+                bridge_orchestrator.load_pending_issue_centric_codex_materialized(state)
+            )
+        self.assertEqual(decision.action.value, "codex_run")
+        self.assertEqual(decision.target_issue, "#20")
+        self.assertFalse(decision.close_current_issue)
+        self.assertFalse(decision.create_followup_issue)
+        self.assertEqual(materialized.prepared.codex_body.decoded_text, artifact_text)
+        self.assertEqual(raw_log_ref, "")
+
+    def test_resume_succeeds_when_raw_log_file_is_missing(self) -> None:
+        """If the raw log file on disk is gone, artifact fallback must be used."""
+        artifact_text = "# Codex instruction\n\nAnother task.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_log = root / "prepared_issue_centric_codex_body.md"
+            artifact_log.write_text(artifact_text, encoding="utf-8")
+            # metadata points to a non-existent raw log
+            metadata_log = root / "metadata.json"
+            metadata_log.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "target_issue": "#5",
+                        "close_current_issue": False,
+                        "create_followup_issue": False,
+                        "summary": "missing raw log fallback test",
+                        "raw_response_log": str(root / "does_not_exist.txt"),
+                        "prepared_artifact": {
+                            "kind": "codex_body",
+                            "path": str(artifact_log),
+                        },
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": False,
+                "chatgpt_decision": "issue_centric:codex_run",
+                "chatgpt_decision_note": "prepared for later dispatch",
+                "last_issue_centric_action": "codex_run",
+                "last_issue_centric_target_issue": "#5",
+                "last_issue_centric_artifact_kind": "codex_body",
+                "last_issue_centric_artifact_file": str(artifact_log),
+                "last_issue_centric_metadata_log": str(metadata_log),
+                "last_issue_centric_decision_log": "",
+                "last_issue_centric_execution_status": "",
+            }
+            decision, materialized, _, _, _ = (
+                bridge_orchestrator.load_pending_issue_centric_codex_materialized(state)
+            )
+        self.assertEqual(decision.action.value, "codex_run")
+        self.assertEqual(decision.target_issue, "#5")
+        self.assertEqual(materialized.prepared.codex_body.decoded_text, artifact_text)
+
+    def test_resume_fails_safely_when_artifact_is_also_missing(self) -> None:
+        """When both raw log and artifact are unavailable, raise BridgeError (safe stop)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata_log = root / "metadata.json"
+            metadata_log.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "target_issue": "#7",
+                        "close_current_issue": False,
+                        "create_followup_issue": False,
+                        "summary": "missing artifact test",
+                        "raw_response_log": "",
+                        "prepared_artifact": None,
+                    },
+                    ensure_ascii=True,
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": False,
+                "chatgpt_decision": "issue_centric:codex_run",
+                "last_issue_centric_artifact_kind": "codex_body",
+                "last_issue_centric_artifact_file": "",
+                "last_issue_centric_metadata_log": str(metadata_log),
+                "last_issue_centric_execution_status": "",
+            }
+            with self.assertRaises(BridgeError):
+                bridge_orchestrator.load_pending_issue_centric_codex_materialized(state)
+
+    def test_resume_does_not_double_dispatch_when_execution_status_set(self) -> None:
+        """has_pending_issue_centric_codex_dispatch returns False once execution_status is set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_log = root / "artifact.md"
+            artifact_log.write_text("done body\n", encoding="utf-8")
+            metadata_log = root / "metadata.json"
+            metadata_log.write_text(json.dumps({"action": "codex_run", "target_issue": "#9"}), encoding="utf-8")
+            state = {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": False,
+                "chatgpt_decision": "issue_centric:codex_run",
+                "last_issue_centric_artifact_kind": "codex_body",
+                "last_issue_centric_artifact_file": str(artifact_log),
+                "last_issue_centric_metadata_log": str(metadata_log),
+                "last_issue_centric_execution_status": "completed",
+            }
+        self.assertFalse(_bridge_common.has_pending_issue_centric_codex_dispatch(state))
+
 
 class IssueCentricContinuationArchiveTests(unittest.TestCase):
     def test_archive_marks_issue_centric_report_as_ready_for_next_request(self) -> None:
