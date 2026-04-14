@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -27,16 +28,20 @@ def make_args(
     *,
     ready_issue_ref: str = "",
     request_body: str = "",
+    status: bool = False,
+    resume: bool = False,
+    doctor: bool = False,
+    clear_error: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         project_path=project_path,
         ready_issue_ref=ready_issue_ref,
         request_body=request_body,
         max_execution_count=max_execution_count,
-        status=False,
-        resume=False,
-        doctor=False,
-        clear_error=False,
+        status=status,
+        resume=resume,
+        doctor=doctor,
+        clear_error=clear_error,
     )
 
 
@@ -54,6 +59,99 @@ class HelpSmokeTest(unittest.TestCase):
         self.assertIn("ready issue の参照を使います", output)
         self.assertIn("--ready-issue-ref", output)
         self.assertIn("reply contract だけを追加します", output)
+
+
+class RecoverablePendingCodexResumeTests(unittest.TestCase):
+    def _pending_codex_state(self, *, error: bool = True) -> dict[str, object]:
+        return {
+            "mode": "awaiting_user",
+            "error": error,
+            "error_message": "pending issue-centric codex dispatch を raw response log から再構成できませんでした。",
+            "chatgpt_decision": "issue_centric:codex_run",
+            "last_issue_centric_artifact_kind": "codex_body",
+            "last_issue_centric_metadata_log": "logs/meta.json",
+            "last_issue_centric_artifact_file": "logs/body.md",
+            "last_issue_centric_execution_status": "",
+            "need_codex_run": False,
+        }
+
+    def test_recover_resume_clears_error_for_reconstructable_pending_dispatch(self) -> None:
+        args = make_args(resume=True)
+        state = self._pending_codex_state()
+        saved: dict[str, object] = {}
+        fake_module = types.SimpleNamespace(
+            load_pending_issue_centric_codex_materialized=lambda payload: ("decision", "materialized", "", "", "")
+        )
+        with (
+            patch.object(start_bridge.run_until_stop, "load_state", return_value=state),
+            patch.object(start_bridge.importlib, "import_module", return_value=fake_module),
+            patch.object(start_bridge, "save_state", side_effect=lambda updated: saved.update(updated)),
+        ):
+            self.assertTrue(start_bridge.recover_resume_from_pending_issue_centric_codex_dispatch(args))
+        self.assertFalse(bool(saved.get("error")))
+        self.assertEqual(saved.get("error_message"), "")
+
+    def test_recover_resume_keeps_error_when_no_pending_dispatch(self) -> None:
+        args = make_args(resume=True)
+        state = {
+            "mode": "awaiting_user",
+            "error": True,
+            "error_message": "plain error",
+            "chatgpt_decision": "issue_centric:codex_run",
+            "last_issue_centric_artifact_kind": "",
+            "last_issue_centric_metadata_log": "",
+            "last_issue_centric_execution_status": "",
+            "need_codex_run": False,
+        }
+        with (
+            patch.object(start_bridge.run_until_stop, "load_state", return_value=state),
+            patch.object(start_bridge, "save_state") as save_state_mock,
+        ):
+            self.assertFalse(start_bridge.recover_resume_from_pending_issue_centric_codex_dispatch(args))
+        save_state_mock.assert_not_called()
+
+    def test_recover_resume_keeps_error_when_reconstruct_fails(self) -> None:
+        args = make_args(resume=True)
+        state = self._pending_codex_state()
+        fake_module = types.SimpleNamespace(
+            load_pending_issue_centric_codex_materialized=lambda payload: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        with (
+            patch.object(start_bridge.run_until_stop, "load_state", return_value=state),
+            patch.object(start_bridge.importlib, "import_module", return_value=fake_module),
+            patch.object(start_bridge, "save_state") as save_state_mock,
+        ):
+            self.assertFalse(start_bridge.recover_resume_from_pending_issue_centric_codex_dispatch(args))
+        save_state_mock.assert_not_called()
+
+    def test_main_resume_clears_recoverable_pending_dispatch_error_before_run(self) -> None:
+        args = self._pending_codex_state()
+        mutable_state = dict(args)
+        fake_module = types.SimpleNamespace(
+            load_pending_issue_centric_codex_materialized=lambda payload: ("decision", "materialized", "", "", "")
+        )
+
+        def _save(updated: dict[str, object]) -> None:
+            mutable_state.clear()
+            mutable_state.update(updated)
+
+        def _run(_argv: list[str]) -> int:
+            self.assertFalse(bool(mutable_state.get("error")))
+            return 0
+
+        with (
+            patch.object(start_bridge.run_until_stop, "load_state", side_effect=lambda: dict(mutable_state)),
+            patch.object(start_bridge.importlib, "import_module", return_value=fake_module),
+            patch.object(start_bridge, "save_state", side_effect=_save),
+            patch.object(start_bridge, "print_resume_overview"),
+            patch.object(start_bridge.run_until_stop, "load_project_config", return_value={}),
+            patch.object(start_bridge.run_until_stop, "worker_repo_path", return_value=Path("/tmp/repo")),
+            patch.object(start_bridge.run_until_stop, "browser_fetch_timeout_seconds", return_value=1800),
+            patch.object(start_bridge.run_until_stop, "load_browser_config", return_value={}),
+            patch.object(start_bridge.run_until_stop, "run", side_effect=_run),
+        ):
+            rc = start_bridge.main(["--project-path", "/tmp/repo", "--max-execution-count", "6", "--resume"])
+        self.assertEqual(rc, 0)
 
 
 class HumanFacingStatusTests(unittest.TestCase):

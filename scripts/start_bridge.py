@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 
 import run_until_stop
-from _bridge_common import clear_error_fields, format_lifecycle_sync_state_note, save_state
+from _bridge_common import (
+    clear_error_fields,
+    format_lifecycle_sync_state_note,
+    has_pending_issue_centric_codex_dispatch,
+    save_state,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -187,6 +193,32 @@ def clear_error_for_resume(args: argparse.Namespace) -> int:
     return 0
 
 
+def recover_resume_from_pending_issue_centric_codex_dispatch(args: argparse.Namespace) -> bool:
+    """Clear error only for --resume when pending issue-centric codex dispatch is reconstructable."""
+    if not args.resume or args.status or args.doctor or args.clear_error:
+        return False
+
+    current_state = run_until_stop.load_state()
+    if not bool(current_state.get("error")):
+        return False
+    if not has_pending_issue_centric_codex_dispatch(current_state):
+        return False
+
+    try:
+        bridge_orchestrator = importlib.import_module("bridge_orchestrator")
+        bridge_orchestrator.load_pending_issue_centric_codex_materialized(dict(current_state))
+    except Exception:
+        return False
+
+    save_state(clear_error_fields(dict(current_state)))
+    print(
+        "bridge resume: recoverable pending issue-centric codex dispatch が再構成可能なため、"
+        " error を解除してそのまま再開します。",
+        flush=True,
+    )
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_config = run_until_stop.load_project_config()
@@ -200,6 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.clear_error:
         return clear_error_for_resume(args)
+    recover_resume_from_pending_issue_centric_codex_dispatch(args)
     print("bridge start: このコマンドが通常入口です。", flush=True)
     print(f"- project_path: {project_path_display}", flush=True)
     print(f"- max_execution_count: {args.max_execution_count}", flush=True)
