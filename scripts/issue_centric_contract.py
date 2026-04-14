@@ -36,6 +36,8 @@ _TARGET_ISSUE_URL_RE = re.compile(
     r"^https://github\.com/[^/\s]+/[^/\s]+/issues/[0-9]+$"
 )
 _TARGET_ISSUE_REF_RE = re.compile(r"^(?:[^/\s]+/[^/#\s]+#|#)?([0-9]+)$")
+# Extension: "#3 Ready: ..." or "owner/repo#42 Some title" → extract leading ref only.
+_TARGET_ISSUE_REF_LEADING_RE = re.compile(r"^((?:[^/\s]+/[^/#\s]+#|#)[0-9]+)\s+\S")
 
 
 class IssueCentricContractError(ValueError):
@@ -143,6 +145,7 @@ def build_issue_centric_reply_contract_section() -> str:
             "各 body block の payload は BASE64 で返してください。",
             f"`action` は {actions} のいずれかだけを使ってください。",
             "`summary` は短くしてください。",
+            "`target_issue` は `#3`・`42`・`owner/repo#42`・issue URL など **issue ref のみ** を使ってください。title を含めないでください。",
             f"返答の最終行に必ず `{REPLY_COMPLETE_TAG}` を置いてください。bridge はこのタグが来るまで completion 扱いしません。",
         ]
     ).strip()
@@ -300,6 +303,9 @@ def _normalize_target_issue(raw_target_issue: str) -> str | None:
         return None
     if _TARGET_ISSUE_URL_RE.match(stripped) or _TARGET_ISSUE_REF_RE.match(stripped):
         return stripped
+    m = _TARGET_ISSUE_REF_LEADING_RE.match(stripped)
+    if m:
+        return m.group(1)
     raise IssueCentricContractError(
         f"target_issue has an invalid format: {stripped!r}. "
         'Accepted formats: bare number ("42"), hash-prefixed ("#42"), '

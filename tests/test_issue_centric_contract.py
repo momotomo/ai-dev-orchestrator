@@ -815,6 +815,63 @@ class IssueCentricTargetIssueFormatTests(unittest.TestCase):
                 self._make_reply("owner/repo#abc"), after_text="request body"
             )
 
+    # --- ref with trailing title (normalization, added for live-run failure case) ---
+
+    def test_normalizes_hash_ref_with_title(self) -> None:
+        """'#3 Ready: ...' normalizes to '#3' (actual live-run failure case)."""
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply(
+                "#3 Ready: verify GitHub attach confirmed path with second rehearsal note"
+            ),
+            after_text="request body",
+        )
+        self.assertEqual(decision.target_issue, "#3")
+
+    def test_normalizes_cross_repo_ref_with_title(self) -> None:
+        """'owner/repo#42 Some title' normalizes to 'owner/repo#42'."""
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            self._make_reply("owner/repo#42 Some PR title"),
+            after_text="request body",
+        )
+        self.assertEqual(decision.target_issue, "owner/repo#42")
+
+    def test_rejects_issue_keyword_with_number(self) -> None:
+        """'issue 3' has no leading issue ref → still invalid."""
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("issue 3"), after_text="request body"
+            )
+
+    def test_rejects_ref_embedded_mid_string(self) -> None:
+        """'Ready: #3' has ref in the middle, not at start → still invalid."""
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError,
+            "target_issue has an invalid format",
+        ):
+            issue_centric_contract.parse_issue_centric_reply(
+                self._make_reply("Ready: #3"), after_text="request body"
+            )
+
+    def test_integration_with_full_raw_reply_ref_with_title(self) -> None:
+        """Integration: target_issue='#3 Ready: ...' normalizes to '#3' end-to-end."""
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#3 Ready: verify GitHub attach confirmed path with second rehearsal note",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Normalized from ref-with-title.",
+            },
+            after_text="request body",
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(
+            raw, after_text="request body"
+        )
+        self.assertEqual(decision.target_issue, "#3")
+
 
 class IssueCentricTransportTests(unittest.TestCase):
     def materialize(
