@@ -45,6 +45,7 @@ from issue_centric_contract import (
     IssueCentricContractError,
     IssueCentricContractNotFound,
     IssueCentricDecision,
+    REPLY_COMPLETE_TAG,
     USER_TURN_MARKER,
     parse_issue_centric_reply,
 )
@@ -94,6 +95,10 @@ class IssueCentricReplyReadiness:
     partial_body_block_detected: bool = False
     # Names of open (start-only) body blocks, e.g. ["===CHATGPT_CODEX_BODY==="]
     open_body_blocks: tuple[str, ...] = ()
+    # True when the terminal completion tag (===CHATGPT_REPLY_COMPLETE===) is
+    # present in the assistant segment.  Only when this is True does the bridge
+    # proceed to parse / validate the issue-centric contract.
+    reply_complete_tag_present: bool = False
     decision: IssueCentricDecision | None = None
 
 
@@ -112,6 +117,7 @@ class IssueCentricReplyNotReady(BridgeError):
         self.body_block_end_present = readiness.body_block_end_present
         self.partial_body_block_detected = readiness.partial_body_block_detected
         self.open_body_blocks = readiness.open_body_blocks
+        self.reply_complete_tag_present = readiness.reply_complete_tag_present
 
 
 import re as _re
@@ -284,7 +290,16 @@ def classify_issue_centric_reply_readiness(
     )
     decision_marker_present = "===CHATGPT_DECISION_JSON===" in assistant_segment
     legacy_marker_present = any(marker in assistant_segment for marker in _LEGACY_REPLY_MARKERS)
+    reply_complete_tag_present = REPLY_COMPLETE_TAG in assistant_segment
 
+    # Always compute body block state so diagnostic fields are accurate even
+    # when returning early via the terminal tag gate.
+    open_blocks, closed_blocks = _detect_partial_body_blocks(assistant_segment)
+    partial_body_block = bool(open_blocks)
+    body_block_start_present = bool(open_blocks) or bool(closed_blocks)
+    body_block_end_present = bool(closed_blocks)
+
+    # ── Gate 1: no text at all ──────────────────────────────────────────────
     if not assistant_text_present:
         return IssueCentricReplyReadiness(
             status="reply_not_ready",
@@ -295,23 +310,14 @@ def classify_issue_centric_reply_readiness(
             contract_parse_attempted=False,
             assistant_final_content_present=False,
             assistant_meta_only=False,
+            reply_complete_tag_present=False,
         )
 
-    # If all visible assistant lines are meta-only labels (thinking spinners,
-    # source pills, connector names) and the decision marker is absent, the
-    # reply is not yet final — treat as not-ready rather than invalid stop.
-    if not decision_marker_present and assistant_meta_only:
-        return IssueCentricReplyReadiness(
-            status="reply_not_ready",
-            reason="assistant area shows only UI metadata labels (not final reply content).",
-            assistant_text_present=True,
-            thinking_visible=thinking_visible,
-            decision_marker_present=False,
-            contract_parse_attempted=False,
-            assistant_final_content_present=False,
-            assistant_meta_only=True,
-        )
-
+    # ── Gate 1b: legacy contract — exempt from terminal tag requirement ─────
+    # Legacy replies (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===) do
+    # not carry the new terminal tag.  Detect them before the terminal tag gate
+    # so the safety fallback path in wait_for_plan_a_or_prompt_reply_text still
+    # works.
     if legacy_marker_present:
         return IssueCentricReplyReadiness(
             status="reply_complete_legacy_contract",
@@ -322,58 +328,51 @@ def classify_issue_centric_reply_readiness(
             contract_parse_attempted=False,
             assistant_final_content_present=assistant_final_content_present,
             assistant_meta_only=assistant_meta_only,
+            reply_complete_tag_present=reply_complete_tag_present,
         )
 
-    if not decision_marker_present:
-        # Only treat as invalid stop when final reply content is actually present.
-        # If somehow no final content lines remain here (edge case), stay safe.
-        if not assistant_final_content_present:
-            return IssueCentricReplyReadiness(
-                status="reply_not_ready",
-                reason="assistant area has no final content lines; waiting for reply.",
-                assistant_text_present=True,
-                thinking_visible=thinking_visible,
-                decision_marker_present=False,
-                contract_parse_attempted=False,
-                assistant_final_content_present=False,
-                assistant_meta_only=assistant_meta_only,
-            )
-        return IssueCentricReplyReadiness(
-            status="reply_complete_no_marker",
-            reason="assistant final reply is visible but issue-centric decision markers are missing.",
-            assistant_text_present=True,
-            thinking_visible=thinking_visible,
-            decision_marker_present=False,
-            contract_parse_attempted=False,
-            assistant_final_content_present=True,
-            assistant_meta_only=False,
-        )
-
-    open_blocks, closed_blocks = _detect_partial_body_blocks(assistant_segment)
-    partial_body_block = bool(open_blocks)
-    body_block_start_present = bool(open_blocks) or bool(closed_blocks)
-    body_block_end_present = bool(closed_blocks)
-
-    # If a body block start marker is present but its end marker is not yet
-    # visible, the reply is still being generated — treat as not-ready rather
-    # than invalid stop.
-    if partial_body_block:
+    # ── Gate 2 (PRIMARY): terminal tag absent → always not-ready ───────────
+    # This covers every in-progress state: thinking spinners, source pills,
+    # partial body blocks, plain assistant text without the contract, etc.
+    # Nothing below this gate is reachable until REPLY_COMPLETE_TAG appears.
+    if not reply_complete_tag_present:
+        if assistant_meta_only:
+            reason_suffix = " (assistant area shows only UI metadata labels)"
+        elif partial_body_block:
+            reason_suffix = f" (partial body block: {open_blocks})"
+        elif not assistant_final_content_present:
+            reason_suffix = " (no final content lines visible)"
+        else:
+            reason_suffix = ""
         return IssueCentricReplyReadiness(
             status="reply_not_ready",
-            reason=(
-                "body block generation in progress"
-                f" (open_blocks={open_blocks})."
-            ),
+            reason=f"completion tag {REPLY_COMPLETE_TAG!r} is not yet present." + reason_suffix,
             assistant_text_present=True,
             thinking_visible=thinking_visible,
             decision_marker_present=decision_marker_present,
             contract_parse_attempted=False,
             assistant_final_content_present=assistant_final_content_present,
             assistant_meta_only=assistant_meta_only,
-            body_block_start_present=True,
+            body_block_start_present=body_block_start_present,
             body_block_end_present=body_block_end_present,
-            partial_body_block_detected=True,
+            partial_body_block_detected=partial_body_block,
             open_body_blocks=tuple(open_blocks),
+            reply_complete_tag_present=False,
+        )
+
+    # ── Terminal tag is present — proceed to parse / validate ───────────────
+
+    if not decision_marker_present:
+        return IssueCentricReplyReadiness(
+            status="reply_complete_no_marker",
+            reason="completion tag present but issue-centric decision markers are missing.",
+            assistant_text_present=True,
+            thinking_visible=thinking_visible,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+            assistant_final_content_present=assistant_final_content_present,
+            assistant_meta_only=assistant_meta_only,
+            reply_complete_tag_present=True,
         )
 
     try:
@@ -391,6 +390,7 @@ def classify_issue_centric_reply_readiness(
             body_block_start_present=body_block_start_present,
             body_block_end_present=body_block_end_present,
             partial_body_block_detected=False,
+            reply_complete_tag_present=True,
         )
     except IssueCentricContractError as exc:
         return IssueCentricReplyReadiness(
@@ -405,6 +405,7 @@ def classify_issue_centric_reply_readiness(
             body_block_start_present=body_block_start_present,
             body_block_end_present=body_block_end_present,
             partial_body_block_detected=False,
+            reply_complete_tag_present=True,
         )
 
     return IssueCentricReplyReadiness(
@@ -419,6 +420,7 @@ def classify_issue_centric_reply_readiness(
         body_block_start_present=body_block_start_present,
         body_block_end_present=body_block_end_present,
         partial_body_block_detected=False,
+        reply_complete_tag_present=True,
         decision=decision,
     )
 
@@ -471,6 +473,7 @@ def stop_for_invalid_issue_centric_contract(
                 f"- assistant_meta_only: {readiness.assistant_meta_only}",
                 f"- thinking_visible: {readiness.thinking_visible}",
                 f"- decision_marker_present: {readiness.decision_marker_present}",
+                f"- reply_complete_tag_present: {readiness.reply_complete_tag_present}",
                 f"- body_block_start_present: {readiness.body_block_start_present}",
                 f"- body_block_end_present: {readiness.body_block_end_present}",
                 f"- partial_body_block_detected: {readiness.partial_body_block_detected}",
@@ -520,6 +523,7 @@ def stop_for_invalid_issue_centric_contract(
             "partial_body_block_detected": readiness.partial_body_block_detected if readiness is not None else False,
             "open_body_blocks": list(readiness.open_body_blocks) if readiness is not None else [],
             "contract_parse_attempted": readiness.contract_parse_attempted if readiness is not None else False,
+            "reply_complete_tag_present": readiness.reply_complete_tag_present if readiness is not None else False,
         }
     )
     save_state(failed_state)
@@ -585,6 +589,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "assistant_meta_only": bool(event_details.get("assistant_meta_only", False)),
                     "thinking_visible": bool(event_details.get("thinking_visible", False)),
                     "decision_marker_present": bool(event_details.get("decision_marker_present", False)),
+                    "reply_complete_tag_present": bool(event_details.get("reply_complete_tag_present", False)),
                     "body_block_start_present": bool(event_details.get("body_block_start_present", False)),
                     "body_block_end_present": bool(event_details.get("body_block_end_present", False)),
                     "partial_body_block_detected": bool(event_details.get("partial_body_block_detected", False)),

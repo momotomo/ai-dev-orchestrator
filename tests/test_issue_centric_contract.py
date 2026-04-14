@@ -72,6 +72,8 @@ def build_raw_reply(
     lines.extend(contract_parts)
     if extra_after:
         lines.append(extra_after)
+    # Terminal completion tag — bridge waits for this before attempting parse.
+    lines.append(issue_centric_contract.REPLY_COMPLETE_TAG)
     return "\n".join(lines)
 
 
@@ -1413,6 +1415,7 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
         )
 
     def test_parse_issue_centric_reply_for_fetch_waits_when_marker_is_absent(self) -> None:
+        # No terminal tag → no decision markers → reply_not_ready (not invalid).
         raw = "\n".join(
             [
                 "あなた:",
@@ -1421,9 +1424,10 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
                 "No contract markers here yet.",
             ]
         )
-        with self.assertRaises(fetch_next_prompt.IssueCentricReplyInvalid) as ctx:
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady) as ctx:
             fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw, after_text="request body")
-        self.assertIn("issue-centric decision markers are missing", str(ctx.exception))
+        self.assertEqual(ctx.exception.reply_readiness_status, "reply_not_ready")
+        self.assertFalse(ctx.exception.reply_complete_tag_present)
 
     def test_parse_issue_centric_reply_for_fetch_stops_when_marker_is_present_but_invalid(self) -> None:
         raw = build_raw_reply(
@@ -1678,6 +1682,8 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
         self.assertFalse(ctx.exception.decision_marker_present)
 
     def test_classifies_completed_reply_without_marker_as_invalid_stop(self) -> None:
+        # No terminal tag → reply_not_ready regardless of content (terminal tag
+        # gate takes precedence over UI-state inference).
         raw = "\n".join(
             [
                 "あなた:",
@@ -1693,12 +1699,13 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
             after_text="request body",
         )
 
-        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertEqual(readiness.status, "reply_not_ready")
         self.assertTrue(readiness.assistant_text_present)
         self.assertFalse(readiness.thinking_visible)
-        self.assertFalse(readiness.decision_marker_present)
+        self.assertFalse(readiness.reply_complete_tag_present)
 
     def test_classifies_invalid_contract_when_decision_json_is_broken(self) -> None:
+        # Terminal tag present + broken JSON → reply_complete_invalid_contract.
         raw = "\n".join(
             [
                 "あなた:",
@@ -1707,6 +1714,7 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
                 issue_centric_contract.DECISION_JSON_START,
                 "not json",
                 issue_centric_contract.DECISION_JSON_END,
+                issue_centric_contract.REPLY_COMPLETE_TAG,
             ]
         )
 
@@ -1718,6 +1726,7 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
         self.assertEqual(readiness.status, "reply_complete_invalid_contract")
         self.assertTrue(readiness.decision_marker_present)
         self.assertTrue(readiness.contract_parse_attempted)
+        self.assertTrue(readiness.reply_complete_tag_present)
 
     def test_classifies_valid_contract_and_returns_decision(self) -> None:
         codex_payload = b64("Codex body")
@@ -1948,23 +1957,28 @@ class MetaOnlyReplyNotReadyTests(unittest.TestCase):
         self.assertTrue(readiness.assistant_meta_only)
 
     def test_actual_reply_body_with_no_marker_is_invalid_stop(self) -> None:
+        # No terminal tag → reply_not_ready (terminal tag gate supersedes
+        # content-presence inference).
         raw = self._make_raw("了解しました。次の変更を進めます。")
         readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
             raw, after_text="request body"
         )
-        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertEqual(readiness.status, "reply_not_ready")
         self.assertTrue(readiness.assistant_final_content_present)
         self.assertFalse(readiness.assistant_meta_only)
+        self.assertFalse(readiness.reply_complete_tag_present)
 
     def test_mixed_meta_and_content_lines_is_invalid_stop(self) -> None:
+        # No terminal tag → reply_not_ready (terminal tag gate supersedes
+        # content-presence inference even when content lines are present).
         raw = self._make_raw("Thought for 5s", "了解しました。次の変更を進めます。")
         readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
             raw, after_text="request body"
         )
-        # Has actual content + no marker → invalid stop
-        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertEqual(readiness.status, "reply_not_ready")
         self.assertTrue(readiness.assistant_final_content_present)
         self.assertFalse(readiness.assistant_meta_only)
+        self.assertFalse(readiness.reply_complete_tag_present)
 
     def test_assistant_meta_only_flag_set_correctly(self) -> None:
         raw_meta = self._make_raw("Thought for 1s", "GitHub")
@@ -2134,7 +2148,7 @@ class PartialBodyBlockNotReadyTests(unittest.TestCase):
         self.assertTrue(readiness.partial_body_block_detected)
 
     def test_completed_codex_body_still_goes_to_parse(self) -> None:
-        """Complete CODEX_BODY block pairing must pass through to contract parse."""
+        """Complete CODEX_BODY block pairing + terminal tag must pass through to contract parse."""
         import base64
         codex_payload = base64.b64encode(b"do the thing").decode()
         raw = self._make_raw(
@@ -2142,6 +2156,7 @@ class PartialBodyBlockNotReadyTests(unittest.TestCase):
             "===CHATGPT_CODEX_BODY===",
             codex_payload,
             "===END_CODEX_BODY===",
+            issue_centric_contract.REPLY_COMPLETE_TAG,
         )
         readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
             raw, after_text="request body"
@@ -2150,6 +2165,7 @@ class PartialBodyBlockNotReadyTests(unittest.TestCase):
         self.assertFalse(readiness.partial_body_block_detected)
         self.assertTrue(readiness.body_block_start_present)
         self.assertTrue(readiness.body_block_end_present)
+        self.assertTrue(readiness.reply_complete_tag_present)
         # If parse succeeded: valid; if parse failed: invalid. Either is fine
         # as long as partial_body_block_detected is False.
         self.assertIn(
@@ -2207,12 +2223,14 @@ class PartialBodyBlockNotReadyTests(unittest.TestCase):
         self.assertFalse(readiness.partial_body_block_detected)
 
     def test_completed_no_marker_still_invalid_stop(self) -> None:
+        # No terminal tag → reply_not_ready (terminal tag gate).
         raw = self._make_raw("This is a complete reply with no markers at all.")
         readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
             raw, after_text="request body"
         )
-        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertEqual(readiness.status, "reply_not_ready")
         self.assertFalse(readiness.partial_body_block_detected)
+        self.assertFalse(readiness.reply_complete_tag_present)
 
 
 class RunningAppMetaOnlyTests(unittest.TestCase):
@@ -2277,12 +2295,13 @@ class RunningAppMetaOnlyTests(unittest.TestCase):
         self.assertTrue(readiness.assistant_final_content_present)
 
     def test_completed_no_marker_still_invalid_stop(self) -> None:
-        """Complete reply without markers must remain reply_complete_no_marker."""
+        """No terminal tag → reply_not_ready (terminal tag gate supersedes content-presence)."""
         raw = self._make_raw("This is a complete reply with no markers at all.")
         readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
             raw, after_text="request body"
         )
-        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.reply_complete_tag_present)
 
     # ------------------------------------------------------------------
     # parse_issue_centric_reply_for_fetch
@@ -2327,6 +2346,141 @@ class RunningAppMetaOnlyTests(unittest.TestCase):
         )
         self.assertEqual(readiness.status, "reply_not_ready")
         self.assertTrue(readiness.partial_body_block_detected)
+
+
+class ReplyCompleteTagGateTests(unittest.TestCase):
+    """Verify the primary terminal tag gate behaviour.
+
+    The bridge must not attempt parse / validate until
+    ===CHATGPT_REPLY_COMPLETE=== appears at the end of the assistant turn.
+    """
+
+    _COMPLETE = issue_centric_contract.REPLY_COMPLETE_TAG
+
+    _VALID_DECISION = "\n".join([
+        "===CHATGPT_DECISION_JSON===",
+        '{"action":"no_action","target_issue":"none","close_current_issue":false,"create_followup_issue":false,"summary":"ok"}',
+        "===END_DECISION_JSON===",
+    ])
+
+    def _make_raw(self, *assistant_lines: str) -> str:
+        return "\n".join(
+            ["あなた:", "request body", "ChatGPT:", ""] + list(assistant_lines)
+        )
+
+    # ------------------------------------------------------------------
+    # 1. 完了タグなし + meta-only text → reply_not_ready
+    # ------------------------------------------------------------------
+
+    def test_no_tag_meta_only_thought_for_seconds_is_not_ready(self) -> None:
+        """完了タグなし + Thought for 39s / じっくり思考 / GitHub → reply_not_ready."""
+        raw = self._make_raw("Thought for 39s", "じっくり思考", "GitHub")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.reply_complete_tag_present)
+        self.assertTrue(readiness.assistant_meta_only)
+        self.assertFalse(readiness.assistant_final_content_present)
+
+    # ------------------------------------------------------------------
+    # 2. 完了タグなし + partial CODEX_BODY → reply_not_ready
+    # ------------------------------------------------------------------
+
+    def test_no_tag_partial_codex_body_is_not_ready(self) -> None:
+        """完了タグなし + partial CODEX_BODY → reply_not_ready."""
+        raw = self._make_raw(
+            self._VALID_DECISION,
+            "===CHATGPT_CODEX_BODY===",
+            "aGVsbG8=",
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.reply_complete_tag_present)
+        self.assertTrue(readiness.partial_body_block_detected)
+
+    # ------------------------------------------------------------------
+    # 3. 完了タグあり + 正常な issue-centric contract → valid
+    # ------------------------------------------------------------------
+
+    def test_with_tag_valid_no_action_contract_is_valid(self) -> None:
+        """完了タグあり + 正常な no_action contract → reply_complete_valid_contract."""
+        raw = self._make_raw(self._VALID_DECISION, self._COMPLETE)
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertTrue(readiness.reply_complete_tag_present)
+        self.assertIsNotNone(readiness.decision)
+
+    def test_with_tag_valid_contract_parse_returns_decision(self) -> None:
+        """完了タグあり + valid → parse_issue_centric_reply_for_fetch が decision を返す."""
+        raw = self._make_raw(self._VALID_DECISION, self._COMPLETE)
+        decision = fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+            raw, after_text="request body"
+        )
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.NO_ACTION)
+
+    # ------------------------------------------------------------------
+    # 4. 完了タグあり + DECISION_JSON 欠落 → invalid
+    # ------------------------------------------------------------------
+
+    def test_with_tag_missing_decision_json_is_invalid(self) -> None:
+        """完了タグあり + DECISION_JSON なし → reply_complete_no_marker."""
+        raw = self._make_raw("This is the reply text.", self._COMPLETE)
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_no_marker")
+        self.assertTrue(readiness.reply_complete_tag_present)
+        self.assertFalse(readiness.decision_marker_present)
+
+    def test_with_tag_missing_decision_json_raises_invalid(self) -> None:
+        """完了タグあり + DECISION_JSON なし → parse_for_fetch は IssueCentricReplyInvalid を raise."""
+        raw = self._make_raw("This is the reply text.", self._COMPLETE)
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyInvalid):
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+
+    # ------------------------------------------------------------------
+    # 5. 途中メタ表示 (Running app / Received app) + 完了タグなし → not invalid
+    # ------------------------------------------------------------------
+
+    def test_no_tag_running_app_request_is_not_ready_not_invalid(self) -> None:
+        """Running app request + 完了タグなし → reply_not_ready, never invalid."""
+        raw = self._make_raw("Running app request", "じっくり思考")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.reply_complete_tag_present)
+        # Must not be any kind of reply_complete_*
+        self.assertFalse(readiness.status.startswith("reply_complete"))
+
+    def test_no_tag_received_app_response_is_not_ready(self) -> None:
+        """Received app response + 完了タグなし → reply_not_ready."""
+        raw = self._make_raw("Received app response", "Thought for 1m 10s")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.reply_complete_tag_present)
+
+    def test_no_tag_running_app_never_raises_invalid(self) -> None:
+        """Running app labels + 完了タグなし → IssueCentricReplyNotReady, never IssueCentricReplyInvalid."""
+        raw = self._make_raw("Running app request", "Running app response", "Received app response")
+        try:
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="request body"
+            )
+            self.fail("expected IssueCentricReplyNotReady")
+        except fetch_next_prompt.IssueCentricReplyNotReady:
+            pass  # correct
+        except fetch_next_prompt.IssueCentricReplyInvalid:
+            self.fail("tool-call labels without terminal tag must not raise IssueCentricReplyInvalid")
 
 
 if __name__ == "__main__":

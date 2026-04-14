@@ -5458,6 +5458,9 @@ def _wait_for_chatgpt_reply_text(
                         "contract_parse_attempted": bool(
                             getattr(exc, "contract_parse_attempted", False)
                         ),
+                        "reply_complete_tag_present": bool(
+                            getattr(exc, "reply_complete_tag_present", False)
+                        ),
                     }
                     signature = "|".join(
                         [
@@ -5473,6 +5476,7 @@ def _wait_for_chatgpt_reply_text(
                             str(readiness_details["partial_body_block_detected"]),
                             str(readiness_details["open_body_blocks"]),
                             str(readiness_details["contract_parse_attempted"]),
+                            str(readiness_details["reply_complete_tag_present"]),
                         ]
                     )
                     if (

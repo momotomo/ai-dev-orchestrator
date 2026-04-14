@@ -89,6 +89,7 @@ def build_issue_create_reply(
                 ensure_ascii=True,
             ),
             issue_centric_contract.DECISION_JSON_END,
+            issue_centric_contract.REPLY_COMPLETE_TAG,
         ]
     )
     return "\n".join(parts)

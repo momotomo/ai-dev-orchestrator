@@ -21,6 +21,10 @@ REVIEW_BODY_END = "===END_REVIEW==="
 FOLLOWUP_ISSUE_BODY_START = "===CHATGPT_FOLLOWUP_ISSUE_BODY==="
 FOLLOWUP_ISSUE_BODY_END = "===END_FOLLOWUP_ISSUE_BODY==="
 
+# Mandatory terminal tag that signals the reply is fully complete.
+# bridge only starts parse/validate after this tag is present.
+REPLY_COMPLETE_TAG = "===CHATGPT_REPLY_COMPLETE==="
+
 CHATGPT_TURN_MARKER = "ChatGPT:"
 USER_TURN_MARKER = "あなた:"
 
@@ -139,6 +143,7 @@ def build_issue_centric_reply_contract_section() -> str:
             "各 body block の payload は BASE64 で返してください。",
             f"`action` は {actions} のいずれかだけを使ってください。",
             "`summary` は短くしてください。",
+            f"返答の最終行に必ず `{REPLY_COMPLETE_TAG}` を置いてください。bridge はこのタグが来るまで completion 扱いしません。",
         ]
     ).strip()
 

@@ -82,6 +82,7 @@ def build_reply(
                 ensure_ascii=True,
             ),
             issue_centric_contract.DECISION_JSON_END,
+            issue_centric_contract.REPLY_COMPLETE_TAG,
         ]
     )
     return "\n".join(parts)
@@ -703,6 +704,7 @@ class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
                     ensure_ascii=True,
                 ),
                 issue_centric_contract.DECISION_JSON_END,
+                issue_centric_contract.REPLY_COMPLETE_TAG,
             ]
         )
         saved_states: list[dict[str, object]] = []
