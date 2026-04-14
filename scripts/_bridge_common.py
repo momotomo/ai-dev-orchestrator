@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from issue_centric_contract import build_issue_centric_reply_contract_section as _build_ic_reply_contract_section
 from issue_centric_normalized_summary import (
     IssueCentricNextRequestContext,
     IssueCentricRecoveryContext,
@@ -5581,9 +5582,14 @@ def build_chatgpt_handoff_request(
     open_questions: str,
     current_status: str | None = None,
     issue_centric_next_request_section: str | None = None,
+    issue_centric_route_selected: str = "",
 ) -> str:
     summary = compact_last_report_text(last_report)
-    contract = build_chatgpt_reply_contract_section()
+    contract = (
+        _build_ic_reply_contract_section()
+        if issue_centric_route_selected == "issue_centric"
+        else build_chatgpt_reply_contract_section()
+    )
     status_view = present_bridge_status(state)
     status_text = current_status or build_issue_centric_request_status(
         state,
@@ -5635,6 +5641,7 @@ def build_chatgpt_request(
     last_report: str | None = None,
     resume_note: str | None = None,
     issue_centric_next_request_section: str | None = None,
+    issue_centric_route_selected: str = "",
 ) -> str:
     template_text = read_text(template_path).strip()
     if not template_text:
@@ -5671,7 +5678,10 @@ def build_chatgpt_request(
         "ISSUE_CENTRIC_NEXT_REQUEST_SECTION": next_request_section or "",
         "RESUME_CONTEXT_SECTION": resume_section,
     }
-    return render_template(template_text, values).strip() + "\n"
+    result = render_template(template_text, values).strip() + "\n"
+    if issue_centric_route_selected == "issue_centric":
+        result = result.rstrip("\n") + "\n\n" + _build_ic_reply_contract_section() + "\n"
+    return result
 
 
 def build_issue_centric_request_status(

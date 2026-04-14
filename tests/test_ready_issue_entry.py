@@ -1300,5 +1300,225 @@ class IssueAwareProvenanceTest(unittest.TestCase):
         )
 
 
+class IssueCentricContinuationReplyContractTests(unittest.TestCase):
+    """#fix: report-based continuation must use issue-centric contract when route is issue_centric.
+
+    Guard against regression where archive_codex_report → request_prompt_from_report
+    falls back to legacy visible-text tags (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
+    instead of maintaining issue-centric contract only.
+
+    Normal (issue_centric route):
+      - built request contains ===CHATGPT_DECISION_JSON=== and REPLY_COMPLETE tag
+      - built request does NOT contain ===CHATGPT_PROMPT_REPLY=== or ===CHATGPT_NO_CODEX===
+
+    Abnormal (fallback_legacy or empty route):
+      - legacy route: does NOT contain CHATGPT_DECISION_JSON (no unintended injection)
+      - no route: same as legacy
+
+    Backward compat (build_chatgpt_request without issue_centric_route_selected):
+      - default "" behaves as legacy (no extra DECISION_JSON appended)
+    """
+
+    def _template(self, tmp: Path) -> Path:
+        t = tmp / "template.md"
+        t.write_text(
+            "## state\n{CURRENT_STATUS}\n\n{ISSUE_CENTRIC_NEXT_REQUEST_SECTION}\n"
+            "{RESUME_CONTEXT_SECTION}\n"
+            "===CHATGPT_PROMPT_REPLY===\n[body]\n===END_REPLY===\n"
+            "===CHATGPT_NO_CODEX===\nstatus\n===END_NO_CODEX===\n",
+            encoding="utf-8",
+        )
+        return t
+
+    def test_build_chatgpt_request_issue_centric_route_appends_ic_contract(self) -> None:
+        """issue_centric_route_selected='issue_centric' → DECISION_JSON present, legacy tags absent."""
+        from _bridge_common import build_chatgpt_request
+        with tempfile.TemporaryDirectory() as tmp:
+            t = self._template(Path(tmp))
+            result = build_chatgpt_request(
+                state={"mode": "idle"},
+                template_path=t,
+                next_todo="next",
+                open_questions="none",
+                issue_centric_route_selected="issue_centric",
+            )
+        self.assertIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("===CHATGPT_REPLY_COMPLETE===", result)
+        self.assertIn("issue-centric contract only", result)
+        self.assertIn("legacy visible-text fallback は使わないでください", result)
+
+    def test_build_chatgpt_request_issue_centric_route_legacy_tags_still_present_in_body(self) -> None:
+        """Legacy tag instructions from the template appear before the override contract.
+
+        The issue-centric contract at the end explicitly overrides them.
+        Both are present; ChatGPT follows the issue-centric instruction (last wins).
+        """
+        from _bridge_common import build_chatgpt_request
+        with tempfile.TemporaryDirectory() as tmp:
+            t = self._template(Path(tmp))
+            result = build_chatgpt_request(
+                state={"mode": "idle"},
+                template_path=t,
+                next_todo="next",
+                open_questions="none",
+                issue_centric_route_selected="issue_centric",
+            )
+        # Issue-centric override must come AFTER the legacy template block:
+        ic_pos = result.index("===CHATGPT_DECISION_JSON===")
+        legacy_pos = result.index("===CHATGPT_PROMPT_REPLY===")
+        self.assertGreater(
+            ic_pos, legacy_pos,
+            "Issue-centric contract must appear after legacy template section so it overrides.",
+        )
+
+    def test_build_chatgpt_request_fallback_legacy_route_no_ic_contract_injected(self) -> None:
+        """fallback_legacy route → no CHATGPT_DECISION_JSON appended (backward compat)."""
+        from _bridge_common import build_chatgpt_request
+        with tempfile.TemporaryDirectory() as tmp:
+            t = self._template(Path(tmp))
+            result = build_chatgpt_request(
+                state={"mode": "idle"},
+                template_path=t,
+                next_todo="next",
+                open_questions="none",
+                issue_centric_route_selected="fallback_legacy",
+            )
+        self.assertNotIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("===CHATGPT_PROMPT_REPLY===", result)
+
+    def test_build_chatgpt_request_default_route_no_ic_contract_injected(self) -> None:
+        """Default (no route_selected) behaves as legacy – no extra contract injection."""
+        from _bridge_common import build_chatgpt_request
+        with tempfile.TemporaryDirectory() as tmp:
+            t = self._template(Path(tmp))
+            result = build_chatgpt_request(
+                state={"mode": "idle"},
+                template_path=t,
+                next_todo="next",
+                open_questions="none",
+            )
+        self.assertNotIn("===CHATGPT_DECISION_JSON===", result)
+
+    def test_build_chatgpt_handoff_request_issue_centric_route_uses_ic_contract(self) -> None:
+        """build_chatgpt_handoff_request with issue_centric_route_selected='issue_centric' uses IC contract."""
+        from _bridge_common import build_chatgpt_handoff_request
+        result = build_chatgpt_handoff_request(
+            state={"mode": "idle"},
+            last_report="# Report\n\n===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+            next_todo="next",
+            open_questions="none",
+            issue_centric_route_selected="issue_centric",
+        )
+        self.assertIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("issue-centric contract only", result)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", result)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", result)
+
+    def test_build_chatgpt_handoff_request_default_route_uses_legacy_contract(self) -> None:
+        """Default (no route) keeps legacy contract in handoff request for backward compat."""
+        from _bridge_common import build_chatgpt_handoff_request
+        result = build_chatgpt_handoff_request(
+            state={"mode": "idle"},
+            last_report="# Report\n\n===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
+            next_todo="next",
+            open_questions="none",
+        )
+        self.assertNotIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("===CHATGPT_PROMPT_REPLY===", result)
+
+    def test_run_resume_request_issue_centric_route_sends_ic_contract(self) -> None:
+        """run_resume_request with issue_centric_ready snapshot → IC contract in sent request."""
+        import request_prompt_from_report
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps({
+                    "action": "codex_run",
+                    "final_status": "completed",
+                    "principal_issue_kind": "current_issue",
+                    "principal_issue_candidate": {
+                        "number": "6",
+                        "url": "https://github.com/example/repo/issues/6",
+                        "title": "Ready: verify mutation path",
+                        "ref": "#6",
+                    },
+                    "current_issue": {
+                        "number": "6",
+                        "url": "https://github.com/example/repo/issues/6",
+                        "title": "Ready: verify mutation path",
+                        "ref": "#6",
+                    },
+                    "next_request_hint": "continue_on_current_issue",
+                }),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "idle",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+                "last_issue_centric_normalized_summary": str(summary_path),
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/6",
+            }
+            args = argparse.Namespace(
+                next_todo="verify mutation path",
+                open_questions="none",
+                current_status="",
+            )
+            sent_requests: list[str] = []
+
+            def fake_send(text: str) -> None:
+                sent_requests.append(text)
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=fake_send):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, "# Report\n", "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        self.assertIn("===CHATGPT_DECISION_JSON===", text,
+                      "issue-centric ready route must include DECISION_JSON contract")
+        self.assertIn("legacy visible-text fallback は使わないでください", text,
+                      "issue-centric contract must explicitly forbid legacy tags")
+
+    def test_run_resume_request_no_issue_centric_snapshot_keeps_legacy(self) -> None:
+        """Without issue-centric snapshot, legacy contract is used (no unintended IC injection)."""
+        import request_prompt_from_report
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = {
+                "mode": "idle",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+            }
+            args = argparse.Namespace(
+                next_todo="next",
+                open_questions="none",
+                current_status="",
+            )
+            sent_requests: list[str] = []
+
+            def fake_send(text: str) -> None:
+                sent_requests.append(text)
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=fake_send):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, "# Report\n", "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        self.assertNotIn("===CHATGPT_DECISION_JSON===", text,
+                         "No IC snapshot → must not inject IC contract")
+
+
 if __name__ == "__main__":
     unittest.main()
