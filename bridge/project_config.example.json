@@ -16,6 +16,18 @@
   "execution_agent": "codex",
   "agent_model": "",
   "github_copilot_bin": "gh",
+  "_notes_github_copilot_wrapper": {
+    "summary": "github_copilot execution_agent で model (例: sonnet-4.6) を指定するには custom wrapper を使います。",
+    "gh_direct_limitation": "'github_copilot_bin': 'gh' の場合、gh copilot suggest は --model を受け付けないため agent_model は CLI 引数に含まれません。",
+    "wrapper_usage": "scripts/github_copilot_wrapper.py を github_copilot_bin に指定すると --model <agent_model> が wrapper に渡ります。",
+    "example_config": {
+      "execution_agent": "github_copilot",
+      "agent_model": "sonnet-4.6",
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py"
+    },
+    "model_aware_provider": "wrapper が --exec オプションを受け取った場合、その provider に --model を転送します。例: github_copilot_wrapper.py --exec /usr/local/bin/my-provider",
+    "note": "_notes_* キーは project_config_warnings には影響しません。このフィールドはドキュメント目的のみです。"
+  },
   "codex_bin": "codex",
   "codex_model": "",
   "codex_sandbox": "",

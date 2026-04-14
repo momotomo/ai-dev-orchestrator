@@ -462,5 +462,122 @@ class AgentModelConfigTests(unittest.TestCase):
         self.assertNotIn("--model", cmd)
 
 
+# ---------------------------------------------------------------------------
+# github_copilot_wrapper unit tests
+# ---------------------------------------------------------------------------
+
+
+class GithubCopilotWrapperTests(unittest.TestCase):
+    """Tests for scripts/github_copilot_wrapper.py."""
+
+    def setUp(self) -> None:
+        import github_copilot_wrapper
+        self.wrapper = github_copilot_wrapper
+
+    # ------------------------------------------------------------------
+    # parse_args
+    # ------------------------------------------------------------------
+
+    def test_parse_args_defaults(self) -> None:
+        args = self.wrapper.parse_args([])
+        self.assertEqual(args.model, "")
+        self.assertEqual(args.exec, "")
+
+    def test_parse_args_accepts_model(self) -> None:
+        args = self.wrapper.parse_args(["--model", "sonnet-4.6"])
+        self.assertEqual(args.model, "sonnet-4.6")
+
+    def test_parse_args_accepts_exec(self) -> None:
+        args = self.wrapper.parse_args(["--exec", "/usr/local/bin/my-provider"])
+        self.assertEqual(args.exec, "/usr/local/bin/my-provider")
+
+    def test_parse_args_model_and_exec_together(self) -> None:
+        args = self.wrapper.parse_args(["--model", "sonnet-4.6", "--exec", "/usr/local/bin/p"])
+        self.assertEqual(args.model, "sonnet-4.6")
+        self.assertEqual(args.exec, "/usr/local/bin/p")
+
+    # ------------------------------------------------------------------
+    # build_command
+    # ------------------------------------------------------------------
+
+    def test_build_command_no_exec_no_model_is_gh_default(self) -> None:
+        """No --exec, no model → fall back to gh copilot suggest."""
+        args = self.wrapper.parse_args([])
+        cmd = self.wrapper.build_command(args)
+        self.assertEqual(cmd[0], "gh")
+        self.assertIn("copilot", cmd)
+        self.assertNotIn("--model", cmd)
+
+    def test_build_command_no_exec_with_model_still_gh_default(self) -> None:
+        """No --exec even with --model → gh copilot suggest (model not forwarded)."""
+        args = self.wrapper.parse_args(["--model", "sonnet-4.6"])
+        cmd = self.wrapper.build_command(args)
+        self.assertEqual(cmd[0], "gh")
+        self.assertNotIn("--model", cmd)
+
+    def test_build_command_exec_with_model_forwards_model(self) -> None:
+        """With --exec and --model, the model is forwarded."""
+        args = self.wrapper.parse_args([
+            "--model", "sonnet-4.6",
+            "--exec", "/usr/local/bin/my-provider",
+        ])
+        cmd = self.wrapper.build_command(args)
+        self.assertEqual(cmd[0], "/usr/local/bin/my-provider")
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet-4.6")
+
+    def test_build_command_exec_without_model_no_model_flag(self) -> None:
+        """With --exec but no --model, --model flag is omitted."""
+        args = self.wrapper.parse_args(["--exec", "/usr/local/bin/my-provider"])
+        cmd = self.wrapper.build_command(args)
+        self.assertEqual(cmd[0], "/usr/local/bin/my-provider")
+        self.assertNotIn("--model", cmd)
+
+    # ------------------------------------------------------------------
+    # run() integration: subprocess is mocked
+    # ------------------------------------------------------------------
+
+    def test_run_default_gh_sets_copilot_model_env_and_warns(self) -> None:
+        """When model is set but no --exec, COPILOT_MODEL env is set and a note is printed."""
+        import io
+        with patch.object(self.wrapper.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            buf = io.StringIO()
+            with patch("sys.stdin", io.StringIO("test prompt")):
+                with patch("sys.stderr", buf):
+                    ret = self.wrapper.run(["--model", "sonnet-4.6"])
+        self.assertEqual(ret, 0)
+        call_kwargs = mock_run.call_args
+        env_used = call_kwargs[1]["env"] if isinstance(call_kwargs[1], dict) else call_kwargs.kwargs["env"]
+        self.assertEqual(env_used.get("COPILOT_MODEL"), "sonnet-4.6")
+        self.assertIn("NOTE", buf.getvalue())
+
+    def test_run_exec_path_forwards_model_no_warning(self) -> None:
+        """With --exec, model is forwarded to provider; no 'NOTE' warning emitted."""
+        import io
+        with patch.object(self.wrapper.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            buf = io.StringIO()
+            with patch("sys.stdin", io.StringIO("prompt text")):
+                with patch("sys.stderr", buf):
+                    ret = self.wrapper.run([
+                        "--model", "sonnet-4.6",
+                        "--exec", "/usr/local/bin/custom",
+                    ])
+        self.assertEqual(ret, 0)
+        call_args = mock_run.call_args
+        cmd_used = call_args[0][0] if call_args[0] else call_args.args[0]
+        self.assertEqual(cmd_used[0], "/usr/local/bin/custom")
+        self.assertIn("--model", cmd_used)
+        self.assertNotIn("NOTE", buf.getvalue())
+
+    def test_run_returns_127_on_command_not_found(self) -> None:
+        """FileNotFoundError → exit code 127 (command not found)."""
+        with patch.object(self.wrapper.subprocess, "run", side_effect=FileNotFoundError("not found")):
+            with patch("sys.stdin", __import__("io").StringIO("p")):
+                ret = self.wrapper.run(["--exec", "/no/such/binary"])
+        self.assertEqual(ret, 127)
+
+
 if __name__ == "__main__":
     unittest.main()
