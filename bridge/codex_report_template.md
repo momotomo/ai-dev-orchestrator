@@ -6,6 +6,7 @@
 - changed: [主要ファイル。なければ なし]
 - verify: [確認結果。未実施なら未実施]
 - next_state: codex_done
+- result: [completed | consultation_needed | blocked | failed]
 - live_ready: [live 1 周確認へ進める状態か。条件付きなら一言]
 - risks: [残課題や注意点。なければ なし]
 ===END_BRIDGE_SUMMARY===

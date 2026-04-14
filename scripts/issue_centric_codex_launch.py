@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,15 @@ from issue_centric_transport import PreparedIssueCentricDecision
 
 class IssueCentricCodexLaunchError(ValueError):
     """Raised when issue-centric codex launch cannot be prepared safely."""
+
+
+def _parse_codex_report_result(report_text: str) -> str:
+    match = re.search(r"^\s*-\s+result:\s+(\S+)", report_text, re.MULTILINE)
+    if match:
+        value = match.group(1).rstrip(".,;:").lower()
+        if value in ("completed", "consultation_needed", "blocked", "failed"):
+            return value
+    return "completed"
 
 
 @dataclass(frozen=True)
@@ -266,6 +276,8 @@ def build_issue_centric_codex_prompt(
         "- 既存の Codex report template を使う",
         f"- BRIDGE_SUMMARY か本文のどちらかで target issue `{execution.resolved_issue.issue_url}` を明示する",
         f"- BRIDGE_SUMMARY か本文のどちらかで trigger comment `{execution.created_comment.url}` を明示する",
+        "- BRIDGE_SUMMARY の result: フィールドを必ず記入する（completed / consultation_needed / blocked / failed のいずれか）",
+        "- result: completed は全タスク実施済み + target issue に完了コメントを投稿した場合のみ使う",
         "- close / follow-up / review automation の判断は report の残課題へ留める",
         "",
         "## 追加確認 docs",
@@ -372,20 +384,36 @@ def assess_issue_centric_continuation(
     report_file = repo_relative(report_path) if report_ready else ""
 
     if report_ready and final_mode == "codex_done":
+        report_text = report_path.read_text(encoding="utf-8")
+        result_from_report = _parse_codex_report_result(report_text)
+        if result_from_report == "consultation_needed":
+            safe_stop_reason = "Issue-centric Codex launch produced a report, but Codex reported consultation_needed. ChatGPT review required before proceeding."
+        elif result_from_report in ("blocked", "failed"):
+            safe_stop_reason = f"Issue-centric Codex launch produced a report, but Codex reported {result_from_report}. Manual intervention may be needed."
+        else:
+            safe_stop_reason = "Issue-centric Codex launch completed and the existing codex_done flow produced a report ready for archive."
         return (
             "report_ready_for_archive",
             "ready_for_archive",
             report_file,
-            "Issue-centric Codex launch completed and the existing codex_done flow produced a report ready for archive.",
-            "completed",
+            safe_stop_reason,
+            result_from_report,
         )
     if report_ready:
+        report_text = report_path.read_text(encoding="utf-8")
+        result_from_report = _parse_codex_report_result(report_text)
+        if result_from_report == "consultation_needed":
+            safe_stop_reason = "Issue-centric Codex launch produced a report (recovery path), but Codex reported consultation_needed. ChatGPT review required before proceeding."
+        elif result_from_report in ("blocked", "failed"):
+            safe_stop_reason = f"Issue-centric Codex launch produced a report (recovery path), but Codex reported {result_from_report}. Manual intervention may be needed."
+        else:
+            safe_stop_reason = "Issue-centric Codex launch completed and a report is ready, but the final mode was not codex_done. The existing report recovery / archive path can take over next."
         return (
             "report_ready_for_recovery",
             "ready_for_recovery",
             report_file,
-            "Issue-centric Codex launch completed and a report is ready, but the final mode was not codex_done. The existing report recovery / archive path can take over next.",
-            "completed",
+            safe_stop_reason,
+            result_from_report,
         )
     if final_mode == "codex_running" and bool(final_state.get("need_codex_run")):
         return (
