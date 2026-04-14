@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import sys
 from pathlib import Path
@@ -16,7 +17,7 @@ from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds,
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
-from issue_centric_contract import maybe_parse_issue_centric_reply
+from issue_centric_contract import IssueCentricAction, IssueCentricDecision, maybe_parse_issue_centric_reply
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
@@ -157,6 +158,56 @@ def resolve_saved_runtime_path(raw_path: str) -> Path:
     return path
 
 
+def _reconstruct_issue_centric_codex_decision_from_metadata(
+    metadata: dict[str, object],
+    state: dict[str, object],
+) -> IssueCentricDecision:
+    """Reconstruct a codex_run IssueCentricDecision from saved metadata + artifact file.
+
+    Used when raw response log is unavailable or cannot be re-parsed (e.g. multi-turn
+    page dump parse ambiguity, or file missing after max-execution-count stop + resume).
+    """
+    action_raw = str(metadata.get("action", "")).strip()
+    if action_raw != "codex_run":
+        raise BridgeError(
+            f"pending codex dispatch を metadata から再構成しましたが、action が codex_run ではありません: {action_raw!r}"
+        )
+    target_issue_raw = str(metadata.get("target_issue", "")).strip()
+    if not target_issue_raw or target_issue_raw.lower() == "none":
+        raise BridgeError("pending codex dispatch の metadata に有効な target_issue がありません。")
+    close_current_issue = bool(metadata.get("close_current_issue", False))
+    create_followup_issue = bool(metadata.get("create_followup_issue", False))
+    summary = str(metadata.get("summary", "")).strip()
+    artifact_ref = (
+        str(state.get("last_issue_centric_artifact_file", "")).strip()
+        or str((metadata.get("prepared_artifact") or {}).get("path", "")).strip()
+    )
+    if not artifact_ref:
+        raise BridgeError(
+            "pending codex dispatch の再構成に必要な artifact パスが state・metadata のいずれにもありません。"
+        )
+    artifact_path = resolve_saved_runtime_path(artifact_ref)
+    artifact_text = read_text(artifact_path)
+    if not artifact_text.strip():
+        raise BridgeError(
+            f"pending codex dispatch の artifact ファイルを読めませんでした: {artifact_ref}"
+        )
+    codex_body_base64 = base64.b64encode(artifact_text.encode("utf-8")).decode("ascii")
+    return IssueCentricDecision(
+        action=IssueCentricAction.CODEX_RUN,
+        target_issue=target_issue_raw,
+        close_current_issue=close_current_issue,
+        create_followup_issue=create_followup_issue,
+        summary=summary,
+        issue_body_base64=None,
+        codex_body_base64=codex_body_base64,
+        review_base64=None,
+        followup_issue_body_base64=None,
+        raw_json="",
+        raw_segment="(reconstructed from saved artifact)",
+    )
+
+
 def load_pending_issue_centric_codex_materialized(
     state: dict[str, object],
 ) -> tuple[object, MaterializedIssueCentricDecision, str, str, str]:
@@ -169,17 +220,24 @@ def load_pending_issue_centric_codex_materialized(
     except json.JSONDecodeError as exc:
         raise BridgeError(f"issue-centric metadata log を読めませんでした: {metadata_ref}") from exc
 
+    # Primary path: try to re-parse from raw response log.
     raw_log_ref = str(metadata.get("raw_response_log", "")).strip()
-    if not raw_log_ref:
-        raise BridgeError("issue-centric codex dispatch に必要な raw response log が metadata にありません。")
-    raw_log_path = resolve_saved_runtime_path(raw_log_ref)
-    raw_text = read_text(raw_log_path).strip()
-    if not raw_text:
-        raise BridgeError(f"issue-centric raw response log を読めませんでした: {raw_log_ref}")
+    contract_decision = None
+    if raw_log_ref:
+        try:
+            raw_log_path = resolve_saved_runtime_path(raw_log_ref)
+            raw_text = read_text(raw_log_path).strip()
+            if raw_text:
+                parsed = maybe_parse_issue_centric_reply(raw_text)
+                if parsed is not None and parsed.action.value == "codex_run":
+                    contract_decision = parsed
+        except Exception:
+            pass
 
-    contract_decision = maybe_parse_issue_centric_reply(raw_text)
-    if contract_decision is None or contract_decision.action.value != "codex_run":
-        raise BridgeError("pending issue-centric codex dispatch を raw response log から再構成できませんでした。")
+    # Fallback: reconstruct from metadata + artifact file when raw log is unavailable
+    # or cannot be re-parsed (e.g. after max-execution-count stop + resume).
+    if contract_decision is None:
+        contract_decision = _reconstruct_issue_centric_codex_decision_from_metadata(metadata, state)
 
     prepared = decode_issue_centric_decision(contract_decision)
     artifact_ref = (
