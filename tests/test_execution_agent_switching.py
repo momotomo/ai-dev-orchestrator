@@ -464,6 +464,36 @@ class AgentModelConfigTests(unittest.TestCase):
         cmd = launch_github_copilot.build_github_copilot_command(args)
         self.assertNotIn("--model", cmd)
 
+    def test_launch_copilot_build_command_bin_with_inline_exec_is_split(self) -> None:
+        """github_copilot_bin with inline --exec is split so wrapper receives --exec.
+
+        Regression: build_github_copilot_command used [bin_path] (single element) which
+        treated the whole string as a command name, making inline --exec impossible.
+        Now shlex.split is used so "wrapper.py --exec /provider" is split correctly.
+        """
+        config = {
+            "agent_model": "sonnet-4.6",
+            "github_copilot_bin": "/path/to/github_copilot_wrapper.py --exec /usr/local/bin/my-provider",
+            "codex_timeout_seconds": 7200,
+            "worker_repo_path": "/tmp",
+            "bridge_runtime_root": ".",
+        }
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
+                ["--prompt-file", "/tmp/p.md", "--report-file", "/tmp/r.md"],
+                config,
+            )
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        # First element: the wrapper binary
+        self.assertEqual(cmd[0], "/path/to/github_copilot_wrapper.py")
+        # Second+third: the inline --exec that was embedded in github_copilot_bin
+        self.assertIn("--exec", cmd)
+        self.assertEqual(cmd[cmd.index("--exec") + 1], "/usr/local/bin/my-provider")
+        # model and report-file are also forwarded
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "sonnet-4.6")
+        self.assertIn("--report-file", cmd)
+
 
 # ---------------------------------------------------------------------------
 # github_copilot_wrapper unit tests
