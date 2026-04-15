@@ -315,6 +315,15 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         log_paths=[stdout_log_path, stderr_log_path],
     )
 
+    # If the Copilot subprocess exited successfully and stdout has content but no
+    # structured report path was found by recover_codex_report, write stdout directly
+    # as the report.  This handles providers (e.g. custom --exec wrappers) whose
+    # output is the response text rather than a file path to codex_report.md.
+    if result.returncode == 0 and not codex_report_is_ready(report_path):
+        stdout_text = read_text(stdout_log_path).strip()
+        if stdout_text:
+            write_text(report_path, stdout_text + "\n")
+
     if codex_report_is_ready(report_path):
         mark_launch_done(state, prompt_path)
         print(f"github_copilot prompt log: {prompt_log_path}")
