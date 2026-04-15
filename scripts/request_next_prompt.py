@@ -211,7 +211,14 @@ def request_source_label(request_source: str) -> str:
     return "初回 request"
 
 
-def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str]:
+def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str, str]:
+    """Return (request_text, request_hash, request_source, ready_issue_ref).
+
+    ``ready_issue_ref`` is the normalized ready issue ref when the request was built
+    from a ready_issue path (non-empty), otherwise empty string.  It is saved to state
+    as ``current_ready_issue_ref`` so that continuation requests can detect a fresh-start
+    context and prevent carry-over from a previous issue's ``last_issue_centric_*`` state.
+    """
     ready_issue_ref = normalize_ready_issue_ref(args.ready_issue_ref)
     request_body = args.request_body.strip()
     project_path = resolve_project_path(args.project_path)
@@ -221,11 +228,11 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str]:
 
     if ready_issue_ref:
         request_text = compose_ready_issue_request_text(ready_issue_ref, project_path)
-        return request_text, stable_text_hash(request_text), build_ready_issue_request_source(ready_issue_ref)
+        return request_text, stable_text_hash(request_text), build_ready_issue_request_source(ready_issue_ref), ready_issue_ref
 
     if request_body:
         request_text = compose_override_request_text(request_body)
-        return request_text, stable_text_hash(request_text), build_override_request_source(request_body)
+        return request_text, stable_text_hash(request_text), build_override_request_source(request_body), ""
 
     if sys.stdin is not None and not sys.stdin.isatty():
         stdin_text = sys.stdin.read().strip()
@@ -235,12 +242,12 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str]:
                 " 通常入口では `--ready-issue-ref` を使うか、例外経路なら `--request-body` または対話入力で本文を渡してください。"
             )
         request_text = compose_override_request_text(stdin_text)
-        return request_text, stable_text_hash(request_text), build_override_request_source(stdin_text)
+        return request_text, stable_text_hash(request_text), build_override_request_source(stdin_text), ""
 
     interactive_ready_issue_ref = normalize_ready_issue_ref(prompt_ready_issue_reference(project_path))
     if interactive_ready_issue_ref:
         request_text = compose_ready_issue_request_text(interactive_ready_issue_ref, project_path)
-        return request_text, stable_text_hash(request_text), build_ready_issue_request_source(interactive_ready_issue_ref)
+        return request_text, stable_text_hash(request_text), build_ready_issue_request_source(interactive_ready_issue_ref), interactive_ready_issue_ref
 
     override_text = prompt_override_request_body(build_override_example_templates(project_path))
     if not override_text.strip():
@@ -249,7 +256,7 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str]:
             " 通常入口では current ready issue の参照を入力するか、例外経路なら `--request-body` で本文を渡してください。"
         )
     request_text = compose_override_request_text(override_text)
-    return request_text, stable_text_hash(request_text), build_override_request_source(override_text)
+    return request_text, stable_text_hash(request_text), build_override_request_source(override_text), ""
 
 
 def load_retryable_initial_request(state: dict[str, object]) -> tuple[str, str, str] | None:
@@ -270,13 +277,16 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     retryable_request = None if (args.request_body.strip() or args.ready_issue_ref.strip()) else load_retryable_initial_request(state)
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
+        # When retrying a previously prepared ready_issue request, recover the pinned ref
+        # from state so continuation requests can still detect the fresh-start context.
+        raw_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
         prepared_status = str(state.get("prepared_request_status", "")).strip()
         if prepared_status == "prepared":
             print(f"request: prepared の {request_source_label(request_source)} entry request を再生成せず送信します。")
         else:
             print(f"request: 前回未送信の {request_source_label(request_source)} entry request を再送します。")
     else:
-        request_text, request_hash, request_source = build_initial_request(args)
+        request_text, request_hash, request_source, raw_ready_issue_ref = build_initial_request(args)
 
     if (
         str(state.get("mode", "")).strip() == "waiting_prompt_reply"
@@ -296,6 +306,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         request_source=request_source,
         request_log=repo_relative(prepared_log),
     )
+    prepared_state["current_ready_issue_ref"] = raw_ready_issue_ref
     save_state(prepared_state)
 
     try:
@@ -309,6 +320,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             request_log=repo_relative(prepared_log),
             status="retry_send",
         )
+        retry_state["current_ready_issue_ref"] = raw_ready_issue_ref
         save_state(retry_state)
         raise
 
@@ -357,6 +369,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             "request_send_continued_without_github_source": bool(
                 send_result.get("request_send_continued_without_github_source")
             ),
+            "current_ready_issue_ref": raw_ready_issue_ref,
         }
     )
     save_state(mutable_state)

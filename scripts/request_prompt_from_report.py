@@ -10,6 +10,7 @@ from _bridge_common import (
     BridgeStop,
     build_chatgpt_handoff_request,
     build_chatgpt_request,
+    build_pinned_ready_issue_ic_section,
     can_reuse_prepared_request,
     clear_chat_rotation_fields,
     clear_error_fields,
@@ -213,29 +214,49 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    issue_centric_runtime_snapshot, _ = (
-        prepare_issue_centric_runtime_snapshot(state)
+    # Detect fresh-start ready-issue continuation to prevent carry-over from
+    # a previous issue's last_issue_centric_* context.
+    # When pending_request_source is "ready_issue:..." and current_ready_issue_ref
+    # is set, we know this continuation follows the initial request for a newly
+    # pinned ready issue.  In that case, skip the old IC snapshot entirely and
+    # build a fresh IC section from the explicit ready issue ref.
+    _pending_source = str(state.get("pending_request_source", "")).strip()
+    _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+    _use_pinned_ready_issue = (
+        _pending_source.startswith("ready_issue:") and bool(_pinned_ready_issue_ref)
     )
-    issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
-    runtime_mode_state = dict(state)
-    if issue_centric_runtime_snapshot is not None:
-        runtime_mode_state.update(
-            {
-                "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
-                "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
-            }
+
+    if _use_pinned_ready_issue:
+        issue_centric_runtime_snapshot = None
+        issue_centric_runtime_mode = None
+        issue_centric_next_request_section = build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref)
+        _route_selected = "issue_centric"
+    else:
+        issue_centric_runtime_snapshot, _ = (
+            prepare_issue_centric_runtime_snapshot(state)
         )
-    issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
-        runtime_mode_state
-    )
-    route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
+        issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
+        runtime_mode_state = dict(state)
+        if issue_centric_runtime_snapshot is not None:
+            runtime_mode_state.update(
+                {
+                    "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
+                    "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
+                }
+            )
+        issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
+            runtime_mode_state
+        )
+        route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
+        _route_selected = route_choice.route_selected
+
     if retryable_request is None:
         retryable_request = load_retryable_prepared_request(state)
     if retryable_request is not None:
         request_text, request_hash, request_source = retryable_request
         prepared_status = str(state.get("prepared_request_status", "")).strip()
         if prepared_status == "prepared":
-            if route_choice.route_selected == "issue_centric":
+            if _route_selected == "issue_centric":
                 print("request: issue-centric preferred route の prepared ChatGPT request を再生成せず送信します。")
             else:
                 print("request: legacy fallback へ寄せた prepared の ChatGPT request を再生成せず送信します。")
@@ -252,7 +273,7 @@ def run_resume_request(
             last_report=last_report,
             resume_note=resume_note or None,
             issue_centric_next_request_section=issue_centric_next_request_section,
-            issue_centric_route_selected=route_choice.route_selected,
+            issue_centric_route_selected=_route_selected,
         )
         request_hash = stable_text_hash(request_text)
         request_source = build_report_request_source(state, resume_note)

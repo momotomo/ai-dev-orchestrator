@@ -5831,3 +5831,29 @@ def prepare_issue_centric_runtime_mode(
         return None, ""
     section = render_issue_centric_next_request_section(runtime_mode, repo_label=repo_label)
     return runtime_mode, section
+
+
+def build_pinned_ready_issue_ic_section(ready_issue_ref: str) -> str:
+    """Build a minimal issue-centric next-request section from a pinned ready issue ref.
+
+    Used in ``request_prompt_from_report.run_resume_request`` when the current pending
+    request was a ``ready_issue:`` entry (fresh start with explicit issue input) to
+    prevent stale ``last_issue_centric_target_issue`` context (from a previous run) from
+    being used as the target issue in the continuation request.
+
+    The returned section includes only the pinned target_issue and the minimum context
+    needed for ChatGPT to identify the current work item.  Route is treated as
+    ``issue_centric`` by the caller so the IC reply contract is also appended.
+    """
+    config = load_project_config()
+    repo_label = str(config.get("github_repository", "")).strip() or str(project_repo_path(config))
+    ctx = IssueCentricNextRequestContext(
+        target_issue=ready_issue_ref,
+        target_issue_source="pinned_ready_issue",
+        next_request_hint="ready_issue_active",
+        principal_issue_kind="current_issue",
+        used_normalized_summary=False,
+        fallback_reason="",
+        summary_path="",
+    )
+    return render_issue_centric_next_request_section(ctx, repo_label=repo_label)
