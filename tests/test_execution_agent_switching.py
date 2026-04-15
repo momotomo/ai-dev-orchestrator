@@ -579,5 +579,172 @@ class GithubCopilotWrapperTests(unittest.TestCase):
         self.assertEqual(ret, 127)
 
 
+# ---------------------------------------------------------------------------
+# launch_github_copilot.run() report generation tests
+# ---------------------------------------------------------------------------
+
+
+class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
+    """Tests for the stdout→report fallback in launch_github_copilot.run().
+
+    When the Copilot subprocess exits 0 and writes response text to stdout,
+    launch_github_copilot.run() must write that text as codex_report.md so the
+    bridge can proceed.  The tests below cover the main success, failure, and
+    edge-case paths introduced by this fix.
+    """
+
+    import tempfile as _tempfile
+
+    def setUp(self) -> None:
+        import tempfile
+        self._tmpdir_ctx = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self._tmpdir_ctx.__enter__())
+        self.prompt_path = self.tmpdir / "codex_prompt.md"
+        self.report_path = self.tmpdir / "codex_report.md"
+        self.prompt_path.write_text("# GitHub Copilot Prompt\n\nDo something.\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self._tmpdir_ctx.__exit__(None, None, None)
+
+    def _minimal_config(self) -> dict[str, object]:
+        return {
+            "github_copilot_bin": "/scripts/github_copilot_wrapper.py",
+            "codex_timeout_seconds": 60,
+            "worker_repo_path": str(self.tmpdir),
+            "bridge_runtime_root": str(self.tmpdir),
+        }
+
+    def _run_with_fake_subprocess(
+        self,
+        *,
+        stdout_text: str,
+        returncode: int,
+    ) -> int:
+        """Run launch_github_copilot.run() with a fake subprocess returning given stdout/returncode."""
+        import subprocess
+        config = self._minimal_config()
+        state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+        def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+            # Write stdout_text to the stdout file handle so logs are populated.
+            stdout.write(stdout_text)
+            proc = MagicMock()
+            proc.stdin = MagicMock()
+            proc.poll.return_value = returncode
+            return proc
+
+        with (
+            patch("launch_github_copilot.load_project_config", return_value=config),
+            patch("launch_github_copilot.print_project_config_warnings"),
+            patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
+            patch("launch_github_copilot.save_state"),
+            patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
+            patch("launch_github_copilot.recover_codex_report", return_value=None),
+            patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+        ):
+            return launch_github_copilot.run(
+                dict(state),
+                [
+                    "--prompt-file", str(self.prompt_path),
+                    "--report-file", str(self.report_path),
+                    "--worker-repo-path", str(self.tmpdir),
+                ],
+            )
+
+    # ------------------------------------------------------------------
+    # Normal success: stdout content → report file written
+    # ------------------------------------------------------------------
+
+    def test_stdout_written_as_report_on_success(self) -> None:
+        """Exit 0 + stdout content → report file is written and run returns 0."""
+        from _bridge_common import BridgeError
+        rc = self._run_with_fake_subprocess(
+            stdout_text="# Copilot Report\n\nAll done.\n",
+            returncode=0,
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(self.report_path.exists(), "codex_report.md must be created")
+        report_text = self.report_path.read_text(encoding="utf-8")
+        self.assertIn("All done.", report_text)
+
+    # ------------------------------------------------------------------
+    # Failure: non-zero exit code → BridgeError even with stdout content
+    # ------------------------------------------------------------------
+
+    def test_nonzero_exit_raises_bridge_error(self) -> None:
+        """Exit non-0 → BridgeError regardless of stdout content."""
+        from _bridge_common import BridgeError
+        with self.assertRaises(BridgeError) as ctx:
+            self._run_with_fake_subprocess(
+                stdout_text="partial output\n",
+                returncode=1,
+            )
+        self.assertIn("bridge/outbox/codex_report.md", str(ctx.exception))
+        self.assertIn("exit_code=1", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # Edge case: empty stdout with exit 0 → BridgeError (no empty report)
+    # ------------------------------------------------------------------
+
+    def test_empty_stdout_exit_zero_raises_bridge_error(self) -> None:
+        """Exit 0 but empty stdout → BridgeError; empty report must not be written."""
+        from _bridge_common import BridgeError
+        with self.assertRaises(BridgeError):
+            self._run_with_fake_subprocess(
+                stdout_text="",
+                returncode=0,
+            )
+        # Report must not exist (or must be empty / placeholder only)
+        if self.report_path.exists():
+            from _bridge_common import ready_codex_report_text
+            self.assertEqual(
+                ready_codex_report_text(self.report_path),
+                "",
+                "report must not contain real content when stdout was empty",
+            )
+
+    # ------------------------------------------------------------------
+    # Pre-existing report wins: stdout-fallback must not overwrite it
+    # ------------------------------------------------------------------
+
+    def test_existing_report_not_overwritten_by_stdout(self) -> None:
+        """If recover_codex_report already put content in report_path, stdout must not overwrite it."""
+        import subprocess
+        config = self._minimal_config()
+        state = {"mode": "ready_for_codex", "need_codex_run": True}
+        prior_content = "# Recovered Report\n\nPrior content.\n"
+        self.report_path.write_text(prior_content, encoding="utf-8")
+
+        def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+            stdout.write("NEW stdout content that must NOT appear in report\n")
+            proc = MagicMock()
+            proc.stdin = MagicMock()
+            proc.poll.return_value = 0
+            return proc
+
+        with (
+            patch("launch_github_copilot.load_project_config", return_value=config),
+            patch("launch_github_copilot.print_project_config_warnings"),
+            patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
+            patch("launch_github_copilot.save_state"),
+            patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
+            # recover_codex_report returns a path to signal it already placed the report
+            patch("launch_github_copilot.recover_codex_report", return_value=self.report_path),
+            patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+        ):
+            rc = launch_github_copilot.run(
+                dict(state),
+                [
+                    "--prompt-file", str(self.prompt_path),
+                    "--report-file", str(self.report_path),
+                    "--worker-repo-path", str(self.tmpdir),
+                ],
+            )
+        self.assertEqual(rc, 0)
+        after = self.report_path.read_text(encoding="utf-8")
+        self.assertIn("Prior content.", after)
+        self.assertNotIn("NEW stdout", after)
+
+
 if __name__ == "__main__":
     unittest.main()
