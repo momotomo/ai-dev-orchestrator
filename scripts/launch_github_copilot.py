@@ -24,6 +24,7 @@ report 検証ロジックを合わせて調整してください。
 from __future__ import annotations
 
 import argparse
+import shlex
 import subprocess
 import sys
 import time
@@ -137,7 +138,9 @@ def build_github_copilot_command(args: argparse.Namespace) -> list[str]:
         # --model flag yet.  Use a custom wrapper to forward the model when needed.
         return ["gh", "copilot", "suggest", "--target=shell", "-"]
     # Custom wrapper: call it with --model / --report-file when set; prompt via stdin.
-    cmd = [bin_path]
+    # github_copilot_bin may contain inline args (e.g. "wrapper.py --exec /provider").
+    # Use shlex.split so those args are forwarded correctly to the wrapper.
+    cmd = shlex.split(bin_path)
     if model:
         cmd.extend(["--model", model])
     if report_file:
