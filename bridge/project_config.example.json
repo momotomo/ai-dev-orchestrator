@@ -23,7 +23,7 @@
     "example_config": {
       "execution_agent": "github_copilot",
       "agent_model": "sonnet-4.6",
-      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py"
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_stub.py"
     },
     "model_aware_provider": "wrapper が --exec オプションを受け取った場合、その provider に --model を転送します。例: github_copilot_wrapper.py --exec /usr/local/bin/my-provider",
     "note": "_notes_* キーは project_config_warnings には影響しません。このフィールドはドキュメント目的のみです。"
