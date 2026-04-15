@@ -129,16 +129,19 @@ def build_github_copilot_command(args: argparse.Namespace) -> list[str]:
     """
     bin_path = args.github_copilot_bin.strip()
     model = str(getattr(args, "model", "")).strip()
+    report_file = str(getattr(args, "report_file", "")).strip()
     if bin_path == "gh":
         # Use the gh CLI Copilot extension in shell-suggestion mode.
         # Prompt is piped via stdin.
         # Note: model is not forwarded here because gh copilot suggest has no stable
         # --model flag yet.  Use a custom wrapper to forward the model when needed.
         return ["gh", "copilot", "suggest", "--target=shell", "-"]
-    # Custom wrapper: call it with --model when agent_model is set; prompt via stdin.
+    # Custom wrapper: call it with --model / --report-file when set; prompt via stdin.
     cmd = [bin_path]
     if model:
         cmd.extend(["--model", model])
+    if report_file:
+        cmd.extend(["--report-file", report_file])
     return cmd
 
 
@@ -314,15 +317,6 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         report_path,
         log_paths=[stdout_log_path, stderr_log_path],
     )
-
-    # If the Copilot subprocess exited successfully and stdout has content but no
-    # structured report path was found by recover_codex_report, write stdout directly
-    # as the report.  This handles providers (e.g. custom --exec wrappers) whose
-    # output is the response text rather than a file path to codex_report.md.
-    if result.returncode == 0 and not codex_report_is_ready(report_path):
-        stdout_text = read_text(stdout_log_path).strip()
-        if stdout_text:
-            write_text(report_path, stdout_text + "\n")
 
     if codex_report_is_ready(report_path):
         mark_launch_done(state, prompt_path)
