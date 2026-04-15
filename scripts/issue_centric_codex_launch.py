@@ -80,7 +80,12 @@ def launch_issue_centric_codex_run(
         )
 
     now = (now_fn or _utcnow)()
-    launch_entrypoint = "launch_codex_once.run"
+    launch_callable = launch_runner or launch_codex_once.run
+    _module = getattr(launch_callable, "__module__", "") or ""
+    if _module.endswith("launch_github_copilot"):
+        launch_entrypoint = "launch_github_copilot.run"
+    else:
+        launch_entrypoint = "launch_codex_once.run"
     prompt_path = runtime_prompt_path_fn(project_config)
     prompt_text = build_issue_centric_codex_prompt(prepared, execution)
     write_text_fn(prompt_path, prompt_text)
@@ -105,7 +110,6 @@ def launch_issue_centric_codex_run(
     )
     save_state_fn(ready_state)
 
-    launch_callable = launch_runner or launch_codex_once.run
     try:
         launch_callable(dict(ready_state), [])
         final_state = clear_error_fields(dict(load_state_fn()))

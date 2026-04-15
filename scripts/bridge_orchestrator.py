@@ -263,8 +263,14 @@ def dispatch_pending_issue_centric_codex_run(
     state: dict[str, object],
     *,
     project_config: dict[str, object],
+    execution_agent: str = "codex",
 ) -> int:
     contract_decision, materialized, raw_log_ref, metadata_ref, artifact_ref = load_pending_issue_centric_codex_materialized(state)
+    launch_runner = (
+        launch_github_copilot.run
+        if execution_agent == "github_copilot"
+        else launch_codex_once.run
+    )
     dispatch_result = dispatch_issue_centric_execution(
         contract_decision=contract_decision,
         materialized=materialized,
@@ -287,7 +293,7 @@ def dispatch_pending_issue_centric_codex_run(
         execute_close_current_issue_fn=execute_close_current_issue,
         execute_followup_issue_action_fn=execute_followup_issue_action,
         execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync,
-        launch_runner=launch_codex_once.run,
+        launch_runner=launch_runner,
     )
     save_state(dispatch_result.final_state)
     print(dispatch_result.stop_message)
@@ -335,7 +341,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if has_pending_issue_centric_codex_dispatch(state):
         status = present_bridge_status(state)
         print(f"{status.label}です。prepared Codex body を issue-centric codex_run dispatch へ進めます。")
-        return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config)
+        return dispatch_pending_issue_centric_codex_run(dict(state), project_config=project_config, execution_agent=execution_agent)
 
     # Blocked lifecycle guard: operator confirmation required, no dispatch.
     # resolve_unified_next_action() falls through to the dispatch plan for blocked lifecycle
