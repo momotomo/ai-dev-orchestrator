@@ -306,10 +306,26 @@ def _decode_optional_body(
 
     try:
         decoded_text = raw_bytes.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise IssueCentricBodyDecodeError(
-            f"{_BLOCK_NAMES[kind]} payload is not valid UTF-8: {exc}"
-        ) from exc
+    except UnicodeDecodeError as strict_exc:
+        # Payload is valid base64 but decoded bytes contain non-UTF-8 sequences.
+        # This can happen when the AI model produces slightly malformed base64.
+        # Fall back to lenient decode so the run can continue, but emit a visible warning.
+        decoded_lax = raw_bytes.decode("utf-8", errors="replace")
+        if not decoded_lax.strip():
+            raise IssueCentricBodyDecodeError(
+                f"{_BLOCK_NAMES[kind]} payload decoded to empty text after UTF-8 error replacement."
+                f" (original error: {strict_exc})"
+            ) from strict_exc
+        replacement_count = decoded_lax.count("\ufffd")
+        bad_bytes_hex = strict_exc.object[strict_exc.start : strict_exc.end].hex()
+        print(
+            f"[issue_centric_transport] WARNING: {_BLOCK_NAMES[kind]} payload contained"
+            f" {replacement_count} non-UTF-8 byte(s) starting at position {strict_exc.start}"
+            f" (bytes {bad_bytes_hex}). Replaced with U+FFFD."
+            f" Decoded text may contain replacement characters.",
+            flush=True,
+        )
+        decoded_text = decoded_lax
 
     if decoded_text == "":
         raise IssueCentricBodyDecodeError(
