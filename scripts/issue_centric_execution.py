@@ -57,6 +57,7 @@ def dispatch_issue_centric_execution(
     execute_followup_issue_action_fn: Callable[..., object],
     execute_current_issue_project_state_sync_fn: Callable[..., object],
     launch_runner: Callable[[dict[str, object], list[str] | None], int],
+    execute_parent_issue_update_fn: Callable[..., object] | None = None,
 ) -> IssueCentricDispatchResult:
     steps: list[IssueCentricExecutionStep] = []
     decision_action = contract_decision.action.value
@@ -1450,6 +1451,7 @@ def dispatch_issue_centric_execution(
             )
         )
         final_status = close_execution.status
+        parent_update_note = ""
         if close_execution.status == "completed":
             done_sync_execution = _run_current_issue_project_state_sync(
                 lifecycle_stage="done",
@@ -1469,6 +1471,34 @@ def dispatch_issue_centric_execution(
             )
             if done_sync_execution.status not in {"completed", "not_requested"}:
                 final_status = "partial"
+            if execute_parent_issue_update_fn is not None:
+                parent_update_execution = execute_parent_issue_update_fn(
+                    close_execution=close_execution,
+                    prior_state=mutable_state,
+                    source_decision_log=source_decision_log,
+                    source_metadata_log=source_metadata_log,
+                    source_action_execution_log=repo_relative(close_execution.execution_log_path),
+                    log_writer=log_writer,
+                    repo_relative=repo_relative,
+                )
+                _apply_parent_issue_update_state(
+                    mutable_state,
+                    parent_update_execution=parent_update_execution,
+                    repo_relative=repo_relative,
+                )
+                steps.append(
+                    IssueCentricExecutionStep(
+                        name="parent_issue_update_after_close",
+                        status=parent_update_execution.status,
+                        log_path=repo_relative(parent_update_execution.execution_log_path),
+                        note=parent_update_execution.safe_stop_reason,
+                    )
+                )
+                if parent_update_execution.status not in {"completed", "not_requested"}:
+                    final_status = "partial"
+                parent_comment = getattr(parent_update_execution, "created_comment", None)
+                if parent_comment is not None:
+                    parent_update_note = f" parent update: {getattr(parent_comment, 'url', '')}"
         return _finalize_dispatch(
             matrix_path="no_action_close",
             final_status=final_status,
@@ -1481,6 +1511,7 @@ def dispatch_issue_centric_execution(
                 f" decision log: {source_decision_log}"
                 f" metadata: {source_metadata_log}"
                 + f" close: {repo_relative(close_execution.execution_log_path)}"
+                + parent_update_note
                 + (f" action: {decision_action}" if decision_action != "no_action" else "")
                 + " create_followup_issue mutation / review automation / Projects update はまだ未実装です。"
             ),
@@ -1756,6 +1787,38 @@ def _apply_current_issue_project_state_sync_state(
             "last_issue_centric_lifecycle_sync_state_value": sync_execution.project_state_value_name,
             "last_issue_centric_stop_reason": sync_execution.safe_stop_reason,
             "chatgpt_decision_note": sync_execution.safe_stop_reason,
+        }
+    )
+
+
+def _apply_parent_issue_update_state(
+    target_state: dict[str, object],
+    *,
+    parent_update_execution: object,
+    repo_relative: Callable[[Path], str],
+) -> None:
+    target_state.update(
+        {
+            "last_issue_centric_parent_update_status": str(
+                getattr(parent_update_execution, "update_status", "")
+            ).strip(),
+            "last_issue_centric_parent_update_log": repo_relative(
+                getattr(parent_update_execution, "execution_log_path")
+            ),
+            "last_issue_centric_parent_update_issue": (
+                getattr(getattr(parent_update_execution, "resolved_parent_issue", None), "issue_url", "") or ""
+            ),
+            "last_issue_centric_parent_update_comment_id": str(
+                getattr(getattr(parent_update_execution, "created_comment", None), "comment_id", "") or ""
+            ).strip(),
+            "last_issue_centric_parent_update_comment_url": (
+                getattr(getattr(parent_update_execution, "created_comment", None), "url", "") or ""
+            ),
+            "last_issue_centric_parent_update_closed_issue": str(
+                getattr(parent_update_execution, "closed_issue_url", "") or ""
+            ).strip(),
+            "last_issue_centric_stop_reason": getattr(parent_update_execution, "safe_stop_reason", ""),
+            "chatgpt_decision_note": getattr(parent_update_execution, "safe_stop_reason", ""),
         }
     )
 

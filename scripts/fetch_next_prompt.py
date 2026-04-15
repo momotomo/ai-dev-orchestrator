@@ -38,6 +38,7 @@ from _bridge_common import (
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
+from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
     CHATGPT_TURN_MARKER,
@@ -52,6 +53,7 @@ from issue_centric_contract import (
 from issue_centric_codex_run import execute_codex_run_action
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
+from issue_centric_github import IssueCentricGitHubError, resolve_target_issue
 from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import (
     IssueCentricTransportError,
@@ -530,6 +532,47 @@ def stop_for_invalid_issue_centric_contract(
     raise BridgeError(str(failed_state["error_message"]))
 
 
+def _validate_ready_issue_target_binding(
+    decision: IssueCentricDecision,
+    *,
+    state: dict[str, object],
+    pending_request_source: str,
+) -> str | None:
+    if not pending_request_source.startswith("ready_issue:"):
+        return None
+    raw_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+    if not raw_ready_issue_ref:
+        return None
+    expected_issue_ref = raw_ready_issue_ref.split(maxsplit=1)[0].strip()
+    if not expected_issue_ref:
+        return "current_ready_issue_ref から ready issue ref を抽出できませんでした。"
+    raw_target_issue = str(decision.target_issue or "").strip()
+    if not raw_target_issue:
+        return (
+            f"current ready issue は {raw_ready_issue_ref} に固定されていますが、"
+            "contract reply が target_issue=none を返しました。"
+        )
+
+    project_config = load_project_config()
+    default_repository = str(project_config.get("github_repository", "")).strip()
+    try:
+        expected_issue = resolve_target_issue(expected_issue_ref, default_repository=default_repository)
+        actual_issue = resolve_target_issue(raw_target_issue, default_repository=default_repository)
+    except IssueCentricGitHubError as exc:
+        return f"ready issue binding validation failed: {exc}"
+
+    if (
+        expected_issue.repository != actual_issue.repository
+        or expected_issue.issue_number != actual_issue.issue_number
+    ):
+        return (
+            f"current ready issue は {raw_ready_issue_ref} ですが、"
+            f"contract reply が stale target_issue {raw_target_issue} を返しました。"
+            " ready issue request では current ready issue と一致する target_issue だけを受け入れます。"
+        )
+    return None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の ChatGPT 返答ブロックを抽出します。")
     parser.add_argument(
@@ -648,6 +691,20 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
     contract_decision = readiness.decision
     if contract_decision is not None:
+        ready_issue_binding_error = _validate_ready_issue_target_binding(
+            contract_decision,
+            state=state,
+            pending_request_source=pending_request_source,
+        )
+        if ready_issue_binding_error:
+            stop_for_invalid_issue_centric_contract(
+                dict(state),
+                raw_text=raw_text,
+                detail=ready_issue_binding_error,
+                pending_request_source=pending_request_source,
+                raw_log_path=raw_log,
+                readiness=readiness,
+            )
         decision_log = log_text(
             "extracted_issue_centric_contract",
             contract_decision.render_debug_markdown(),
@@ -800,6 +857,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "last_issue_centric_closed_issue_url": "",
                 "last_issue_centric_closed_issue_title": "",
                 "last_issue_centric_close_order": "",
+                "last_issue_centric_parent_update_status": "",
+                "last_issue_centric_parent_update_log": "",
+                "last_issue_centric_parent_update_issue": "",
+                "last_issue_centric_parent_update_comment_id": "",
+                "last_issue_centric_parent_update_comment_url": "",
+                "last_issue_centric_parent_update_closed_issue": "",
                 "last_issue_centric_review_status": "",
                 "last_issue_centric_review_log": "",
                 "last_issue_centric_review_comment_id": "",
@@ -853,6 +916,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             launch_issue_centric_codex_run_fn=launch_issue_centric_codex_run,
             execute_human_review_action_fn=execute_human_review_action,
             execute_close_current_issue_fn=execute_close_current_issue,
+            execute_parent_issue_update_fn=execute_parent_issue_update_after_close,
             execute_followup_issue_action_fn=execute_followup_issue_action,
             execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync,
             launch_runner=launch_codex_once.run,

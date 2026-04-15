@@ -17,6 +17,7 @@ import issue_centric_close_current_issue  # noqa: E402
 import issue_centric_contract  # noqa: E402
 import issue_centric_github  # noqa: E402
 import issue_centric_issue_create  # noqa: E402
+import issue_centric_parent_update  # noqa: E402
 import issue_centric_transport  # noqa: E402
 from _bridge_common import BridgeStop  # noqa: E402
 
@@ -671,6 +672,101 @@ class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
             saved = saved_states[0]
             self.assertEqual(saved["last_issue_centric_close_status"], "closed")
             self.assertEqual(saved["last_issue_centric_closed_issue_url"], "https://github.com/example/repo/issues/20")
+
+    def test_no_action_close_runs_parent_update_in_fetch_path(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#20",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_target_issue": "#20",
+        }
+        raw = build_reply(action="no_action", target_issue="#20", close_current_issue=True, include_issue_body=False)
+        saved_states: list[dict[str, object]] = []
+        fake_close = issue_centric_close_current_issue.IssueCloseExecutionResult(
+            status="completed",
+            close_status="closed",
+            close_order="after_no_action",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            issue_before=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Current issue",
+                repository="example/repo",
+                state="open",
+                body="Parent: #1",
+            ),
+            issue_after=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Current issue",
+                repository="example/repo",
+                state="closed",
+                body="Parent: #1",
+            ),
+            execution_log_path=REPO_ROOT / "logs" / "close.json",
+            safe_stop_reason="close_current_issue closed #20.",
+        )
+        fake_parent_update = issue_centric_parent_update.ParentIssueUpdateResult(
+            status="completed",
+            update_status="comment_created",
+            resolved_parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=1,
+                issue_url="https://github.com/example/repo/issues/1",
+                source_ref="#1",
+            ),
+            created_comment=issue_centric_github.CreatedGitHubComment(
+                comment_id=901,
+                url="https://github.com/example/repo/issues/1#issuecomment-901",
+                issue_number=1,
+                repository="example/repo",
+                body="parent updated",
+            ),
+            closed_issue_url="https://github.com/example/repo/issues/20",
+            execution_log_path=REPO_ROOT / "logs" / "parent_update.json",
+            safe_stop_reason="parent issue #1 received a completion comment after issue #20 closed.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "execute_close_current_issue", return_value=fake_close) as close_mock,
+                patch.object(fetch_next_prompt, "execute_parent_issue_update_after_close", return_value=fake_parent_update) as parent_update_mock,
+            ):
+                with self.assertRaisesRegex(BridgeStop, "parent update: https://github.com/example/repo/issues/1#issuecomment-901"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(parent_update_mock.call_count, 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_close_status"], "closed")
+            self.assertEqual(saved["last_issue_centric_parent_update_status"], "comment_created")
+            self.assertEqual(saved["last_issue_centric_parent_update_issue"], "https://github.com/example/repo/issues/1")
+            self.assertEqual(
+                saved["last_issue_centric_parent_update_comment_url"],
+                "https://github.com/example/repo/issues/1#issuecomment-901",
+            )
 
     def test_codex_run_with_close_current_issue_is_staged_for_later_dispatch(self) -> None:
         state = {

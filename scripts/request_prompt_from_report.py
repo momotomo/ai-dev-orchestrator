@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from _bridge_common import (
@@ -42,6 +43,8 @@ from _bridge_common import (
 
 DEFAULT_NEXT_TODO = "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。"
 DEFAULT_OPEN_QUESTIONS = "未解決事項があれば安全側で補ってください。"
+
+_REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_]+):\s+(.+?)\s*$", re.MULTILINE)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -113,6 +116,84 @@ def build_report_request_source(state: dict[str, object], resume_note: str) -> s
     if principal_issue:
         return f"report:{last_report_file}:issue:{principal_issue}"
     return f"report:{last_report_file}"
+
+
+def _parse_report_summary_fields(report_text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for match in _REPORT_SUMMARY_FIELD_RE.finditer(report_text):
+        key = str(match.group(1)).strip().lower()
+        value = str(match.group(2)).strip()
+        if key and value and key not in fields:
+            fields[key] = value
+    return fields
+
+
+def _build_completion_followup_section(state: dict[str, object], report_text: str) -> str:
+    summary_fields = _parse_report_summary_fields(report_text)
+    if summary_fields.get("result", "").strip().lower() != "completed":
+        return ""
+    if summary_fields.get("live_ready", "").strip().lower() != "confirmed":
+        return ""
+    if str(state.get("last_issue_centric_action", "")).strip() != "codex_run":
+        return ""
+    if str(state.get("last_issue_centric_principal_issue_kind", "")).strip() != "current_issue":
+        return ""
+    if str(state.get("last_issue_centric_next_request_hint", "")).strip() != "continue_on_current_issue":
+        return ""
+
+    target_issue = str(state.get("last_issue_centric_next_request_target", "")).strip()
+    if not target_issue:
+        target_issue = str(state.get("last_issue_centric_principal_issue", "")).strip()
+    if not target_issue:
+        target_issue = str(state.get("last_issue_centric_resolved_issue", "")).strip()
+    if not target_issue:
+        target_issue = str(state.get("last_issue_centric_target_issue", "")).strip()
+    if not target_issue:
+        return ""
+
+    lines = [
+        "## issue_centric_completion_followup",
+        f"- archived_report_result: {summary_fields.get('result', '')}",
+        f"- archived_report_live_ready: {summary_fields.get('live_ready', '')}",
+        f"- target_issue: {target_issue}",
+        "- directive: 今回は新しい Codex 用 prompt を作りません。今回判断するのは lifecycle automation だけです。",
+        "- directive: この continuation で action=codex_run は不正です。CHATGPT_CODEX_BODY を返さないでください。",
+        "- directive: 正規経路は action=no_action です。create_followup_issue=false のまま返してください。",
+        "- directive: current issue を閉じるべきなら close_current_issue=true を返してください。閉じない判断でも action=no_action のまま返してください。",
+        "- directive: target_issue は current issue の issue ref だけを使ってください。",
+        "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
+    ]
+    return "\n".join(lines)
+
+
+def _resolve_completion_followup_request(
+    state: dict[str, object],
+    *,
+    last_report: str,
+    issue_centric_next_request_section: str,
+    route_selected: str,
+    next_todo: str,
+    open_questions: str,
+) -> tuple[str, str, str]:
+    if route_selected != "issue_centric":
+        return issue_centric_next_request_section, next_todo, open_questions
+
+    completion_section = _build_completion_followup_section(state, last_report)
+    if not completion_section:
+        return issue_centric_next_request_section, next_todo, open_questions
+
+    merged_section = issue_centric_next_request_section.rstrip()
+    if merged_section:
+        merged_section = merged_section + "\n\n" + completion_section
+    else:
+        merged_section = completion_section
+
+    completion_next_todo = (
+        "新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
+        " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
+    )
+    completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
+    return merged_section, completion_next_todo, completion_open_questions
 
 
 def load_retryable_prepared_request(state: dict[str, object]) -> tuple[str, str, str] | None:
@@ -250,6 +331,17 @@ def run_resume_request(
         route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
         _route_selected = route_choice.route_selected
 
+    issue_centric_next_request_section, effective_next_todo, effective_open_questions = (
+        _resolve_completion_followup_request(
+            state,
+            last_report=last_report,
+            issue_centric_next_request_section=issue_centric_next_request_section,
+            route_selected=_route_selected,
+            next_todo=args.next_todo,
+            open_questions=args.open_questions,
+        )
+    )
+
     if retryable_request is None:
         retryable_request = load_retryable_prepared_request(state)
     if retryable_request is not None:
@@ -267,8 +359,8 @@ def run_resume_request(
         request_text = build_chatgpt_request(
             state=state,
             template_path=template_path,
-            next_todo=args.next_todo,
-            open_questions=args.open_questions,
+            next_todo=effective_next_todo,
+            open_questions=effective_open_questions,
             current_status=args.current_status or None,
             last_report=last_report,
             resume_note=resume_note or None,

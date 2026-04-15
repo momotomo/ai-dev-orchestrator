@@ -1521,6 +1521,28 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
         self.assertFalse(decision.close_current_issue)
         self.assertFalse(decision.create_followup_issue)
 
+    def test_validate_ready_issue_target_binding_accepts_matching_target(self) -> None:
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            target_issue="#8",
+            close_current_issue=True,
+            create_followup_issue=False,
+            summary="close the current ready issue",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        with patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}):
+            error = fetch_next_prompt._validate_ready_issue_target_binding(
+                decision,
+                state={"current_ready_issue_ref": "#8 Ready: verify parent update comment after narrow child close"},
+                pending_request_source="ready_issue:hash",
+            )
+        self.assertIsNone(error)
+
     def test_fetch_run_stops_immediately_for_invalid_issue_centric_contract(self) -> None:
         state = {
             "mode": "waiting_prompt_reply",
@@ -1566,6 +1588,55 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
             self.assertEqual(saved["chatgpt_decision"], "issue_centric_invalid_contract")
             self.assertIn("raw_chatgpt_prompt_dump", str(saved["error_message"]))
             self.assertIn("invalid_issue_centric_contract", str(saved["error_message"]))
+
+    def test_fetch_run_rejects_stale_target_issue_for_ready_issue_request(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#8",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "current_ready_issue_ref": "#8 Ready: verify parent update comment after narrow child close",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#7",
+                "close_current_issue": True,
+                "create_followup_issue": False,
+                "summary": "stale issue should be rejected",
+            },
+            extra_before="current ready issue と違う stale target が返っています。",
+        )
+        saved_states: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}),
+                patch.object(fetch_next_prompt, "dispatch_issue_centric_execution", side_effect=AssertionError("dispatch should not run")),
+            ):
+                with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が不正でした"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(len(saved_states), 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["mode"], "awaiting_user")
+            self.assertTrue(bool(saved["error"]))
+            self.assertEqual(saved["chatgpt_decision"], "issue_centric_invalid_contract")
+            self.assertIn("#8", str(saved["chatgpt_decision_note"]))
+            self.assertIn("#7", str(saved["chatgpt_decision_note"]))
 
 
 class PlanAFetchPrimaryPathTests(unittest.TestCase):

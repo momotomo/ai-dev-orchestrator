@@ -49,6 +49,7 @@ class GitHubIssueSnapshot:
     repository: str
     state: str
     node_id: str = ""
+    body: str = ""
 
 
 @dataclass(frozen=True)
@@ -668,6 +669,7 @@ def _parse_issue_snapshot(
         repository=repository,
         state=returned_state,
         node_id=str(payload_obj.get("node_id", "") or ""),
+        body=str(payload_obj.get("body", "") or ""),
     )
 
 

@@ -163,7 +163,10 @@ def compose_ready_issue_request_text(ready_issue_ref: str, project_path: Path) -
             f"current ready issue: {normalized_ref}",
             "ready issue を今回の実行単位正本として使う",
             "この ready issue の範囲から広げず、次の 1 回分だけ判断してください。",
-            "必要なら `codex_run` を選び、`target_issue` には current ready issue を使ってください。",
+            "必要なら `codex_run` を選び、`target_issue` には必ず current ready issue の番号だけを使ってください。",
+            f"この request では `target_issue` は {normalized_ref.split()[0]} に固定されます。",
+            "closed や stale な別 issue を target_issue にしてはいけません。",
+            "follow-up issue や parent issue の話に広げてはいけません。",
         ]
     )
     return f"{body}\n\n{contract_section}\n"
