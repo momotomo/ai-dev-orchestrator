@@ -166,6 +166,20 @@ def run(argv: list[str] | None = None) -> int:
 
     if report_file:
         # Report-file mode: capture provider stdout and write as bridge report on success.
+        if not exec_cmd:
+            # gh copilot suggest outputs interactive shell suggestions, not structured text.
+            # It also requires the gh copilot extension to be installed.
+            # Without --exec, we cannot write a meaningful bridge report.
+            print(
+                "[github_copilot_wrapper] ERROR: --report-file requires --exec "
+                "(a model-aware provider binary). "
+                "gh copilot suggest cannot produce a bridge report without an explicit --exec. "
+                "Either install the gh copilot extension and omit --report-file "
+                "(use github_copilot_bin=gh without the wrapper), or specify "
+                "--exec /path/to/provider in the wrapper call.",
+                file=sys.stderr,
+            )
+            return 1
         # stdout and stderr are echoed to our own streams so launch logs capture them.
         try:
             result = subprocess.run(

@@ -681,6 +681,50 @@ class GithubCopilotWrapperTests(unittest.TestCase):
         call_kwargs = mock_run.call_args.kwargs if hasattr(mock_run.call_args, "kwargs") else mock_run.call_args[1]
         self.assertFalse(call_kwargs.get("capture_output", True))
 
+    # ------------------------------------------------------------------
+    # Regression: --report-file without --exec must fail immediately
+    # (not try gh copilot suggest, which requires extension + produces no report)
+    # ------------------------------------------------------------------
+
+    def test_run_with_report_file_but_no_exec_fails_immediately(self) -> None:
+        """--report-file + no --exec → exit 1 immediately without calling any subprocess.
+
+        Root cause of '#7 gh copilot not installed' failure:
+        wrapper was called with --report-file but no --exec, so it fell through to
+        gh copilot suggest, which requires the gh-copilot extension.
+        This test ensures the wrapper fails fast with a clear error message instead.
+        """
+        import tempfile, io as _io
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            stderr_buf = _io.StringIO()
+            with (
+                patch.object(self.wrapper.subprocess, "run") as mock_run,
+                patch("sys.stdin", _io.StringIO("prompt")),
+                patch("sys.stderr", stderr_buf),
+            ):
+                ret = self.wrapper.run([
+                    "--model", "sonnet-4.6",
+                    "--report-file", str(report_path),
+                    # NOTE: no --exec
+                ])
+            mock_run.assert_not_called()
+            self.assertEqual(ret, 1)
+            self.assertFalse(report_path.exists())
+            err = stderr_buf.getvalue()
+            self.assertIn("ERROR", err)
+            self.assertIn("--report-file requires --exec", err)
+
+    def test_run_without_report_file_no_exec_still_uses_gh_default(self) -> None:
+        """Without --report-file, no --exec still calls gh copilot suggest (unchanged)."""
+        with patch.object(self.wrapper.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            with patch("sys.stdin", io.StringIO("prompt")):
+                ret = self.wrapper.run([])
+        self.assertEqual(ret, 0)
+        cmd_used = mock_run.call_args.args[0] if mock_run.call_args.args else mock_run.call_args[0][0]
+        self.assertEqual(cmd_used[0], "gh")
+
 
 # ---------------------------------------------------------------------------
 # launch_github_copilot.run() report generation tests
