@@ -27,7 +27,8 @@ class RequestNextPromptTests(unittest.TestCase):
             request_body="",
             project_path="/tmp/repo",
         )
-        request_text, request_hash, request_source = request_next_prompt.build_initial_request(args)
+        request_text, request_hash, request_source, ready_issue_ref = request_next_prompt.build_initial_request(args)
+        self.assertEqual(ready_issue_ref, "#20 runtime entry")
         self.assertIn("current ready issue: #20 runtime entry", request_text)
         self.assertIn("ready issue を今回の実行単位正本として使う", request_text)
         self.assertTrue(request_hash)
@@ -43,7 +44,8 @@ class RequestNextPromptTests(unittest.TestCase):
             request_body="Target repo: /tmp/repo\nOverride reason: recovery",
             project_path="/tmp/repo",
         )
-        request_text, _, request_source = request_next_prompt.build_initial_request(args)
+        request_text, _, request_source, ready_issue_ref_override = request_next_prompt.build_initial_request(args)
+        self.assertEqual(ready_issue_ref_override, "")
         self.assertIn("Override reason: recovery", request_text)
         self.assertTrue(request_source.startswith("override:"))
         self.assertIn("===CHATGPT_DECISION_JSON===", request_text)
@@ -1518,6 +1520,195 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
         text = sent_requests[0]
         self.assertNotIn("===CHATGPT_DECISION_JSON===", text,
                          "No IC snapshot → must not inject IC contract")
+
+
+# ---------------------------------------------------------------------------
+# Fresh-start ready-issue carry-over prevention tests
+# ---------------------------------------------------------------------------
+
+
+class ReadyIssueCarryOverTests(unittest.TestCase):
+    """Tests that fresh-start with an explicit ready issue prevents carry-over
+    from the previous issue's last_issue_centric_* context.
+
+    Scenario that triggered the bug:
+    - Old state has last_issue_centric_target_issue = "#5"
+    - Fresh start with "--ready-issue-ref '#7 Ready: verify ...'"
+    - After a legacy fallback on the first fetch, run_resume_request was called
+    - It picked up #5 from the old IC snapshot context
+    - ChatGPT returned issue_centric:no_action targeting #5
+
+    Fix: request_next_prompt saves current_ready_issue_ref to state.
+         run_resume_request detects pending_request_source = "ready_issue:..." +
+         current_ready_issue_ref and builds a fresh IC section from the pinned ref.
+    """
+
+    # ------------------------------------------------------------------
+    # build_initial_request: 4-tuple includes ready_issue_ref
+    # ------------------------------------------------------------------
+
+    def test_build_initial_request_returns_ready_issue_ref_in_4th_element(self) -> None:
+        args = argparse.Namespace(
+            ready_issue_ref="#7 Ready: verify 2-3 consecutive rehearsal cycles stay stable",
+            request_body="",
+            project_path="/tmp/repo",
+        )
+        text, hash_, source, ref = request_next_prompt.build_initial_request(args)
+        self.assertEqual(ref, "#7 Ready: verify 2-3 consecutive rehearsal cycles stay stable")
+        self.assertTrue(source.startswith("ready_issue:"))
+
+    def test_build_initial_request_returns_empty_ref_for_override(self) -> None:
+        args = argparse.Namespace(
+            ready_issue_ref="",
+            request_body="override body text",
+            project_path="/tmp/repo",
+        )
+        _, _, source, ref = request_next_prompt.build_initial_request(args)
+        self.assertEqual(ref, "")
+        self.assertTrue(source.startswith("override:"))
+
+    # ------------------------------------------------------------------
+    # build_pinned_ready_issue_ic_section
+    # ------------------------------------------------------------------
+
+    def test_build_pinned_ready_issue_ic_section_contains_target_issue(self) -> None:
+        from _bridge_common import build_pinned_ready_issue_ic_section
+        with patch("_bridge_common.load_project_config", return_value={"github_repository": "owner/repo"}):
+            section = build_pinned_ready_issue_ic_section("#7 Ready: verify cycles")
+        self.assertIn("#7 Ready: verify cycles", section)
+        self.assertIn("pinned_ready_issue", section)
+        self.assertIn("ready_issue_active", section)
+
+    def test_build_pinned_ready_issue_ic_section_does_not_contain_old_issue(self) -> None:
+        from _bridge_common import build_pinned_ready_issue_ic_section
+        with patch("_bridge_common.load_project_config", return_value={"github_repository": "owner/repo"}):
+            section = build_pinned_ready_issue_ic_section("#7 Ready: verify cycles")
+        self.assertNotIn("#5", section)
+
+    # ------------------------------------------------------------------
+    # run_resume_request: pinned ready issue prevents carry-over
+    # ------------------------------------------------------------------
+
+    def test_run_resume_request_pinned_ready_issue_uses_pinned_target_not_old(self) -> None:
+        """When pending_request_source=ready_issue: + current_ready_issue_ref=#7,
+        the continuation must target #7, not the old #5 from last_issue_centric_*."""
+        import request_prompt_from_report
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state: dict[str, object] = {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+                # Old context from a previous #5 run
+                "last_issue_centric_target_issue": "#5",
+                "last_issue_centric_principal_issue": "https://github.com/owner/repo/issues/5",
+                "last_issue_centric_next_request_target": "https://github.com/owner/repo/issues/5",
+                # Fresh-start ready issue #7 pinned
+                "pending_request_source": f"ready_issue:{request_next_prompt.stable_text_hash('#7 Ready: verify')}",
+                "current_ready_issue_ref": "#7 Ready: verify 2-3 consecutive rehearsal cycles stay stable",
+            }
+            args = argparse.Namespace(
+                next_todo="next",
+                open_questions="none",
+                current_status="",
+            )
+            sent_requests: list[str] = []
+
+            def fake_send(text: str) -> None:
+                sent_requests.append(text)
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=fake_send):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, "# Report\n", "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        # Must contain #7 context in the IC directive section
+        self.assertIn("#7 Ready: verify", text, "pinned #7 must appear in the request")
+        # IC next_request section must explicitly set target to #7 (not a carry-over #5)
+        # Note: state dump still shows legacy last_issue_centric_* fields for debugging context;
+        # what matters is the IC directive field `- target_issue: #7` in the next_request section.
+        self.assertIn("- target_issue: #7 Ready: verify", text,
+                      "IC next_request section must target #7")
+        # Must use IC contract (route=issue_centric)
+        self.assertIn("===CHATGPT_DECISION_JSON===", text,
+                      "pinned ready issue continuation must use IC contract")
+        # Must use pinned_ready_issue source label
+        self.assertIn("target_issue_source: pinned_ready_issue", text,
+                      "IC section must label source as pinned_ready_issue")
+
+    def test_run_resume_request_no_pinned_ref_falls_back_to_normal_path(self) -> None:
+        """When current_ready_issue_ref is empty, run_resume_request uses normal path."""
+        import request_prompt_from_report
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state: dict[str, object] = {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+                # Old context from a #5 run — should be used since no pinned ref
+                "last_issue_centric_target_issue": "#5",
+                # No pinned ready issue
+                "pending_request_source": "report:logs/report.md",
+                "current_ready_issue_ref": "",
+            }
+            args = argparse.Namespace(
+                next_todo="next",
+                open_questions="none",
+                current_status="",
+            )
+            sent_requests: list[str] = []
+
+            def fake_send(text: str) -> None:
+                sent_requests.append(text)
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=fake_send):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, "# Report\n", "")
+
+        self.assertEqual(len(sent_requests), 1)
+        # pinned_ready_issue must NOT appear (using normal path, not the pinned one)
+        self.assertNotIn("pinned_ready_issue", sent_requests[0])
+
+    def test_run_resume_request_ready_issue_source_but_no_ref_falls_back_to_normal_path(self) -> None:
+        """ready_issue: source but current_ready_issue_ref is empty → normal path."""
+        import request_prompt_from_report
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state: dict[str, object] = {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+                "pending_request_source": "ready_issue:somehash",
+                "current_ready_issue_ref": "",  # missing → normal path
+            }
+            args = argparse.Namespace(
+                next_todo="next",
+                open_questions="none",
+                current_status="",
+            )
+            sent_requests: list[str] = []
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=lambda t: sent_requests.append(t)):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, "# Report\n", "")
+
+        self.assertNotIn("pinned_ready_issue", sent_requests[0])
 
 
 if __name__ == "__main__":
