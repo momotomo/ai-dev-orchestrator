@@ -980,5 +980,125 @@ class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
         self.assertIn("Recovered.", after)
 
 
+# ---------------------------------------------------------------------------
+# github_copilot_provider_stub unit tests
+# ---------------------------------------------------------------------------
+
+
+class ProviderStubTests(unittest.TestCase):
+    """Tests for scripts/github_copilot_provider_stub.py."""
+
+    def setUp(self) -> None:
+        import github_copilot_provider_stub
+        self.stub = github_copilot_provider_stub
+
+    def test_run_returns_zero(self) -> None:
+        """run() exits 0 on normal input."""
+        with patch("sys.stdin", io.StringIO("Hello prompt\nline two")):
+            rc = self.stub.run(["--model", "sonnet-4.6"])
+        self.assertEqual(rc, 0)
+
+    def test_stdout_is_non_empty(self) -> None:
+        """run() always produces non-empty stdout."""
+        import io as _io
+        with (
+            patch("sys.stdin", _io.StringIO("some prompt")),
+            patch("sys.stdout", _io.StringIO()) as mock_stdout,
+        ):
+            self.stub.run(["--model", "test-model"])
+        output = mock_stdout.getvalue()
+        self.assertTrue(output.strip(), "stdout must not be empty")
+
+    def test_output_contains_provider_name(self) -> None:
+        """Output includes the provider name for traceability."""
+        import io as _io
+        buf = _io.StringIO()
+        with (
+            patch("sys.stdin", _io.StringIO("prompt")),
+            patch("sys.stdout", buf),
+        ):
+            self.stub.run(["--model", "sonnet-4.6"])
+        self.assertIn("github_copilot_provider_stub", buf.getvalue())
+
+    def test_output_contains_model(self) -> None:
+        """Output includes the --model value."""
+        import io as _io
+        buf = _io.StringIO()
+        with (
+            patch("sys.stdin", _io.StringIO("prompt")),
+            patch("sys.stdout", buf),
+        ):
+            self.stub.run(["--model", "my-model-42"])
+        self.assertIn("my-model-42", buf.getvalue())
+
+    def test_output_contains_input_char_count(self) -> None:
+        """Output includes input character count (input_chars field)."""
+        import io as _io
+        prompt = "x" * 50
+        buf = _io.StringIO()
+        with (
+            patch("sys.stdin", _io.StringIO(prompt)),
+            patch("sys.stdout", buf),
+        ):
+            self.stub.run(["--model", ""])
+        self.assertIn("50", buf.getvalue())
+
+    def test_first_line_truncated_at_80_chars(self) -> None:
+        """First line preview is truncated to 80 chars with '...'."""
+        import io as _io
+        long_line = "A" * 120
+        buf = _io.StringIO()
+        with (
+            patch("sys.stdin", _io.StringIO(long_line)),
+            patch("sys.stdout", buf),
+        ):
+            self.stub.run(["--model", ""])
+        output = buf.getvalue()
+        self.assertIn("...", output)
+        # The truncated preview must not exceed max chars + "..."
+        for line in output.splitlines():
+            if line.startswith("first_line:"):
+                preview = line[len("first_line:"):].strip()
+                self.assertLessEqual(len(preview), 80 + 3)
+
+    def test_empty_model_defaults_to_none_label(self) -> None:
+        """When --model is empty or omitted, output shows '(none)'."""
+        import io as _io
+        buf = _io.StringIO()
+        with (
+            patch("sys.stdin", _io.StringIO("prompt")),
+            patch("sys.stdout", buf),
+        ):
+            self.stub.run([])
+        self.assertIn("(none)", buf.getvalue())
+
+    def test_wrapper_integration_stub_produces_report(self) -> None:
+        """End-to-end: wrapper + stub produce a bridge report via --report-file + --exec.
+
+        This is the key疎通 test: wrapper calls stub via --exec, stub returns
+        non-empty stdout, wrapper writes bridge report with BRIDGE_SUMMARY block.
+        """
+        import tempfile, io as _io
+        import github_copilot_wrapper
+        stub_path = str(
+            Path(__file__).parent.parent / "scripts" / "github_copilot_provider_stub.py"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            with patch("sys.stdin", _io.StringIO("test prompt content")):
+                rc = github_copilot_wrapper.run([
+                    "--model", "sonnet-4.6",
+                    "--exec", stub_path,
+                    "--report-file", str(report_path),
+                ])
+            # Assertions must be inside the tmpdir context.
+            self.assertEqual(rc, 0)
+            self.assertTrue(report_path.exists(), "report file should have been written")
+            report_text = report_path.read_text(encoding="utf-8")
+            self.assertIn("===BRIDGE_SUMMARY===", report_text)
+            self.assertIn("===END_BRIDGE_SUMMARY===", report_text)
+            self.assertIn("github_copilot_provider_stub", report_text)
+
+
 if __name__ == "__main__":
     unittest.main()
