@@ -3390,6 +3390,7 @@ class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
         launch_issue_centric_codex_run_fn=None,
         execute_human_review_action_fn=None,
         execute_close_current_issue_fn=None,
+        execute_parent_issue_update_fn=None,
         execute_followup_issue_action_fn=None,
         materialized_override=None,
     ) -> issue_centric_execution.IssueCentricDispatchResult:
@@ -3430,6 +3431,7 @@ class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
             execute_followup_issue_action_fn=execute_followup_issue_action_fn or _abort("followup"),
             execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
             launch_runner=lambda s, argv=None: 0,
+            execute_parent_issue_update_fn=execute_parent_issue_update_fn,
         )
 
     # ---- codex_run + close (no followup): state fields recorded ----
@@ -3659,6 +3661,82 @@ class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
             self.assertEqual(result.final_status, "completed")
             self.assertEqual(result.final_state["last_issue_centric_close_status"], "completed")
             self.assertEqual(result.final_state["last_issue_centric_closed_issue_number"], "20")
+
+    def test_combo_no_action_close_runs_parent_update_after_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                p = root / "close_no_action_parent.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    resolved_issue=SimpleNamespace(
+                        issue_number=20,
+                        issue_url="https://github.com/example/repo/issues/20",
+                    ),
+                    issue_before=SimpleNamespace(
+                        number=20,
+                        url="https://github.com/example/repo/issues/20",
+                        title="Ready child",
+                        state="open",
+                        body="Parent: #1\n",
+                    ),
+                    issue_after=SimpleNamespace(
+                        number=20,
+                        url="https://github.com/example/repo/issues/20",
+                        title="Ready child",
+                        state="closed",
+                        body="Parent: #1\n",
+                    ),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            def fake_parent_update(*args, **kwargs):
+                calls.append("parent")
+                p = root / "parent_update.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    update_status="comment_created",
+                    resolved_parent_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/1"),
+                    created_comment=SimpleNamespace(
+                        comment_id=901,
+                        url="https://github.com/example/repo/issues/1#issuecomment-901",
+                    ),
+                    closed_issue_url="https://github.com/example/repo/issues/20",
+                    execution_log_path=p,
+                    safe_stop_reason="updated parent #1.",
+                )
+
+            result = self._dispatch(
+                decision=decision,
+                root=root,
+                execute_close_current_issue_fn=fake_close,
+                execute_parent_issue_update_fn=fake_parent_update,
+            )
+
+            self.assertEqual(calls, ["close", "parent"])
+            self.assertEqual(result.matrix_path, "no_action_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_parent_update_status"], "comment_created")
+            self.assertEqual(
+                result.final_state["last_issue_centric_parent_update_issue"],
+                "https://github.com/example/repo/issues/1",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_parent_update_comment_url"],
+                "https://github.com/example/repo/issues/1#issuecomment-901",
+            )
 
     # ---- close_policy field recorded in state after human_review ----
 

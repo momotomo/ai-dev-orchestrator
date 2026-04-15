@@ -66,6 +66,48 @@ class RequestNextPromptTests(unittest.TestCase):
         self.assertNotIn("===CHATGPT_PROMPT_REPLY===", request_text)
         self.assertNotIn("===CHATGPT_NO_CODEX===", request_text)
 
+    def test_compose_ready_issue_request_text_binds_target_issue_to_current_ready_issue(self) -> None:
+        """ready issue request に target_issue は current ready issue に固定される旨が明示されている.
+
+        Regression: #9 を送ったのに stale #8 が返った原因は request 文面の弱さ。
+        この修正後は:
+        - target_issue が current ready issue 番号に固定される宣言が含まれている
+        - closed/stale issue への言及禁止が含まれている
+        - follow-up/parent issue への拡張禁止が含まれている
+        """
+        request_text = request_next_prompt.compose_ready_issue_request_text(
+            "#9 Ready: verify fetch path parent update live comment after child close",
+            Path("/tmp/repo"),
+        )
+        # current ready issue の番号が固定される明示
+        self.assertIn("#9", request_text)
+        # target_issue が #9 に固定される宣言
+        self.assertIn("target_issue", request_text)
+        self.assertIn("固定", request_text)
+        # stale/closed issue 禁止
+        self.assertIn("stale", request_text)
+        # follow-up/parent 拡張禁止
+        self.assertIn("follow-up", request_text)
+        # contract は壊れていない
+        self.assertIn("===CHATGPT_DECISION_JSON===", request_text)
+        self.assertIn("===END_DECISION_JSON===", request_text)
+
+    def test_compose_ready_issue_request_text_fixed_issue_number_extracted(self) -> None:
+        """target_issue 固定行の issue 番号が ready issue の番号と一致する."""
+        for ref in ["#9", "#9 Ready: some title", "#42 Fix: something"]:
+            with self.subTest(ref=ref):
+                request_text = request_next_prompt.compose_ready_issue_request_text(
+                    ref, Path("/tmp/repo")
+                )
+                expected_num = ref.split()[0]  # "#9" or "#42"
+                # 固定行に正しい issue 番号が含まれる
+                fixed_line = next(
+                    (l for l in request_text.splitlines() if "固定" in l and "target_issue" in l),
+                    None,
+                )
+                self.assertIsNotNone(fixed_line, f"固定 line not found for ref={ref!r}")
+                self.assertIn(expected_num, fixed_line)
+
     def test_compose_override_request_text_requires_issue_centric_contract_only(self) -> None:
         request_text = request_next_prompt.compose_override_request_text(
             "repo: /tmp/repo\ntarget_issue: #2\nrequest: keep this bounded"
@@ -1487,6 +1529,85 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
                       "issue-centric ready route must include DECISION_JSON contract")
         self.assertIn("legacy visible-text fallback は使わないでください", text,
                       "issue-centric contract must explicitly forbid legacy tags")
+
+    def test_run_resume_request_completed_report_requests_close_followup(self) -> None:
+        """Completed + live_ready archived reports should request lifecycle close follow-up, not another codex phase."""
+        import request_prompt_from_report
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "7",
+                            "url": "https://github.com/example/repo/issues/7",
+                            "title": "Ready: verify consecutive cycles",
+                            "ref": "#7",
+                        },
+                        "current_issue": {
+                            "number": "7",
+                            "url": "https://github.com/example/repo/issues/7",
+                            "title": "Ready: verify consecutive cycles",
+                            "ref": "#7",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "idle",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+                "last_issue_centric_action": "codex_run",
+                "last_issue_centric_target_issue": "#7",
+                "last_issue_centric_principal_issue": "https://github.com/example/repo/issues/7",
+                "last_issue_centric_principal_issue_kind": "current_issue",
+                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/7",
+                "last_issue_centric_next_request_hint": "continue_on_current_issue",
+                "last_issue_centric_normalized_summary": str(summary_path),
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/7",
+            }
+            args = argparse.Namespace(
+                next_todo="verify stability",
+                open_questions="none",
+                current_status="",
+            )
+            sent_requests: list[str] = []
+            report_text = "\n".join(
+                [
+                    "===BRIDGE_SUMMARY===",
+                    "- summary: GitHub Copilot 実行完了 (model: sonnet-4.6)",
+                    "- result: completed",
+                    "- live_ready: confirmed",
+                    "===END_BRIDGE_SUMMARY===",
+                ]
+            )
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=lambda text: sent_requests.append(text)):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, report_text, "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        self.assertIn("issue_centric_completion_followup", text)
+        self.assertIn("新しい Codex 用 prompt は作りません", text)
+        self.assertIn("action=codex_run は不正", text)
+        self.assertIn("CHATGPT_CODEX_BODY を返さないでください", text)
+        self.assertIn("action=no_action を返し", text)
+        self.assertIn("close_current_issue=true", text)
+        self.assertIn("create_followup_issue=false", text)
+        self.assertIn("action=no_action", text)
+        self.assertIn("target_issue: https://github.com/example/repo/issues/7", text)
 
     def test_run_resume_request_no_issue_centric_snapshot_keeps_legacy(self) -> None:
         """Without issue-centric snapshot, legacy contract is used (no unintended IC injection)."""

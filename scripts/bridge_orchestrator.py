@@ -15,6 +15,7 @@ import request_next_prompt
 import request_prompt_from_report
 from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
+from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
 from issue_centric_contract import IssueCentricAction, IssueCentricDecision, maybe_parse_issue_centric_reply
@@ -291,6 +292,7 @@ def dispatch_pending_issue_centric_codex_run(
         launch_issue_centric_codex_run_fn=launch_issue_centric_codex_run,
         execute_human_review_action_fn=execute_human_review_action,
         execute_close_current_issue_fn=execute_close_current_issue,
+        execute_parent_issue_update_fn=execute_parent_issue_update_after_close,
         execute_followup_issue_action_fn=execute_followup_issue_action,
         execute_current_issue_project_state_sync_fn=execute_current_issue_project_state_sync,
         launch_runner=launch_runner,
