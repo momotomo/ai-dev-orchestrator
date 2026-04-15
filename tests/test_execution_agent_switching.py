@@ -263,7 +263,10 @@ class LaunchGithubCopilotTests(unittest.TestCase):
                 config,
             )
         cmd = launch_github_copilot.build_github_copilot_command(args)
-        self.assertEqual(cmd, ["/usr/local/bin/my-gh"])
+        self.assertEqual(cmd[0], "/usr/local/bin/my-gh")
+        # --report-file is now forwarded to custom bins
+        self.assertIn("--report-file", cmd)
+        self.assertEqual(cmd[cmd.index("--report-file") + 1], "/tmp/r.md")
 
     def test_dry_run_returns_zero(self) -> None:
         config = self._minimal_config()
@@ -578,6 +581,106 @@ class GithubCopilotWrapperTests(unittest.TestCase):
                 ret = self.wrapper.run(["--exec", "/no/such/binary"])
         self.assertEqual(ret, 127)
 
+    # ------------------------------------------------------------------
+    # --report-file argument
+    # ------------------------------------------------------------------
+
+    def test_parse_args_accepts_report_file(self) -> None:
+        args = self.wrapper.parse_args(["--report-file", "/tmp/report.md"])
+        self.assertEqual(args.report_file, "/tmp/report.md")
+
+    def test_parse_args_report_file_default_is_empty(self) -> None:
+        args = self.wrapper.parse_args([])
+        self.assertEqual(args.report_file, "")
+
+    # ------------------------------------------------------------------
+    # build_bridge_report
+    # ------------------------------------------------------------------
+
+    def test_build_bridge_report_contains_bridge_summary(self) -> None:
+        report = self.wrapper.build_bridge_report(
+            "Provider reply text.\n", model="sonnet-4.6", exec_cmd="/usr/bin/provider"
+        )
+        self.assertIn("===BRIDGE_SUMMARY===", report)
+        self.assertIn("===END_BRIDGE_SUMMARY===", report)
+        self.assertIn("result: completed", report)
+        self.assertIn("Provider reply text.", report)
+        self.assertIn("sonnet-4.6", report)
+
+    def test_build_bridge_report_no_model_no_exec_is_valid(self) -> None:
+        report = self.wrapper.build_bridge_report("Output.")
+        self.assertIn("===BRIDGE_SUMMARY===", report)
+        self.assertIn("result: completed", report)
+        self.assertIn("Output.", report)
+
+    # ------------------------------------------------------------------
+    # run() with --report-file: capture + write bridge report
+    # ------------------------------------------------------------------
+
+    def test_run_with_report_file_writes_bridge_report_on_success(self) -> None:
+        """--report-file + provider exit 0 + stdout → bridge report written."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            with patch.object(self.wrapper.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="Provider response.\n",
+                    stderr="",
+                )
+                with patch("sys.stdin", io.StringIO("prompt")):
+                    ret = self.wrapper.run([
+                        "--model", "sonnet-4.6",
+                        "--exec", "/usr/bin/provider",
+                        "--report-file", str(report_path),
+                    ])
+            self.assertEqual(ret, 0)
+            self.assertTrue(report_path.exists())
+            text = report_path.read_text(encoding="utf-8")
+            self.assertIn("===BRIDGE_SUMMARY===", text)
+            self.assertIn("result: completed", text)
+            self.assertIn("Provider response.", text)
+
+    def test_run_with_report_file_no_write_on_provider_failure(self) -> None:
+        """--report-file + provider exit 1 → NO report written, returns 1."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            with patch.object(self.wrapper.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+                with patch("sys.stdin", io.StringIO("prompt")):
+                    ret = self.wrapper.run([
+                        "--exec", "/usr/bin/provider",
+                        "--report-file", str(report_path),
+                    ])
+            self.assertEqual(ret, 1)
+            self.assertFalse(report_path.exists())
+
+    def test_run_with_report_file_returns_1_on_empty_provider_stdout(self) -> None:
+        """--report-file + provider exit 0 + empty stdout → returns 1 (no content = no report)."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "report.md"
+            with patch.object(self.wrapper.subprocess, "run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                with patch("sys.stdin", io.StringIO("prompt")):
+                    ret = self.wrapper.run([
+                        "--exec", "/usr/bin/provider",
+                        "--report-file", str(report_path),
+                    ])
+            self.assertEqual(ret, 1)
+            self.assertFalse(report_path.exists())
+
+    def test_run_without_report_file_is_transparent_passthrough(self) -> None:
+        """Without --report-file, behavior is transparent passthrough (unchanged)."""
+        with patch.object(self.wrapper.subprocess, "run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            with patch("sys.stdin", io.StringIO("prompt")):
+                ret = self.wrapper.run(["--exec", "/usr/bin/provider"])
+        self.assertEqual(ret, 0)
+        call_kwargs = mock_run.call_args.kwargs if hasattr(mock_run.call_args, "kwargs") else mock_run.call_args[1]
+        self.assertFalse(call_kwargs.get("capture_output", True))
+
 
 # ---------------------------------------------------------------------------
 # launch_github_copilot.run() report generation tests
@@ -585,15 +688,16 @@ class GithubCopilotWrapperTests(unittest.TestCase):
 
 
 class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
-    """Tests for the stdout→report fallback in launch_github_copilot.run().
+    """Verify launch_github_copilot.run() report detection / failure handling.
 
-    When the Copilot subprocess exits 0 and writes response text to stdout,
-    launch_github_copilot.run() must write that text as codex_report.md so the
-    bridge can proceed.  The tests below cover the main success, failure, and
-    edge-case paths introduced by this fix.
+    Success path: the custom bin (wrapper) writes a bridge report to --report-file.
+    launch_github_copilot.run() detects it via codex_report_is_ready() and returns 0.
+
+    Key invariant — 「stdout だけで誤成功しない」:
+    Raw stdout content alone must NOT create a report.  The wrapper must explicitly
+    write to --report-file.  This prevents false-success when the provider emits
+    output to stdout but the report file is absent.
     """
-
-    import tempfile as _tempfile
 
     def setUp(self) -> None:
         import tempfile
@@ -614,109 +718,57 @@ class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
             "bridge_runtime_root": str(self.tmpdir),
         }
 
-    def _run_with_fake_subprocess(
-        self,
-        *,
-        stdout_text: str,
-        returncode: int,
-    ) -> int:
-        """Run launch_github_copilot.run() with a fake subprocess returning given stdout/returncode."""
-        import subprocess
+    # ------------------------------------------------------------------
+    # build_github_copilot_command: --report-file forwarding
+    # ------------------------------------------------------------------
+
+    def test_build_command_passes_report_file_to_custom_bin(self) -> None:
+        """For a non-'gh' custom bin, --report-file is appended to the command."""
         config = self._minimal_config()
-        state = {"mode": "ready_for_codex", "need_codex_run": True}
-
-        def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
-            # Write stdout_text to the stdout file handle so logs are populated.
-            stdout.write(stdout_text)
-            proc = MagicMock()
-            proc.stdin = MagicMock()
-            proc.poll.return_value = returncode
-            return proc
-
-        with (
-            patch("launch_github_copilot.load_project_config", return_value=config),
-            patch("launch_github_copilot.print_project_config_warnings"),
-            patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
-            patch("launch_github_copilot.save_state"),
-            patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
-            patch("launch_github_copilot.recover_codex_report", return_value=None),
-            patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
-        ):
-            return launch_github_copilot.run(
-                dict(state),
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
                 [
+                    "--github-copilot-bin", "/scripts/github_copilot_wrapper.py",
                     "--prompt-file", str(self.prompt_path),
                     "--report-file", str(self.report_path),
-                    "--worker-repo-path", str(self.tmpdir),
                 ],
+                config,
             )
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertIn("--report-file", cmd)
+        self.assertEqual(cmd[cmd.index("--report-file") + 1], str(self.report_path))
 
-    # ------------------------------------------------------------------
-    # Normal success: stdout content → report file written
-    # ------------------------------------------------------------------
-
-    def test_stdout_written_as_report_on_success(self) -> None:
-        """Exit 0 + stdout content → report file is written and run returns 0."""
-        from _bridge_common import BridgeError
-        rc = self._run_with_fake_subprocess(
-            stdout_text="# Copilot Report\n\nAll done.\n",
-            returncode=0,
-        )
-        self.assertEqual(rc, 0)
-        self.assertTrue(self.report_path.exists(), "codex_report.md must be created")
-        report_text = self.report_path.read_text(encoding="utf-8")
-        self.assertIn("All done.", report_text)
-
-    # ------------------------------------------------------------------
-    # Failure: non-zero exit code → BridgeError even with stdout content
-    # ------------------------------------------------------------------
-
-    def test_nonzero_exit_raises_bridge_error(self) -> None:
-        """Exit non-0 → BridgeError regardless of stdout content."""
-        from _bridge_common import BridgeError
-        with self.assertRaises(BridgeError) as ctx:
-            self._run_with_fake_subprocess(
-                stdout_text="partial output\n",
-                returncode=1,
+    def test_build_command_does_not_add_report_file_for_gh_bin(self) -> None:
+        """The default 'gh' bin must NOT receive --report-file."""
+        config = {**self._minimal_config(), "github_copilot_bin": "gh"}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
+                [
+                    "--github-copilot-bin", "gh",
+                    "--prompt-file", str(self.prompt_path),
+                    "--report-file", str(self.report_path),
+                ],
+                config,
             )
-        self.assertIn("bridge/outbox/codex_report.md", str(ctx.exception))
-        self.assertIn("exit_code=1", str(ctx.exception))
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertEqual(cmd[0], "gh")
+        self.assertNotIn("--report-file", cmd)
 
     # ------------------------------------------------------------------
-    # Edge case: empty stdout with exit 0 → BridgeError (no empty report)
+    # run(): success path — wrapper writes report, launch detects it
     # ------------------------------------------------------------------
 
-    def test_empty_stdout_exit_zero_raises_bridge_error(self) -> None:
-        """Exit 0 but empty stdout → BridgeError; empty report must not be written."""
-        from _bridge_common import BridgeError
-        with self.assertRaises(BridgeError):
-            self._run_with_fake_subprocess(
-                stdout_text="",
-                returncode=0,
-            )
-        # Report must not exist (or must be empty / placeholder only)
-        if self.report_path.exists():
-            from _bridge_common import ready_codex_report_text
-            self.assertEqual(
-                ready_codex_report_text(self.report_path),
-                "",
-                "report must not contain real content when stdout was empty",
-            )
-
-    # ------------------------------------------------------------------
-    # Pre-existing report wins: stdout-fallback must not overwrite it
-    # ------------------------------------------------------------------
-
-    def test_existing_report_not_overwritten_by_stdout(self) -> None:
-        """If recover_codex_report already put content in report_path, stdout must not overwrite it."""
-        import subprocess
+    def test_run_succeeds_when_wrapper_writes_report(self) -> None:
+        """When the subprocess writes a bridge report to --report-file, run returns 0."""
         config = self._minimal_config()
         state = {"mode": "ready_for_codex", "need_codex_run": True}
-        prior_content = "# Recovered Report\n\nPrior content.\n"
-        self.report_path.write_text(prior_content, encoding="utf-8")
+        report_content = "===BRIDGE_SUMMARY===\n- result: completed\n===END_BRIDGE_SUMMARY===\nDone.\n"
 
         def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
-            stdout.write("NEW stdout content that must NOT appear in report\n")
+            # Simulate wrapper writing bridge report to --report-file.
+            if "--report-file" in cmd:
+                rf_path = cmd[cmd.index("--report-file") + 1]
+                Path(rf_path).write_text(report_content, encoding="utf-8")
             proc = MagicMock()
             proc.stdin = MagicMock()
             proc.poll.return_value = 0
@@ -728,8 +780,7 @@ class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
             patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
             patch("launch_github_copilot.save_state"),
             patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
-            # recover_codex_report returns a path to signal it already placed the report
-            patch("launch_github_copilot.recover_codex_report", return_value=self.report_path),
+            patch("launch_github_copilot.recover_codex_report", return_value=None),
             patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
         ):
             rc = launch_github_copilot.run(
@@ -741,9 +792,118 @@ class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
                 ],
             )
         self.assertEqual(rc, 0)
+        self.assertTrue(self.report_path.exists())
+
+    # ------------------------------------------------------------------
+    # run(): failure — non-zero exit → BridgeError
+    # ------------------------------------------------------------------
+
+    def test_nonzero_exit_raises_bridge_error(self) -> None:
+        """Provider exit non-0 → BridgeError with exit_code in message."""
+        from _bridge_common import BridgeError
+        config = self._minimal_config()
+        state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+        def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+            proc = MagicMock()
+            proc.stdin = MagicMock()
+            proc.poll.return_value = 1
+            return proc
+
+        with (
+            patch("launch_github_copilot.load_project_config", return_value=config),
+            patch("launch_github_copilot.print_project_config_warnings"),
+            patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
+            patch("launch_github_copilot.save_state"),
+            patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
+            patch("launch_github_copilot.recover_codex_report", return_value=None),
+            patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                launch_github_copilot.run(
+                    dict(state),
+                    [
+                        "--prompt-file", str(self.prompt_path),
+                        "--report-file", str(self.report_path),
+                        "--worker-repo-path", str(self.tmpdir),
+                    ],
+                )
+        self.assertIn("exit_code=1", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # run(): stdout alone does NOT create report (no 誤成功)
+    # ------------------------------------------------------------------
+
+    def test_stdout_alone_does_not_create_report(self) -> None:
+        """Exit 0 + stdout content but no wrapper-written --report-file → BridgeError.
+
+        Guards the 'stdout だけで誤成功しない' invariant: raw stdout must not become a report.
+        """
+        from _bridge_common import BridgeError, ready_codex_report_text
+        config = self._minimal_config()
+        state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+        def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+            # Write stdout but do NOT write to --report-file.
+            stdout.write("Some provider output that looks like content.\n")
+            proc = MagicMock()
+            proc.stdin = MagicMock()
+            proc.poll.return_value = 0
+            return proc
+
+        with (
+            patch("launch_github_copilot.load_project_config", return_value=config),
+            patch("launch_github_copilot.print_project_config_warnings"),
+            patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
+            patch("launch_github_copilot.save_state"),
+            patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
+            patch("launch_github_copilot.recover_codex_report", return_value=None),
+            patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+        ):
+            with self.assertRaises(BridgeError):
+                launch_github_copilot.run(
+                    dict(state),
+                    [
+                        "--prompt-file", str(self.prompt_path),
+                        "--report-file", str(self.report_path),
+                        "--worker-repo-path", str(self.tmpdir),
+                    ],
+                )
+        # Report must not contain real content.
+        self.assertEqual(ready_codex_report_text(self.report_path), "")
+
+    # ------------------------------------------------------------------
+    # run(): pre-existing report wins (recovered before launch)
+    # ------------------------------------------------------------------
+
+    def test_existing_report_is_respected(self) -> None:
+        """If recover_codex_report already placed a report, run returns 0 immediately."""
+        config = self._minimal_config()
+        state = {"mode": "ready_for_codex", "need_codex_run": True}
+        prior_content = "===BRIDGE_SUMMARY===\n- result: completed\n===END_BRIDGE_SUMMARY===\nRecovered.\n"
+        self.report_path.write_text(prior_content, encoding="utf-8")
+
+        with (
+            patch("launch_github_copilot.load_project_config", return_value=config),
+            patch("launch_github_copilot.print_project_config_warnings"),
+            patch("launch_github_copilot.worker_repo_path", return_value=self.tmpdir),
+            patch("launch_github_copilot.save_state"),
+            patch("launch_github_copilot.runtime_logs_dir", return_value=self.tmpdir),
+            # recover_codex_report returns a recovered path before launch
+            patch("launch_github_copilot.recover_codex_report", return_value=self.report_path),
+        ):
+            rc = launch_github_copilot.run(
+                dict(state),
+                [
+                    "--prompt-file", str(self.prompt_path),
+                    "--report-file", str(self.report_path),
+                    "--worker-repo-path", str(self.tmpdir),
+                ],
+            )
+        self.assertEqual(rc, 0)
+        # Content unchanged.
         after = self.report_path.read_text(encoding="utf-8")
-        self.assertIn("Prior content.", after)
-        self.assertNotIn("NEW stdout", after)
+        self.assertIn("Recovered.", after)
 
 
 if __name__ == "__main__":
