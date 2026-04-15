@@ -1331,5 +1331,117 @@ class CodexBodyUtf8DecodeTests(unittest.TestCase):
         self.assertIsNotNone(prepared.codex_body)
 
 
+class IcExecutionAgentSwitchingTests(unittest.TestCase):
+    """Verify dispatch_pending_issue_centric_codex_run selects launch_runner by execution_agent."""
+
+    def _make_fake_materialized(self) -> object:
+        return SimpleNamespace(
+            prepared=SimpleNamespace(
+                codex_body=SimpleNamespace(decoded_text="body"),
+                followup_issue_body=None,
+                target_issue="https://github.com/example/repo/issues/20",
+                trigger_comment_url="https://github.com/example/repo/issues/20#issuecomment-1",
+            )
+        )
+
+    def _make_state(self) -> dict[str, object]:
+        return {
+            "mode": "ready_for_codex",
+            "need_codex_run": True,
+            "last_issue_centric_raw_log": "/tmp/raw.json",
+            "last_issue_centric_artifact_file": "/tmp/artifact.txt",
+            "last_issue_centric_metadata_log": "/tmp/meta.json",
+            "last_issue_centric_decision_log": "/tmp/decision.json",
+        }
+
+    def _run_dispatch(self, execution_agent: str) -> object:
+        """Run dispatch_pending_issue_centric_codex_run and return the launch_runner that was passed to dispatch_issue_centric_execution."""
+        captured: list[object] = []
+        fake_contract = SimpleNamespace(create_followup_issue=False)
+        fake_materialized = self._make_fake_materialized()
+        fake_result = SimpleNamespace(final_state=self._make_state(), stop_message="done")
+
+        def fake_dispatch(**kwargs: object) -> object:
+            captured.append(kwargs.get("launch_runner"))
+            return fake_result
+
+        with (
+            patch.object(bridge_orchestrator, "load_pending_issue_centric_codex_materialized",
+                         return_value=(fake_contract, fake_materialized, "/tmp/raw.json", "/tmp/meta.json", "/tmp/artifact.txt")),
+            patch.object(bridge_orchestrator, "dispatch_issue_centric_execution", side_effect=fake_dispatch),
+            patch.object(bridge_orchestrator, "save_state"),
+        ):
+            bridge_orchestrator.dispatch_pending_issue_centric_codex_run(
+                self._make_state(),
+                project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                execution_agent=execution_agent,
+            )
+        return captured[0]
+
+    def test_codex_agent_uses_launch_codex_once(self) -> None:
+        import launch_codex_once
+        runner = self._run_dispatch("codex")
+        self.assertIs(runner, launch_codex_once.run)
+
+    def test_github_copilot_agent_uses_launch_github_copilot(self) -> None:
+        import launch_github_copilot
+        runner = self._run_dispatch("github_copilot")
+        self.assertIs(runner, launch_github_copilot.run)
+
+    def test_default_agent_uses_launch_codex_once(self) -> None:
+        """When execution_agent is not specified the default is codex."""
+        import launch_codex_once
+        fake_contract = SimpleNamespace(create_followup_issue=False)
+        fake_materialized = self._make_fake_materialized()
+        fake_result = SimpleNamespace(final_state=self._make_state(), stop_message="done")
+        captured: list[object] = []
+
+        def fake_dispatch(**kwargs: object) -> object:
+            captured.append(kwargs.get("launch_runner"))
+            return fake_result
+
+        with (
+            patch.object(bridge_orchestrator, "load_pending_issue_centric_codex_materialized",
+                         return_value=(fake_contract, fake_materialized, "/tmp/raw.json", "/tmp/meta.json", "/tmp/artifact.txt")),
+            patch.object(bridge_orchestrator, "dispatch_issue_centric_execution", side_effect=fake_dispatch),
+            patch.object(bridge_orchestrator, "save_state"),
+        ):
+            bridge_orchestrator.dispatch_pending_issue_centric_codex_run(
+                self._make_state(),
+                project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                # execution_agent omitted → default "codex"
+            )
+        self.assertIs(captured[0], launch_codex_once.run)
+
+    def test_bridge_run_passes_execution_agent_to_ic_dispatch(self) -> None:
+        """bridge_orchestrator.run with execution_agent=github_copilot passes it through."""
+        import launch_github_copilot
+        state = {
+            "mode": "ready_for_codex",
+            "need_codex_run": True,
+            "last_issue_centric_raw_log": "/tmp/raw.json",
+            "last_issue_centric_artifact_file": "/tmp/artifact.txt",
+            "last_issue_centric_metadata_log": "/tmp/meta.json",
+            "last_issue_centric_decision_log": "/tmp/decision.json",
+            "has_pending_issue_centric_codex_dispatch": True,
+        }
+        captured: list[object] = []
+
+        def fake_dispatch_ic(s: dict, *, project_config: dict, execution_agent: str = "codex") -> int:
+            captured.append(execution_agent)
+            return 0
+
+        with (
+            patch.object(bridge_orchestrator, "load_project_config",
+                         return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": ".", "execution_agent": "github_copilot"}),
+            patch.object(bridge_orchestrator, "print_project_config_warnings"),
+            patch.object(bridge_orchestrator, "has_pending_issue_centric_codex_dispatch", return_value=True),
+            patch.object(bridge_orchestrator, "dispatch_pending_issue_centric_codex_run", side_effect=fake_dispatch_ic),
+        ):
+            bridge_orchestrator.run(dict(state), [])
+
+        self.assertEqual(captured[0], "github_copilot")
+
+
 if __name__ == "__main__":
     unittest.main()
