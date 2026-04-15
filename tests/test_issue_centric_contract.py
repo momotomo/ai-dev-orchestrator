@@ -1159,6 +1159,10 @@ class IssueCentricTransportTests(unittest.TestCase):
             issue_centric_transport.decode_issue_centric_decision(decision)
 
     def test_rejects_invalid_utf8_at_transport_stage(self) -> None:
+        # New behavior (post-fix): valid base64 that decodes to non-UTF-8 bytes
+        # no longer raises IssueCentricBodyDecodeError.  Instead a WARNING is printed
+        # and the text is decoded with errors='replace' (U+FFFD for bad bytes).
+        # This ensures that AI-model encoding errors don't hard-stop the run.
         decision = issue_centric_contract.IssueCentricDecision(
             action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
             target_issue="#123",
@@ -1172,11 +1176,17 @@ class IssueCentricTransportTests(unittest.TestCase):
             raw_json="{}",
             raw_segment="segment",
         )
-        with self.assertRaisesRegex(
-            issue_centric_transport.IssueCentricBodyDecodeError,
-            "not valid UTF-8",
-        ):
-            issue_centric_transport.decode_issue_centric_decision(decision)
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        output = buf.getvalue()
+        # Warning must be visible
+        self.assertIn("WARNING", output)
+        self.assertIn("non-UTF-8", output)
+        # Decoded text contains replacement character, not empty
+        self.assertIn("\ufffd", prepared.codex_body.decoded_text)
 
     def test_rejects_empty_decoded_payload(self) -> None:
         decision = issue_centric_contract.IssueCentricDecision(

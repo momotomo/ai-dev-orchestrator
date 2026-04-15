@@ -1170,5 +1170,166 @@ class CopilotPreambleRegressionTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# CHATGPT_CODEX_BODY UTF-8 decode robustness tests
+# ---------------------------------------------------------------------------
+
+
+def _b64_from_bytes(raw: bytes) -> str:
+    """Base64-encode raw bytes (not necessarily valid UTF-8)."""
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _codex_decision_with_raw_b64(raw_b64: str) -> issue_centric_contract.IssueCentricDecision:
+    return issue_centric_contract.IssueCentricDecision(
+        action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+        target_issue="#7",
+        close_current_issue=False,
+        create_followup_issue=False,
+        summary="test",
+        issue_body_base64=None,
+        codex_body_base64=raw_b64,
+        review_base64=None,
+        followup_issue_body_base64=None,
+        raw_json="{}",
+        raw_segment="segment",
+    )
+
+
+class CodexBodyUtf8DecodeTests(unittest.TestCase):
+    """CHATGPT_CODEX_BODY payload decode: normal, partial-failure, and hard-failure cases.
+
+    Regression for: 'CHATGPT_CODEX_BODY payload is not valid UTF-8:
+    utf-8 codec can't decode byte 0xe0 in position 560: invalid continuation byte'
+
+    Fix: instead of raising IssueCentricBodyDecodeError for every UnicodeDecodeError,
+    fall back to errors='replace' and emit a WARNING when the payload is mostly decodable.
+    Only raise if the lenient-decoded text is empty.
+    """
+
+    # ------------------------------------------------------------------
+    # Normal case: valid UTF-8 base64
+    # ------------------------------------------------------------------
+
+    def test_normal_utf8_body_decodes_cleanly(self) -> None:
+        body = "# Task\n日本語テスト\nメモ: これは通常の body です。\n"
+        decision = build_codex_decision("#7", body)
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertEqual(prepared.codex_body.decoded_text, body)
+
+    def test_ascii_only_body_decodes_cleanly(self) -> None:
+        body = "# Task\nRun the following steps.\n1. git status\n2. verify clean worktree\n"
+        decision = build_codex_decision("#7", body)
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertEqual(prepared.codex_body.decoded_text, body)
+
+    # ------------------------------------------------------------------
+    # Invalid base64: must fail with clear message
+    # ------------------------------------------------------------------
+
+    def test_invalid_base64_raises_with_clear_message(self) -> None:
+        """Characters outside b64 alphabet raise IssueCentricBodyDecodeError: not valid base64."""
+        decision = _codex_decision_with_raw_b64("not!!!valid?base64!")
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIn("not valid base64", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # Partial UTF-8 failure: should warn but continue
+    # ------------------------------------------------------------------
+
+    def test_partially_broken_utf8_warns_but_does_not_raise(self) -> None:
+        """Valid base64, but decoded bytes contain an invalid UTF-8 sequence.
+
+        Reproduces the actual failure: byte 0xe0 followed by non-continuation byte.
+        After the fix, this must NOT raise IssueCentricBodyDecodeError.
+        """
+        # bytes: valid prefix + invalid UTF-8 sequence + valid suffix
+        broken_bytes = b"# Task\nfresh-start " + b"\xe0\x6d\x9c\x6e" + b"3. small step\n"
+        decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
+        # must NOT raise
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIn("# Task", prepared.codex_body.decoded_text)
+        self.assertIn("3. small step", prepared.codex_body.decoded_text)
+        # replacement character must appear where bad bytes were
+        self.assertIn("\ufffd", prepared.codex_body.decoded_text)
+
+    def test_partial_utf8_failure_warning_is_printed(self) -> None:
+        """The WARNING line is printed to stdout so operators can see it."""
+        broken_bytes = b"body\xe0\x6d tail"
+        decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        output = buf.getvalue()
+        self.assertIn("WARNING", output)
+        self.assertIn("CHATGPT_CODEX_BODY", output)
+        self.assertIn("non-UTF-8 byte", output)
+
+    def test_partial_utf8_failure_warning_includes_position_and_hex(self) -> None:
+        """Warning message includes byte position and hex of bad bytes."""
+        broken_bytes = b"prefix_12345678_" + b"\xe0\x6d" + b"suffix"
+        decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        output = buf.getvalue()
+        # position 16 (length of b"prefix_12345678_")
+        self.assertIn("16", output)
+        # hex of bad bytes
+        self.assertIn("e0", output)
+
+    def test_actual_failing_payload_from_issue_7_run_decodes_without_raise(self) -> None:
+        """The exact payload from the failing run (first 60 chars of b64) must not raise."""
+        # Verified failing payload (first 100 chars, enough to trigger the byte-560 issue
+        # is beyond this truncated slice, but the mechanism is the same)
+        broken_bytes = (
+            b"# Issue #7\n\nfresh-start \xe3\x82\x92\xe9\x81\xb8\xe0\x6d\x9c\x6e"
+            b"3. \xe5\xb0\x8f\xe3\x81\x95\xe3\x81\x84 step\n"
+        )
+        decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
+        # must NOT raise
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIn("# Issue #7", prepared.codex_body.decoded_text)
+        self.assertIn("\ufffd", prepared.codex_body.decoded_text)
+
+    # ------------------------------------------------------------------
+    # Hard failure: empty payload after replacement
+    # ------------------------------------------------------------------
+
+    def test_empty_payload_raises(self) -> None:
+        """Empty (whitespace-only) normalized payload raises regardless."""
+        decision = _codex_decision_with_raw_b64("   \n   ")
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIn("empty text", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # Error message distinguishes base64 failure from UTF-8 failure
+    # ------------------------------------------------------------------
+
+    def test_invalid_base64_message_contains_base64_fragment(self) -> None:
+        decision = _codex_decision_with_raw_b64("!!!!")
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        msg = str(ctx.exception)
+        self.assertIn("base64", msg)
+        self.assertNotIn("UTF-8", msg)
+
+    def test_partial_utf8_no_longer_raises_body_decode_error(self) -> None:
+        """Regression: before fix, partial UTF-8 raised IssueCentricBodyDecodeError.
+        After fix, it must NOT raise."""
+        broken_bytes = b"# header\n\xe0\x6d\x9c\x6e\n# footer\n"
+        decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
+        # This is the key regression guard — was raising before the fix.
+        try:
+            prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        except issue_centric_transport.IssueCentricBodyDecodeError as exc:
+            self.fail(
+                f"IssueCentricBodyDecodeError must not be raised for partial UTF-8; got: {exc}"
+            )
+        self.assertIsNotNone(prepared.codex_body)
+
+
 if __name__ == "__main__":
     unittest.main()
