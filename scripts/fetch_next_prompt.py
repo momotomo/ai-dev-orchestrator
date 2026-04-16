@@ -493,6 +493,25 @@ def _build_contract_correction_request(reason: str) -> str:
     )
 
 
+def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_ref: str) -> str:
+    """Build a correction request when target_issue does not match the current ready issue.
+
+    Unlike the generic correction request, this explicitly tells ChatGPT which
+    target_issue to use and forbids changing anything else.
+    """
+    return (
+        "前回の返答の target_issue が現在の ready issue と一致していませんでした。\n"
+        f"エラー詳細: {reason}\n\n"
+        "以下の点を修正して contract を再出力してください。\n\n"
+        f"- `target_issue` は必ず `{current_ready_issue_ref.split(maxsplit=1)[0].strip()}` に合わせること\n"
+        "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / flags / summary）は変更しないこと\n"
+        "- ===CHATGPT_DECISION_JSON=== / ===END_CHATGPT_DECISION_JSON=== マーカーを正確に配置すること\n"
+        "- BODY block が必要なら有効な base64 で再エンコードすること\n"
+        "- 余計な説明・謝罪・コメントを付けないこと\n"
+        "- 最後に必ず `===CHATGPT_REPLY_COMPLETE===` を付けること\n"
+    )
+
+
 def stop_for_invalid_issue_centric_contract(
     state: dict[str, object],
     *,
@@ -764,7 +783,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         if ready_issue_binding_error:
             binding_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
             if binding_correction_count < _MAX_CONTRACT_CORRECTIONS:
-                correction_text = _build_contract_correction_request(ready_issue_binding_error)
+                current_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+                correction_text = _build_binding_mismatch_correction_request(
+                    ready_issue_binding_error, current_ready_issue_ref
+                )
                 correction_log = log_text("contract_correction_request", correction_text, suffix="md")
                 send_to_chatgpt(correction_text)
                 correction_state = clear_error_fields(dict(state))

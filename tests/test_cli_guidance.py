@@ -3157,8 +3157,29 @@ class ContractCorrectionHelperTests(unittest.TestCase):
     def test_max_contract_corrections_is_two(self) -> None:
         self.assertEqual(self.fp._MAX_CONTRACT_CORRECTIONS, 2)
 
+    # --- _build_binding_mismatch_correction_request ---
+
+    def test_binding_mismatch_request_contains_reason(self) -> None:
+        reason = "current ready issue は #5 ですが stale target #7 を返しました。"
+        text = self.fp._build_binding_mismatch_correction_request(reason, "#5 Ready: feature X")
+        self.assertIn(reason, text)
+
+    def test_binding_mismatch_request_contains_current_ready_issue_ref(self) -> None:
+        text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
+        self.assertIn("#5", text)
+
+    def test_binding_mismatch_request_contains_reply_complete_tag(self) -> None:
+        text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
+        self.assertIn("===CHATGPT_REPLY_COMPLETE===", text)
+
+    def test_binding_mismatch_request_mentions_target_issue(self) -> None:
+        text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
+        self.assertIn("target_issue", text)
+
+    def test_binding_mismatch_request_differs_from_generic(self) -> None:
+        """The binding mismatch request must NOT start with the generic contract error intro."""
+        text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
+        self.assertNotIn("issue-centric contract の不正がありました", text)
 
 
-if __name__ == "__main__":
-    unittest.main()
 

@@ -2867,5 +2867,193 @@ class FollowupIssueBodyFallbackTests(unittest.TestCase):
         self.assertEqual(prepared.primary_body.decoded_text, "# Child Issue\n\nFallback body.")
 
 
+# ---------------------------------------------------------------------------
+# ContractCorrectionRetryBehaviorTests
+# ---------------------------------------------------------------------------
+
+class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
+    """Integration-level tests for the correction-retry loop in fetch_next_prompt.run().
+
+    Verifies that:
+    - A retryable invalid-contract triggers send_to_chatgpt on the 1st attempt
+    - The saved correction count reaches 1 after the 1st send
+    - A second retryable hit (count=1) triggers send_to_chatgpt again
+    - The saved correction count reaches 2 after the 2nd send
+    - When count is already 2 (== _MAX_CONTRACT_CORRECTIONS), no send occurs and
+      a hard stop (BridgeError) fires instead
+    - ready_issue_binding_error (count=0) also triggers send_to_chatgpt
+    - ready_issue_binding_error correction request uses binding-mismatch wording
+    - reply_not_ready does NOT trigger correction — just raises BridgeError
+    - A valid contract bypasses all correction logic and proceeds normally
+    """
+
+    # Helper: a raw reply text that carries the completion tag but omits the
+    # decision markers, causing reply_complete_no_marker.
+    _NO_MARKER_RAW = (
+        "あなた:\nrequest body\nChatGPT:\n"
+        "何かコメントをここに書きました。\n"
+        + issue_centric_contract.REPLY_COMPLETE_TAG
+    )
+
+    # Helper: a raw reply text that has no completion tag → reply_not_ready
+    _NOT_READY_RAW = "あなた:\nrequest body\nChatGPT:\nまだ考え中です。"
+
+    def _base_state(self, *, correction_count: int = 0) -> dict[str, object]:
+        state: dict[str, object] = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash-abc",
+            "pending_request_source": "ready_issue:#5",
+            "pending_request_log": "logs/req.md",
+            "pending_request_signal": "",
+            "current_ready_issue_ref": "#5 Ready: implement feature X",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        if correction_count:
+            state["last_issue_centric_contract_correction_count"] = correction_count
+        return state
+
+    def _make_patched_context(self, tmp: str, raw: str, saved_states: list, sent_texts: list):
+        """Return a context manager that patches all external calls in run()."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        temp_root = Path(tmp)
+
+        def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+            path = temp_root / f"{prefix}.{suffix}"
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        def fake_send(text: str) -> None:
+            sent_texts.append(text)
+
+        return (
+            patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+            patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+            patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+            patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch.object(fetch_next_prompt, "send_to_chatgpt", side_effect=fake_send),
+            patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}),
+        )
+
+    # ------------------------------------------------------------------
+    # Generic invalid contract (reply_complete_no_marker) retry
+    # ------------------------------------------------------------------
+
+    def test_first_retry_sends_correction_request(self) -> None:
+        """1st attempt (count=0): send_to_chatgpt called, count saved as 1, BridgeStop raised."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._NO_MARKER_RAW, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+        self.assertEqual(len(sent_texts), 1, "send_to_chatgpt should be called once")
+        self.assertEqual(len(saved_states), 1)
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 1)
+        self.assertEqual(saved_states[0]["mode"], "waiting_prompt_reply")
+
+    def test_second_retry_sends_correction_request(self) -> None:
+        """2nd attempt (count=1): send_to_chatgpt called, count saved as 2, BridgeStop raised."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._NO_MARKER_RAW, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=1), [])
+        self.assertEqual(len(sent_texts), 1, "send_to_chatgpt should be called once")
+        self.assertEqual(len(saved_states), 1)
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 2)
+
+    def test_third_attempt_hard_stops_without_send(self) -> None:
+        """3rd attempt (count=2 == _MAX): no send, BridgeError (hard stop) raised."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._NO_MARKER_RAW, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が不正でした"):
+                    fetch_next_prompt.run(self._base_state(correction_count=2), [])
+        self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must NOT be called on hard stop")
+        self.assertEqual(len(saved_states), 1)
+        self.assertEqual(saved_states[0]["mode"], "awaiting_user")
+
+    # ------------------------------------------------------------------
+    # reply_not_ready — must NOT enter correction loop
+    # ------------------------------------------------------------------
+
+    def test_reply_not_ready_does_not_send_correction(self) -> None:
+        """reply_not_ready: no correction sent, raises BridgeError about incomplete reply."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._NOT_READY_RAW, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeError):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+        self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must NOT be called for reply_not_ready")
+
+    # ------------------------------------------------------------------
+    # ready_issue_binding_error retry
+    # ------------------------------------------------------------------
+
+    def _stale_target_raw(self) -> str:
+        """A valid-format contract reply but with target_issue=#99 (stale, doesn't match #5)."""
+        return build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#99",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "stale issue",
+            }
+        )
+
+    def test_binding_mismatch_first_retry_sends_correction(self) -> None:
+        """ready_issue_binding_error with count=0: send_to_chatgpt called, count saved as 1."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._stale_target_raw(), saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+        self.assertEqual(len(sent_texts), 1, "binding mismatch: send_to_chatgpt should be called")
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 1)
+
+    def test_binding_mismatch_correction_uses_binding_wording(self) -> None:
+        """The correction request for binding mismatch must mention target_issue fix."""
+        sent_texts: list[str] = []
+        saved_states: list[dict] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._stale_target_raw(), saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+        self.assertEqual(len(sent_texts), 1)
+        correction_text = sent_texts[0]
+        # binding mismatch wording must include target_issue fix instruction
+        self.assertIn("target_issue", correction_text)
+        self.assertIn("#5", correction_text)  # current ready issue ref
+        self.assertIn("===CHATGPT_REPLY_COMPLETE===", correction_text)
+        # must NOT be generic wording (generic starts with "前回の返答に issue-centric contract の不正")
+        self.assertNotIn("issue-centric contract の不正がありました", correction_text)
+
+    def test_binding_mismatch_hard_stop_at_max_corrections(self) -> None:
+        """ready_issue_binding_error with count=2: no send, BridgeError raised."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._stale_target_raw(), saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が不正でした"):
+                    fetch_next_prompt.run(self._base_state(correction_count=2), [])
+        self.assertEqual(len(sent_texts), 0)
+        self.assertEqual(saved_states[0]["mode"], "awaiting_user")
+
+
 if __name__ == "__main__":
     unittest.main()
