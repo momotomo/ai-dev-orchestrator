@@ -199,6 +199,7 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
     parser.add_argument("--ready-issue-ref", default="", help="通常入口で使う current ready issue の参照")
     parser.add_argument("--request-body", default="", help="例外 / recovery / override 用の初回本文")
+    parser.add_argument("--select-issue", action="store_true", default=False, help="初回 issue 選定モード")
     parser.add_argument("--entry-script", default="scripts/run_until_stop.py", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
@@ -311,6 +312,8 @@ def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--ready-issue-ref", args.ready_issue_ref])
     if args.request_body:
         command.extend(["--request-body", args.request_body])
+    if getattr(args, "select_issue", False):
+        command.append("--select-issue")
     return command
 
 
@@ -322,6 +325,8 @@ def format_runner_command(args: argparse.Namespace) -> str:
         command.extend(["--ready-issue-ref", str(args.ready_issue_ref)])
     if args.request_body:
         command.extend(["--request-body", str(args.request_body)])
+    if getattr(args, "select_issue", False):
+        command.append("--select-issue")
     if args.stop_at_cycle_boundary:
         command.append("--stop-at-cycle-boundary")
     if args.sleep_seconds != DEFAULT_SLEEP_SECONDS:

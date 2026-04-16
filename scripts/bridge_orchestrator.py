@@ -82,6 +82,7 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--current-status", default="", help="request 系 script に渡す CURRENT_STATUS 上書き")
     parser.add_argument("--ready-issue-ref", default="", help="request_next_prompt.py に渡す current ready issue 参照")
     parser.add_argument("--request-body", default="", help="request_next_prompt.py に渡す override 用の初回本文")
+    parser.add_argument("--select-issue", action="store_true", default=False, help="初回 issue 選定モード: request_next_prompt.py に転送する")
     return parser.parse_args(argv)
 
 
@@ -129,6 +130,8 @@ def build_initial_request_argv(args: argparse.Namespace) -> list[str]:
         request_argv.extend(["--ready-issue-ref", args.ready_issue_ref])
     if args.request_body:
         request_argv.extend(["--request-body", args.request_body])
+    if getattr(args, "select_issue", False):
+        request_argv.append("--select-issue")
     return request_argv
 
 
