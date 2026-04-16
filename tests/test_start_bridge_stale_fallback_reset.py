@@ -476,5 +476,123 @@ class StartBridgeResetFlagTests(unittest.TestCase):
         self.assertFalse(args.clear_error)
 
 
+class FreshStartInitialSelectionRoutingTests(unittest.TestCase):
+    """fresh_start_issue_selection routes to initial_selection: flow, not override: flow."""
+
+    def _initial_state(self) -> dict:
+        return _bridge_common.DEFAULT_STATE.copy()
+
+    def test_fresh_start_sets_select_issue_flag_on_args(self) -> None:
+        """When entry_action == fresh_start_issue_selection, args.select_issue is set True."""
+        from unittest.mock import patch
+        from pathlib import Path
+
+        initial = self._initial_state()
+        captured: dict = {}
+
+        def _run(argv: list[str]) -> int:
+            captured["argv"] = argv
+            return 0
+
+        with (
+            patch.object(start_bridge.run_until_stop, "load_state", return_value=initial),
+            patch.object(start_bridge.run_until_stop, "load_project_config", return_value={}),
+            patch.object(start_bridge.run_until_stop, "worker_repo_path", return_value=Path("/tmp/repo")),
+            patch.object(start_bridge.run_until_stop, "browser_fetch_timeout_seconds", return_value=1800),
+            patch.object(start_bridge.run_until_stop, "load_browser_config", return_value={}),
+            patch.object(start_bridge, "print_resume_overview"),
+            patch.object(start_bridge.run_until_stop, "run", side_effect=_run),
+            patch.object(start_bridge, "reset_stale_fallback_for_fresh_start", return_value=False),
+            patch.object(start_bridge, "recover_resume_from_pending_issue_centric_codex_dispatch", return_value=False),
+        ):
+            rc = start_bridge.main(["--project-path", "/tmp/repo", "--max-execution-count", "3"])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("--select-issue", captured.get("argv", []))
+        self.assertNotIn("--request-body", captured.get("argv", []))
+
+    def test_fresh_start_does_not_inject_request_body(self) -> None:
+        """fresh_start_issue_selection must NOT inject --request-body (override path)."""
+        from unittest.mock import patch
+        from pathlib import Path
+
+        initial = self._initial_state()
+        captured: dict = {}
+
+        def _run(argv: list[str]) -> int:
+            captured["argv"] = argv
+            return 0
+
+        with (
+            patch.object(start_bridge.run_until_stop, "load_state", return_value=initial),
+            patch.object(start_bridge.run_until_stop, "load_project_config", return_value={}),
+            patch.object(start_bridge.run_until_stop, "worker_repo_path", return_value=Path("/tmp/repo")),
+            patch.object(start_bridge.run_until_stop, "browser_fetch_timeout_seconds", return_value=1800),
+            patch.object(start_bridge.run_until_stop, "load_browser_config", return_value={}),
+            patch.object(start_bridge, "print_resume_overview"),
+            patch.object(start_bridge.run_until_stop, "run", side_effect=_run),
+            patch.object(start_bridge, "reset_stale_fallback_for_fresh_start", return_value=False),
+            patch.object(start_bridge, "recover_resume_from_pending_issue_centric_codex_dispatch", return_value=False),
+        ):
+            start_bridge.main(["--project-path", "/tmp/repo"])
+
+        forwarded = captured.get("argv", [])
+        self.assertNotIn("--request-body", forwarded)
+
+    def test_explicit_select_issue_arg_still_routes_to_initial_selection(self) -> None:
+        """--select-issue passed explicitly still goes to --select-issue in forwarded_argv."""
+        from unittest.mock import patch
+        from pathlib import Path
+
+        captured: dict = {}
+
+        def _run(argv: list[str]) -> int:
+            captured["argv"] = argv
+            return 0
+
+        with (
+            patch.object(start_bridge.run_until_stop, "load_project_config", return_value={}),
+            patch.object(start_bridge.run_until_stop, "worker_repo_path", return_value=Path("/tmp/repo")),
+            patch.object(start_bridge.run_until_stop, "browser_fetch_timeout_seconds", return_value=1800),
+            patch.object(start_bridge.run_until_stop, "load_browser_config", return_value={}),
+            patch.object(start_bridge, "print_resume_overview"),
+            patch.object(start_bridge.run_until_stop, "run", side_effect=_run),
+            patch.object(start_bridge, "reset_stale_fallback_for_fresh_start", return_value=False),
+            patch.object(start_bridge, "recover_resume_from_pending_issue_centric_codex_dispatch", return_value=False),
+        ):
+            rc = start_bridge.main(["--project-path", "/tmp/repo", "--select-issue"])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("--select-issue", captured.get("argv", []))
+
+    def test_request_body_still_routes_to_override(self) -> None:
+        """--request-body should NOT cause select_issue; override path is unchanged."""
+        from unittest.mock import patch
+        from pathlib import Path
+
+        captured: dict = {}
+
+        def _run(argv: list[str]) -> int:
+            captured["argv"] = argv
+            return 0
+
+        with (
+            patch.object(start_bridge.run_until_stop, "load_project_config", return_value={}),
+            patch.object(start_bridge.run_until_stop, "worker_repo_path", return_value=Path("/tmp/repo")),
+            patch.object(start_bridge.run_until_stop, "browser_fetch_timeout_seconds", return_value=1800),
+            patch.object(start_bridge.run_until_stop, "load_browser_config", return_value={}),
+            patch.object(start_bridge, "print_resume_overview"),
+            patch.object(start_bridge.run_until_stop, "run", side_effect=_run),
+            patch.object(start_bridge, "reset_stale_fallback_for_fresh_start", return_value=False),
+            patch.object(start_bridge, "recover_resume_from_pending_issue_centric_codex_dispatch", return_value=False),
+        ):
+            rc = start_bridge.main(["--project-path", "/tmp/repo", "--request-body", "override text"])
+
+        self.assertEqual(rc, 0)
+        forwarded = captured.get("argv", [])
+        self.assertIn("--request-body", forwarded)
+        self.assertNotIn("--select-issue", forwarded)
+
+
 if __name__ == "__main__":
     unittest.main()

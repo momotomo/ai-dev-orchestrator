@@ -7,7 +7,6 @@ import sys
 
 import run_until_stop
 from _bridge_common import (
-    FRESH_START_ISSUE_SELECTION_TEMPLATE,
     clear_error_fields,
     clear_pending_request_fields,
     format_lifecycle_sync_state_note,
@@ -419,16 +418,17 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
         elif entry_action == "fresh_start_issue_selection":
-            # Initial state: inject Issue confirmation template as the first request body.
+            # Initial state: route to the proper initial_selection flow (--select-issue).
+            # This ensures request_source becomes "initial_selection:*" (not "override:*"),
+            # and fetch_next_prompt.py's existing initial_selection special handling applies.
             repo = str(project_config.get("github_repository", "") or effective_project_path)
-            issue_selection_body = FRESH_START_ISSUE_SELECTION_TEMPLATE.format(repo=repo)
             print(
-                "bridge start: 初期状態を検出しました。Issue 確認テンプレートを最初のリクエストとして送信します。",
+                "bridge start: 初期状態を検出しました。issue-centric initial selection フローへ入ります。",
                 flush=True,
             )
             print(f"- repo: {repo}", flush=True)
-            # Inject the template as the initial request body so run_until_stop handles the send.
-            args.request_body = issue_selection_body
+            # Use select_issue flag so build_initial_request() uses initial_selection: source.
+            args.select_issue = True
 
     print("bridge start: このコマンドが通常入口です。", flush=True)
     print(f"- project_path: {project_path_display}", flush=True)
