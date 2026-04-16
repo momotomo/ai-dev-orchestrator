@@ -3100,43 +3100,63 @@ class WaitingPromptReplyFetchTransitionTests(unittest.TestCase):
         self.assertEqual(resolve_next_generation_transition(state), "request_prompt_from_report")
 
 
-class MalformedBase64CorrectionHelperTests(unittest.TestCase):
-    """Unit-tests for the malformed-base64 detection and correction helpers in fetch_next_prompt."""
+class ContractCorrectionHelperTests(unittest.TestCase):
+    """Unit-tests for the retryable-contract detection and correction helpers in fetch_next_prompt."""
 
     def setUp(self) -> None:
         import fetch_next_prompt  # noqa: E402 — imported here to avoid heavy top-level side effects
         self.fp = fetch_next_prompt
 
-    def test_is_malformed_base64_returns_true_for_data_character_error(self) -> None:
-        """The real binascii error from misaligned base64 is detected correctly."""
-        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string: number of data characters (2277) cannot be 1 more than a multiple of 4"
-        self.assertTrue(self.fp._is_malformed_base64_contract_error(reason))
+    # --- _is_retryable_contract_error ---
 
-    def test_is_malformed_base64_returns_true_for_non_base64_char_error(self) -> None:
-        reason = "CHATGPT_ISSUE_BODY block is not valid base64: Non-base64 digit found"
-        self.assertTrue(self.fp._is_malformed_base64_contract_error(reason))
+    def test_retryable_for_invalid_contract_status(self) -> None:
+        """reply_complete_invalid_contract is always retryable regardless of reason."""
+        self.assertTrue(
+            self.fp._is_retryable_contract_error("CHATGPT_CODEX_BODY block is not valid base64: ...", "reply_complete_invalid_contract")
+        )
 
-    def test_is_malformed_base64_returns_false_for_missing_block(self) -> None:
-        """Missing-block errors are unrelated to base64 corruption."""
-        reason = "CHATGPT_CODEX_BODY block is required but missing."
-        self.assertFalse(self.fp._is_malformed_base64_contract_error(reason))
+    def test_retryable_for_no_marker_status(self) -> None:
+        """reply_complete_no_marker (ChatGPT forgot the contract) is retryable."""
+        self.assertTrue(
+            self.fp._is_retryable_contract_error("completion tag present but issue-centric decision markers are missing.", "reply_complete_no_marker")
+        )
 
-    def test_is_malformed_base64_returns_false_for_bad_json(self) -> None:
-        reason = "CHATGPT_DECISION_JSON is not valid JSON: Expecting value: line 1 column 1 (char 0)"
-        self.assertFalse(self.fp._is_malformed_base64_contract_error(reason))
+    def test_retryable_for_bad_json_in_invalid_contract(self) -> None:
+        self.assertTrue(
+            self.fp._is_retryable_contract_error("CHATGPT_DECISION_JSON is not valid JSON: ...", "reply_complete_invalid_contract")
+        )
 
-    def test_build_base64_correction_request_contains_reason(self) -> None:
+    def test_not_retryable_for_not_ready_status(self) -> None:
+        """reply_not_ready means the response is still incomplete — do not retry."""
+        self.assertFalse(
+            self.fp._is_retryable_contract_error("reply not ready", "reply_not_ready")
+        )
+
+    def test_not_retryable_for_unknown_status(self) -> None:
+        self.assertFalse(
+            self.fp._is_retryable_contract_error("some reason", "reply_complete_legacy_contract")
+        )
+
+    # --- _build_contract_correction_request ---
+
+    def test_build_correction_request_contains_reason(self) -> None:
         reason = "CHATGPT_CODEX_BODY block is not valid base64: ..."
-        text = self.fp._build_base64_correction_request(reason)
+        text = self.fp._build_contract_correction_request(reason)
         self.assertIn(reason, text)
 
-    def test_build_base64_correction_request_contains_reply_complete_tag(self) -> None:
-        text = self.fp._build_base64_correction_request("some reason")
+    def test_build_correction_request_contains_reply_complete_tag(self) -> None:
+        text = self.fp._build_contract_correction_request("some reason")
         self.assertIn("===CHATGPT_REPLY_COMPLETE===", text)
 
-    def test_build_base64_correction_request_mentions_decision_json(self) -> None:
-        text = self.fp._build_base64_correction_request("some reason")
+    def test_build_correction_request_mentions_decision_json(self) -> None:
+        text = self.fp._build_contract_correction_request("some reason")
         self.assertIn("CHATGPT_DECISION_JSON", text)
+
+    # --- max corrections constant ---
+
+    def test_max_contract_corrections_is_two(self) -> None:
+        self.assertEqual(self.fp._MAX_CONTRACT_CORRECTIONS, 2)
+
 
 
 if __name__ == "__main__":

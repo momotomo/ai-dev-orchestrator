@@ -1552,6 +1552,8 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
             "pending_request_signal": "",
             "last_processed_request_hash": "",
             "last_processed_reply_hash": "",
+            # exhausted correction retries so stop_for_invalid_issue_centric_contract is reached
+            "last_issue_centric_contract_correction_count": 2,
         }
         raw = build_raw_reply(
             {
@@ -1599,6 +1601,8 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
             "current_ready_issue_ref": "#8 Ready: verify parent update comment after narrow child close",
             "last_processed_request_hash": "",
             "last_processed_reply_hash": "",
+            # exhausted correction retries so stop_for_invalid_issue_centric_contract is reached
+            "last_issue_centric_contract_correction_count": 2,
         }
         raw = build_raw_reply(
             {
