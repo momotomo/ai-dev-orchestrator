@@ -454,34 +454,59 @@ def parse_issue_centric_reply_for_fetch(
     return readiness.decision
 
 
-# Maximum number of automatic base64 correction requests per pending request.
-_MAX_BASE64_CORRECTIONS = 1
+# Maximum number of automatic contract correction requests per pending request.
+_MAX_CONTRACT_CORRECTIONS = 2
 
 
-def _is_malformed_base64_contract_error(reason: str) -> bool:
-    """Return True when the invalid-contract reason is a malformed base64 payload.
+def _is_retryable_contract_error(reason: str, status: str) -> bool:
+    """Return True when the invalid-contract reason is one ChatGPT can fix by re-emitting.
 
-    The contract module raises:
-      "<BLOCK_NAME> block is not valid base64: <binascii error message>"
-    This helper matches that pattern so we can distinguish it from other
-    invalid-contract reasons (missing markers, bad JSON, wrong action combos, …).
+    The following are considered retryable (ChatGPT formatting / content errors):
+      - reply_complete_invalid_contract: the completion tag is present but contract
+        parse failed for any reason (base64, JSON, block markers, field types, …)
+      - reply_complete_no_marker: the completion tag is present but the decision
+        markers are entirely missing (ChatGPT forgot to include the contract)
+
+    The following are NOT retryable:
+      - reply_not_ready: response is still incomplete, just wait
+      - transport / execution / controller code errors
     """
-    return "is not valid base64" in reason
+    return status in {"reply_complete_invalid_contract", "reply_complete_no_marker"}
 
 
-def _build_base64_correction_request(reason: str) -> str:
-    """Build a correction request to send to ChatGPT when a BODY block is malformed base64.
+def _build_contract_correction_request(reason: str) -> str:
+    """Build a correction request to send to ChatGPT when the contract reply is invalid.
 
-    The message asks ChatGPT to re-emit the same decision with every BODY block
-    re-encoded as valid, padding-correct base64, without altering the decision JSON.
+    Covers all retryable invalid-contract cases: malformed base64, invalid JSON,
+    missing or broken block markers, field type errors, unknown action, etc.
     """
     return (
-        "前回の返答に issue-centric contract の BODY payload エラーがありました。\n"
+        "前回の返答に issue-centric contract の不正がありました。\n"
         f"エラー詳細: {reason}\n\n"
         "以下の手順で修正した返答を再出力してください。\n\n"
         "- CHATGPT_DECISION_JSON の内容（action / target_issue / flags / summary）は一切変えないこと\n"
-        "- すべての BODY block（CHATGPT_ISSUE_BODY / CHATGPT_CODEX_BODY / CHATGPT_REVIEW / CHATGPT_FOLLOWUP_ISSUE_BODY）を\n"
-        "  有効な base64（padding 含む）で再エンコードして再出力すること\n"
+        "- ===CHATGPT_DECISION_JSON=== / ===END_CHATGPT_DECISION_JSON=== マーカーを正確に配置すること\n"
+        "- BODY block（CHATGPT_ISSUE_BODY / CHATGPT_CODEX_BODY / CHATGPT_REVIEW /\n"
+        "  CHATGPT_FOLLOWUP_ISSUE_BODY）が必要なら有効な base64（padding 含む）で再エンコードすること\n"
+        "- 余計な説明・謝罪・コメントを付けないこと\n"
+        "- 最後に必ず `===CHATGPT_REPLY_COMPLETE===` を付けること\n"
+    )
+
+
+def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_ref: str) -> str:
+    """Build a correction request when target_issue does not match the current ready issue.
+
+    Unlike the generic correction request, this explicitly tells ChatGPT which
+    target_issue to use and forbids changing anything else.
+    """
+    return (
+        "前回の返答の target_issue が現在の ready issue と一致していませんでした。\n"
+        f"エラー詳細: {reason}\n\n"
+        "以下の点を修正して contract を再出力してください。\n\n"
+        f"- `target_issue` は必ず `{current_ready_issue_ref.split(maxsplit=1)[0].strip()}` に合わせること\n"
+        "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / flags / summary）は変更しないこと\n"
+        "- ===CHATGPT_DECISION_JSON=== / ===END_CHATGPT_DECISION_JSON=== マーカーを正確に配置すること\n"
+        "- BODY block が必要なら有効な base64 で再エンコードすること\n"
         "- 余計な説明・謝罪・コメントを付けないこと\n"
         "- 最後に必ず `===CHATGPT_REPLY_COMPLETE===` を付けること\n"
     )
@@ -495,6 +520,7 @@ def stop_for_invalid_issue_centric_contract(
     pending_request_source: str,
     raw_log_path: Path | None = None,
     readiness: IssueCentricReplyReadiness | None = None,
+    correction_count: int = 0,
 ) -> None:
     raw_log = raw_log_path or log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     readiness_lines: list[str] = []
@@ -528,6 +554,20 @@ def stop_for_invalid_issue_centric_contract(
     ).strip() + "\n"
     invalid_log = log_text("invalid_issue_centric_contract", invalid_summary, suffix="md")
     failed_state = dict(state)
+    if correction_count > 0:
+        action_guidance = (
+            f"ChatGPT に自動修正依頼を {correction_count} 回試しましたが修正できませんでした。"
+            " 内容を確認して再実行してください。"
+        )
+    else:
+        action_guidance = "ChatGPT の返答を確認して再実行してください。"
+    user_message = (
+        f"問題: issue-centric contract reply が不正でした。\n"
+        f"対応: {action_guidance}\n"
+        f"詳細: raw dump: {repo_relative(raw_log)}"
+        f" / invalid log: {repo_relative(invalid_log)}"
+        f" / error: {detail}"
+    )
     failed_state.update(
         {
             "mode": "awaiting_user",
@@ -535,12 +575,7 @@ def stop_for_invalid_issue_centric_contract(
             "need_chatgpt_next": False,
             "need_codex_run": False,
             "error": True,
-            "error_message": (
-                "issue-centric contract reply が不正でした: "
-                f"{detail}"
-                f" raw dump: {repo_relative(raw_log)}"
-                f" invalid log: {repo_relative(invalid_log)}"
-            ),
+            "error_message": user_message,
             "chatgpt_decision": "issue_centric_invalid_contract",
             "chatgpt_decision_note": detail,
             "last_issue_centric_decision_log": repo_relative(invalid_log),
@@ -562,7 +597,7 @@ def stop_for_invalid_issue_centric_contract(
         }
     )
     save_state(failed_state)
-    raise BridgeError(str(failed_state["error_message"]))
+    raise BridgeError(user_message)
 
 
 def _validate_ready_issue_target_binding(
@@ -694,47 +729,40 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
             )
         except IssueCentricReplyInvalid as exc:
+            correction_count_early = int(state.get("last_issue_centric_contract_correction_count") or 0)
             stop_for_invalid_issue_centric_contract(
                 dict(state),
                 raw_text=exc.raw_text,
                 detail=exc.detail,
                 pending_request_source=pending_request_source,
+                correction_count=correction_count_early,
             )
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     readiness = classify_issue_centric_reply_readiness(raw_text, after_text=request_text or None)
     if readiness.status == "reply_not_ready":
         raise BridgeError("ChatGPT reply はまだ未完成です。もう一度 fetch を待ってください。")
-    if readiness.status == "reply_complete_no_marker":
-        stop_for_invalid_issue_centric_contract(
-            dict(state),
-            raw_text=raw_text,
-            detail=readiness.reason,
-            pending_request_source=pending_request_source,
-            raw_log_path=raw_log,
-            readiness=readiness,
-        )
-    if readiness.status == "reply_complete_invalid_contract":
+
+    # --- retryable invalid contract handling ---
+    # reply_complete_no_marker and reply_complete_invalid_contract are both retryable
+    # because they mean ChatGPT produced a complete response but with bad formatting.
+    if _is_retryable_contract_error(readiness.reason, readiness.status):
         correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
-        if (
-            _is_malformed_base64_contract_error(readiness.reason)
-            and correction_count < _MAX_BASE64_CORRECTIONS
-        ):
-            correction_text = _build_base64_correction_request(readiness.reason)
-            correction_log = log_text("base64_correction_request", correction_text, suffix="md")
+        if correction_count < _MAX_CONTRACT_CORRECTIONS:
+            correction_text = _build_contract_correction_request(readiness.reason)
+            correction_log = log_text("contract_correction_request", correction_text, suffix="md")
             send_to_chatgpt(correction_text)
             correction_state = clear_error_fields(dict(state))
-            # Preserve pending_request_hash / source / log so the next fetch can pick up the reply.
+            # Preserve pending_request_hash / source / log so the next fetch picks up the reply.
             correction_state["last_issue_centric_contract_correction_count"] = correction_count + 1
             correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
             correction_state["last_issue_centric_contract_correction_reason"] = readiness.reason
             correction_state["mode"] = "waiting_prompt_reply"
             save_state(correction_state)
             raise BridgeStop(
-                "issue-centric contract reply の BODY block が malformed base64 でした。"
-                " 同チャットに correction request を送信しました。"
-                f" 再出力を待って fetch を再実行してください。"
-                f" correction log: {repo_relative(correction_log)}"
-                f" reason: {readiness.reason}"
+                f"問題: issue-centric contract reply が不正でした（{correction_count + 1} 回目）。\n"
+                f"対応: 同じチャットに修正依頼を再送しました。返答後に fetch を再実行してください。\n"
+                f"詳細: correction log: {repo_relative(correction_log)}"
+                f" / reason: {readiness.reason}"
             )
         stop_for_invalid_issue_centric_contract(
             dict(state),
@@ -743,6 +771,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             pending_request_source=pending_request_source,
             raw_log_path=raw_log,
             readiness=readiness,
+            correction_count=correction_count,
         )
     contract_decision = readiness.decision
     if contract_decision is not None:
@@ -752,6 +781,26 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             pending_request_source=pending_request_source,
         )
         if ready_issue_binding_error:
+            binding_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+            if binding_correction_count < _MAX_CONTRACT_CORRECTIONS:
+                current_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+                correction_text = _build_binding_mismatch_correction_request(
+                    ready_issue_binding_error, current_ready_issue_ref
+                )
+                correction_log = log_text("contract_correction_request", correction_text, suffix="md")
+                send_to_chatgpt(correction_text)
+                correction_state = clear_error_fields(dict(state))
+                correction_state["last_issue_centric_contract_correction_count"] = binding_correction_count + 1
+                correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
+                correction_state["last_issue_centric_contract_correction_reason"] = ready_issue_binding_error
+                correction_state["mode"] = "waiting_prompt_reply"
+                save_state(correction_state)
+                raise BridgeStop(
+                    f"問題: ready issue binding が不正でした（{binding_correction_count + 1} 回目）。\n"
+                    f"対応: 同じチャットに修正依頼を再送しました。返答後に fetch を再実行してください。\n"
+                    f"詳細: correction log: {repo_relative(correction_log)}"
+                    f" / reason: {ready_issue_binding_error}"
+                )
             stop_for_invalid_issue_centric_contract(
                 dict(state),
                 raw_text=raw_text,
@@ -759,6 +808,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 pending_request_source=pending_request_source,
                 raw_log_path=raw_log,
                 readiness=readiness,
+                correction_count=binding_correction_count,
             )
         decision_log = log_text(
             "extracted_issue_centric_contract",
