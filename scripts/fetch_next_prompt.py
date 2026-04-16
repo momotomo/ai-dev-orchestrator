@@ -729,14 +729,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
             )
         except IssueCentricReplyInvalid as exc:
-            correction_count_early = int(state.get("last_issue_centric_contract_correction_count") or 0)
-            stop_for_invalid_issue_centric_contract(
-                dict(state),
-                raw_text=exc.raw_text,
-                detail=exc.detail,
-                pending_request_source=pending_request_source,
-                correction_count=correction_count_early,
-            )
+            # Set raw_text so the common correction retry logic below handles this
+            # error the same way as the normal wait-success route.  The readiness
+            # classification is repeated on the same raw_text, yielding the same
+            # retryable status and falling into the unified correction retry path.
+            raw_text = exc.raw_text
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     readiness = classify_issue_centric_reply_readiness(raw_text, after_text=request_text or None)
     if readiness.status == "reply_not_ready":
@@ -980,6 +977,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "thinking_visible": readiness.thinking_visible,
                 "decision_marker_present": readiness.decision_marker_present,
                 "contract_parse_attempted": readiness.contract_parse_attempted,
+                # Clear correction retry state — a valid contract was recovered so
+                # the previous correction loop (if any) is no longer relevant.
+                "last_issue_centric_contract_correction_count": 0,
+                "last_issue_centric_contract_correction_log": "",
+                "last_issue_centric_contract_correction_reason": "",
             }
         )
         if contract_decision.action is IssueCentricAction.CODEX_RUN:

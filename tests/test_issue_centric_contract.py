@@ -3054,6 +3054,137 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(len(sent_texts), 0)
         self.assertEqual(saved_states[0]["mode"], "awaiting_user")
 
+    # ------------------------------------------------------------------
+    # Early exception route (IssueCentricReplyInvalid raised by wait_for_plan_a_or_prompt_reply_text)
+    # ------------------------------------------------------------------
 
-if __name__ == "__main__":
-    unittest.main()
+    def _make_early_exc_patched_context(self, tmp: str, exc: Exception, saved_states: list, sent_texts: list):
+        """Return patches where wait_for_plan_a_or_prompt_reply_text raises exc directly."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        temp_root = Path(tmp)
+
+        def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+            path = temp_root / f"{prefix}.{suffix}"
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        def fake_send(text: str) -> None:
+            sent_texts.append(text)
+
+        return (
+            patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+            patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", side_effect=exc),
+            patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+            patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch.object(fetch_next_prompt, "send_to_chatgpt", side_effect=fake_send),
+            patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}),
+        )
+
+    def _make_early_invalid_exc(self) -> "fetch_next_prompt.IssueCentricReplyInvalid":
+        """Build an IssueCentricReplyInvalid that looks like reply_complete_no_marker."""
+        from fetch_next_prompt import IssueCentricReplyReadiness
+
+        raw = self._NO_MARKER_RAW
+        readiness = IssueCentricReplyReadiness(
+            status="reply_complete_no_marker",
+            reason="completion tag present but issue-centric decision markers are missing.",
+            assistant_text_present=True,
+            assistant_final_content_present=True,
+            assistant_meta_only=False,
+            thinking_visible=False,
+            decision_marker_present=False,
+            reply_complete_tag_present=True,
+            body_block_start_present=False,
+            body_block_end_present=False,
+            partial_body_block_detected=False,
+            open_body_blocks=set(),
+            contract_parse_attempted=False,
+            decision=None,
+        )
+        return fetch_next_prompt.IssueCentricReplyInvalid(
+            readiness.reason,
+            raw_text=raw,
+            readiness=readiness,
+        )
+
+    def test_early_exception_first_retry_sends_correction(self) -> None:
+        """IssueCentricReplyInvalid from wait_for_plan_a: count=0 → send_to_chatgpt, count→1."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        exc = self._make_early_invalid_exc()
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_early_exc_patched_context(tmp, exc, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+        self.assertEqual(len(sent_texts), 1, "send_to_chatgpt must be called on early exception retry")
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 1)
+        self.assertEqual(saved_states[0]["mode"], "waiting_prompt_reply")
+
+    def test_early_exception_second_retry_sends_correction(self) -> None:
+        """IssueCentricReplyInvalid from wait_for_plan_a: count=1 → send_to_chatgpt, count→2."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        exc = self._make_early_invalid_exc()
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_early_exc_patched_context(tmp, exc, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=1), [])
+        self.assertEqual(len(sent_texts), 1)
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 2)
+
+    def test_early_exception_hard_stop_at_max_count(self) -> None:
+        """IssueCentricReplyInvalid from wait_for_plan_a: count=2 → no send, hard BridgeError."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        exc = self._make_early_invalid_exc()
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_early_exc_patched_context(tmp, exc, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaisesRegex(BridgeError, "issue-centric contract reply が不正でした"):
+                    fetch_next_prompt.run(self._base_state(correction_count=2), [])
+        self.assertEqual(len(sent_texts), 0, "no send on hard stop")
+        self.assertEqual(saved_states[0]["mode"], "awaiting_user")
+
+    # ------------------------------------------------------------------
+    # Valid contract clears correction state
+    # ------------------------------------------------------------------
+
+    def _valid_no_action_raw(self) -> str:
+        """A fully valid no_action contract for issue #5 (matches current_ready_issue_ref)."""
+        return build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "No action needed.",
+            }
+        )
+
+    def test_valid_contract_clears_correction_state(self) -> None:
+        """After a valid contract is processed, correction count/log/reason are cleared in state."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=1)
+        state["last_issue_centric_contract_correction_log"] = "logs/prev_correction.md"
+        state["last_issue_centric_contract_correction_reason"] = "some old reason"
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._valid_no_action_raw(), saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                # valid contract raises BridgeStop for no_action (awaiting_user save then stop)
+                try:
+                    fetch_next_prompt.run(dict(state), [])
+                except (BridgeStop, BridgeError):
+                    pass
+        # At least one save_state must have occurred with correction fields cleared
+        self.assertGreater(len(saved_states), 0)
+        last_saved = saved_states[-1]
+        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_count"), 0)
+        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_log"), "")
+        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "")
+
+
