@@ -46,6 +46,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="例外 / recovery / override 用の初回本文。通常入口の代替としては使わない",
     )
     parser.add_argument(
+        "--select-issue",
+        action="store_true",
+        default=False,
+        help="初回 issue 選定モード: ChatGPT に open issue から ready issue を 1 件選ばせる。実装開始は次の request で行う",
+    )
+    parser.add_argument(
         "--max-execution-count",
         type=int,
         default=run_until_stop.DEFAULT_MAX_STEPS,
@@ -93,6 +99,7 @@ def build_derived_args(args: argparse.Namespace) -> argparse.Namespace:
         ]
             + (["--ready-issue-ref", args.ready_issue_ref] if args.ready_issue_ref else [])
             + (["--request-body", args.request_body] if args.request_body else [])
+            + (["--select-issue"] if getattr(args, "select_issue", False) else [])
         ),
         project_config,
     )
@@ -305,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.ready_issue_ref:
         print(f"- ready_issue_ref: {args.ready_issue_ref}", flush=True)
         print("- 通常入口として、この ready issue 参照を使って最初の ChatGPT request を組み立てます。", flush=True)
+    elif getattr(args, "select_issue", False):
+        print("- select-issue モード: open issue から ready issue を 1 件選ばせます。実装開始は次の request で行います。", flush=True)
     elif args.request_body:
         print("- free-form override: 指定された初回本文を例外経路として使います。", flush=True)
     else:
@@ -326,6 +335,8 @@ def main(argv: list[str] | None = None) -> int:
         forwarded_argv.extend(["--ready-issue-ref", args.ready_issue_ref])
     if args.request_body:
         forwarded_argv.extend(["--request-body", args.request_body])
+    if getattr(args, "select_issue", False):
+        forwarded_argv.append("--select-issue")
     return run_until_stop.run(forwarded_argv)
 
 

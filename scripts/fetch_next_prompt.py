@@ -891,6 +891,20 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     else ""
                 )
             )
+        if (
+            pending_request_source.startswith("initial_selection:")
+            and contract_decision.action is IssueCentricAction.NO_ACTION
+            and contract_decision.target_issue
+        ):
+            mutable_state["selected_ready_issue_ref"] = contract_decision.target_issue
+            save_state(mutable_state)
+            raise BridgeStop(
+                f"initial_selection: ChatGPT が ready issue を選定しました: {contract_decision.target_issue}."
+                f" summary: {contract_decision.summary!r}"
+                " 次は --ready-issue-ref でその issue を指定して実行を開始してください。"
+                f" raw dump: {repo_relative(raw_log)}"
+                f" decision log: {repo_relative(decision_log)}"
+            )
         project_config = load_project_config()
         dispatch_result = dispatch_issue_centric_execution(
             contract_decision=contract_decision,

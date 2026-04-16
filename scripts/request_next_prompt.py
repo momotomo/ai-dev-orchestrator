@@ -47,6 +47,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="例外 / recovery / override 経路で使う初回本文。指定時は ready issue 参照の入力を省略する",
     )
     parser.add_argument(
+        "--select-issue",
+        action="store_true",
+        default=False,
+        help="初回 issue 選定モード: ChatGPT に open issue から ready issue を 1 件選ばせる。実装開始は次の request で行う",
+    )
+    parser.add_argument(
         "--project-path",
         default=str(worker_repo_path(project_config)),
         help="例文テンプレート表示用の project path",
@@ -180,6 +186,28 @@ def compose_override_request_text(user_body: str) -> str:
     return f"{body}\n\n{contract_section}\n"
 
 
+def compose_initial_selection_request_text(project_path: Path) -> str:
+    """Return request text asking ChatGPT to select ONE ready issue from open issues.
+
+    This request uses ``initial_selection:`` source prefix so that
+    ready-issue binding validation is NOT applied.  The intent is issue
+    selection only — execution starts in the next request.
+    """
+    project_name = project_path.name or project_path.as_posix()
+    contract_section = build_issue_centric_reply_contract_section()
+    body = "\n".join(
+        [
+            f"対象案件: {project_name}",
+            f"対象 repo: {project_path}",
+            "今回のお願い: open issue の中から、次に着手するのが最も自然な ready issue を 1 件だけ選んでください。",
+            "選んだ issue を `target_issue` に入れて `no_action` で返してください。",
+            "実装の判断や codex_run の指示は今回しないでください。",
+            "選定理由は `summary` に短く書いてください。",
+        ]
+    )
+    return f"{body}\n\n{contract_section}\n"
+
+
 def build_ready_issue_request_source(ready_issue_ref: str) -> str:
     return f"ready_issue:{stable_text_hash(normalize_ready_issue_ref(ready_issue_ref))}"
 
@@ -188,11 +216,17 @@ def build_override_request_source(user_body: str) -> str:
     return f"override:{stable_text_hash(user_body.strip())}"
 
 
+def build_initial_selection_request_source(project_path: str) -> str:
+    return f"initial_selection:{stable_text_hash(project_path.strip())}"
+
+
 def request_source_kind(request_source: str) -> str:
     if request_source.startswith("ready_issue:"):
         return "ready_issue"
     if request_source.startswith(("override:", "initial:")):
         return "override"
+    if request_source.startswith("initial_selection:"):
+        return "initial_selection"
     return "initial"
 
 
@@ -202,6 +236,8 @@ def request_log_prefixes(request_source: str) -> tuple[str, str]:
         return "prepared_prompt_request_from_ready_issue", "sent_prompt_request_from_ready_issue"
     if kind == "override":
         return "prepared_prompt_request_from_override", "sent_prompt_request_from_override"
+    if kind == "initial_selection":
+        return "prepared_prompt_request_from_initial_selection", "sent_prompt_request_from_initial_selection"
     return "prepared_prompt_request", "sent_prompt_request"
 
 
@@ -211,6 +247,8 @@ def request_source_label(request_source: str) -> str:
         return "ready issue 参照"
     if kind == "override":
         return "free-form override"
+    if kind == "initial_selection":
+        return "初回 issue 選定"
     return "初回 request"
 
 
@@ -225,6 +263,15 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str, str]
     ready_issue_ref = normalize_ready_issue_ref(args.ready_issue_ref)
     request_body = args.request_body.strip()
     project_path = resolve_project_path(args.project_path)
+
+    select_issue = bool(getattr(args, "select_issue", False))
+    if select_issue and (ready_issue_ref or request_body):
+        raise BridgeError("`--select-issue` は `--ready-issue-ref` / `--request-body` と同時に使えません。")
+
+    if select_issue:
+        request_text = compose_initial_selection_request_text(project_path)
+        request_source = build_initial_selection_request_source(str(project_path))
+        return request_text, stable_text_hash(request_text), request_source, ""
 
     if ready_issue_ref and request_body:
         raise BridgeError("`--ready-issue-ref` と `--request-body` は同時に使えません。通常入口か override のどちらか 1 つを選んでください。")
@@ -267,7 +314,7 @@ def load_retryable_initial_request(state: dict[str, object]) -> tuple[str, str, 
         return None
     prepared_source = str(state.get("prepared_request_source", "")).strip()
     prepared_hash = str(state.get("prepared_request_hash", "")).strip()
-    if not can_reuse_prepared_request(state) or not prepared_source.startswith(("ready_issue:", "override:", "initial:")):
+    if not can_reuse_prepared_request(state) or not prepared_source.startswith(("ready_issue:", "override:", "initial:", "initial_selection:")):
         return None
     prepared_text = read_prepared_request_text(state)
     if not prepared_text:
