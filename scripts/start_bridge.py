@@ -10,6 +10,8 @@ from _bridge_common import (
     clear_error_fields,
     format_lifecycle_sync_state_note,
     has_pending_issue_centric_codex_dispatch,
+    load_state,
+    resolve_unified_next_action,
     save_state,
 )
 
@@ -219,6 +221,69 @@ def recover_resume_from_pending_issue_centric_codex_dispatch(args: argparse.Name
     return True
 
 
+def _is_safe_stale_fallback_state(state: dict) -> bool:
+    """Return True when the state is a stale no-action fallback with nothing genuinely pending.
+
+    This detects the case where a previous run (e.g. rehearsal) left the state at
+    mode=awaiting_user with old issue-centric fields, which causes resolve_unified_next_action()
+    to return 'no_action' and blocks fresh-start for a new project.
+
+    Safe to reset when ALL of the following hold:
+      - resolve_unified_next_action() == 'no_action'  (bridge is already stuck)
+      - error=false, pause=false                       (no error recovery in progress)
+      - no pending_request_hash                        (no unsent request)
+      - no pending_handoff_hash                        (no handoff in flight)
+      - no last_issue_centric_pending_generation_id    (no pending Codex run)
+      - no last_issue_centric_prepared_generation_id   (no prepared Codex body)
+      - mode NOT in active Codex lifecycle states
+    """
+    _active_codex_modes = {"ready_for_codex", "codex_running", "codex_done"}
+    if str(state.get("mode", "")).strip() in _active_codex_modes:
+        return False
+    if bool(state.get("error")):
+        return False
+    if bool(state.get("pause")):
+        return False
+    if str(state.get("pending_request_hash", "")).strip():
+        return False
+    if str(state.get("pending_handoff_hash", "")).strip():
+        return False
+    if str(state.get("last_issue_centric_pending_generation_id", "")).strip():
+        return False
+    if str(state.get("last_issue_centric_prepared_generation_id", "")).strip():
+        return False
+    return resolve_unified_next_action(state) == "no_action"
+
+
+def reset_stale_fallback_for_fresh_start(args: argparse.Namespace) -> bool:
+    """Reset stale no-action fallback state to allow fresh-start on the new target repo.
+
+    When start_bridge.py is called for a new project (e.g. PromptWeave after rehearsal),
+    the old state.json may have mode=awaiting_user + stale issue-centric fields that
+    cause resolve_unified_next_action() to return 'no_action', blocking fresh-start.
+
+    If the state is safe to reset (nothing genuinely pending), transition to
+    mode=idle + need_chatgpt_prompt=True so the normal fresh-start path proceeds.
+
+    Returns True if a reset was applied, False otherwise.
+    """
+    if args.status or args.doctor or args.clear_error:
+        return False
+    state = load_state()
+    if not _is_safe_stale_fallback_state(state):
+        return False
+    updated = dict(state)
+    updated["mode"] = "idle"
+    updated["need_chatgpt_prompt"] = True
+    save_state(updated)
+    print(
+        "bridge start: stale fallback state (no_action / 保留なし) を検出しました。"
+        " mode=idle + need_chatgpt_prompt=True にリセットして fresh-start へ進みます。",
+        flush=True,
+    )
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     project_config = run_until_stop.load_project_config()
@@ -233,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.clear_error:
         return clear_error_for_resume(args)
     recover_resume_from_pending_issue_centric_codex_dispatch(args)
+    reset_stale_fallback_for_fresh_start(args)
     print("bridge start: このコマンドが通常入口です。", flush=True)
     print(f"- project_path: {project_path_display}", flush=True)
     print(f"- max_execution_count: {args.max_execution_count}", flush=True)
