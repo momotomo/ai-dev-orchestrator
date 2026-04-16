@@ -7,10 +7,14 @@ import sys
 
 import run_until_stop
 from _bridge_common import (
+    FRESH_START_ISSUE_SELECTION_TEMPLATE,
     clear_error_fields,
+    clear_pending_request_fields,
     format_lifecycle_sync_state_note,
     has_pending_issue_centric_codex_dispatch,
+    is_initial_bridge_state,
     load_state,
+    resolve_start_resume_entry_action,
     resolve_unified_next_action,
     save_state,
 )
@@ -74,10 +78,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--clear-error",
-        "--reset",
         action="store_true",
         dest="clear_error",
         help="bridge 側の recoverable error だけを解除する。doctor や stop summary が勧めた時だけ使う",
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        dest="reset",
+        help="state.json を初期状態（mode=idle + need_chatgpt_prompt=True）へ完全リセットする。通常は使わない",
     )
     return parser.parse_args(argv)
 
@@ -262,6 +271,35 @@ def _is_safe_stale_fallback_state(state: dict) -> bool:
     return resolve_unified_next_action(state) == "no_action"
 
 
+def _is_stale_ready_issue_awaiting_state(state: dict) -> bool:
+    """Return True when the state is a stale awaiting_user state from a ready_issue: run.
+
+    This detects the case where a previous ready_issue run (or invalid-contract recovery)
+    left mode=awaiting_user with an old ready_issue: pending request, causing
+    resolve_unified_next_action() to return 'no_action' and blocking --select-issue
+    fresh-start.
+
+    Safe to reset when ALL of the following hold:
+      - mode == "awaiting_user"                              (not waiting_prompt_reply)
+      - pending_request_source starts with "ready_issue:"   (initial request, not continuation)
+      - error=false, pause=false                            (no error recovery in progress)
+      - resolve_unified_next_action() == 'no_action'        (bridge is already stuck)
+
+    Genuine awaiting_user states (chatgpt_decision=human_review/need_info or
+    issue_centric:codex_run) are not affected because they resolve to
+    request_prompt_from_report or dispatch_issue_centric_codex_run, not no_action.
+    """
+    if str(state.get("mode", "")).strip() != "awaiting_user":
+        return False
+    if not str(state.get("pending_request_source", "")).strip().startswith("ready_issue:"):
+        return False
+    if bool(state.get("error")):
+        return False
+    if bool(state.get("pause")):
+        return False
+    return resolve_unified_next_action(state) == "no_action"
+
+
 def reset_stale_fallback_for_fresh_start(args: argparse.Namespace) -> bool:
     """Reset stale no-action fallback state to allow fresh-start on the new target repo.
 
@@ -277,18 +315,46 @@ def reset_stale_fallback_for_fresh_start(args: argparse.Namespace) -> bool:
     if args.status or args.doctor or args.clear_error:
         return False
     state = load_state()
-    if not _is_safe_stale_fallback_state(state):
+    is_safe_stale = _is_safe_stale_fallback_state(state)
+    is_stale_ready_issue = not is_safe_stale and _is_stale_ready_issue_awaiting_state(state)
+    if not is_safe_stale and not is_stale_ready_issue:
         return False
     updated = dict(state)
+    if is_stale_ready_issue:
+        clear_pending_request_fields(updated)
+        updated["last_issue_centric_pending_generation_id"] = ""
+        print(
+            "bridge start: stale ready_issue: pending state (awaiting_user / no_action) を検出しました。"
+            " pending request を解除して fresh-start へ進みます。",
+            flush=True,
+        )
+    else:
+        print(
+            "bridge start: stale fallback state (no_action / 保留なし) を検出しました。"
+            " mode=idle + need_chatgpt_prompt=True にリセットして fresh-start へ進みます。",
+            flush=True,
+        )
     updated["mode"] = "idle"
     updated["need_chatgpt_prompt"] = True
     save_state(updated)
-    print(
-        "bridge start: stale fallback state (no_action / 保留なし) を検出しました。"
-        " mode=idle + need_chatgpt_prompt=True にリセットして fresh-start へ進みます。",
-        flush=True,
-    )
     return True
+
+
+def reset_state_for_fresh_start(args: argparse.Namespace) -> int:
+    """--reset: Unconditionally reset state.json to the initial default state."""
+    from _bridge_common import DEFAULT_STATE  # noqa: PLC0415
+
+    state = load_state()
+    if bool(state.get("pending_request_hash", "")):
+        print(
+            "bridge reset: pending_request_hash が残っています。"
+            " 未送信リクエストが失われる可能性があります。",
+            flush=True,
+        )
+    save_state(DEFAULT_STATE.copy())
+    print("bridge reset: state.json を初期状態 (mode=idle + need_chatgpt_prompt=True) にリセットしました。", flush=True)
+    print("- pending / prepared / error / pause フィールドはすべて初期値に戻りました。", flush=True)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -304,8 +370,66 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.clear_error:
         return clear_error_for_resume(args)
+    if getattr(args, "reset", False):
+        return reset_state_for_fresh_start(args)
     recover_resume_from_pending_issue_centric_codex_dispatch(args)
     reset_stale_fallback_for_fresh_start(args)
+
+    # --- start / resume entry routing ---
+    # When no explicit override args are given, use resolve_start_resume_entry_action
+    # to determine the appropriate entry action.
+    has_explicit_request = bool(args.ready_issue_ref or args.request_body or getattr(args, "select_issue", False))
+    if not has_explicit_request:
+        current_state = run_until_stop.load_state()
+        entry_action = resolve_start_resume_entry_action(current_state)
+        if entry_action == "blocked_error":
+            print(
+                "bridge start: state.error=true のため実行を中止します。"
+                " 先に --clear-error または --doctor で状態を確認してください。",
+                flush=True,
+            )
+            return 1
+        elif entry_action == "blocked_pause":
+            print(
+                "bridge start: state.pause=true のため実行を中止します。"
+                " 先に pause を解除してください。",
+                flush=True,
+            )
+            return 1
+        elif entry_action == "resume_pending_reply":
+            print(
+                "bridge start: 送信済みリクエストへの返信待ち状態を検出しました。"
+                " 返信待ちのまま続きから再開します（二重送信防止）。",
+                flush=True,
+            )
+            # Fall through: run_until_stop will pick up waiting_prompt_reply → fetch_next_prompt
+        elif entry_action == "resume_pending_handoff":
+            print(
+                "bridge start: pending handoff を検出しました。そのまま続きから再開します。",
+                flush=True,
+            )
+        elif entry_action == "resume_prepared_request":
+            print(
+                "bridge start: 準備済みリクエストを検出しました。そのまま続きから再開します。",
+                flush=True,
+            )
+        elif entry_action == "resume_issue_centric_codex_dispatch":
+            print(
+                "bridge start: pending issue-centric codex dispatch を検出しました。そのまま続きから再開します。",
+                flush=True,
+            )
+        elif entry_action == "fresh_start_issue_selection":
+            # Initial state: inject Issue confirmation template as the first request body.
+            repo = str(project_config.get("github_repository", "") or effective_project_path)
+            issue_selection_body = FRESH_START_ISSUE_SELECTION_TEMPLATE.format(repo=repo)
+            print(
+                "bridge start: 初期状態を検出しました。Issue 確認テンプレートを最初のリクエストとして送信します。",
+                flush=True,
+            )
+            print(f"- repo: {repo}", flush=True)
+            # Inject the template as the initial request body so run_until_stop handles the send.
+            args.request_body = issue_selection_body
+
     print("bridge start: このコマンドが通常入口です。", flush=True)
     print(f"- project_path: {project_path_display}", flush=True)
     print(f"- max_execution_count: {args.max_execution_count}", flush=True)

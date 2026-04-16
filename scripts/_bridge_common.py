@@ -1104,6 +1104,105 @@ def has_pending_issue_centric_codex_dispatch(state: Mapping[str, Any]) -> bool:
     )
 
 
+def is_initial_bridge_state(state: Mapping[str, Any]) -> bool:
+    """Return True when state is at the factory-default (just-reset / brand-new) state.
+
+    The canonical initial state has:
+      - mode == "idle"
+      - need_chatgpt_prompt == True
+      - no pending/prepared request hashes
+      - no issue-centric artefacts
+      - error=False, pause=False
+    """
+    if str(state.get("mode", "")).strip() != "idle":
+        return False
+    if not bool(state.get("need_chatgpt_prompt", True)):
+        return False
+    if bool(state.get("error")):
+        return False
+    if bool(state.get("pause")):
+        return False
+    if str(state.get("pending_request_hash", "")).strip():
+        return False
+    if str(state.get("pending_handoff_hash", "")).strip():
+        return False
+    if str(state.get("prepared_request_hash", "")).strip():
+        return False
+    if str(state.get("last_issue_centric_pending_generation_id", "")).strip():
+        return False
+    if str(state.get("last_issue_centric_prepared_generation_id", "")).strip():
+        return False
+    return True
+
+
+# --- Start / resume entry action ---
+#
+# Returns one of the seven canonical start-entry action strings:
+#
+#   blocked_error                    — state.error=true, must clear before resuming
+#   blocked_pause                    — state.pause=true, must unpause before resuming
+#   resume_pending_reply             — a sent request is waiting for a ChatGPT reply
+#   resume_pending_handoff           — a rotation handoff is pending confirmation
+#   resume_prepared_request          — a prepared-but-not-yet-sent request is ready
+#   resume_issue_centric_codex_dispatch — a codex dispatch is waiting to be launched
+#   fresh_start_issue_selection      — state is at the initial default, start from scratch
+#
+# If none of the seven conditions match, returns "" so the caller can delegate to
+# the existing routing (resolve_unified_next_action / run_until_stop).
+_START_ENTRY_ACTIONS = frozenset(
+    {
+        "blocked_error",
+        "blocked_pause",
+        "resume_pending_reply",
+        "resume_pending_handoff",
+        "resume_prepared_request",
+        "resume_issue_centric_codex_dispatch",
+        "fresh_start_issue_selection",
+    }
+)
+
+FRESH_START_ISSUE_SELECTION_TEMPLATE = (
+    "この repo（{repo}）は Issue 前提で進めます。\n"
+    "まず、今回進める Issue を確認してください。\n"
+    "必要なら、親 Issue のまま進めず child issue を切る判断をして構いません。\n"
+    "返答は issue-centric contract に従ってください。\n"
+)
+
+
+def resolve_start_resume_entry_action(state: Mapping[str, Any]) -> str:
+    """Determine the start / resume entry action based on state.
+
+    Evaluation order (fixed):
+      1. error=true          → "blocked_error"
+      2. pause=true          → "blocked_pause"
+      3. pending_request_*   → "resume_pending_reply"
+      4. pending_handoff_*   → "resume_pending_handoff"
+      5. prepared_request_*  → "resume_prepared_request"
+      6. pending codex dispatch → "resume_issue_centric_codex_dispatch"
+      7. initial state       → "fresh_start_issue_selection"
+      8. otherwise           → "" (delegate to existing routing)
+
+    Returns a string from _START_ENTRY_ACTIONS or "" for delegation.
+    """
+    if bool(state.get("error")):
+        return "blocked_error"
+    if bool(state.get("pause")):
+        return "blocked_pause"
+    if str(state.get("pending_request_hash", "")).strip():
+        return "resume_pending_reply"
+    if str(state.get("pending_handoff_hash", "")).strip():
+        return "resume_pending_handoff"
+    prepared_hash = str(state.get("prepared_request_hash", "")).strip()
+    prepared_source = str(state.get("prepared_request_source", "")).strip()
+    if prepared_hash and prepared_source:
+        return "resume_prepared_request"
+    if has_pending_issue_centric_codex_dispatch(state):
+        return "resume_issue_centric_codex_dispatch"
+    if is_initial_bridge_state(state):
+        return "fresh_start_issue_selection"
+    return ""
+
+
 def prepared_request_action(state: Mapping[str, Any]) -> str:
     prepared_source = str(state.get("prepared_request_source", "")).strip()
     if prepared_source.startswith(("report:", "handoff:", "human_review_continue:")):
@@ -1493,6 +1592,7 @@ def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
     Returns one of:
         "request_next_prompt"        - idle initial request path
         "request_prompt_from_report" - awaiting_user or next-phase report path
+        "fetch_next_prompt"          - reply-wait mode with pending request hash
         "completed"                  - session already finished
         "no_action"                  - no matching condition
     """
@@ -1503,6 +1603,16 @@ def resolve_next_generation_transition(state: Mapping[str, Any]) -> str:
         return "request_prompt_from_report"
     if mode == "idle" and bool(state.get("need_chatgpt_next")):
         return "request_prompt_from_report"
+    # Reply-wait modes: if a pending request hash is present, prioritize fetching
+    # over generation lifecycle.  request_next_prompt.py sets pending_request_hash
+    # via save_pending_request() but does not set last_issue_centric_pending_generation_id,
+    # so generation_lifecycle stays "fresh_available" and runtime_action becomes
+    # "need_next_generation".  Without this branch, waiting_prompt_reply + pending hash
+    # would fall through to no_action here instead of going to fetch_next_prompt.
+    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"} and str(
+        state.get("pending_request_hash", "")
+    ).strip():
+        return "fetch_next_prompt"
     if is_completed_state(state):
         return "completed"
     return "no_action"
