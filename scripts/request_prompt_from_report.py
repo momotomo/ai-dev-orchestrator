@@ -128,6 +128,24 @@ def _parse_report_summary_fields(report_text: str) -> dict[str, str]:
     return fields
 
 
+def _is_ready_bounded_continuation(state: dict[str, object]) -> bool:
+    """Return True when the current continuation is for a Ready:-prefixed bounded issue.
+
+    A continuation qualifies as a Ready: bounded issue if ``current_ready_issue_ref``
+    (saved by request_next_prompt when ``--ready-issue-ref`` is supplied) is non-empty
+    and its value contains the "Ready:" prefix (case-insensitive).  This is the naming
+    convention used by the orchestrator to mark a bounded single-issue work item.
+
+    When ``current_ready_issue_ref`` is absent or does not start with "Ready:", the
+    issue is treated as a parent / planned issue, allowing child / follow-up creation
+    in the completion followup continuation.
+    """
+    ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+    if not ready_issue_ref:
+        return False
+    return "ready:" in ready_issue_ref.lower()
+
+
 def _build_completion_followup_section(state: dict[str, object], report_text: str) -> str:
     summary_fields = _parse_report_summary_fields(report_text)
     if summary_fields.get("result", "").strip().lower() != "completed":
@@ -156,13 +174,34 @@ def _build_completion_followup_section(state: dict[str, object], report_text: st
         f"- archived_report_result: {summary_fields.get('result', '')}",
         f"- archived_report_live_ready: {summary_fields.get('live_ready', '')}",
         f"- target_issue: {target_issue}",
-        "- directive: 今回は新しい Codex 用 prompt を作りません。今回判断するのは lifecycle automation だけです。",
-        "- directive: この continuation で action=codex_run は不正です。CHATGPT_CODEX_BODY を返さないでください。",
-        "- directive: 正規経路は action=no_action です。create_followup_issue=false のまま返してください。",
-        "- directive: current issue を閉じるべきなら close_current_issue=true を返してください。閉じない判断でも action=no_action のまま返してください。",
-        "- directive: target_issue は current issue の issue ref だけを使ってください。",
-        "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
     ]
+
+    if _is_ready_bounded_continuation(state):
+        # Bounded Ready: issue — close-only lifecycle decision, no new Codex prompt.
+        lines += [
+            "- directive: 今回は新しい Codex 用 prompt を作りません。今回判断するのは lifecycle automation だけです。",
+            "- directive: この continuation で action=codex_run は不正です。CHATGPT_CODEX_BODY を返さないでください。",
+            "- directive: 正規経路は action=no_action です。create_followup_issue=false のまま返してください。",
+            "- directive: current issue を閉じるべきなら close_current_issue=true を返してください。閉じない判断でも action=no_action のまま返してください。",
+            "- directive: target_issue は current issue の issue ref だけを使ってください。",
+            "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
+        ]
+    else:
+        # Parent / planned / non-Ready: issue — allow child issue creation, additional
+        # codex run, or close.  These issues have possible sub-issues and are not
+        # bounded to a single Ready: work item.
+        lines += [
+            "- directive: target_issue は parent / planned issue です (Ready: 接頭辞なし)。",
+            "- directive: archived report を踏まえて、以下の action から最適な 1 つを選んでください:",
+            "  - action=issue_create + create_followup_issue=true: target_issue の下に child / follow-up issue を 1 件作る",
+            "  - action=codex_run: target_issue に対してもう 1 フェーズ bounded に続ける (Codex 用 prompt を作成)",
+            "  - action=no_action + close_current_issue=true: target_issue を閉じて次へ進む",
+            "  - action=no_action + close_current_issue=false: 今回は何もしない",
+            "- directive: child / follow-up issue が適切な場合は action=issue_create + create_followup_issue=true を返してください。",
+            "- directive: target_issue は current issue の issue ref だけを使ってください。",
+            "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
+        ]
+
     return "\n".join(lines)
 
 
@@ -188,11 +227,18 @@ def _resolve_completion_followup_request(
     else:
         merged_section = completion_section
 
-    completion_next_todo = (
-        "新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
-        " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
-    )
-    completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
+    if _is_ready_bounded_continuation(state):
+        completion_next_todo = (
+            "新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
+            " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
+        )
+        completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
+    else:
+        completion_next_todo = (
+            "archived report を踏まえて、parent / planned issue の continuation を issue-centric contract で判断してください。"
+            " child / follow-up issue の作成 (action=issue_create)、追加 Codex 実行 (action=codex_run)、issue close (action=no_action + close_current_issue=true) から選んでください。"
+        )
+        completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
     return merged_section, completion_next_todo, completion_open_questions
 
 

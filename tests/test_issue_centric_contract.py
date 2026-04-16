@@ -2621,5 +2621,247 @@ class ReplyCompleteTagGateTests(unittest.TestCase):
             self.fail("tool-call labels without terminal tag must not raise IssueCentricReplyInvalid")
 
 
+class Base64WhitespaceToleranceTests(unittest.TestCase):
+    """Whitespace inside base64 payload blocks must be tolerated.
+
+    LLM responses sometimes insert spaces or newlines inside a base64 block.
+    The contract and transport layers must strip whitespace before validation,
+    while truly invalid payloads (non-base64 characters) still raise errors.
+    """
+
+    def _envelope(self, action: str = "codex_run") -> dict[str, object]:
+        if action == "issue_create":
+            return {
+                "action": "issue_create",
+                "target_issue": "#1 test",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "ws tolerance test",
+            }
+        return {
+            "action": "codex_run",
+            "target_issue": "#1 test",
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": "ws tolerance test",
+        }
+
+    def test_codex_body_with_intra_line_spaces_is_accepted(self) -> None:
+        """CHATGPT_CODEX_BODY with spaces inside a line must parse successfully."""
+        clean = b64("hello world task")
+        # Insert a space in the middle of the base64 string
+        spaced = clean[:8] + " " + clean[8:]
+        raw = build_raw_reply(
+            self._envelope(),
+            parts=[
+                block("codex", spaced),
+                block("json", json.dumps(self._envelope(), ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        decoded = base64.b64decode(decision.codex_body_base64 + "==", validate=False)
+        self.assertEqual(decoded.decode("utf-8"), "hello world task")
+
+    def test_codex_body_with_newlines_inside_block_is_accepted(self) -> None:
+        """CHATGPT_CODEX_BODY with extra newlines inside the block must parse."""
+        clean = b64("hello world task")
+        # Split the base64 string across multiple lines (LLM word-wrap behavior)
+        split = clean[:6] + "\n" + clean[6:12] + "\n" + clean[12:]
+        raw = build_raw_reply(
+            self._envelope(),
+            parts=[
+                block("codex", split),
+                block("json", json.dumps(self._envelope(), ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+
+    def test_codex_body_with_tabs_inside_block_is_accepted(self) -> None:
+        """CHATGPT_CODEX_BODY with tab characters inside must parse."""
+        clean = b64("tabbed content")
+        tabbed = clean[:4] + "\t" + clean[4:]
+        raw = build_raw_reply(
+            self._envelope(),
+            parts=[
+                block("codex", tabbed),
+                block("json", json.dumps(self._envelope(), ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+
+    def test_issue_body_with_intra_line_spaces_is_accepted(self) -> None:
+        """CHATGPT_ISSUE_BODY with spaces inside a line must parse successfully."""
+        clean = b64("issue body content")
+        spaced = clean[:5] + " " + clean[5:]
+        raw = build_raw_reply(
+            self._envelope("issue_create"),
+            parts=[
+                block("issue", spaced),
+                block("json", json.dumps(self._envelope("issue_create"), ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+
+    def test_truly_invalid_payload_still_raises(self) -> None:
+        """Non-base64 characters (e.g. '!', '@') still raise IssueCentricContractError."""
+        invalid_payload = "!!not-valid-base64!!"
+        raw = build_raw_reply(
+            self._envelope(),
+            parts=[
+                block("codex", invalid_payload),
+                block("json", json.dumps(self._envelope(), ensure_ascii=True)),
+            ],
+        )
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError, "not valid base64"
+        ):
+            issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+
+    def test_normalize_base64_payload_removes_all_whitespace(self) -> None:
+        """_normalize_base64_payload (via extract_body_block) removes space, tab, CR, LF."""
+        from issue_centric_contract import _normalize_base64_payload
+        clean = b64("whitespace test")
+        dirty = " " + clean[:4] + "\t" + clean[4:8] + "\r\n" + clean[8:]
+        result = _normalize_base64_payload(dirty, name="TEST")
+        self.assertEqual(result, clean)
+
+
+class FollowupIssueBodyFallbackTests(unittest.TestCase):
+    """issue_create + create_followup_issue=True + CHATGPT_FOLLOWUP_ISSUE_BODY (no CHATGPT_ISSUE_BODY).
+
+    Root cause: _validate_decision() required CHATGPT_ISSUE_BODY unconditionally for
+    issue_create, even when create_followup_issue=True and CHATGPT_FOLLOWUP_ISSUE_BODY
+    was provided. The fix: allow issue_body_base64=None when create_followup_issue=True
+    and followup_issue_body_base64 is present.
+    """
+
+    def _followup_envelope(self) -> dict[str, object]:
+        return {
+            "action": "issue_create",
+            "target_issue": "#1 PromptWeave",
+            "close_current_issue": False,
+            "create_followup_issue": True,
+            "summary": "Create child issue via followup body",
+        }
+
+    def test_issue_create_followup_body_only_is_accepted(self) -> None:
+        """issue_create + create_followup_issue=True + CHATGPT_FOLLOWUP_ISSUE_BODY only → accepted."""
+        envelope = self._followup_envelope()
+        followup_b64 = b64("# Child Issue\n\nBody of the follow-up issue.")
+        raw = build_raw_reply(
+            envelope,
+            parts=[
+                block("followup", followup_b64),
+                block("json", json.dumps(envelope, ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertIsNone(decision.issue_body_base64)
+        self.assertEqual(decision.followup_issue_body_base64, followup_b64)
+        self.assertTrue(decision.create_followup_issue)
+
+    def test_issue_create_issue_body_only_still_accepted(self) -> None:
+        """issue_create + CHATGPT_ISSUE_BODY only (no create_followup_issue) → still accepted."""
+        envelope: dict[str, object] = {
+            "action": "issue_create",
+            "target_issue": "#2 Other",
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": "Normal issue create",
+        }
+        issue_b64 = b64("# Main Issue\n\nBody.")
+        raw = build_raw_reply(
+            envelope,
+            parts=[
+                block("issue", issue_b64),
+                block("json", json.dumps(envelope, ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.issue_body_base64, issue_b64)
+        self.assertIsNone(decision.followup_issue_body_base64)
+
+    def test_issue_create_no_body_at_all_is_rejected(self) -> None:
+        """issue_create with neither CHATGPT_ISSUE_BODY nor CHATGPT_FOLLOWUP_ISSUE_BODY → error."""
+        envelope: dict[str, object] = {
+            "action": "issue_create",
+            "target_issue": "#3 Missing",
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": "No body at all",
+        }
+        raw = build_raw_reply(
+            envelope,
+            parts=[block("json", json.dumps(envelope, ensure_ascii=True))],
+        )
+        with self.assertRaisesRegex(
+            issue_centric_contract.IssueCentricContractError, "requires CHATGPT_ISSUE_BODY"
+        ):
+            issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+
+    def test_issue_create_create_followup_true_no_followup_body_is_rejected(self) -> None:
+        """issue_create + create_followup_issue=True but NO body blocks at all → error."""
+        envelope = self._followup_envelope()
+        raw = build_raw_reply(
+            envelope,
+            parts=[block("json", json.dumps(envelope, ensure_ascii=True))],
+        )
+        # create_followup_issue=True requires CHATGPT_FOLLOWUP_ISSUE_BODY fires first
+        with self.assertRaises(issue_centric_contract.IssueCentricContractError):
+            issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+
+    def test_issue_create_issue_body_takes_priority_over_followup_body(self) -> None:
+        """When both CHATGPT_ISSUE_BODY and CHATGPT_FOLLOWUP_ISSUE_BODY are present, issue_body wins."""
+        envelope = self._followup_envelope()
+        issue_b64 = b64("# Primary Issue\n\nThis is the primary body.")
+        followup_b64 = b64("# Child Issue\n\nThis is the child body.")
+        raw = build_raw_reply(
+            envelope,
+            parts=[
+                block("issue", issue_b64),
+                block("followup", followup_b64),
+                block("json", json.dumps(envelope, ensure_ascii=True)),
+            ],
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision.issue_body_base64, issue_b64)
+        self.assertEqual(decision.followup_issue_body_base64, followup_b64)
+
+    def test_primary_body_returns_followup_body_when_issue_body_absent(self) -> None:
+        """transport primary_body falls back to followup_issue_body when issue_body=None."""
+        followup_b64 = b64("# Child Issue\n\nFallback body.")
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue="#1",
+            close_current_issue=False,
+            create_followup_issue=True,
+            summary="fallback test",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=followup_b64,
+            raw_json="",
+            raw_segment="",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIsNone(prepared.issue_body)
+        self.assertIsNotNone(prepared.followup_issue_body)
+        # primary_body must fall back to followup_issue_body
+        self.assertIsNotNone(prepared.primary_body)
+        assert prepared.primary_body is not None
+        self.assertEqual(prepared.primary_body.decoded_text, "# Child Issue\n\nFallback body.")
+
+
 if __name__ == "__main__":
     unittest.main()

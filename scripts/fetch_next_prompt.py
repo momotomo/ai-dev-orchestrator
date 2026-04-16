@@ -454,6 +454,39 @@ def parse_issue_centric_reply_for_fetch(
     return readiness.decision
 
 
+# Maximum number of automatic base64 correction requests per pending request.
+_MAX_BASE64_CORRECTIONS = 1
+
+
+def _is_malformed_base64_contract_error(reason: str) -> bool:
+    """Return True when the invalid-contract reason is a malformed base64 payload.
+
+    The contract module raises:
+      "<BLOCK_NAME> block is not valid base64: <binascii error message>"
+    This helper matches that pattern so we can distinguish it from other
+    invalid-contract reasons (missing markers, bad JSON, wrong action combos, …).
+    """
+    return "is not valid base64" in reason
+
+
+def _build_base64_correction_request(reason: str) -> str:
+    """Build a correction request to send to ChatGPT when a BODY block is malformed base64.
+
+    The message asks ChatGPT to re-emit the same decision with every BODY block
+    re-encoded as valid, padding-correct base64, without altering the decision JSON.
+    """
+    return (
+        "前回の返答に issue-centric contract の BODY payload エラーがありました。\n"
+        f"エラー詳細: {reason}\n\n"
+        "以下の手順で修正した返答を再出力してください。\n\n"
+        "- CHATGPT_DECISION_JSON の内容（action / target_issue / flags / summary）は一切変えないこと\n"
+        "- すべての BODY block（CHATGPT_ISSUE_BODY / CHATGPT_CODEX_BODY / CHATGPT_REVIEW / CHATGPT_FOLLOWUP_ISSUE_BODY）を\n"
+        "  有効な base64（padding 含む）で再エンコードして再出力すること\n"
+        "- 余計な説明・謝罪・コメントを付けないこと\n"
+        "- 最後に必ず `===CHATGPT_REPLY_COMPLETE===` を付けること\n"
+    )
+
+
 def stop_for_invalid_issue_centric_contract(
     state: dict[str, object],
     *,
@@ -681,6 +714,28 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             readiness=readiness,
         )
     if readiness.status == "reply_complete_invalid_contract":
+        correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+        if (
+            _is_malformed_base64_contract_error(readiness.reason)
+            and correction_count < _MAX_BASE64_CORRECTIONS
+        ):
+            correction_text = _build_base64_correction_request(readiness.reason)
+            correction_log = log_text("base64_correction_request", correction_text, suffix="md")
+            send_to_chatgpt(correction_text)
+            correction_state = clear_error_fields(dict(state))
+            # Preserve pending_request_hash / source / log so the next fetch can pick up the reply.
+            correction_state["last_issue_centric_contract_correction_count"] = correction_count + 1
+            correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
+            correction_state["last_issue_centric_contract_correction_reason"] = readiness.reason
+            correction_state["mode"] = "waiting_prompt_reply"
+            save_state(correction_state)
+            raise BridgeStop(
+                "issue-centric contract reply の BODY block が malformed base64 でした。"
+                " 同チャットに correction request を送信しました。"
+                f" 再出力を待って fetch を再実行してください。"
+                f" correction log: {repo_relative(correction_log)}"
+                f" reason: {readiness.reason}"
+            )
         stop_for_invalid_issue_centric_contract(
             dict(state),
             raw_text=raw_text,

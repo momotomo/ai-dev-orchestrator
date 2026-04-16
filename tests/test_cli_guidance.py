@@ -3021,5 +3021,124 @@ class CloseoutFacingHumanTextLifecycleSyncSurfacingTests(unittest.TestCase):
         self.assertIn("補足:", summary)
 
 
+class WaitingPromptReplyFetchTransitionTests(unittest.TestCase):
+    """resolve_next_generation_transition() routes waiting_prompt_reply + pending hash
+    to fetch_next_prompt instead of no_action.
+
+    Root cause: request_next_prompt.py calls save_pending_request() but does NOT set
+    last_issue_centric_pending_generation_id, so generation_lifecycle stays
+    "fresh_available" and runtime_action becomes "need_next_generation".  Without the
+    reply-wait branch in resolve_next_generation_transition(), waiting_prompt_reply + hash
+    would fall through to no_action.
+    """
+
+    def test_waiting_prompt_reply_with_pending_hash_routes_to_fetch(self) -> None:
+        """waiting_prompt_reply + pending_request_hash → fetch_next_prompt, not no_action."""
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "abc123hash",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "fetch_next_prompt")
+
+    def test_waiting_prompt_reply_without_pending_hash_stays_no_action(self) -> None:
+        """waiting_prompt_reply without pending_request_hash → no_action (genuine stale)."""
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "no_action")
+
+    def test_extended_wait_with_pending_hash_routes_to_fetch(self) -> None:
+        """extended_wait + pending_request_hash → fetch_next_prompt."""
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "extended_wait",
+            "pending_request_hash": "hashxyz",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "fetch_next_prompt")
+
+    def test_past_no_action_chatgpt_decision_does_not_block_fetch(self) -> None:
+        """A stale chatgpt_decision=no_action field must not prevent fetch when hash present."""
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash456",
+            "pending_request_source": "ready_issue:#42 some task",
+            "pending_request_signal": "conversation_url",
+            "chatgpt_decision": "no_action",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "fetch_next_prompt")
+
+    def test_unified_action_waiting_prompt_reply_with_pending_hash_is_fetch(self) -> None:
+        """resolve_unified_next_action() returns fetch_next_prompt for the full bug state."""
+        from _bridge_common import resolve_unified_next_action
+        # Minimal state replicating the bug: request_next_prompt ran successfully,
+        # last_issue_centric_pending_generation_id is NOT set (request_next_prompt
+        # does not set it), but pending_request_hash is present.
+        state: dict[str, object] = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "bugrepro_hash",
+            "pending_request_source": "ready_issue:#1 PromptWeave initial",
+            "pending_request_log": "bridge/history/sent_prompt_request.md",
+            "pending_request_signal": "conversation_url",
+            "last_issue_centric_pending_generation_id": "",
+            "error": False,
+            "pause": False,
+        }
+        self.assertEqual(resolve_unified_next_action(state), "fetch_next_prompt")
+
+    def test_awaiting_user_no_pending_hash_not_affected(self) -> None:
+        """awaiting_user without pending hash is not changed by the new branch."""
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "human_review",
+            "pending_request_hash": "",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "request_prompt_from_report")
+
+
+class MalformedBase64CorrectionHelperTests(unittest.TestCase):
+    """Unit-tests for the malformed-base64 detection and correction helpers in fetch_next_prompt."""
+
+    def setUp(self) -> None:
+        import fetch_next_prompt  # noqa: E402 — imported here to avoid heavy top-level side effects
+        self.fp = fetch_next_prompt
+
+    def test_is_malformed_base64_returns_true_for_data_character_error(self) -> None:
+        """The real binascii error from misaligned base64 is detected correctly."""
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string: number of data characters (2277) cannot be 1 more than a multiple of 4"
+        self.assertTrue(self.fp._is_malformed_base64_contract_error(reason))
+
+    def test_is_malformed_base64_returns_true_for_non_base64_char_error(self) -> None:
+        reason = "CHATGPT_ISSUE_BODY block is not valid base64: Non-base64 digit found"
+        self.assertTrue(self.fp._is_malformed_base64_contract_error(reason))
+
+    def test_is_malformed_base64_returns_false_for_missing_block(self) -> None:
+        """Missing-block errors are unrelated to base64 corruption."""
+        reason = "CHATGPT_CODEX_BODY block is required but missing."
+        self.assertFalse(self.fp._is_malformed_base64_contract_error(reason))
+
+    def test_is_malformed_base64_returns_false_for_bad_json(self) -> None:
+        reason = "CHATGPT_DECISION_JSON is not valid JSON: Expecting value: line 1 column 1 (char 0)"
+        self.assertFalse(self.fp._is_malformed_base64_contract_error(reason))
+
+    def test_build_base64_correction_request_contains_reason(self) -> None:
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: ..."
+        text = self.fp._build_base64_correction_request(reason)
+        self.assertIn(reason, text)
+
+    def test_build_base64_correction_request_contains_reply_complete_tag(self) -> None:
+        text = self.fp._build_base64_correction_request("some reason")
+        self.assertIn("===CHATGPT_REPLY_COMPLETE===", text)
+
+    def test_build_base64_correction_request_mentions_decision_json(self) -> None:
+        text = self.fp._build_base64_correction_request("some reason")
+        self.assertIn("CHATGPT_DECISION_JSON", text)
+
+
 if __name__ == "__main__":
     unittest.main()
+

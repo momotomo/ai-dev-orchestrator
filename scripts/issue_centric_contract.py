@@ -249,7 +249,7 @@ def _extract_single_block(
 
 
 def _normalize_base64_payload(raw_body: str, *, name: str) -> str:
-    normalized = "".join(line.strip() for line in raw_body.splitlines() if line.strip())
+    normalized = "".join(raw_body.split())
     if not normalized:
         raise IssueCentricContractError(f"{name} block is present but empty.")
 
@@ -464,7 +464,9 @@ def _validate_decision(decision: IssueCentricDecision) -> None:
         raise IssueCentricContractError("CHATGPT_FOLLOWUP_ISSUE_BODY is allowed only when create_followup_issue=true.")
 
     if decision.action is IssueCentricAction.ISSUE_CREATE:
-        if decision.issue_body_base64 is None:
+        if decision.issue_body_base64 is None and not (
+            decision.create_followup_issue and decision.followup_issue_body_base64 is not None
+        ):
             raise IssueCentricContractError("issue_create requires CHATGPT_ISSUE_BODY.")
         if decision.codex_body_base64 is not None:
             raise IssueCentricContractError("issue_create must not include CHATGPT_CODEX_BODY.")

@@ -81,7 +81,13 @@ class PreparedIssueCentricDecision:
     @property
     def primary_body(self) -> IssueCentricDecodedBody | None:
         if self.decision.action is IssueCentricAction.ISSUE_CREATE:
-            return self.issue_body
+            if self.issue_body is not None:
+                return self.issue_body
+            # Fallback: create_followup_issue=True with CHATGPT_FOLLOWUP_ISSUE_BODY
+            # as the only issue body (LLM omitted CHATGPT_ISSUE_BODY).
+            if self.decision.create_followup_issue and self.followup_issue_body is not None:
+                return self.followup_issue_body
+            return None
         if self.decision.action is IssueCentricAction.CODEX_RUN:
             return self.codex_body
         if self.decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED:
@@ -290,7 +296,7 @@ def _decode_optional_body(
     if raw_payload is None:
         return None
 
-    normalized = "".join(line.strip() for line in raw_payload.splitlines() if line.strip())
+    normalized = "".join(raw_payload.split())
     if not normalized:
         raise IssueCentricBodyDecodeError(
             f"{_BLOCK_NAMES[kind]} payload decodes to empty text."

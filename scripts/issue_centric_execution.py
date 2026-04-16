@@ -104,9 +104,9 @@ def dispatch_issue_centric_execution(
         )
 
     if decision_action == "issue_create":
-        if contract_decision.create_followup_issue and materialized.prepared.issue_body is None:
+        if contract_decision.create_followup_issue and materialized.prepared.primary_body is None:
             blocked_reason = (
-                "issue_create + create_followup_issue requires a prepared CHATGPT_ISSUE_BODY artifact before any issue mutation can run."
+                "issue_create + create_followup_issue requires a prepared CHATGPT_ISSUE_BODY or CHATGPT_FOLLOWUP_ISSUE_BODY artifact before any issue mutation can run."
             )
             mutable_state.update(
                 {
@@ -198,7 +198,14 @@ def dispatch_issue_centric_execution(
         followup_execution = None
         close_execution = None
         done_sync_execution = None
-        if contract_decision.create_followup_issue and execution.status == "completed":
+        # When issue_body is None, we used followup_issue_body as the primary body via the
+        # primary_body fallback.  Running execute_followup_issue_action_fn would create a
+        # second issue from the same followup_issue_body — skip it to avoid duplicate creation.
+        if (
+            contract_decision.create_followup_issue
+            and execution.status == "completed"
+            and materialized.prepared.issue_body is not None
+        ):
             followup_execution = execute_followup_issue_action_fn(
                 materialized.prepared,
                 prior_state=prior_state,

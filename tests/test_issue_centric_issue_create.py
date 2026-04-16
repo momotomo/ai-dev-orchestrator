@@ -1060,5 +1060,363 @@ class IssueCreateProjectSyncSignalTests(unittest.TestCase):
         self.assertNotIn("[project_sync:", result.safe_stop_reason)
 
 
+def build_followup_only_decision(
+    followup_text: str,
+) -> issue_centric_contract.IssueCentricDecision:
+    """issue_body_base64=None, followup_issue_body_base64=set, create_followup_issue=True."""
+    return issue_centric_contract.IssueCentricDecision(
+        action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+        target_issue=None,
+        close_current_issue=False,
+        create_followup_issue=True,
+        summary="Followup-only issue create.",
+        issue_body_base64=None,  # omitted on purpose
+        codex_body_base64=None,
+        review_base64=None,
+        followup_issue_body_base64=b64(followup_text),
+        raw_json="{}",
+        raw_segment="segment",
+    )
+
+
+class PrimaryBodyFallbackExecutionTests(unittest.TestCase):
+    """Verify that issue_create execution uses primary_body (with followup fallback).
+
+    When action=issue_create and CHATGPT_ISSUE_BODY is absent but
+    create_followup_issue=True + CHATGPT_FOLLOWUP_ISSUE_BODY is present,
+    primary_body returns followup_issue_body and execution should succeed.
+    """
+
+    def _fake_creator(self, repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+        return issue_centric_issue_create.CreatedGitHubIssue(
+            number=99,
+            url="https://github.com/example/repo/issues/99",
+            title=title,
+            repository=repository,
+            node_id="ISSUE_node_99",
+        )
+
+    def test_materialize_draft_uses_followup_body_when_issue_body_absent(self) -> None:
+        decision = build_followup_only_decision("# Followup Title\n\nFollowup body.\n")
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        # primary_body falls back to followup_issue_body
+        self.assertIsNone(prepared.issue_body)
+        self.assertIsNotNone(prepared.followup_issue_body)
+        self.assertIsNotNone(prepared.primary_body)
+        draft = issue_centric_issue_create.materialize_issue_create_draft(
+            prepared,
+            source_artifact_path="logs/followup-body.md",
+        )
+        self.assertEqual(draft.title, "Followup Title")
+        self.assertEqual(draft.body, "Followup body.\n")
+
+    def test_materialize_draft_raises_when_both_bodies_absent(self) -> None:
+        # Bypass contract validation to test the guard inside materialize_issue_create_draft.
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Nothing.",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        # Construct PreparedIssueCentricDecision directly to bypass validation
+        prepared = issue_centric_transport.PreparedIssueCentricDecision(
+            decision=decision,
+            issue_body=None,
+            codex_body=None,
+            review_body=None,
+            followup_issue_body=None,
+        )
+        with self.assertRaisesRegex(
+            issue_centric_issue_create.IssueCentricIssueCreateError,
+            "No decoded issue body",
+        ):
+            issue_centric_issue_create.materialize_issue_create_draft(
+                prepared,
+                source_artifact_path="logs/none.md",
+            )
+
+    def test_execute_issue_create_succeeds_with_followup_body_only(self) -> None:
+        decision = build_followup_only_decision("# Followup Title\n\nFollowup body.\n")
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/followup-body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=self._fake_creator,
+                env={"GITHUB_TOKEN": "token-abc"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.created_issue.number, 99)
+        self.assertEqual(result.created_issue.title, "Followup Title")
+
+    def test_execute_issue_create_uses_issue_body_when_both_present(self) -> None:
+        """When both bodies are set, issue_body takes precedence via primary_body."""
+        decision = build_decision(
+            "# Primary Title\n\nPrimary body.\n",
+            create_followup_issue=True,
+            followup_text="# Followup Title\n\nFollowup body.\n",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIsNotNone(prepared.issue_body)
+        self.assertIsNotNone(prepared.followup_issue_body)
+        # primary_body must return issue_body (higher priority)
+        self.assertEqual(prepared.primary_body, prepared.issue_body)
+        draft = issue_centric_issue_create.materialize_issue_create_draft(
+            prepared,
+            source_artifact_path="logs/primary.md",
+        )
+        self.assertEqual(draft.title, "Primary Title")
+
+    def test_primary_body_returns_none_when_no_issue_body_and_no_followup(self) -> None:
+        # create_followup_issue=True + followup_body=None is rejected by contract,
+        # so bypass validation to unit-test primary_body directly.
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=True,
+            summary="No bodies.",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        prepared = issue_centric_transport.PreparedIssueCentricDecision(
+            decision=decision,
+            issue_body=None,
+            codex_body=None,
+            review_body=None,
+            followup_issue_body=None,
+        )
+        self.assertIsNone(prepared.primary_body)
+
+    def test_primary_body_returns_issue_body_when_issue_body_present_and_no_followup(self) -> None:
+        decision = build_decision("# Solo Title\n\nSolo body.\n")
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIsNotNone(prepared.issue_body)
+        self.assertIsNone(prepared.followup_issue_body)
+        self.assertEqual(prepared.primary_body, prepared.issue_body)
+
+
+def build_followup_only_reply(
+    followup_text: str,
+    *,
+    target_issue: str | None = "none",
+) -> str:
+    """Build a raw reply with CHATGPT_FOLLOWUP_ISSUE_BODY but NO CHATGPT_ISSUE_BODY.
+
+    action=issue_create + create_followup_issue=true: Task 5 allows this combo when
+    issue_body_base64 is absent but followup_issue_body_base64 is present.
+    """
+    parts = [
+        "あなた:",
+        "request body",
+        "ChatGPT:",
+        issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+        b64(followup_text),
+        issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+        issue_centric_contract.DECISION_JSON_START,
+        json.dumps(
+            {
+                "action": "issue_create",
+                "target_issue": target_issue if target_issue is not None else "none",
+                "close_current_issue": False,
+                "create_followup_issue": True,
+                "summary": "Create the child follow-up issue.",
+            },
+            ensure_ascii=True,
+        ),
+        issue_centric_contract.DECISION_JSON_END,
+        issue_centric_contract.REPLY_COMPLETE_TAG,
+    ]
+    return "\n".join(parts)
+
+
+class NoDuplicateIssueCreationTests(unittest.TestCase):
+    """Verify that issue_create + create_followup_issue=true + followup_body only → 1 issue, not 2.
+
+    Regression for: action=issue_create + create_followup_issue=true with only
+    CHATGPT_FOLLOWUP_ISSUE_BODY caused execute_followup_issue_action to create a second
+    duplicate issue from the same body.
+    """
+
+    def _primary_result(self, title: str, number: int) -> "issue_centric_issue_create.IssueCreateExecutionResult":
+        return issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title=title,
+                body="Body.\n",
+                title_line=f"# {title}",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=number,
+                url=f"https://github.com/example/repo/issues/{number}",
+                title=title,
+                repository="example/repo",
+                node_id=f"ISSUE_node_{number}",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "primary-draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "primary-execution.json",
+            project_url="",
+            project_sync_status="issue_only_fallback",
+            project_sync_note="No project configured.",
+            project_item_id=None,
+            project_state_field_name="State",
+            project_state_value_name="",
+            safe_stop_reason=f"Created issue #{number}.",
+        )
+
+    def _followup_result(self, title: str, number: int) -> "issue_centric_followup_issue.FollowupIssueExecutionResult":
+        return issue_centric_followup_issue.FollowupIssueExecutionResult(
+            status="completed",
+            followup_status="completed",
+            parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=1,
+                issue_url="https://github.com/example/repo/issues/1",
+                source_ref="#1",
+            ),
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title=title,
+                body="Body.\n",
+                title_line=f"# {title}",
+                source_artifact_path="logs/followup-body.md",
+            ),
+            created_issue=issue_centric_github.CreatedGitHubIssue(
+                number=number,
+                url=f"https://github.com/example/repo/issues/{number}",
+                title=title,
+                repository="example/repo",
+                node_id=f"ISSUE_node_{number}",
+            ),
+            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup-inner.json",
+            execution_log_path=REPO_ROOT / "logs" / "followup-execution.json",
+            project_url="",
+            project_sync_status="issue_only_fallback",
+            project_sync_note="No project configured.",
+            project_item_id=None,
+            project_state_field_name="State",
+            project_state_value_name="",
+            close_policy="after_issue_create_followup_success_only",
+            safe_stop_reason=f"Created follow-up issue #{number}.",
+        )
+
+    def test_followup_only_body_creates_single_issue_not_duplicate(self) -> None:
+        """When only CHATGPT_FOLLOWUP_ISSUE_BODY is provided, followup_mock must NOT be called."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#1",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/1",
+            "last_issue_centric_target_issue": "#1",
+        }
+        raw = build_followup_only_reply("# Child Issue\n\nChild body.\n")
+        saved_states: list[dict[str, object]] = []
+
+        primary_result = self._primary_result("Child Issue", 13)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                ),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action") as followup_mock,
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(dict(state), [])
+
+        # Primary issue create must run exactly once; followup must NOT run (no duplicate)
+        self.assertEqual(primary_mock.call_count, 1)
+        self.assertEqual(followup_mock.call_count, 0, "followup_issue_action must NOT be called when issue_body is absent (duplicate prevention)")
+
+    def test_both_bodies_present_creates_two_issues(self) -> None:
+        """When both CHATGPT_ISSUE_BODY and CHATGPT_FOLLOWUP_ISSUE_BODY are provided, both execute."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#1",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/1",
+            "last_issue_centric_target_issue": "#1",
+        }
+        raw = build_issue_create_reply(
+            "# Primary Issue\n\nPrimary body.\n",
+            create_followup_issue=True,
+            followup_text="# Follow-up Issue\n\nFollow-up body.\n",
+        )
+        saved_states: list[dict[str, object]] = []
+
+        primary_result = self._primary_result("Primary Issue", 13)
+        followup_result = self._followup_result("Follow-up Issue", 14)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                ),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=followup_result) as followup_mock,
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(dict(state), [])
+
+        # Both bodies present → both create executions run
+        self.assertEqual(primary_mock.call_count, 1)
+        self.assertEqual(followup_mock.call_count, 1, "followup_issue_action must run when issue_body is also present")
+
+
 if __name__ == "__main__":
     unittest.main()

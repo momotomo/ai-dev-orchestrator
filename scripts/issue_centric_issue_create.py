@@ -107,10 +107,11 @@ def execute_issue_create_action(
     if prepared.decision.action is not IssueCentricAction.ISSUE_CREATE:
         raise IssueCentricIssueCreateError("issue_create execution only accepts action=issue_create.")
 
-    if prepared.issue_body is None:
+    primary = prepared.primary_body
+    if primary is None:
         raise IssueCentricIssueCreateError("No decoded issue body is available for issue_create.")
     draft = materialize_issue_draft_text(
-        prepared.issue_body.decoded_text,
+        primary.decoded_text,
         source_artifact_path=source_artifact_path,
     )
     return execute_issue_create_draft(
@@ -385,10 +386,11 @@ def materialize_issue_create_draft(
 ) -> IssueCreateDraft:
     if prepared.decision.action is not IssueCentricAction.ISSUE_CREATE:
         raise IssueCentricIssueCreateError("issue draft materialization only supports action=issue_create.")
-    if prepared.issue_body is None:
+    primary = prepared.primary_body
+    if primary is None:
         raise IssueCentricIssueCreateError("No decoded issue body is available for issue_create.")
     return materialize_issue_draft_text(
-        prepared.issue_body.decoded_text,
+        primary.decoded_text,
         source_artifact_path=source_artifact_path,
     )
 def _render_issue_draft_markdown(draft: IssueCreateDraft) -> str:

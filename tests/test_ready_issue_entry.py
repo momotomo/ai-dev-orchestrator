@@ -1574,6 +1574,8 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
                 "last_issue_centric_next_request_hint": "continue_on_current_issue",
                 "last_issue_centric_normalized_summary": str(summary_path),
                 "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/7",
+                # Explicit Ready: prefix marks this as a bounded ready issue → close-only path
+                "current_ready_issue_ref": "#7 Ready: verify consecutive cycles",
             }
             args = argparse.Namespace(
                 next_todo="verify stability",
@@ -1641,6 +1643,188 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
         text = sent_requests[0]
         self.assertNotIn("===CHATGPT_DECISION_JSON===", text,
                          "No IC snapshot → must not inject IC contract")
+
+
+# ---------------------------------------------------------------------------
+# Parent / planned issue continuation tests
+# ---------------------------------------------------------------------------
+
+
+class ParentIssueContinuationTests(unittest.TestCase):
+    """Tests that archived-report continuation for a non-Ready: (parent/planned) issue
+    allows child issue creation and codex_run, rather than forcing close-only no_action.
+
+    Scenario: PromptWeave #1 (architecture/parent issue, no "Ready:" prefix) completed
+    a codex_run.  The continuation request should offer issue_create / codex_run options,
+    NOT mandate action=no_action + create_followup_issue=false.
+    """
+
+    def _make_summary_path(self, root: object, issue_ref: str = "#1") -> object:
+        from pathlib import Path
+        import json
+        root = Path(str(root))
+        summary_path = root / "summary.json"
+        summary_path.write_text(
+            json.dumps(
+                {
+                    "action": "codex_run",
+                    "final_status": "completed",
+                    "principal_issue_kind": "current_issue",
+                    "principal_issue_candidate": {
+                        "number": "1",
+                        "url": "https://github.com/example/repo/issues/1",
+                        "title": "PromptWeave foundation architecture",
+                        "ref": issue_ref,
+                    },
+                    "current_issue": {
+                        "number": "1",
+                        "url": "https://github.com/example/repo/issues/1",
+                        "title": "PromptWeave foundation architecture",
+                        "ref": issue_ref,
+                    },
+                    "next_request_hint": "continue_on_current_issue",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return summary_path
+
+    def _base_state(self, summary_path: object) -> dict:
+        return {
+            "mode": "idle",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": True,
+            "need_codex_run": False,
+            "last_report_file": "logs/report.md",
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_target_issue": "#1",
+            "last_issue_centric_principal_issue": "https://github.com/example/repo/issues/1",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/1",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_normalized_summary": str(summary_path),
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/1",
+            # No current_ready_issue_ref → parent/planned issue path
+        }
+
+    _REPORT_TEXT = "\n".join([
+        "===BRIDGE_SUMMARY===",
+        "- summary: GitHub Copilot 実行完了 (model: sonnet-4.6)",
+        "- result: completed",
+        "- live_ready: confirmed",
+        "===END_BRIDGE_SUMMARY===",
+    ])
+
+    def test_parent_issue_continuation_allows_issue_create(self) -> None:
+        """Parent issue with no Ready: prefix must allow action=issue_create."""
+        import request_prompt_from_report
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = self._make_summary_path(root)
+            state = self._base_state(summary_path)
+            args = argparse.Namespace(next_todo="next", open_questions="none", current_status="")
+            sent_requests: list[str] = []
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=lambda t: sent_requests.append(t)):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, self._REPORT_TEXT, "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        self.assertIn("issue_centric_completion_followup", text)
+        self.assertIn("target_issue: https://github.com/example/repo/issues/1", text)
+        # Must offer issue_create / follow-up creation
+        self.assertIn("action=issue_create", text)
+        self.assertIn("create_followup_issue=true", text)
+        # Must NOT mandate close-only no_action
+        self.assertNotIn("create_followup_issue=false のまま返してください", text)
+        self.assertNotIn("action=codex_run は不正", text)
+
+    def test_parent_issue_continuation_allows_codex_run(self) -> None:
+        """Parent issue continuation must list action=codex_run as a valid option."""
+        import request_prompt_from_report
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = self._make_summary_path(root)
+            state = self._base_state(summary_path)
+            args = argparse.Namespace(next_todo="next", open_questions="none", current_status="")
+            sent_requests: list[str] = []
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=lambda t: sent_requests.append(t)):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, self._REPORT_TEXT, "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        self.assertIn("action=codex_run", text)
+
+    def test_ready_issue_continuation_keeps_close_only_directives(self) -> None:
+        """Ready: issue must still use the close-only directives (regression guard)."""
+        import request_prompt_from_report
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            from pathlib import Path as _Path
+            import json as _json
+            summary_path = _Path(str(root)) / "summary7.json"
+            summary_path.write_text(
+                _json.dumps(
+                    {
+                        "action": "codex_run",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "7",
+                            "url": "https://github.com/example/repo/issues/7",
+                            "title": "Ready: verify cycles",
+                            "ref": "#7",
+                        },
+                        "current_issue": {
+                            "number": "7",
+                            "url": "https://github.com/example/repo/issues/7",
+                            "title": "Ready: verify cycles",
+                            "ref": "#7",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "mode": "idle",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": True,
+                "need_codex_run": False,
+                "last_report_file": "logs/report.md",
+                "last_issue_centric_action": "codex_run",
+                "last_issue_centric_target_issue": "#7",
+                "last_issue_centric_principal_issue": "https://github.com/example/repo/issues/7",
+                "last_issue_centric_principal_issue_kind": "current_issue",
+                "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/7",
+                "last_issue_centric_next_request_hint": "continue_on_current_issue",
+                "last_issue_centric_normalized_summary": str(summary_path),
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/7",
+                "current_ready_issue_ref": "#7 Ready: verify cycles",
+            }
+            args = argparse.Namespace(next_todo="next", open_questions="none", current_status="")
+            sent_requests: list[str] = []
+
+            with patch.object(request_prompt_from_report, "send_to_chatgpt", side_effect=lambda t: sent_requests.append(t)):
+                with patch.object(request_prompt_from_report, "log_text", side_effect=lambda prefix, text, *a, **kw: root / f"{prefix}.md"):
+                    with patch.object(request_prompt_from_report, "repo_relative", side_effect=lambda p: str(p)):
+                        with patch.object(request_prompt_from_report, "save_state"):
+                            request_prompt_from_report.run_resume_request(state, args, self._REPORT_TEXT, "")
+
+        self.assertEqual(len(sent_requests), 1)
+        text = sent_requests[0]
+        self.assertIn("issue_centric_completion_followup", text)
+        self.assertIn("新しい Codex 用 prompt は作りません", text)
+        self.assertIn("action=codex_run は不正", text)
+        self.assertIn("create_followup_issue=false", text)
+        self.assertNotIn("action=issue_create", text)
 
 
 # ---------------------------------------------------------------------------
