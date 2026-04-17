@@ -2167,5 +2167,41 @@ class BuildCompletionFollowupWordingHelperTests(unittest.TestCase):
         self.assertEqual(oq_ready, oq_non_ready)
 
 
+class ShouldUsePinnedReadyIssuePathHelperTests(unittest.TestCase):
+    """Unit tests for _should_use_pinned_ready_issue_path."""
+
+    def _invoke(self, state: dict) -> bool:
+        import request_prompt_from_report
+        return request_prompt_from_report._should_use_pinned_ready_issue_path(state)
+
+    def test_ready_issue_source_and_ref_present_returns_true(self) -> None:
+        """pending_request_source starts with ready_issue: and ref is set → True."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "current_ready_issue_ref": "#7 Ready: verify cycles",
+        }
+        self.assertTrue(self._invoke(state))
+
+    def test_non_ready_issue_source_returns_false(self) -> None:
+        """pending_request_source does not start with ready_issue: → False."""
+        state = {
+            "pending_request_source": "report:somehash",
+            "current_ready_issue_ref": "#7 Ready: verify cycles",
+        }
+        self.assertFalse(self._invoke(state))
+
+    def test_ready_issue_source_but_empty_ref_returns_false(self) -> None:
+        """pending_request_source is ready_issue: but current_ready_issue_ref is empty → False."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "current_ready_issue_ref": "",
+        }
+        self.assertFalse(self._invoke(state))
+
+    def test_both_absent_returns_false(self) -> None:
+        """Both fields absent → False."""
+        self.assertFalse(self._invoke({}))
+
+
 if __name__ == "__main__":
     unittest.main()
