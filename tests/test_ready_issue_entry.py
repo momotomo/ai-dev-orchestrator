@@ -2033,5 +2033,57 @@ class IsReadyBoundedCompletionFollowupRequestHelperTests(unittest.TestCase):
         self.assertFalse(self._invoke(state, "lifecycle todo", "original todo"))
 
 
+class IsCompletionFollowupEligibleHelperTests(unittest.TestCase):
+    """Unit tests for _is_completion_followup_eligible."""
+
+    def _base_state(self) -> dict:
+        return {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+
+    def _base_summary(self) -> dict:
+        return {"result": "completed", "live_ready": "confirmed"}
+
+    def _invoke(self, summary_fields: dict, state: dict) -> bool:
+        import request_prompt_from_report
+        return request_prompt_from_report._is_completion_followup_eligible(summary_fields, state)
+
+    def test_all_conditions_met_returns_true(self) -> None:
+        """All five conditions satisfied → eligible."""
+        self.assertTrue(self._invoke(self._base_summary(), self._base_state()))
+
+    def test_result_not_completed_returns_false(self) -> None:
+        """result != completed → not eligible."""
+        summary = self._base_summary()
+        summary["result"] = "failed"
+        self.assertFalse(self._invoke(summary, self._base_state()))
+
+    def test_live_ready_not_confirmed_returns_false(self) -> None:
+        """live_ready != confirmed → not eligible."""
+        summary = self._base_summary()
+        summary["live_ready"] = "pending"
+        self.assertFalse(self._invoke(summary, self._base_state()))
+
+    def test_action_not_codex_run_returns_false(self) -> None:
+        """last_issue_centric_action != codex_run → not eligible."""
+        state = self._base_state()
+        state["last_issue_centric_action"] = "no_action"
+        self.assertFalse(self._invoke(self._base_summary(), state))
+
+    def test_principal_issue_kind_not_current_issue_returns_false(self) -> None:
+        """last_issue_centric_principal_issue_kind != current_issue → not eligible."""
+        state = self._base_state()
+        state["last_issue_centric_principal_issue_kind"] = "parent_issue"
+        self.assertFalse(self._invoke(self._base_summary(), state))
+
+    def test_next_request_hint_not_continue_returns_false(self) -> None:
+        """last_issue_centric_next_request_hint != continue_on_current_issue → not eligible."""
+        state = self._base_state()
+        state["last_issue_centric_next_request_hint"] = "create_followup_issue"
+        self.assertFalse(self._invoke(self._base_summary(), state))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -147,17 +147,44 @@ def _is_ready_bounded_continuation(state: dict[str, object]) -> bool:
     return "ready:" in ready_issue_ref.lower()
 
 
+def _is_completion_followup_eligible(
+    summary_fields: dict[str, str],
+    state: dict[str, object],
+) -> bool:
+    """Return True when the archived report and state qualify for a completion followup section.
+
+    All five conditions must hold:
+
+    1. ``result=completed`` in the archived report summary — the last Codex run finished
+       successfully.
+    2. ``live_ready=confirmed`` in the archived report summary — the result was verified
+       in the live environment.
+    3. ``last_issue_centric_action == codex_run`` — the action that produced the archived
+       report was a Codex run (not an issue-create or no-action cycle).
+    4. ``last_issue_centric_principal_issue_kind == current_issue`` — the principal issue
+       of the last cycle is the current issue (not a parent or planned issue).
+    5. ``last_issue_centric_next_request_hint == continue_on_current_issue`` — the
+       normalized summary explicitly requests continuation on the same issue.
+
+    When any condition fails the caller should skip building the completion followup
+    section entirely.
+    """
+    if summary_fields.get("result", "").strip().lower() != "completed":
+        return False
+    if summary_fields.get("live_ready", "").strip().lower() != "confirmed":
+        return False
+    if str(state.get("last_issue_centric_action", "")).strip() != "codex_run":
+        return False
+    if str(state.get("last_issue_centric_principal_issue_kind", "")).strip() != "current_issue":
+        return False
+    if str(state.get("last_issue_centric_next_request_hint", "")).strip() != "continue_on_current_issue":
+        return False
+    return True
+
+
 def _build_completion_followup_section(state: dict[str, object], report_text: str) -> str:
     summary_fields = _parse_report_summary_fields(report_text)
-    if summary_fields.get("result", "").strip().lower() != "completed":
-        return ""
-    if summary_fields.get("live_ready", "").strip().lower() != "confirmed":
-        return ""
-    if str(state.get("last_issue_centric_action", "")).strip() != "codex_run":
-        return ""
-    if str(state.get("last_issue_centric_principal_issue_kind", "")).strip() != "current_issue":
-        return ""
-    if str(state.get("last_issue_centric_next_request_hint", "")).strip() != "continue_on_current_issue":
+    if not _is_completion_followup_eligible(summary_fields, state):
         return ""
 
     target_issue = str(state.get("last_issue_centric_next_request_target", "")).strip()
