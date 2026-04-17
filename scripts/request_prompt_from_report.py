@@ -284,6 +284,36 @@ def _is_ready_bounded_completion_followup_request(
     )
 
 
+def _build_completion_followup_wording(state: dict[str, object]) -> tuple[str, str]:
+    """Return (completion_next_todo, completion_open_questions) for a completion followup request.
+
+    The wording differs based on whether the current continuation is for a Ready:-bounded
+    issue or a parent / planned issue:
+
+    - **Ready bounded**: lifecycle automation only — no new Codex prompt.  The returned
+      next_todo instructs ChatGPT to evaluate lifecycle actions (close or no-action) using
+      the issue-centric contract.
+    - **Parent / planned**: a broader set of actions is appropriate — child issue creation,
+      additional Codex run, or issue close.  The returned next_todo asks ChatGPT to pick
+      the most suitable action from those options.
+
+    In both cases ``completion_open_questions`` instructs ChatGPT to acknowledge the
+    parent-update scope boundary in the summary if anything is left unhandled.
+    """
+    if _is_ready_bounded_continuation(state):
+        completion_next_todo = (
+            "新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
+            " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
+        )
+    else:
+        completion_next_todo = (
+            "archived report を踏まえて、parent / planned issue の continuation を issue-centric contract で判断してください。"
+            " child / follow-up issue の作成 (action=issue_create)、追加 Codex 実行 (action=codex_run)、issue close (action=no_action + close_current_issue=true) から選んでください。"
+        )
+    completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
+    return completion_next_todo, completion_open_questions
+
+
 def _resolve_completion_followup_request(
     state: dict[str, object],
     *,
@@ -306,18 +336,7 @@ def _resolve_completion_followup_request(
     else:
         merged_section = completion_section
 
-    if _is_ready_bounded_continuation(state):
-        completion_next_todo = (
-            "新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
-            " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
-        )
-        completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
-    else:
-        completion_next_todo = (
-            "archived report を踏まえて、parent / planned issue の continuation を issue-centric contract で判断してください。"
-            " child / follow-up issue の作成 (action=issue_create)、追加 Codex 実行 (action=codex_run)、issue close (action=no_action + close_current_issue=true) から選んでください。"
-        )
-        completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
+    completion_next_todo, completion_open_questions = _build_completion_followup_wording(state)
     return merged_section, completion_next_todo, completion_open_questions
 
 

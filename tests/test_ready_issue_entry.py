@@ -2127,5 +2127,45 @@ class ResolveCompletionFollowupTargetIssueHelperTests(unittest.TestCase):
         self.assertEqual(self._invoke({}), "")
 
 
+class BuildCompletionFollowupWordingHelperTests(unittest.TestCase):
+    """Unit tests for _build_completion_followup_wording."""
+
+    def _invoke(self, state: dict) -> tuple:
+        import request_prompt_from_report
+        return request_prompt_from_report._build_completion_followup_wording(state)
+
+    def test_ready_bounded_returns_lifecycle_only_wording(self) -> None:
+        """Ready:-bounded issue → lifecycle-only next_todo, no Codex prompt."""
+        state = {"current_ready_issue_ref": "#7 Ready: verify cycles"}
+        next_todo, open_questions = self._invoke(state)
+        self.assertIn("lifecycle automation", next_todo)
+        self.assertIn("action=codex_run は不正", next_todo)
+        self.assertNotIn("action=issue_create", next_todo)
+        self.assertIn("scope 外", open_questions)
+
+    def test_non_ready_returns_parent_planned_wording(self) -> None:
+        """Non-Ready: issue → parent/planned continuation next_todo."""
+        state = {"current_ready_issue_ref": "#5 implement feature"}
+        next_todo, open_questions = self._invoke(state)
+        self.assertIn("parent / planned issue", next_todo)
+        self.assertIn("action=issue_create", next_todo)
+        self.assertNotIn("action=codex_run は不正", next_todo)
+        self.assertIn("scope 外", open_questions)
+
+    def test_no_ready_issue_ref_returns_parent_planned_wording(self) -> None:
+        """Empty current_ready_issue_ref → parent/planned wording (same as non-Ready)."""
+        state: dict = {}
+        next_todo, open_questions = self._invoke(state)
+        self.assertIn("parent / planned issue", next_todo)
+
+    def test_both_paths_share_same_open_questions(self) -> None:
+        """open_questions is identical for Ready bounded and non-Ready paths."""
+        ready_state = {"current_ready_issue_ref": "#7 Ready: foo"}
+        non_ready_state = {"current_ready_issue_ref": "#5 implement feature"}
+        _, oq_ready = self._invoke(ready_state)
+        _, oq_non_ready = self._invoke(non_ready_state)
+        self.assertEqual(oq_ready, oq_non_ready)
+
+
 if __name__ == "__main__":
     unittest.main()
