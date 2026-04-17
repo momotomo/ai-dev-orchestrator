@@ -5553,7 +5553,7 @@ def _wait_for_chatgpt_reply_text(
             page.wait_for_timeout(int(poll_seconds * 1000))
 
 
-def wait_for_plan_a_or_prompt_reply_text(
+def wait_for_issue_centric_reply_text(
     *,
     plan_a_extractor: Callable[[str, str | None], Any],
     timeout_seconds: int | None = None,

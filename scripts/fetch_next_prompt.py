@@ -28,7 +28,7 @@ from _bridge_common import (
     send_to_chatgpt,
     stable_text_hash,
     should_rotate_before_next_chat_request,
-    wait_for_plan_a_or_prompt_reply_text,
+    wait_for_issue_centric_reply_text,
     write_text,
 )
 from issue_centric_codex_launch import launch_issue_centric_codex_run
@@ -728,7 +728,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             parse_issue_centric_reply_for_fetch(raw, after_text=after)
 
         try:
-            raw_text = wait_for_plan_a_or_prompt_reply_text(
+            raw_text = wait_for_issue_centric_reply_text(
                 plan_a_extractor=_plan_a_extractor,
                 timeout_seconds=args.timeout_seconds or None,
                 request_text=request_text or None,

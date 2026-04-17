@@ -1370,7 +1370,7 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             ):
@@ -1435,7 +1435,7 @@ class FetchNextPromptContractStopTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             ):
@@ -1576,7 +1576,7 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             ):
@@ -1625,7 +1625,7 @@ class FetchNextPromptIssueCentricContractParsingTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}),
@@ -1647,8 +1647,8 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
     """Tests for Plan A BODY base64 transport as the primary fetch path.
 
     Verifies that:
-    - wait_for_plan_a_or_prompt_reply_text succeeds on Plan A contract reply (IC-only path)
-    - fetch_next_prompt.run() passes a plan_a_extractor to wait_for_plan_a_or_prompt_reply_text
+    - wait_for_issue_centric_reply_text succeeds on Plan A contract reply (IC-only path)
+    - fetch_next_prompt.run() passes a plan_a_extractor to wait_for_issue_centric_reply_text
     - fetch_next_prompt.run() raises BridgeStop for legacy visible-text replies (explicit stop)
     """
 
@@ -1700,8 +1700,8 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             plan_a_extractor(raw, "request body")
 
-    def test_fetch_run_uses_wait_for_plan_a_or_prompt_reply_text(self) -> None:
-        """fetch_next_prompt.run() must call wait_for_plan_a_or_prompt_reply_text (not wait_for_prompt_reply_text)."""
+    def test_fetch_run_uses_wait_for_issue_centric_reply_text(self) -> None:
+        """fetch_next_prompt.run() must call wait_for_issue_centric_reply_text (not wait_for_prompt_reply_text)."""
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "hash1",
@@ -1723,7 +1723,7 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
             wait_mock = MagicMock(return_value=raw)
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", wait_mock),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", wait_mock),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: None),
             ):
@@ -1732,7 +1732,7 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
                 except Exception:
                     pass
 
-            # Must have called wait_for_plan_a_or_prompt_reply_text with plan_a_extractor kwarg
+            # Must have called wait_for_issue_centric_reply_text with plan_a_extractor kwarg
             self.assertTrue(wait_mock.called)
             call_kwargs = wait_mock.call_args.kwargs
             self.assertIn("plan_a_extractor", call_kwargs)
@@ -1761,7 +1761,7 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "write_text", side_effect=lambda p, t: None),
@@ -1992,7 +1992,7 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
                 side_effect=[raw_not_ready, raw_valid],
             ),
         ):
-            result = bridge_common.wait_for_plan_a_or_prompt_reply_text(
+            result = bridge_common.wait_for_issue_centric_reply_text(
                 plan_a_extractor=(
                     lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
                         raw_text,
@@ -2037,7 +2037,7 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
             side_effect=fake_wait_for_chatgpt_reply_text,
         ):
             with self.assertRaises(fetch_next_prompt.IssueCentricReplyInvalid):
-                bridge_common.wait_for_plan_a_or_prompt_reply_text(
+                bridge_common.wait_for_issue_centric_reply_text(
                     plan_a_extractor=plan_a_extractor,
                     request_text="request body",
                 )
@@ -2931,7 +2931,7 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
 
         return (
             patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-            patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+            patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
             patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
             patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             patch.object(fetch_next_prompt, "send_to_chatgpt", side_effect=fake_send),
@@ -3056,11 +3056,11 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(saved_states[0]["mode"], "awaiting_user")
 
     # ------------------------------------------------------------------
-    # Early exception route (IssueCentricReplyInvalid raised by wait_for_plan_a_or_prompt_reply_text)
+    # Early exception route (IssueCentricReplyInvalid raised by wait_for_issue_centric_reply_text)
     # ------------------------------------------------------------------
 
     def _make_early_exc_patched_context(self, tmp: str, exc: Exception, saved_states: list, sent_texts: list):
-        """Return patches where wait_for_plan_a_or_prompt_reply_text raises exc directly."""
+        """Return patches where wait_for_issue_centric_reply_text raises exc directly."""
         from pathlib import Path
         from unittest.mock import patch
 
@@ -3076,7 +3076,7 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
 
         return (
             patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-            patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", side_effect=exc),
+            patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", side_effect=exc),
             patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
             patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
             patch.object(fetch_next_prompt, "send_to_chatgpt", side_effect=fake_send),
