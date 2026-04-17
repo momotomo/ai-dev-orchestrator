@@ -3194,4 +3194,66 @@ class ContractCorrectionHelperTests(unittest.TestCase):
         self.assertNotIn("issue-centric contract の不正がありました", text)
 
 
+class LegacyPathDeprecationTests(unittest.TestCase):
+    """issue-centric contract が正規ルートであることを示す縮退整理テスト.
+
+    旧 visible-text マーカー (===CHATGPT_PROMPT_REPLY===) への参照が
+    ユーザー向けの表示文言から除去されているかを検証する.
+    """
+
+    def test_fetch_next_prompt_note_does_not_mention_legacy_marker(self) -> None:
+        """suggested_next_note() for fetch_next_prompt no longer shows ===CHATGPT_PROMPT_REPLY===."""
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "waiting_prompt_reply",
+                "pending_request_hash": "abc",
+                "pending_request_source": "ready_issue:abc",
+                "pending_request_log": "logs/request.md",
+                "pending_request_signal": "",
+            }
+        )
+        # Legacy marker must not appear in user-visible guidance.
+        self.assertNotIn("CHATGPT_PROMPT_REPLY", note)
+
+    def test_fetch_next_prompt_note_uses_issue_centric_wording(self) -> None:
+        """suggested_next_note() for fetch_next_prompt mentions issue-centric contract."""
+        note = run_until_stop.suggested_next_note(
+            {
+                "mode": "waiting_prompt_reply",
+                "pending_request_hash": "abc",
+                "pending_request_source": "ready_issue:abc",
+                "pending_request_log": "logs/request.md",
+                "pending_request_signal": "",
+            }
+        )
+        self.assertIn("issue-centric contract reply", note)
+
+    def test_legacy_markers_tuple_defined_in_fetch_next_prompt(self) -> None:
+        """_LEGACY_REPLY_MARKERS is still defined (safety net not removed)."""
+        import fetch_next_prompt as fnp
+        self.assertIn("===CHATGPT_PROMPT_REPLY===", fnp._LEGACY_REPLY_MARKERS)
+        self.assertIn("===CHATGPT_NO_CODEX===", fnp._LEGACY_REPLY_MARKERS)
+
+    def test_classify_returns_reply_complete_legacy_contract_for_old_markers(self) -> None:
+        """classify_issue_centric_reply_readiness detects legacy markers → reply_complete_legacy_contract."""
+        import fetch_next_prompt as fnp
+        raw = "\n".join([
+            "あなた:",
+            "request text",
+            "ChatGPT:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "some prompt body",
+            "===END_REPLY===",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_legacy_contract")
+
+    def test_is_retryable_contract_error_does_not_treat_legacy_as_retryable(self) -> None:
+        """reply_complete_legacy_contract is NOT treated as retryable (it is an exception path)."""
+        import fetch_next_prompt as fnp
+        self.assertFalse(
+            fnp._is_retryable_contract_error("legacy visible-text reply contract is present.", "reply_complete_legacy_contract")
+        )
+
+
 
