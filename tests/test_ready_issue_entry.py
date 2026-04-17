@@ -2085,5 +2085,47 @@ class IsCompletionFollowupEligibleHelperTests(unittest.TestCase):
         self.assertFalse(self._invoke(self._base_summary(), state))
 
 
+class ResolveCompletionFollowupTargetIssueHelperTests(unittest.TestCase):
+    """Unit tests for _resolve_completion_followup_target_issue."""
+
+    def _invoke(self, state: dict) -> str:
+        import request_prompt_from_report
+        return request_prompt_from_report._resolve_completion_followup_target_issue(state)
+
+    def test_next_request_target_takes_priority(self) -> None:
+        """last_issue_centric_next_request_target is returned when present."""
+        state = {
+            "last_issue_centric_next_request_target": "https://github.com/example/repo/issues/10",
+            "last_issue_centric_principal_issue": "https://github.com/example/repo/issues/9",
+        }
+        self.assertEqual(self._invoke(state), "https://github.com/example/repo/issues/10")
+
+    def test_falls_back_to_principal_issue(self) -> None:
+        """Falls back to last_issue_centric_principal_issue when next_request_target is absent."""
+        state = {
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_principal_issue": "https://github.com/example/repo/issues/9",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/8",
+        }
+        self.assertEqual(self._invoke(state), "https://github.com/example/repo/issues/9")
+
+    def test_falls_back_to_resolved_issue(self) -> None:
+        """Falls back to last_issue_centric_resolved_issue when earlier fields are absent."""
+        state = {
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/8",
+            "last_issue_centric_target_issue": "#8",
+        }
+        self.assertEqual(self._invoke(state), "https://github.com/example/repo/issues/8")
+
+    def test_falls_back_to_target_issue(self) -> None:
+        """Falls back to last_issue_centric_target_issue as last resort."""
+        state = {"last_issue_centric_target_issue": "#7"}
+        self.assertEqual(self._invoke(state), "#7")
+
+    def test_all_empty_returns_empty_string(self) -> None:
+        """Returns empty string when all four fields are absent or empty."""
+        self.assertEqual(self._invoke({}), "")
+
+
 if __name__ == "__main__":
     unittest.main()
