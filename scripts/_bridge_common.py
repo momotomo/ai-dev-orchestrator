@@ -508,10 +508,8 @@ class ChatGPTWaitEvent:
 
 # [DEPRECATED] Old visible-text reply contract format.
 # This function generates the ===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===
-# reply contract that predates the issue-centric contract.  It is kept for:
-#   - build_chatgpt_handoff_request() when issue_centric_route_selected != "issue_centric"
-#   - build_human_review_auto_continue_request() (retained for backward compat; no
-#     longer called from fetch_next_prompt since Phase 9 legacy tail removal)
+# reply contract that predates the issue-centric contract.  It is kept solely for
+# build_chatgpt_handoff_request() when issue_centric_route_selected != "issue_centric".
 # The canonical contract for all new requests is build_issue_centric_reply_contract_section().
 def build_chatgpt_reply_contract_section() -> str:
     return "\n".join(
@@ -5752,21 +5750,6 @@ def build_chatgpt_handoff_request(
         "## bridge_reply_contract\n"
         f"{contract}\n"
     ).strip() + "\n"
-
-
-# [DEPRECATED] Retained for backward compat; no longer called from
-# fetch_next_prompt since the legacy tail block was removed in Phase 9.
-# Previously used for human_review auto-continue via the old visible-text reply
-# contract (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===).
-# All new requests use build_issue_centric_reply_contract_section() instead.
-def build_human_review_auto_continue_request() -> str:
-    contract = build_chatgpt_reply_contract_section()
-    return (
-        "レビュー要求のみでは停止しない運用です。\n"
-        "human_review では止めず継続してください。\n"
-        "次の Codex 用 1 フェーズ prompt を reply contract に従って返してください。\n\n"
-        f"{contract}\n"
-    )
 
 
 def build_chatgpt_request(
