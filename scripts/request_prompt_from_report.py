@@ -182,18 +182,41 @@ def _is_completion_followup_eligible(
     return True
 
 
+def _resolve_completion_followup_target_issue(state: dict[str, object]) -> str:
+    """Resolve the target issue URL/ref for a completion followup section.
+
+    Tries state fields in priority order and returns the first non-empty value:
+
+    1. ``last_issue_centric_next_request_target`` — explicitly set by the normalized
+       summary when the next request should target a specific issue.
+    2. ``last_issue_centric_principal_issue`` — the principal issue that drove the last
+       Codex run; used when no explicit next-request target was recorded.
+    3. ``last_issue_centric_resolved_issue`` — the issue that was resolved by the last
+       cycle; fallback when principal_issue is absent.
+    4. ``last_issue_centric_target_issue`` — the raw target issue ref saved at the start
+       of the last cycle; last-resort fallback.
+
+    Returns ``""`` if all four fields are empty or absent, which signals the caller that
+    a completion followup section cannot be built.
+    """
+    for key in (
+        "last_issue_centric_next_request_target",
+        "last_issue_centric_principal_issue",
+        "last_issue_centric_resolved_issue",
+        "last_issue_centric_target_issue",
+    ):
+        value = str(state.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
 def _build_completion_followup_section(state: dict[str, object], report_text: str) -> str:
     summary_fields = _parse_report_summary_fields(report_text)
     if not _is_completion_followup_eligible(summary_fields, state):
         return ""
 
-    target_issue = str(state.get("last_issue_centric_next_request_target", "")).strip()
-    if not target_issue:
-        target_issue = str(state.get("last_issue_centric_principal_issue", "")).strip()
-    if not target_issue:
-        target_issue = str(state.get("last_issue_centric_resolved_issue", "")).strip()
-    if not target_issue:
-        target_issue = str(state.get("last_issue_centric_target_issue", "")).strip()
+    target_issue = _resolve_completion_followup_target_issue(state)
     if not target_issue:
         return ""
 
