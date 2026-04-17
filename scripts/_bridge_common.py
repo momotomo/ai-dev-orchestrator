@@ -506,34 +506,6 @@ class ChatGPTWaitEvent:
     details: Mapping[str, Any] | None = None
 
 
-# [DEPRECATED] Old visible-text reply contract format.
-# This function generates the ===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===
-# reply contract that predates the issue-centric contract.  It is kept solely for
-# build_chatgpt_handoff_request() when issue_centric_route_selected != "issue_centric".
-# The canonical contract for all new requests is build_issue_centric_reply_contract_section().
-def build_chatgpt_reply_contract_section() -> str:
-    return "\n".join(
-        [
-            "## bridge reply contract",
-            "",
-            "bridge が返答を機械処理するため、前置きや補足説明を付けず、次のどちらか 1 つのブロックだけを返してください。",
-            "",
-            "Codex に渡す 1 フェーズ prompt がある場合:",
-            "===CHATGPT_PROMPT_REPLY===",
-            "[Codex 用 1 フェーズ prompt 本文]",
-            "===END_REPLY===",
-            "",
-            "今回は Codex に渡さない場合:",
-            "===CHATGPT_NO_CODEX===",
-            "completed | human_review | need_info",
-            "[必要なら短い理由]",
-            "===END_NO_CODEX===",
-            "",
-            "`CHATGPT_NO_CODEX` の先頭行は completed / human_review / need_info のいずれかにしてください。",
-        ]
-    ).strip()
-
-
 def _bridge_lifecycle_sync_suffix(state: Mapping[str, Any]) -> str:
     """Return a compact bracketed lifecycle sync suffix for bridge status/handoff detail text.
 
@@ -5716,11 +5688,7 @@ def build_chatgpt_handoff_request(
     issue_centric_route_selected: str = "",
 ) -> str:
     summary = compact_last_report_text(last_report)
-    contract = (
-        _build_ic_reply_contract_section()
-        if issue_centric_route_selected == "issue_centric"
-        else build_chatgpt_reply_contract_section()
-    )
+    contract = _build_ic_reply_contract_section()
     status_view = present_bridge_status(state)
     status_text = current_status or build_issue_centric_request_status(
         state,

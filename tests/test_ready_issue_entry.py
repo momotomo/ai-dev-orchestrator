@@ -1458,8 +1458,8 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
         self.assertNotIn("===CHATGPT_PROMPT_REPLY===", result)
         self.assertNotIn("===CHATGPT_NO_CODEX===", result)
 
-    def test_build_chatgpt_handoff_request_default_route_uses_legacy_contract(self) -> None:
-        """Default (no route) keeps legacy contract in handoff request for backward compat."""
+    def test_build_chatgpt_handoff_request_default_route_uses_ic_contract(self) -> None:
+        """Default (no route) now also uses IC contract — old visible-text contract removed in Phase 12."""
         from _bridge_common import build_chatgpt_handoff_request
         result = build_chatgpt_handoff_request(
             state={"mode": "idle"},
@@ -1467,8 +1467,10 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
             next_todo="next",
             open_questions="none",
         )
-        self.assertNotIn("===CHATGPT_DECISION_JSON===", result)
-        self.assertIn("===CHATGPT_PROMPT_REPLY===", result)
+        self.assertIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("issue-centric contract only", result)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", result)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", result)
 
     def test_run_resume_request_issue_centric_route_sends_ic_contract(self) -> None:
         """run_resume_request with issue_centric_ready snapshot → IC contract in sent request."""
