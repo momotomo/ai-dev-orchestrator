@@ -206,6 +206,34 @@ def _build_completion_followup_section(state: dict[str, object], report_text: st
     return "\n".join(lines)
 
 
+def _is_ready_bounded_completion_followup_request(
+    state: dict[str, object],
+    *,
+    effective_next_todo: str,
+    original_next_todo: str,
+) -> bool:
+    """Return True when this request is a Ready:-bounded completion followup continuation.
+
+    The lifecycle-only guidance path applies when two conditions hold simultaneously:
+
+    1. ``_is_ready_bounded_continuation(state)`` is True — the current issue carries
+       the "Ready:" prefix that marks it as a single, bounded work item (no child-issue
+       creation is expected after completion).
+
+    2. ``effective_next_todo != original_next_todo`` — the next_todo was overridden by
+       ``_resolve_completion_followup_request()``, which only modifies next_todo when a
+       non-empty completion followup section was produced.  A changed next_todo therefore
+       signals that we are inside the completion followup path, not a plain continuation.
+
+    When both are True the caller should use ``_LIFECYCLE_ONLY_REQUEST_GUIDANCE`` so the
+    request no longer asks ChatGPT to produce a new Codex prompt.
+    """
+    return (
+        _is_ready_bounded_continuation(state)
+        and effective_next_todo != original_next_todo
+    )
+
+
 def _resolve_completion_followup_request(
     state: dict[str, object],
     *,
@@ -405,7 +433,11 @@ def run_resume_request(
         template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
         _request_guidance = (
             _LIFECYCLE_ONLY_REQUEST_GUIDANCE
-            if _is_ready_bounded_continuation(state) and effective_next_todo != args.next_todo
+            if _is_ready_bounded_completion_followup_request(
+                state,
+                effective_next_todo=effective_next_todo,
+                original_next_todo=args.next_todo,
+            )
             else None
         )
         request_text = build_chatgpt_request(
