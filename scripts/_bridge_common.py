@@ -510,7 +510,8 @@ class ChatGPTWaitEvent:
 # This function generates the ===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===
 # reply contract that predates the issue-centric contract.  It is kept for:
 #   - build_chatgpt_handoff_request() when issue_centric_route_selected != "issue_centric"
-#   - build_human_review_auto_continue_request() (legacy tail path only)
+#   - build_human_review_auto_continue_request() (retained for backward compat; no
+#     longer called from fetch_next_prompt since Phase 9 legacy tail removal)
 # The canonical contract for all new requests is build_issue_centric_reply_contract_section().
 def build_chatgpt_reply_contract_section() -> str:
     return "\n".join(
@@ -5655,22 +5656,25 @@ def wait_for_plan_a_or_prompt_reply_text(
     allow_project_page_wait: bool = False,
 ) -> str:
     """Wait for a ChatGPT reply that satisfies either the Plan A contract extractor
-    or the visible DOM text (prompt/no-codex) extractor.
+    or the visible DOM text extractor (safety fallback).
 
     ``plan_a_extractor`` is tried first (primary path).  If it raises
-    :class:`BridgeError`, the visible DOM text extractor is tried as a safety
-    fallback.  Other exceptions are treated as hard Plan A failures and are
-    propagated to the caller. Polling continues until an extractor succeeds or
-    the extended timeout / late-completion deadline is reached.
+    :class:`BridgeError` for a reason other than "reply not ready", the visible
+    DOM text extractor is used as a safety net to avoid a hard crash in edge
+    cases where plan A cannot parse the response.  Callers that detect legacy
+    replies in the extracted text are responsible for their own stop logic
+    (e.g., fetch raises BridgeStop for legacy replies after this function
+    returns).  Polling continues until an extractor succeeds or the timeout is
+    reached.
     """
 
-    # [DEPRECATED: exception path]
-    # The combined_extractor below falls back to extract_last_chatgpt_reply() when
-    # plan_a_extractor raises BridgeError (i.e., a legacy visible-text reply was
-    # detected instead of the issue-centric contract).  This fallback is a safety
-    # net so that stale old-format replies do not hard-crash the fetch loop.
-    # The canonical reply format is the issue-centric contract; the safety fallback
-    # may be removed in a future phase once legacy replies are no longer observed.
+    # combined_extractor: plan A is the primary path.  If plan_a_extractor raises
+    # BridgeError for a non-"reply_not_ready" reason (e.g., legacy markers present,
+    # decision is None), fall back to extract_last_chatgpt_reply() as a safety net
+    # so that stale old-format replies do not hard-crash the fetch loop.  The caller
+    # (fetch_next_prompt.run) is responsible for detecting legacy replies in the
+    # returned text and raising BridgeStop; this function does not succeed via a
+    # legacy path.
     def combined_extractor(raw_text: str, after_text: str | None) -> Any:
         try:
             return plan_a_extractor(raw_text, after_text)
@@ -5750,11 +5754,10 @@ def build_chatgpt_handoff_request(
     ).strip() + "\n"
 
 
-# [DEPRECATED: exception path]
-# This function uses the old reply contract (===CHATGPT_PROMPT_REPLY=== /
-# ===CHATGPT_NO_CODEX===).  It is only called from the legacy tail path in
-# fetch_next_prompt.run() — specifically the human_review auto-continue branch
-# which is only reachable when ChatGPT returns the old visible-text format.
+# [DEPRECATED] Retained for backward compat; no longer called from
+# fetch_next_prompt since the legacy tail block was removed in Phase 9.
+# Previously used for human_review auto-continue via the old visible-text reply
+# contract (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===).
 # All new requests use build_issue_centric_reply_contract_section() instead.
 def build_human_review_auto_continue_request() -> str:
     contract = build_chatgpt_reply_contract_section()

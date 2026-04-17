@@ -204,13 +204,14 @@ def _detect_partial_body_blocks(
             else:
                 open_blocks.append(start)
     return open_blocks, closed_blocks
-# [DEPRECATED: exception path]
+# Legacy visible-text reply markers — detect-only, explicit-stop.
 # These markers belong to the old visible-text reply contract that predates the
-# issue-centric contract.  They are kept here ONLY as a safety net so that an
-# accidental / stale old-format ChatGPT reply is detected and routed through the
-# legacy tail path below rather than silently misclassified.  New requests always
-# include `build_issue_centric_reply_contract_section()`, so ChatGPT should never
-# produce these markers in normal operation.
+# issue-centric contract.  They are kept here so that an accidental / stale
+# old-format ChatGPT reply is detected and triggers an explicit BridgeStop
+# rather than being silently misclassified.  Fetch does NOT succeed via this
+# path; canonical replies must use the issue-centric contract only.
+# New requests always include `build_issue_centric_reply_contract_section()`,
+# so ChatGPT should never produce these markers in normal operation.
 _LEGACY_REPLY_MARKERS = (
     "===CHATGPT_PROMPT_REPLY===",
     "===CHATGPT_NO_CODEX===",
@@ -318,12 +319,12 @@ def classify_issue_centric_reply_readiness(
             reply_complete_tag_present=False,
         )
 
-    # ── Gate 1b: [DEPRECATED: exception path] legacy contract ─────────────
+    # ── Gate 1b: legacy contract detection — detect-only, explicit-stop ───
     # Legacy replies (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===) do
-    # not carry the new terminal tag.  Detect them before the terminal tag gate
-    # so the safety fallback path in wait_for_plan_a_or_prompt_reply_text still
-    # works.  The canonical reply format is the issue-centric contract only;
-    # this gate is retained solely as a backward-compat safety net.
+    # not carry the issue-centric terminal tag.  Detect them early so that
+    # run() can raise BridgeStop immediately; fetch does NOT continue through
+    # a legacy success path.  The canonical reply format is the issue-centric
+    # contract only; this gate is retained as a backward-compat safety net.
     if legacy_marker_present:
         return IssueCentricReplyReadiness(
             status="reply_complete_legacy_contract",
@@ -778,11 +779,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
 
     # ── Legacy visible-text reply → explicit stop ──────────────────────────
-    # [DEPRECATED: exception path]
     # When legacy markers (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
     # are detected, the reply is not a valid issue-centric contract.
-    # Stop immediately so the operator can request a proper IC-format reply;
-    # do NOT fall through to the legacy tail extractor and auto-continue.
+    # Stop immediately so the operator can request a proper IC-format reply.
+    # There is no legacy success path; the legacy tail block was removed in
+    # Phase 9 and all replies must use the issue-centric contract format.
     if readiness.status == "reply_complete_legacy_contract":
         legacy_summary = "\n".join(
             [
