@@ -46,7 +46,7 @@ def make_args(
 
 
 class HelpSmokeTest(unittest.TestCase):
-    def test_start_bridge_help_mentions_ready_issue_normal_entry(self) -> None:
+    def test_start_bridge_help_mentions_issue_selection_and_resume_priority(self) -> None:
         result = subprocess.run(
             [sys.executable, "scripts/start_bridge.py", "--help"],
             cwd=REPO_ROOT,
@@ -55,10 +55,22 @@ class HelpSmokeTest(unittest.TestCase):
             text=True,
         )
         output = result.stdout
+        # description: initial state → issue selection, resume priority
         self.assertIn("bridge の通常入口", output)
-        self.assertIn("ready issue の参照を使います", output)
+        self.assertIn("issue selection", output)
+        self.assertIn("resume 優先", output)
+        # --ready-issue-ref: explicit entry, optional for fresh start
         self.assertIn("--ready-issue-ref", output)
-        self.assertIn("reply contract だけを追加します", output)
+        self.assertIn("明示指定", output)
+        self.assertIn("省略してよい", output)
+        # --request-body: exception / recovery / override only
+        self.assertIn("--request-body", output)
+        self.assertIn("exception / recovery / override", output)
+        # --clear-error vs --reset distinction
+        self.assertIn("--clear-error", output)
+        self.assertIn("reset とは別物", output)
+        self.assertIn("--reset", output)
+        self.assertIn("clear-error とは別物", output)
 
 
 class RecoverablePendingCodexResumeTests(unittest.TestCase):

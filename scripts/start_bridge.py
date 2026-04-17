@@ -24,14 +24,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawTextHelpFormatter,
         description=(
             "bridge の通常入口です。\n"
-            "通常は current ready issue の参照から始め、その後は report ベースで継続します。"
+            "初期状態では自動で issue selection から始まり、その後は resume 優先で継続します。"
         ),
         epilog=(
             "よく使う例:\n"
+            "  python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/repo\n"
             "  python3 scripts/start_bridge.py --project-path /ABSOLUTE/PATH/TO/repo --ready-issue-ref '#123 sample browser wording cleanup' --max-execution-count 6\n"
             "  python3 scripts/start_bridge.py --status --project-path /ABSOLUTE/PATH/TO/repo\n"
             "  python3 scripts/start_bridge.py --doctor --project-path /ABSOLUTE/PATH/TO/repo\n\n"
-            "通常入口では ready issue の参照を使います。free-form 初回本文は exception / recovery / override 用で、bridge は本文を改変せず reply contract だけを追加します。"
+            "初期状態（state.json が brand-new）では --ready-issue-ref 不要で自動 issue selection に入ります。\n"
+            "再開可能なら resume を優先します。--ready-issue-ref は明示指定用の入口です。\n"
+            "--request-body は exception / recovery / override 専用で、通常起動では不要です。"
         ),
     )
     parser.add_argument(
@@ -41,18 +44,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--ready-issue-ref",
         default="",
-        help="通常入口で使う current ready issue の参照。例: '#123 sample browser wording cleanup'",
+        help="明示指定用の入口。ready issue を指定して進めたい場合に使う。例: '#123 sample browser wording cleanup'\n初期状態では省略してよい（自動で issue selection フローに入る）",
     )
     parser.add_argument(
         "--request-body",
         default="",
-        help="例外 / recovery / override 用の初回本文。通常入口の代替としては使わない",
+        help="exception / recovery / override 専用の初回本文。通常起動では不要",
     )
     parser.add_argument(
         "--select-issue",
         action="store_true",
         default=False,
-        help="初回 issue 選定モード: ChatGPT に open issue から ready issue を 1 件選ばせる。実装開始は次の request で行う",
+        help="issue selection モードを明示指定する。初期状態では自動でこのモードに入るため、通常は不要",
     )
     parser.add_argument(
         "--max-execution-count",
@@ -79,13 +82,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--clear-error",
         action="store_true",
         dest="clear_error",
-        help="bridge 側の recoverable error だけを解除する。doctor や stop summary が勧めた時だけ使う",
+        help="recoverable error だけを解除して resume できる状態へ戻す。reset とは別物。doctor や stop summary が勧めた時だけ使う",
     )
     parser.add_argument(
         "--reset",
         action="store_true",
         dest="reset",
-        help="state.json を初期状態（mode=idle + need_chatgpt_prompt=True）へ完全リセットする。通常は使わない",
+        help="state.json を完全初期化する（mode=idle + need_chatgpt_prompt=True）。clear-error とは別物。通常は使わない",
     )
     return parser.parse_args(argv)
 
@@ -180,6 +183,8 @@ def print_doctor(args: argparse.Namespace) -> None:
     print(f"  - state_backups: {backup_count} (削除不要)", flush=True)
     print(f"  - lifecycle_sync_state: {format_lifecycle_sync_state_note(state)}", flush=True)
     print(f"- clear_error: {clear_error_status}", flush=True)
+    print("- clear-error は error だけを解除して resume に戻す操作です（state 全体の reset ではありません）。", flush=True)
+    print("- reset が必要な場合は --reset を使ってください（state.json を完全初期化します）。", flush=True)
     print("- logs / history / prompt / report は doctor では変更しません。", flush=True)
 
 
@@ -435,14 +440,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- max_execution_count: {args.max_execution_count}", flush=True)
     if args.ready_issue_ref:
         print(f"- ready_issue_ref: {args.ready_issue_ref}", flush=True)
-        print("- 通常入口として、この ready issue 参照を使って最初の ChatGPT request を組み立てます。", flush=True)
+        print("- 明示指定された ready issue を使って最初の ChatGPT request を組み立てます。", flush=True)
     elif getattr(args, "select_issue", False):
-        print("- select-issue モード: open issue から ready issue を 1 件選ばせます。実装開始は次の request で行います。", flush=True)
+        print("- issue selection モード: open issue から ready issue を 1 件選ばせます。実装開始は次の request で行います。", flush=True)
     elif args.request_body:
-        print("- free-form override: 指定された初回本文を例外経路として使います。", flush=True)
+        print("- exception / recovery / override 経路: 指定された初回本文を使います。", flush=True)
     else:
-        print("- 通常入口では、current ready issue の参照を受けて最初の ChatGPT request を組み立てます。", flush=True)
-    print("- free-form 初回本文は exception / recovery / override 用にだけ残しています。", flush=True)
+        print("- resume 優先: 前回の状態から続きとして進めます。", flush=True)
+    print("- --request-body は exception / recovery / override 用です。通常起動では不要です。", flush=True)
     print("- 2 回目以降は report ベースで継続し、通常は同じチャットを使います。", flush=True)
     if args.resume:
         print("- resume: ここから続きとして進めます。", flush=True)
