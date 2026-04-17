@@ -1996,5 +1996,42 @@ class ReadyIssueCarryOverTests(unittest.TestCase):
         self.assertNotIn("pinned_ready_issue", sent_requests[0])
 
 
+class IsReadyBoundedCompletionFollowupRequestHelperTests(unittest.TestCase):
+    """Unit tests for _is_ready_bounded_completion_followup_request."""
+
+    def _invoke(
+        self,
+        state: dict,
+        effective_next_todo: str,
+        original_next_todo: str,
+    ) -> bool:
+        import request_prompt_from_report
+        return request_prompt_from_report._is_ready_bounded_completion_followup_request(
+            state,
+            effective_next_todo=effective_next_todo,
+            original_next_todo=original_next_todo,
+        )
+
+    def test_ready_bounded_and_todo_overridden_returns_true(self) -> None:
+        """Ready: bounded issue + overridden next_todo → lifecycle-only guidance."""
+        state = {"current_ready_issue_ref": "#7 Ready: verify cycles"}
+        self.assertTrue(self._invoke(state, "lifecycle todo", "original todo"))
+
+    def test_ready_bounded_but_todo_unchanged_returns_false(self) -> None:
+        """Ready: bounded issue but next_todo not overridden → no lifecycle-only guidance."""
+        state = {"current_ready_issue_ref": "#7 Ready: verify cycles"}
+        self.assertFalse(self._invoke(state, "same todo", "same todo"))
+
+    def test_not_ready_bounded_but_todo_overridden_returns_false(self) -> None:
+        """Non-Ready: issue even if next_todo overridden → no lifecycle-only guidance."""
+        state = {"current_ready_issue_ref": "#7 implement feature"}
+        self.assertFalse(self._invoke(state, "lifecycle todo", "original todo"))
+
+    def test_no_ready_issue_ref_returns_false(self) -> None:
+        """Empty current_ready_issue_ref → no lifecycle-only guidance."""
+        state: dict = {}
+        self.assertFalse(self._invoke(state, "lifecycle todo", "original todo"))
+
+
 if __name__ == "__main__":
     unittest.main()
