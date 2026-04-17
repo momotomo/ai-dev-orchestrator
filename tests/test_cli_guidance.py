@@ -949,7 +949,7 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(label, "そのまま再開")
         self.assertIn("--resume", command)
 
-    def test_request_next_prompt_recommends_ready_issue_entry(self) -> None:
+    def test_request_next_prompt_recommends_explicit_ready_issue_entry(self) -> None:
         args = run_until_stop.parse_args(
             [
                 "--project-path",
@@ -970,8 +970,31 @@ class SummaryTests(unittest.TestCase):
                 "need_chatgpt_prompt": True,
             },
         )
-        self.assertEqual(label, "ready issue 参照で開始")
+        self.assertEqual(label, "明示指定の ready issue で開始")
         self.assertIn("--ready-issue-ref", command)
+
+    def test_request_next_prompt_recommends_issue_selection_for_fresh_start(self) -> None:
+        """Brand-new state without --ready-issue-ref → 'issue selection から開始'."""
+        args = run_until_stop.parse_args(
+            [
+                "--project-path",
+                "/tmp/repo",
+                "--max-execution-count",
+                "6",
+                "--entry-script",
+                "scripts/start_bridge.py",
+            ],
+            {},
+        )
+        label, command = run_until_stop.recommended_operator_step(
+            args,
+            {
+                "mode": "idle",
+                "need_chatgpt_prompt": True,
+            },
+        )
+        self.assertEqual(label, "issue selection から開始")
+        self.assertNotIn("--ready-issue-ref", command)
 
 
 class DispatchPlanOperatorHelpersTest(unittest.TestCase):

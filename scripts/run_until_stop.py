@@ -76,7 +76,7 @@ def start_bridge_mode(state: dict[str, Any]) -> str:
     """
     action = resolve_unified_next_action(state)
     if action == "request_next_prompt":
-        return "ready issue 参照から始められます"
+        return "issue selection または明示指定の ready issue から始められます"
     if action == "dispatch_issue_centric_codex_run":
         return "prepared Codex body をそのまま dispatch できます"
     if action == "request_prompt_from_report" and is_awaiting_user_supplement(state):
@@ -209,17 +209,18 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "request_next_prompt":
         if getattr(args, "request_body", "").strip():
             return (
-                "このあと指定済みの free-form override 本文を使って最初の依頼を送ります。"
-                " 通常入口の ready issue 参照は今回だけ使いません。"
+                "このあと指定済みの exception / recovery / override 本文を使って最初の依頼を送ります。"
+                " --request-body は例外経路専用で、通常起動では不要です。"
             )
         if getattr(args, "ready_issue_ref", "").strip():
             return (
-                "このあと指定済みの current ready issue 参照を使って最初の依頼を組み立てます。"
-                " free-form 初回本文は override 用にだけ残しています。"
+                "このあと明示指定された ready issue 参照を使って最初の依頼を組み立てます。"
+                " --ready-issue-ref は明示指定用の入口です（初期状態では省略可能）。"
             )
         return (
-            "このあと通常は current ready issue の参照を受けて最初の依頼を組み立てます。"
-            " ready issue を使えない時だけ free-form override 本文を入力し、bridge は固定の返答契約だけを足します。"
+            "初期状態のため、このあと issue selection から始まります。"
+            " ChatGPT が open issue から ready issue を選定し、次の手で実装を開始します。"
+            " ready issue が決まっている場合は --ready-issue-ref で明示指定してください。"
         )
     if action == "request_prompt_from_report" and is_awaiting_user_supplement(state):
         decision = str(state.get("chatgpt_decision", "")).strip()
@@ -392,7 +393,9 @@ def recommended_operator_step(
     if action == "request_next_prompt":
         if getattr(args, "request_body", "").strip():
             return ("override 入力で開始", format_start_bridge_command(args, mode="run"))
-        return ("ready issue 参照で開始", format_start_bridge_command(args, mode="run"))
+        if getattr(args, "ready_issue_ref", "").strip():
+            return ("明示指定の ready issue で開始", format_start_bridge_command(args, mode="run"))
+        return ("issue selection から開始", format_start_bridge_command(args, mode="run"))
     if action == "request_prompt_from_report" and is_awaiting_user_supplement(final_state):
         return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
     if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
@@ -436,7 +439,9 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         _lc = bridge_lifecycle_sync_suffix(final_state)
         return (
             "Safari の current tab を対象チャットに合わせたまま再実行してください。"
-            " 通常は current ready issue の参照で始め、ready issue を使えない時だけ free-form override を入力します。"
+            " 初期状態では自動で issue selection から始まります。"
+            " ready issue が決まっているなら --ready-issue-ref で明示指定してください。"
+            " --request-body は exception / recovery / override 専用で通常起動では不要です。"
             f"{_lc}"
         )
     if action == "fetch_next_prompt":
