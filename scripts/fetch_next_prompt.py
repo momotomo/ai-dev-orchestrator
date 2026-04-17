@@ -10,11 +10,9 @@ import launch_codex_once
 from _bridge_common import (
     BridgeError,
     BridgeStop,
-    build_human_review_auto_continue_request,
     clear_chat_rotation_fields,
     clear_error_fields,
     clear_pending_request_fields,
-    extract_last_chatgpt_reply,
     guarded_main,
     load_project_config,
     load_state,
@@ -28,10 +26,8 @@ from _bridge_common import (
     runtime_prompt_path,
     save_state,
     send_to_chatgpt,
-    stage_prepared_request,
     stable_text_hash,
     should_rotate_before_next_chat_request,
-    promote_pending_request,
     wait_for_plan_a_or_prompt_reply_text,
     write_text,
 )
@@ -449,13 +445,10 @@ def parse_issue_centric_reply_for_fetch(
             raw_text=raw_text,
             readiness=readiness,
         )
-    # [DEPRECATED: exception path] When the plan-A extractor detects a legacy
-    # visible-text reply (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
-    # it raises BridgeError here so the combined_extractor in
-    # wait_for_plan_a_or_prompt_reply_text falls back to extract_last_chatgpt_reply().
-    # The canonical path always expects an issue-centric contract.
-    if readiness.status == "reply_complete_legacy_contract":
-        raise BridgeError("issue-centric contract reply が見つかりませんでした")
+    # Note: reply_complete_legacy_contract falls through to the `decision is None`
+    # check below.  The explicit stop in run() handles legacy replies before they
+    # reach the dispatch path; parse_issue_centric_reply_for_fetch() no longer needs
+    # its own legacy-specific branch.
     if readiness.status == "reply_complete_invalid_contract":
         raise IssueCentricReplyInvalid(
             readiness.reason,
@@ -1100,194 +1093,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         save_state(dispatch_result.final_state)
         raise BridgeStop(dispatch_result.stop_message)
-    # ── [DEPRECATED: exception path] Legacy visible-text reply handler ──────
-    # NOTE: As of Phase 8 (legacy-fallback-explicit-stop), `reply_complete_legacy_contract`
-    # is intercepted by the explicit-stop block above and raises BridgeStop before reaching
-    # here.  This block is now effectively unreachable for legacy replies.  It is retained
-    # only as a final safety net; it will be removed in a future phase once legacy replies
-    # are confirmed to never occur in practice.
-    decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
-    reply_body = decision.body if decision.kind == "codex_prompt" else (decision.raw_block or decision.note)
-    reply_hash = stable_text_hash(f"{decision.kind}\n{reply_body.strip()}")
-    already_processed = (
-        bool(pending_request_hash)
-        and pending_request_hash == str(state.get("last_processed_request_hash", "")).strip()
-        and reply_hash == str(state.get("last_processed_reply_hash", "")).strip()
+    # Safety guard: contract_decision should always be non-None here because
+    # all statuses that leave decision=None (legacy, not-ready, retryable errors)
+    # are handled by earlier explicit-stop blocks.  If we reach this point with
+    # decision=None it indicates an unhandled classifier state.
+    raise BridgeError(
+        "issue-centric contract reply が見つかりませんでした（未対応の classifier 状態）"
     )
-    mutable_state = clear_error_fields(dict(state))
-    clear_pending_request_fields(mutable_state)
-    if pending_generation_id:
-        mutable_state.update(
-            {
-                "last_issue_centric_generation_lifecycle": "issue_centric_consumed",
-                "last_issue_centric_generation_lifecycle_reason": "chatgpt_reply_recovered_for_generation",
-                "last_issue_centric_generation_lifecycle_source": "fetch_next_prompt",
-                "last_issue_centric_pending_generation_id": "",
-                "last_issue_centric_prepared_generation_id": "",
-                "last_issue_centric_consumed_generation_id": pending_generation_id,
-                "last_issue_centric_route_selected": "fallback_legacy",
-                "last_issue_centric_route_fallback_reason": "chatgpt_reply_recovered_for_generation",
-                "last_issue_centric_runtime_mode": "issue_centric_degraded_fallback",
-                "last_issue_centric_runtime_mode_reason": "chatgpt_reply_recovered_for_generation",
-                "last_issue_centric_runtime_mode_source": "fetch_next_prompt",
-                "last_issue_centric_freshness_status": "issue_centric_stale",
-                "last_issue_centric_freshness_reason": "chatgpt_reply_recovered_for_generation",
-                "last_issue_centric_freshness_source": "reply_recovery_state",
-            }
-        )
-    mutable_state["last_processed_request_hash"] = pending_request_hash or str(state.get("last_processed_request_hash", "")).strip()
-    mutable_state["last_processed_reply_hash"] = reply_hash
-
-    if decision.kind == "codex_prompt":
-        prompt_path = runtime_prompt_path()
-        prompt_log = None
-        current_prompt = read_text(prompt_path).strip()
-        if not already_processed or current_prompt != decision.body.strip():
-            prompt_log = log_text("extracted_codex_prompt", decision.body)
-            write_text(prompt_path, decision.body)
-        mutable_state.update(
-            {
-                "mode": "ready_for_codex",
-                "need_chatgpt_prompt": False,
-                "need_chatgpt_next": False,
-                "need_codex_run": True,
-                "human_review_auto_continue_count": 0,
-                "chatgpt_decision": "",
-                "chatgpt_decision_note": "",
-                "last_prompt_file": repo_relative(prompt_path),
-            }
-        )
-        if rotation_requested:
-            mark_next_request_requires_rotation(mutable_state, rotation_reason or "late_completion")
-        else:
-            clear_chat_rotation_fields(mutable_state)
-        save_state(mutable_state)
-        print(f"raw dump: {raw_log}")
-        if prompt_log is not None:
-            print(f"prompt log: {prompt_log}")
-        elif already_processed:
-            print("prompt: 同じ request / reply はすでに処理済みのため再採用しませんでした")
-        print(f"saved prompt: {prompt_path}")
-        return 0
-
-    auto_continue_count = int(state.get("human_review_auto_continue_count", 0) or 0)
-    if decision.kind == "human_review" and auto_continue_count < 1:
-        continue_text = build_human_review_auto_continue_request()
-        request_hash = stable_text_hash(continue_text)
-        request_source = (
-            f"human_review_continue:{pending_request_hash or stable_text_hash(request_text or '')}:{auto_continue_count + 1}"
-        )
-        prepared_log = log_text("prepared_human_review_auto_continue", continue_text)
-        prepared_log_rel = repo_relative(prepared_log)
-        prepared_state = clear_error_fields(dict(mutable_state))
-        stage_prepared_request(
-            prepared_state,
-            request_hash=request_hash,
-            request_source=request_source,
-            request_log=prepared_log_rel,
-        )
-        prepared_state.update(
-            {
-                    "mode": "awaiting_user",
-                    "need_chatgpt_prompt": False,
-                    "need_chatgpt_next": False,
-                    "need_codex_run": False,
-                    "human_review_auto_continue_count": auto_continue_count + 1,
-                    "chatgpt_decision": "human_review",
-                    "chatgpt_decision_note": decision.note,
-                    "last_prompt_file": "",
-                }
-            )
-        if rotation_requested:
-            mark_next_request_requires_rotation(prepared_state, rotation_reason or "late_completion")
-        else:
-            clear_chat_rotation_fields(prepared_state)
-        save_state(prepared_state)
-        try:
-            send_to_chatgpt(continue_text)
-        except Exception:
-            retry_state = clear_error_fields(dict(mutable_state))
-            stage_prepared_request(
-                retry_state,
-                request_hash=request_hash,
-                request_source=request_source,
-                request_log=prepared_log_rel,
-                status="retry_send",
-            )
-            retry_state.update(
-                {
-                    "mode": "awaiting_user",
-                    "need_chatgpt_prompt": False,
-                    "need_chatgpt_next": False,
-                    "need_codex_run": False,
-                    "human_review_auto_continue_count": auto_continue_count,
-                    "chatgpt_decision": "human_review",
-                    "chatgpt_decision_note": decision.note,
-                    "last_prompt_file": "",
-                }
-            )
-            if rotation_requested:
-                mark_next_request_requires_rotation(retry_state, rotation_reason or "late_completion")
-            else:
-                clear_chat_rotation_fields(retry_state)
-            save_state(retry_state)
-            raise
-        continue_log = log_text("human_review_auto_continue", continue_text)
-        waiting_state = clear_error_fields(dict(mutable_state))
-        promote_pending_request(
-            waiting_state,
-            request_hash=request_hash,
-            request_source=request_source,
-            request_log=repo_relative(continue_log),
-        )
-        waiting_state.update(
-            {
-                "human_review_auto_continue_count": auto_continue_count + 1,
-                "chatgpt_decision": "",
-                "chatgpt_decision_note": "",
-            }
-        )
-        if rotation_requested:
-            mark_next_request_requires_rotation(waiting_state, rotation_reason or "late_completion")
-        else:
-            clear_chat_rotation_fields(waiting_state)
-        save_state(waiting_state)
-        print(f"raw dump: {raw_log}")
-        print(f"auto-continue: {continue_log}")
-        print("ChatGPT の human_review は 1 回だけ自動継続しました。")
-        return 0
-
-    decision_log = None
-    if not already_processed:
-        decision_log = log_text("extracted_no_codex_reply", decision.raw_block or decision.note, suffix="md")
-    decision_note = decision.note
-    if decision.kind == "human_review" and auto_continue_count >= 1:
-        suffix = "human_review が 2 回続いたため、人確認待ちへ切り替えました。"
-        decision_note = f"{decision.note}\n{suffix}".strip() if decision.note else suffix
-    mutable_state.update(
-        {
-            "need_chatgpt_prompt": False,
-            "need_chatgpt_next": False,
-            "need_codex_run": False,
-            "human_review_auto_continue_count": 0,
-            "chatgpt_decision": decision.kind,
-            "chatgpt_decision_note": decision_note,
-            "last_prompt_file": "",
-        }
-    )
-    clear_chat_rotation_fields(mutable_state)
-    if decision.kind == "completed":
-        mutable_state["mode"] = "completed"
-    else:
-        mutable_state["mode"] = "awaiting_user"
-    save_state(mutable_state)
-    print(f"raw dump: {raw_log}")
-    if decision_log is not None:
-        print(f"decision log: {decision_log}")
-    elif already_processed:
-        print("decision: 同じ request / reply はすでに処理済みのため再採用しませんでした")
-    print(f"ChatGPT は Codex 不要と判断しました: {decision.kind}")
-    return 0
 
 
 if __name__ == "__main__":

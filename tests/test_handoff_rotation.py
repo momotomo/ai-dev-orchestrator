@@ -131,12 +131,6 @@ class HandoffWaitTransitionTests(unittest.TestCase):
             "last_processed_request_hash": "",
             "last_processed_reply_hash": "",
         }
-        decision = _bridge_common.ChatGPTReplyDecision(
-            kind="codex_prompt",
-            body="Phase: next prompt",
-            note="",
-            raw_block="===CHATGPT_PROMPT_REPLY===\nPhase: next prompt\n===END_REPLY===",
-        )
 
         with (
             patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request text"),
@@ -155,7 +149,6 @@ class HandoffWaitTransitionTests(unittest.TestCase):
                 ),
             ) as wait_mock,
             patch.object(fetch_next_prompt, "log_text", side_effect=["raw-log", "legacy-log"]),
-            patch.object(fetch_next_prompt, "extract_last_chatgpt_reply", return_value=decision),
             patch.object(fetch_next_prompt, "runtime_prompt_path", return_value=REPO_ROOT / "tests" / "tmp_prompt.md"),
             patch.object(fetch_next_prompt, "read_text", return_value=""),
             patch.object(fetch_next_prompt, "write_text", return_value=None),
