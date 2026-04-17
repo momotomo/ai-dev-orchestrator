@@ -256,6 +256,26 @@ def _build_completion_followup_section(state: dict[str, object], report_text: st
     return "\n".join(lines)
 
 
+def _should_use_pinned_ready_issue_path(state: dict[str, object]) -> bool:
+    """Return True when the continuation should use a fresh pinned ready issue path.
+
+    Two conditions must both hold:
+
+    1. ``pending_request_source`` starts with ``"ready_issue:"`` — the previous request
+       was made for an initial ready-issue entry, not a normal report continuation.
+    2. ``current_ready_issue_ref`` is non-empty — the orchestrator saved an explicit
+       ready issue ref that should anchor this continuation.
+
+    When both are True, ``run_resume_request()`` should skip the old
+    ``last_issue_centric_*`` snapshot entirely and build a fresh IC section from the
+    pinned ready issue ref.  This prevents context carry-over from a previous issue
+    that might still be visible in the state fields.
+    """
+    pending_source = str(state.get("pending_request_source", "")).strip()
+    pinned_ref = str(state.get("current_ready_issue_ref", "")).strip()
+    return pending_source.startswith("ready_issue:") and bool(pinned_ref)
+
+
 def _is_ready_bounded_completion_followup_request(
     state: dict[str, object],
     *,
@@ -439,19 +459,8 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    # Detect fresh-start ready-issue continuation to prevent carry-over from
-    # a previous issue's last_issue_centric_* context.
-    # When pending_request_source is "ready_issue:..." and current_ready_issue_ref
-    # is set, we know this continuation follows the initial request for a newly
-    # pinned ready issue.  In that case, skip the old IC snapshot entirely and
-    # build a fresh IC section from the explicit ready issue ref.
-    _pending_source = str(state.get("pending_request_source", "")).strip()
-    _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
-    _use_pinned_ready_issue = (
-        _pending_source.startswith("ready_issue:") and bool(_pinned_ready_issue_ref)
-    )
-
-    if _use_pinned_ready_issue:
+    if _should_use_pinned_ready_issue_path(state):
+        _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
         issue_centric_runtime_snapshot = None
         issue_centric_runtime_mode = None
         issue_centric_next_request_section = build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref)
