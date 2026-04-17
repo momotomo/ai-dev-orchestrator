@@ -1647,10 +1647,9 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
     """Tests for Plan A BODY base64 transport as the primary fetch path.
 
     Verifies that:
-    - wait_for_plan_a_or_prompt_reply_text succeeds on Plan A contract reply (primary path)
-    - wait_for_plan_a_or_prompt_reply_text succeeds on visible DOM text reply (safety fallback)
+    - wait_for_plan_a_or_prompt_reply_text succeeds on Plan A contract reply (IC-only path)
     - fetch_next_prompt.run() passes a plan_a_extractor to wait_for_plan_a_or_prompt_reply_text
-    - fetch_next_prompt.run() falls through to visible DOM text path when Plan A is absent
+    - fetch_next_prompt.run() raises BridgeStop for legacy visible-text replies (explicit stop)
     """
 
     def _build_plan_a_only_raw(self) -> str:
@@ -1912,7 +1911,7 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
             issue_centric_contract.IssueCentricAction.CODEX_RUN,
         )
 
-    def test_legacy_visible_text_reply_still_uses_fallback_path(self) -> None:
+    def test_legacy_visible_text_reply_classified_and_stopped(self) -> None:
         raw = "\n".join(
             [
                 "あなた:",

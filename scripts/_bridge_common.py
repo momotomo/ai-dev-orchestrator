@@ -39,10 +39,6 @@ STATE_PATH = BRIDGE_DIR / "state.json"
 STOP_PATH = BRIDGE_DIR / "STOP"
 BROWSER_CONFIG_PATH = BRIDGE_DIR / "browser_config.json"
 PROJECT_CONFIG_PATH = BRIDGE_DIR / "project_config.json"
-PROMPT_REPLY_START = "===CHATGPT_PROMPT_REPLY==="
-PROMPT_REPLY_END = "===END_REPLY==="
-NO_CODEX_REPLY_START = "===CHATGPT_NO_CODEX==="
-NO_CODEX_REPLY_END = "===END_NO_CODEX==="
 HANDOFF_REPLY_START = "===CHATGPT_CHAT_HANDOFF==="
 HANDOFF_REPLY_END = "===END_CHAT_HANDOFF==="
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
@@ -3172,51 +3168,6 @@ def extract_last_chatgpt_handoff(raw_text: str, *, after_text: str | None = None
     return handoff + "\n"
 
 
-def extract_last_chatgpt_reply(raw_text: str, *, after_text: str | None = None) -> ChatGPTReplyDecision:
-    search_start = _search_start_index(raw_text, after_text)
-
-    candidate_specs = [
-        ("codex_prompt", PROMPT_REPLY_START, PROMPT_REPLY_END),
-        ("no_codex", NO_CODEX_REPLY_START, NO_CODEX_REPLY_END),
-    ]
-    assistant_matches: list[tuple[int, str, str]] = []
-    fallback_matches: list[tuple[int, str, str]] = []
-
-    for kind, start_marker, end_marker in candidate_specs:
-        pattern = re.compile(
-            rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
-            re.DOTALL,
-        )
-        for match in pattern.finditer(raw_text, search_start):
-            entry = (match.start(), kind, match.group(1))
-            fallback_matches.append(entry)
-            assistant_index = raw_text.rfind("ChatGPT:", search_start, match.start())
-            user_index = raw_text.rfind("あなた:", search_start, match.start())
-            if assistant_index > user_index:
-                assistant_matches.append(entry)
-
-    matches = assistant_matches if search_start > 0 else (assistant_matches or fallback_matches)
-    if not matches:
-        if after_text:
-            raise BridgeError("直近の prompt request 以降に有効な ChatGPT 返答ブロックを抽出できませんでした。")
-        raise BridgeError("直近のユーザー発話以降に有効な ChatGPT 返答ブロックを抽出できませんでした。")
-
-    _, kind, raw_body = sorted(matches, key=lambda item: item[0])[-1]
-    if kind == "codex_prompt":
-        body = normalize_prompt_body(raw_body)
-        return ChatGPTReplyDecision("codex_prompt", body, "", body)
-
-    reason, note = parse_no_codex_block(raw_body)
-    return ChatGPTReplyDecision(reason, "", note, raw_body.strip() + "\n")
-
-
-def extract_last_prompt_reply(raw_text: str, *, after_text: str | None = None) -> str:
-    decision = extract_last_chatgpt_reply(raw_text, after_text=after_text)
-    if decision.kind != "codex_prompt":
-        raise BridgeError("CHATGPT_PROMPT_REPLY ではなく CHATGPT_NO_CODEX が返りました。")
-    return decision.body
-
-
 def _apple_event_timeout_message(target: str) -> str:
     return (
         f"{target} が AppleEvent timeout で止まりました。"
@@ -5602,21 +5553,6 @@ def _wait_for_chatgpt_reply_text(
             page.wait_for_timeout(int(poll_seconds * 1000))
 
 
-def wait_for_prompt_reply_text(
-    timeout_seconds: int | None = None,
-    request_text: str | None = None,
-    stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
-    allow_project_page_wait: bool = False,
-) -> str:
-    return _wait_for_chatgpt_reply_text(
-        timeout_seconds=timeout_seconds,
-        request_text=request_text,
-        extractor=lambda raw_text, after_text: extract_last_chatgpt_reply(raw_text, after_text=after_text),
-        stage_callback=stage_callback,
-        allow_project_page_wait=allow_project_page_wait,
-    )
-
-
 def wait_for_plan_a_or_prompt_reply_text(
     *,
     plan_a_extractor: Callable[[str, str | None], Any],
@@ -5625,39 +5561,18 @@ def wait_for_plan_a_or_prompt_reply_text(
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
     allow_project_page_wait: bool = False,
 ) -> str:
-    """Wait for a ChatGPT reply that satisfies either the Plan A contract extractor
-    or the visible DOM text extractor (safety fallback).
+    """Wait for a ChatGPT reply that satisfies the issue-centric (Plan A) contract extractor.
 
-    ``plan_a_extractor`` is tried first (primary path).  If it raises
-    :class:`BridgeError` for a reason other than "reply not ready", the visible
-    DOM text extractor is used as a safety net to avoid a hard crash in edge
-    cases where plan A cannot parse the response.  Callers that detect legacy
-    replies in the extracted text are responsible for their own stop logic
-    (e.g., fetch raises BridgeStop for legacy replies after this function
-    returns).  Polling continues until an extractor succeeds or the timeout is
-    reached.
+    ``plan_a_extractor`` is the sole extraction path (IC-only).  Legacy
+    visible-text reply extraction (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
+    is no longer a success path.  Detection of legacy replies is handled by the
+    caller (fetch_next_prompt.run classifies legacy as an explicit BridgeStop).
+    Polling continues until plan_a_extractor succeeds or the timeout is reached.
     """
-
-    # combined_extractor: plan A is the primary path.  If plan_a_extractor raises
-    # BridgeError for a non-"reply_not_ready" reason (e.g., legacy markers present,
-    # decision is None), fall back to extract_last_chatgpt_reply() as a safety net
-    # so that stale old-format replies do not hard-crash the fetch loop.  The caller
-    # (fetch_next_prompt.run) is responsible for detecting legacy replies in the
-    # returned text and raising BridgeStop; this function does not succeed via a
-    # legacy path.
-    def combined_extractor(raw_text: str, after_text: str | None) -> Any:
-        try:
-            return plan_a_extractor(raw_text, after_text)
-        except BridgeError as exc:
-            if str(getattr(exc, "reply_readiness_status", "")).strip() == "reply_not_ready":
-                raise
-            pass
-        return extract_last_chatgpt_reply(raw_text, after_text=after_text)
-
     return _wait_for_chatgpt_reply_text(
         timeout_seconds=timeout_seconds,
         request_text=request_text,
-        extractor=combined_extractor,
+        extractor=plan_a_extractor,
         stage_callback=stage_callback,
         allow_project_page_wait=allow_project_page_wait,
     )
