@@ -208,6 +208,13 @@ def _detect_partial_body_blocks(
             else:
                 open_blocks.append(start)
     return open_blocks, closed_blocks
+# [DEPRECATED: exception path]
+# These markers belong to the old visible-text reply contract that predates the
+# issue-centric contract.  They are kept here ONLY as a safety net so that an
+# accidental / stale old-format ChatGPT reply is detected and routed through the
+# legacy tail path below rather than silently misclassified.  New requests always
+# include `build_issue_centric_reply_contract_section()`, so ChatGPT should never
+# produce these markers in normal operation.
 _LEGACY_REPLY_MARKERS = (
     "===CHATGPT_PROMPT_REPLY===",
     "===CHATGPT_NO_CODEX===",
@@ -315,11 +322,12 @@ def classify_issue_centric_reply_readiness(
             reply_complete_tag_present=False,
         )
 
-    # ── Gate 1b: legacy contract — exempt from terminal tag requirement ─────
+    # ── Gate 1b: [DEPRECATED: exception path] legacy contract ─────────────
     # Legacy replies (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===) do
     # not carry the new terminal tag.  Detect them before the terminal tag gate
     # so the safety fallback path in wait_for_plan_a_or_prompt_reply_text still
-    # works.
+    # works.  The canonical reply format is the issue-centric contract only;
+    # this gate is retained solely as a backward-compat safety net.
     if legacy_marker_present:
         return IssueCentricReplyReadiness(
             status="reply_complete_legacy_contract",
@@ -441,6 +449,11 @@ def parse_issue_centric_reply_for_fetch(
             raw_text=raw_text,
             readiness=readiness,
         )
+    # [DEPRECATED: exception path] When the plan-A extractor detects a legacy
+    # visible-text reply (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
+    # it raises BridgeError here so the combined_extractor in
+    # wait_for_plan_a_or_prompt_reply_text falls back to extract_last_chatgpt_reply().
+    # The canonical path always expects an issue-centric contract.
     if readiness.status == "reply_complete_legacy_contract":
         raise BridgeError("issue-centric contract reply が見つかりませんでした")
     if readiness.status == "reply_complete_invalid_contract":
@@ -1044,6 +1057,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         save_state(dispatch_result.final_state)
         raise BridgeStop(dispatch_result.stop_message)
+    # ── [DEPRECATED: exception path] Legacy visible-text reply handler ──────
+    # This block is only reached when `contract_decision is None`, which happens
+    # exclusively for `reply_complete_legacy_contract` (old ===CHATGPT_PROMPT_REPLY===
+    # / ===CHATGPT_NO_CODEX=== format detected).  All other non-ready statuses are
+    # handled above (reply_not_ready → BridgeError, retryable errors → correction
+    # retry).  The canonical reply format is the issue-centric contract; this
+    # fallback is retained as a safety net only and may be removed in a future phase
+    # once confirmed that no legacy replies occur in practice.
     decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
     reply_body = decision.body if decision.kind == "codex_prompt" else (decision.raw_block or decision.note)
     reply_hash = stable_text_hash(f"{decision.kind}\n{reply_body.strip()}")

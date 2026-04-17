@@ -449,7 +449,7 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
                 "同じ handoff は再送せず reply を待ってから再実行してください。",
                 final_state,
             )
-        return "CHATGPT_PROMPT_REPLY が同じ current tab に出たら再実行してください。"
+        return "issue-centric contract reply が同じ current tab に出たら再実行してください。"
     if action == "dispatch_issue_centric_codex_run":
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
         if note:
