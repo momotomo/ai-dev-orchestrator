@@ -3298,5 +3298,40 @@ class LegacyPathDeprecationTests(unittest.TestCase):
             fnp._is_retryable_contract_error("legacy visible-text reply contract is present.", "reply_complete_legacy_contract")
         )
 
+    def test_legacy_reply_readiness_has_no_ic_decision(self) -> None:
+        """classify_issue_centric_reply_readiness for legacy markers → decision is None (no auto-continue)."""
+        import fetch_next_prompt as fnp
+        raw = "\n".join([
+            "あなた:",
+            "request text",
+            "ChatGPT:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "some prompt body",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_legacy_contract")
+        # decision is None → no IC decision to dispatch; explicit stop required
+        self.assertIsNone(readiness.decision)
+
+    def test_legacy_stop_condition_is_distinct_from_retryable_and_success(self) -> None:
+        """reply_complete_legacy_contract is neither retryable (correction retry) nor success (IC dispatch)."""
+        import fetch_next_prompt as fnp
+        status = "reply_complete_legacy_contract"
+        reason = "legacy visible-text reply contract is present."
+        # Not retryable → no correction request sent
+        self.assertFalse(fnp._is_retryable_contract_error(reason, status))
+        # Not a valid IC contract → not success path
+        raw = "\n".join([
+            "あなた:",
+            "request text",
+            "ChatGPT:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "body",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw)
+        # Explicit stop condition: status == "reply_complete_legacy_contract"
+        self.assertEqual(readiness.status, "reply_complete_legacy_contract")
+        # IC decision is absent → cannot proceed to IC dispatch
+        self.assertIsNone(readiness.decision)
 
 
