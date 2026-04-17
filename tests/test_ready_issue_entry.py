@@ -1345,37 +1345,26 @@ class IssueAwareProvenanceTest(unittest.TestCase):
 
 
 class IssueCentricContinuationReplyContractTests(unittest.TestCase):
-    """#fix: report-based continuation must use issue-centric contract when route is issue_centric.
+    """#fix: report-based continuation must use issue-centric contract for all routes.
 
-    Guard against regression where archive_codex_report → request_prompt_from_report
-    falls back to legacy visible-text tags (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
-    instead of maintaining issue-centric contract only.
-
-    Normal (issue_centric route):
-      - built request contains ===CHATGPT_DECISION_JSON=== and REPLY_COMPLETE tag
-      - built request does NOT contain ===CHATGPT_PROMPT_REPLY=== or ===CHATGPT_NO_CODEX===
-
-    Abnormal (fallback_legacy or empty route):
-      - legacy route: does NOT contain CHATGPT_DECISION_JSON (no unintended injection)
-      - no route: same as legacy
-
-    Backward compat (build_chatgpt_request without issue_centric_route_selected):
-      - default "" behaves as legacy (no extra DECISION_JSON appended)
+    As of Phase 13 (outbound contract full cutover):
+      - build_chatgpt_request() always appends issue-centric reply contract
+      - build_chatgpt_handoff_request() always appends issue-centric reply contract
+      - The old visible-text contract (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
+        is no longer included in the template or appended by any builder.
     """
 
     def _template(self, tmp: Path) -> Path:
         t = tmp / "template.md"
         t.write_text(
             "## state\n{CURRENT_STATUS}\n\n{ISSUE_CENTRIC_NEXT_REQUEST_SECTION}\n"
-            "{RESUME_CONTEXT_SECTION}\n"
-            "===CHATGPT_PROMPT_REPLY===\n[body]\n===END_REPLY===\n"
-            "===CHATGPT_NO_CODEX===\nstatus\n===END_NO_CODEX===\n",
+            "{RESUME_CONTEXT_SECTION}\n",
             encoding="utf-8",
         )
         return t
 
-    def test_build_chatgpt_request_issue_centric_route_appends_ic_contract(self) -> None:
-        """issue_centric_route_selected='issue_centric' → DECISION_JSON present, legacy tags absent."""
+    def test_build_chatgpt_request_always_appends_ic_contract(self) -> None:
+        """build_chatgpt_request always appends IC contract regardless of route."""
         from _bridge_common import build_chatgpt_request
         with tempfile.TemporaryDirectory() as tmp:
             t = self._template(Path(tmp))
@@ -1384,19 +1373,16 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
                 template_path=t,
                 next_todo="next",
                 open_questions="none",
-                issue_centric_route_selected="issue_centric",
             )
         self.assertIn("===CHATGPT_DECISION_JSON===", result)
         self.assertIn("===CHATGPT_REPLY_COMPLETE===", result)
         self.assertIn("issue-centric contract only", result)
         self.assertIn("legacy visible-text fallback は使わないでください", result)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", result)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", result)
 
-    def test_build_chatgpt_request_issue_centric_route_legacy_tags_still_present_in_body(self) -> None:
-        """Legacy tag instructions from the template appear before the override contract.
-
-        The issue-centric contract at the end explicitly overrides them.
-        Both are present; ChatGPT follows the issue-centric instruction (last wins).
-        """
+    def test_build_chatgpt_request_ic_contract_appended_after_template_body(self) -> None:
+        """IC contract section appears after the template body content."""
         from _bridge_common import build_chatgpt_request
         with tempfile.TemporaryDirectory() as tmp:
             t = self._template(Path(tmp))
@@ -1405,33 +1391,13 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
                 template_path=t,
                 next_todo="next",
                 open_questions="none",
-                issue_centric_route_selected="issue_centric",
             )
-        # Issue-centric override must come AFTER the legacy template block:
+        status_pos = result.index("## state")
         ic_pos = result.index("===CHATGPT_DECISION_JSON===")
-        legacy_pos = result.index("===CHATGPT_PROMPT_REPLY===")
-        self.assertGreater(
-            ic_pos, legacy_pos,
-            "Issue-centric contract must appear after legacy template section so it overrides.",
-        )
+        self.assertGreater(ic_pos, status_pos, "IC contract must appear after template body.")
 
-    def test_build_chatgpt_request_fallback_legacy_route_no_ic_contract_injected(self) -> None:
-        """fallback_legacy route → no CHATGPT_DECISION_JSON appended (backward compat)."""
-        from _bridge_common import build_chatgpt_request
-        with tempfile.TemporaryDirectory() as tmp:
-            t = self._template(Path(tmp))
-            result = build_chatgpt_request(
-                state={"mode": "idle"},
-                template_path=t,
-                next_todo="next",
-                open_questions="none",
-                issue_centric_route_selected="fallback_legacy",
-            )
-        self.assertNotIn("===CHATGPT_DECISION_JSON===", result)
-        self.assertIn("===CHATGPT_PROMPT_REPLY===", result)
-
-    def test_build_chatgpt_request_default_route_no_ic_contract_injected(self) -> None:
-        """Default (no route_selected) behaves as legacy – no extra contract injection."""
+    def test_build_chatgpt_request_fallback_legacy_route_uses_ic_contract(self) -> None:
+        """fallback_legacy route — no route param needed, IC contract always present."""
         from _bridge_common import build_chatgpt_request
         with tempfile.TemporaryDirectory() as tmp:
             t = self._template(Path(tmp))
@@ -1441,17 +1407,18 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
                 next_todo="next",
                 open_questions="none",
             )
-        self.assertNotIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", result)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", result)
 
-    def test_build_chatgpt_handoff_request_issue_centric_route_uses_ic_contract(self) -> None:
-        """build_chatgpt_handoff_request with issue_centric_route_selected='issue_centric' uses IC contract."""
+    def test_build_chatgpt_handoff_request_always_uses_ic_contract(self) -> None:
+        """build_chatgpt_handoff_request always uses IC contract for all routes."""
         from _bridge_common import build_chatgpt_handoff_request
         result = build_chatgpt_handoff_request(
             state={"mode": "idle"},
             last_report="# Report\n\n===BRIDGE_SUMMARY===\n- summary: done\n===END_BRIDGE_SUMMARY===\n",
             next_todo="next",
             open_questions="none",
-            issue_centric_route_selected="issue_centric",
         )
         self.assertIn("===CHATGPT_DECISION_JSON===", result)
         self.assertIn("issue-centric contract only", result)
@@ -1459,7 +1426,7 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
         self.assertNotIn("===CHATGPT_NO_CODEX===", result)
 
     def test_build_chatgpt_handoff_request_default_route_uses_ic_contract(self) -> None:
-        """Default (no route) now also uses IC contract — old visible-text contract removed in Phase 12."""
+        """Default (no route) uses IC contract — unified in Phase 12-13."""
         from _bridge_common import build_chatgpt_handoff_request
         result = build_chatgpt_handoff_request(
             state={"mode": "idle"},
@@ -1613,8 +1580,8 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
         self.assertIn("action=no_action", text)
         self.assertIn("target_issue: https://github.com/example/repo/issues/7", text)
 
-    def test_run_resume_request_no_issue_centric_snapshot_keeps_legacy(self) -> None:
-        """Without issue-centric snapshot, legacy contract is used (no unintended IC injection)."""
+    def test_run_resume_request_no_issue_centric_snapshot_uses_ic_contract(self) -> None:
+        """Without issue-centric snapshot, IC contract is still always injected (Phase 13)."""
         import request_prompt_from_report
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1643,8 +1610,10 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
 
         self.assertEqual(len(sent_requests), 1)
         text = sent_requests[0]
-        self.assertNotIn("===CHATGPT_DECISION_JSON===", text,
-                         "No IC snapshot → must not inject IC contract")
+        self.assertIn("===CHATGPT_DECISION_JSON===", text,
+                      "IC contract must always be injected regardless of snapshot")
+        self.assertNotIn("===CHATGPT_PROMPT_REPLY===", text)
+        self.assertNotIn("===CHATGPT_NO_CODEX===", text)
 
 
 # ---------------------------------------------------------------------------

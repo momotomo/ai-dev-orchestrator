@@ -411,7 +411,6 @@ def run_resume_request(
             last_report=last_report,
             resume_note=resume_note or None,
             issue_centric_next_request_section=issue_centric_next_request_section,
-            issue_centric_route_selected=_route_selected,
         )
         request_hash = stable_text_hash(request_text)
         request_source = build_report_request_source(state, resume_note)
@@ -480,7 +479,6 @@ def run_rotated_report_request(
             open_questions=args.open_questions,
             current_status=args.current_status or None,
             issue_centric_next_request_section=issue_centric_next_request_section,
-            issue_centric_route_selected=route_choice.route_selected,
         )
         handoff_request_log = log_text("handoff_requested", handoff_request_text)
         send_to_chatgpt(handoff_request_text)

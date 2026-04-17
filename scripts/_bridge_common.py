@@ -5685,7 +5685,6 @@ def build_chatgpt_handoff_request(
     open_questions: str,
     current_status: str | None = None,
     issue_centric_next_request_section: str | None = None,
-    issue_centric_route_selected: str = "",
 ) -> str:
     summary = compact_last_report_text(last_report)
     contract = _build_ic_reply_contract_section()
@@ -5730,7 +5729,6 @@ def build_chatgpt_request(
     last_report: str | None = None,
     resume_note: str | None = None,
     issue_centric_next_request_section: str | None = None,
-    issue_centric_route_selected: str = "",
 ) -> str:
     template_text = read_text(template_path).strip()
     if not template_text:
@@ -5768,8 +5766,7 @@ def build_chatgpt_request(
         "RESUME_CONTEXT_SECTION": resume_section,
     }
     result = render_template(template_text, values).strip() + "\n"
-    if issue_centric_route_selected == "issue_centric":
-        result = result.rstrip("\n") + "\n\n" + _build_ic_reply_contract_section() + "\n"
+    result = result.rstrip("\n") + "\n\n" + _build_ic_reply_contract_section() + "\n"
     return result
 
 
