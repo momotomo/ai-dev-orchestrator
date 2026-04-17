@@ -430,7 +430,7 @@ class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
@@ -526,7 +526,7 @@ class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
@@ -617,7 +617,7 @@ class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
@@ -752,7 +752,7 @@ class FetchNextPromptHumanReviewIntegrationTests(unittest.TestCase):
 
             with (
                 patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
-                patch.object(fetch_next_prompt, "wait_for_plan_a_or_prompt_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
                 patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),

@@ -136,7 +136,7 @@ class HandoffWaitTransitionTests(unittest.TestCase):
             patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request text"),
             patch.object(
                 fetch_next_prompt,
-                "wait_for_plan_a_or_prompt_reply_text",
+                "wait_for_issue_centric_reply_text",
                 return_value="\n".join(
                     [
                         "あなた:",
