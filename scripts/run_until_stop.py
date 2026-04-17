@@ -197,9 +197,9 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--next-todo", default="", help="report ベース request に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="report ベース request に渡す open_questions")
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
-    parser.add_argument("--ready-issue-ref", default="", help="通常入口で使う current ready issue の参照")
-    parser.add_argument("--request-body", default="", help="例外 / recovery / override 用の初回本文")
-    parser.add_argument("--select-issue", action="store_true", default=False, help="初回 issue 選定モード")
+    parser.add_argument("--ready-issue-ref", default="", help="明示指定用の ready issue 参照。初期状態では省略してよい（start_bridge.py が自動で issue selection に入る）")
+    parser.add_argument("--request-body", default="", help="exception / recovery / override 専用の初回本文。通常起動では不要")
+    parser.add_argument("--select-issue", action="store_true", default=False, help="明示的に issue selection から始めるときの補助フラグ。初期状態では start_bridge.py 側が自動処理する")
     parser.add_argument("--entry-script", default="scripts/run_until_stop.py", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 

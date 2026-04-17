@@ -72,6 +72,26 @@ class HelpSmokeTest(unittest.TestCase):
         self.assertIn("--reset", output)
         self.assertIn("clear-error とは別物", output)
 
+    def test_run_until_stop_help_shows_engine_role_and_option_wording(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "scripts/run_until_stop.py", "--help"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        output = result.stdout
+        # description: engine, normal entry is start_bridge.py
+        self.assertIn("実行エンジン", output)
+        self.assertIn("scripts/start_bridge.py", output)
+        # --ready-issue-ref: explicit override, not "通常入口で使う"
+        self.assertIn("明示指定", output)
+        self.assertNotIn("通常入口で使う", output)
+        # --request-body: exception / recovery / override only
+        self.assertIn("exception / recovery / override", output)
+        # --select-issue: explicit issue selection helper
+        self.assertIn("issue selection", output)
+
 
 class RecoverablePendingCodexResumeTests(unittest.TestCase):
     def _pending_codex_state(self, *, error: bool = True) -> dict[str, object]:
