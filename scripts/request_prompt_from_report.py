@@ -22,6 +22,7 @@ from _bridge_common import (
     guarded_main,
     load_project_config,
     log_text,
+    _LIFECYCLE_ONLY_REQUEST_GUIDANCE,
     prepare_issue_centric_runtime_mode,
     prepare_issue_centric_runtime_snapshot,
     present_resume_prompt,
@@ -402,6 +403,11 @@ def run_resume_request(
             print("request: 前回未送信の ChatGPT request を再送します。")
     else:
         template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
+        _request_guidance = (
+            _LIFECYCLE_ONLY_REQUEST_GUIDANCE
+            if _is_ready_bounded_continuation(state) and effective_next_todo != args.next_todo
+            else None
+        )
         request_text = build_chatgpt_request(
             state=state,
             template_path=template_path,
@@ -411,6 +417,7 @@ def run_resume_request(
             last_report=last_report,
             resume_note=resume_note or None,
             issue_centric_next_request_section=issue_centric_next_request_section,
+            request_guidance=_request_guidance,
         )
         request_hash = stable_text_hash(request_text)
         request_source = build_report_request_source(state, resume_note)

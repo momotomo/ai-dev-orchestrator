@@ -5634,6 +5634,19 @@ def build_chatgpt_handoff_request(
     ).strip() + "\n"
 
 
+_DEFAULT_REQUEST_GUIDANCE = (
+    "次の Codex 用 1 フェーズ prompt だけを返してください。\n"
+    "共通ルールは固定 docs 側にあるので、今回差分だけに集中してください。\n"
+    "Git ルールや worker 共通ルールを prompt 本文へ長く重複記載せず、必要なら `追加確認 docs` だけを短く足してください。"
+)
+
+_LIFECYCLE_ONLY_REQUEST_GUIDANCE = (
+    "今回は新しい Codex 用 prompt を作りません。lifecycle automation だけを issue-centric contract で判断してください。\n"
+    "返答は action=no_action を基本とし、issue を閉じるなら close_current_issue=true を添えてください。\n"
+    "CHATGPT_CODEX_BODY は返さないでください。"
+)
+
+
 def build_chatgpt_request(
     *,
     state: Mapping[str, Any],
@@ -5644,6 +5657,7 @@ def build_chatgpt_request(
     last_report: str | None = None,
     resume_note: str | None = None,
     issue_centric_next_request_section: str | None = None,
+    request_guidance: str | None = None,
 ) -> str:
     template_text = read_text(template_path).strip()
     if not template_text:
@@ -5679,6 +5693,7 @@ def build_chatgpt_request(
         "OPEN_QUESTIONS": open_questions,
         "ISSUE_CENTRIC_NEXT_REQUEST_SECTION": next_request_section or "",
         "RESUME_CONTEXT_SECTION": resume_section,
+        "REQUEST_GUIDANCE": (request_guidance if request_guidance is not None else _DEFAULT_REQUEST_GUIDANCE),
     }
     result = render_template(template_text, values).strip() + "\n"
     result = result.rstrip("\n") + "\n\n" + _build_ic_reply_contract_section() + "\n"
