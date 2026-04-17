@@ -1777,7 +1777,13 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
             self.assertIn("legacy", str(cm.exception).lower())
 
 
-class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
+class IssueCentricReplyWaitTests(unittest.TestCase):
+    """Tests for wait_for_issue_centric_reply_text() and the IC reply readiness classifier.
+
+    Also covers the legacy visible-text detect-only safety net:
+    legacy markers are classified and trigger an explicit stop — there is no
+    legacy success path.  Normal operation never reaches the legacy gate.
+    """
     def test_classifies_thinking_reply_as_not_ready(self) -> None:
         raw = "\n".join(
             [
@@ -1912,6 +1918,11 @@ class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):
         )
 
     def test_legacy_visible_text_reply_classified_and_stopped(self) -> None:
+        """Legacy markers are detect-only: classified as reply_complete_legacy_contract,
+        never routed through a success path.  parse_issue_centric_reply_for_fetch()
+        raises BridgeError when called directly with such a reply (run() stops
+        earlier via an explicit BridgeStop before this function is reached).
+        """
         raw = "\n".join(
             [
                 "あなた:",
