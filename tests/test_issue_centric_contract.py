@@ -1739,8 +1739,8 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
             self.assertIn("plan_a_extractor", call_kwargs)
             self.assertTrue(callable(call_kwargs["plan_a_extractor"]))
 
-    def test_fetch_run_falls_back_to_visible_dom_path_when_plan_a_absent(self) -> None:
-        """When Plan A contract is absent, fetch_next_prompt.run() falls through to visible DOM text path."""
+    def test_fetch_run_stops_explicitly_when_legacy_reply_detected(self) -> None:
+        """When only a legacy CHATGPT_PROMPT_REPLY is present, fetch_next_prompt.run() raises BridgeStop (explicit stop)."""
         state = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "hash2",
@@ -1767,13 +1767,15 @@ class PlanAFetchPrimaryPathTests(unittest.TestCase):
                 patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
                 patch.object(fetch_next_prompt, "write_text", side_effect=lambda p, t: None),
             ):
-                result = fetch_next_prompt.run(dict(state), [])
+                with self.assertRaises(BridgeStop) as cm:
+                    fetch_next_prompt.run(dict(state), [])
 
-            # Visible DOM text path: codex_prompt → mode=ready_for_codex
-            self.assertEqual(result, 0)
-            saved = saved_states[0]
-            self.assertEqual(saved["mode"], "ready_for_codex")
-            self.assertTrue(bool(saved.get("need_codex_run")))
+            # State must reflect the explicit legacy stop (error, not success)
+            self.assertTrue(len(saved_states) > 0)
+            saved = saved_states[-1]
+            self.assertEqual(saved["mode"], "awaiting_user")
+            self.assertTrue(saved.get("error"))
+            self.assertIn("legacy", str(cm.exception).lower())
 
 
 class WaitForPlanAOrPromptReplyTextTests(unittest.TestCase):

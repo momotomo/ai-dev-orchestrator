@@ -14,7 +14,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import _bridge_common  # noqa: E402
 import fetch_next_prompt  # noqa: E402
 import request_prompt_from_report  # noqa: E402
-from _bridge_common import BridgeError  # noqa: E402
+from _bridge_common import BridgeError, BridgeStop  # noqa: E402
 
 
 class _DummyPage:
@@ -154,21 +154,24 @@ class HandoffWaitTransitionTests(unittest.TestCase):
                     ]
                 ),
             ) as wait_mock,
-            patch.object(fetch_next_prompt, "log_text", side_effect=["raw-log", "prompt-log"]),
+            patch.object(fetch_next_prompt, "log_text", side_effect=["raw-log", "legacy-log"]),
             patch.object(fetch_next_prompt, "extract_last_chatgpt_reply", return_value=decision),
             patch.object(fetch_next_prompt, "runtime_prompt_path", return_value=REPO_ROOT / "tests" / "tmp_prompt.md"),
             patch.object(fetch_next_prompt, "read_text", return_value=""),
             patch.object(fetch_next_prompt, "write_text", return_value=None),
             patch.object(fetch_next_prompt, "save_state", return_value=None) as save_mock,
         ):
-            rc = fetch_next_prompt.run(dict(state), [])
+            with self.assertRaises(BridgeStop) as cm:
+                fetch_next_prompt.run(dict(state), [])
 
-        self.assertEqual(rc, 0)
+        # allow_project_page_wait must be True even though the reply was legacy
         wait_mock.assert_called_once()
         self.assertTrue(wait_mock.call_args.kwargs["allow_project_page_wait"])
+        # State must reflect the legacy-stop (error, not success)
         saved_state = save_mock.call_args.args[0]
-        self.assertEqual(saved_state["mode"], "ready_for_codex")
-        self.assertEqual(saved_state["pending_request_signal"], "")
+        self.assertEqual(saved_state["mode"], "awaiting_user")
+        self.assertTrue(saved_state.get("error"))
+        self.assertIn("legacy", str(cm.exception).lower())
 
     def test_soft_wait_uses_distinct_request_log_prefix(self) -> None:
         state = {

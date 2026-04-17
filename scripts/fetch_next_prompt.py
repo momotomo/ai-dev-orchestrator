@@ -783,6 +783,49 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             readiness=readiness,
             correction_count=correction_count,
         )
+
+    # ── Legacy visible-text reply → explicit stop ──────────────────────────
+    # [DEPRECATED: exception path]
+    # When legacy markers (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
+    # are detected, the reply is not a valid issue-centric contract.
+    # Stop immediately so the operator can request a proper IC-format reply;
+    # do NOT fall through to the legacy tail extractor and auto-continue.
+    if readiness.status == "reply_complete_legacy_contract":
+        legacy_summary = "\n".join(
+            [
+                "# Legacy Visible-Text Reply Detected",
+                "",
+                f"- reply_readiness_status: {readiness.status}",
+                f"- reply_readiness_reason: {readiness.reason}",
+                f"- raw_dump: {repo_relative(Path(raw_log))}",
+                f"- pending_request_source: {pending_request_source or 'unknown'}",
+            ]
+        ).strip() + "\n"
+        legacy_log = log_text("legacy_reply_detected", legacy_summary, suffix="md")
+        user_message = (
+            "問題: legacy visible-text reply (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===) が返ってきました。\n"
+            "対応: issue-centric contract 形式 (===CHATGPT_DECISION_JSON=== ～ ===CHATGPT_REPLY_COMPLETE===) で返答するよう"
+            " ChatGPT に依頼してください。correction retry ではなくプロンプト / contract 側の確認が必要です。\n"
+            f"詳細: raw log: {repo_relative(Path(raw_log))} / legacy log: {repo_relative(Path(legacy_log))}"
+        )
+        legacy_state = clear_error_fields(dict(state))
+        legacy_state.update(
+            {
+                "mode": "awaiting_user",
+                "need_chatgpt_prompt": False,
+                "need_chatgpt_next": False,
+                "need_codex_run": False,
+                "error": True,
+                "error_message": user_message,
+                "chatgpt_decision": "legacy_contract_detected",
+                "chatgpt_decision_note": "legacy visible-text reply detected; issue-centric contract required",
+                "reply_readiness_status": readiness.status,
+                "reply_readiness_reason": readiness.reason,
+            }
+        )
+        save_state(legacy_state)
+        raise BridgeStop(user_message)
+
     contract_decision = readiness.decision
     if contract_decision is not None:
         ready_issue_binding_error = _validate_ready_issue_target_binding(
@@ -1058,13 +1101,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         save_state(dispatch_result.final_state)
         raise BridgeStop(dispatch_result.stop_message)
     # ── [DEPRECATED: exception path] Legacy visible-text reply handler ──────
-    # This block is only reached when `contract_decision is None`, which happens
-    # exclusively for `reply_complete_legacy_contract` (old ===CHATGPT_PROMPT_REPLY===
-    # / ===CHATGPT_NO_CODEX=== format detected).  All other non-ready statuses are
-    # handled above (reply_not_ready → BridgeError, retryable errors → correction
-    # retry).  The canonical reply format is the issue-centric contract; this
-    # fallback is retained as a safety net only and may be removed in a future phase
-    # once confirmed that no legacy replies occur in practice.
+    # NOTE: As of Phase 8 (legacy-fallback-explicit-stop), `reply_complete_legacy_contract`
+    # is intercepted by the explicit-stop block above and raises BridgeStop before reaching
+    # here.  This block is now effectively unreachable for legacy replies.  It is retained
+    # only as a final safety net; it will be removed in a future phase once legacy replies
+    # are confirmed to never occur in practice.
     decision = extract_last_chatgpt_reply(raw_text, after_text=request_text or None)
     reply_body = decision.body if decision.kind == "codex_prompt" else (decision.raw_block or decision.note)
     reply_hash = stable_text_hash(f"{decision.kind}\n{reply_body.strip()}")
