@@ -1498,6 +1498,10 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
                       "issue-centric ready route must include DECISION_JSON contract")
         self.assertIn("legacy visible-text fallback は使わないでください", text,
                       "issue-centric contract must explicitly forbid legacy tags")
+        self.assertIn("次の Codex 用 1 フェーズ prompt", text,
+                      "normal continuation request must include default Codex prompt guidance")
+        self.assertNotIn("lifecycle automation", text,
+                         "normal continuation must not use lifecycle-only guidance")
 
     def test_run_resume_request_completed_report_requests_close_followup(self) -> None:
         """Completed + live_ready archived reports should request lifecycle close follow-up, not another codex phase."""
@@ -1579,6 +1583,11 @@ class IssueCentricContinuationReplyContractTests(unittest.TestCase):
         self.assertIn("create_followup_issue=false", text)
         self.assertIn("action=no_action", text)
         self.assertIn("target_issue: https://github.com/example/repo/issues/7", text)
+        # lifecycle-only guidance must replace the default Codex-prompt guidance
+        self.assertIn("lifecycle automation", text,
+                      "ready-bounded completion followup must use lifecycle-only guidance")
+        self.assertNotIn("次の Codex 用 1 フェーズ prompt だけを返してください", text,
+                         "ready-bounded completion followup must not request a Codex prompt")
 
     def test_run_resume_request_no_issue_centric_snapshot_uses_ic_contract(self) -> None:
         """Without issue-centric snapshot, IC contract is still always injected (Phase 13)."""
