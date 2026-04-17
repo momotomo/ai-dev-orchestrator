@@ -446,10 +446,12 @@ def parse_issue_centric_reply_for_fetch(
             raw_text=raw_text,
             readiness=readiness,
         )
-    # Note: reply_complete_legacy_contract falls through to the `decision is None`
-    # check below.  The explicit stop in run() handles legacy replies before they
-    # reach the dispatch path; parse_issue_centric_reply_for_fetch() no longer needs
-    # its own legacy-specific branch.
+    # Note: reply_complete_legacy_contract is not gated here.  run() detects
+    # legacy replies via readiness.status BEFORE calling this function, so
+    # parse_issue_centric_reply_for_fetch() is not reached for legacy replies
+    # during normal flow.  If called directly with a legacy-classified raw_text
+    # (e.g. in tests), execution falls through to the `decision is None` check
+    # below and raises BridgeError.
     if readiness.status == "reply_complete_invalid_contract":
         raise IssueCentricReplyInvalid(
             readiness.reason,
@@ -778,12 +780,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             correction_count=correction_count,
         )
 
-    # ── Legacy visible-text reply → explicit stop ──────────────────────────
+    # ── Legacy visible-text reply → explicit stop (detect-only safety net) ───
     # When legacy markers (===CHATGPT_PROMPT_REPLY=== / ===CHATGPT_NO_CODEX===)
     # are detected, the reply is not a valid issue-centric contract.
     # Stop immediately so the operator can request a proper IC-format reply.
-    # There is no legacy success path; the legacy tail block was removed in
-    # Phase 9 and all replies must use the issue-centric contract format.
+    # There is no legacy success path; this block is a backward-compat safety
+    # net for accidental / stale old-format replies only.  Normal operation
+    # should never reach here because outbound requests always carry the
+    # IC-only reply contract section.
     if readiness.status == "reply_complete_legacy_contract":
         legacy_summary = "\n".join(
             [
