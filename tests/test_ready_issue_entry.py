@@ -4249,5 +4249,212 @@ class CycleBoundaryStateConsistencyTests(unittest.TestCase):
         self.assertIs(plan.state, cleaned)
 
 
+class IcExecutionToNextCycleConsistencyTests(unittest.TestCase):
+    """Phase 34 — _IcNextCycleContext and execution→next-cycle consistency."""
+
+    def _module(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "scripts"))
+        return importlib.import_module("request_prompt_from_report")
+
+    # ------------------------------------------------------------------
+    # _IcNextCycleContext / _read_ic_next_cycle_context
+    # ------------------------------------------------------------------
+
+    def test_read_ic_next_cycle_context_empty_state(self):
+        """Empty state returns all-empty fields with safe empty fallbacks."""
+        m = self._module()
+        ctx = m._read_ic_next_cycle_context({})
+        self.assertEqual(ctx.next_request_target, "")
+        self.assertEqual(ctx.principal_issue, "")
+        self.assertEqual(ctx.principal_issue_kind, "")
+        self.assertEqual(ctx.resolved_issue, "")
+        self.assertEqual(ctx.target_issue, "")
+        self.assertEqual(ctx.action, "")
+        self.assertEqual(ctx.next_request_hint, "")
+        self.assertEqual(ctx.close_order, "")
+
+    def test_read_ic_next_cycle_context_maps_all_fields(self):
+        """All state keys are read and mapped to the correct fields."""
+        m = self._module()
+        state = {
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/9",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/8",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/7",
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_close_order": "2",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.next_request_target, "https://github.com/org/repo/issues/10")
+        self.assertEqual(ctx.principal_issue, "https://github.com/org/repo/issues/9")
+        self.assertEqual(ctx.principal_issue_kind, "current_issue")
+        self.assertEqual(ctx.resolved_issue, "https://github.com/org/repo/issues/8")
+        self.assertEqual(ctx.target_issue, "https://github.com/org/repo/issues/7")
+        self.assertEqual(ctx.action, "codex_run")
+        self.assertEqual(ctx.next_request_hint, "continue_on_current_issue")
+        self.assertEqual(ctx.close_order, "2")
+
+    def test_resolved_next_request_target_priority_next_request_target_wins(self):
+        """next_request_target wins over all other fields in priority chain."""
+        m = self._module()
+        state = {
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/9",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/8",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/7",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/10")
+
+    def test_resolved_next_request_target_falls_back_to_principal_issue(self):
+        """Falls back to principal_issue when next_request_target is absent."""
+        m = self._module()
+        state = {
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/9",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/8",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/7",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/9")
+
+    def test_resolved_next_request_target_falls_back_to_resolved_issue(self):
+        """Falls back to resolved_issue when next_request_target and principal_issue are absent."""
+        m = self._module()
+        state = {
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/8",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/7",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/8")
+
+    def test_resolved_next_request_target_falls_back_to_target_issue(self):
+        """Falls back to target_issue as last resort."""
+        m = self._module()
+        state = {
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/7",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/7")
+
+    def test_resolved_next_request_target_empty_when_all_absent(self):
+        """Returns empty string when all four priority fields are absent."""
+        m = self._module()
+        ctx = m._read_ic_next_cycle_context({})
+        self.assertEqual(ctx.resolved_next_request_target, "")
+
+    # ------------------------------------------------------------------
+    # _resolve_completion_followup_target_issue delegates to _IcNextCycleContext
+    # ------------------------------------------------------------------
+
+    def test_resolve_completion_followup_target_uses_next_request_target(self):
+        """_resolve_completion_followup_target_issue reads next_request_target first."""
+        m = self._module()
+        state = {
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/42",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/1",
+        }
+        result = m._resolve_completion_followup_target_issue(state)
+        self.assertEqual(result, "https://github.com/org/repo/issues/42")
+
+    def test_resolve_completion_followup_target_fallback_chain_without_next_target(self):
+        """_resolve_completion_followup_target_issue falls back through principal → resolved → target."""
+        m = self._module()
+        state = {
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/9",
+        }
+        result = m._resolve_completion_followup_target_issue(state)
+        self.assertEqual(result, "https://github.com/org/repo/issues/9")
+
+    def test_resolve_completion_followup_target_empty_state(self):
+        """Returns empty string from empty state."""
+        m = self._module()
+        result = m._resolve_completion_followup_target_issue({})
+        self.assertEqual(result, "")
+
+    # ------------------------------------------------------------------
+    # _is_completion_followup_eligible uses _IcNextCycleContext
+    # ------------------------------------------------------------------
+
+    def test_is_completion_followup_eligible_requires_codex_run_action(self):
+        """Returns False when last action is not codex_run."""
+        m = self._module()
+        summary = {"result": "completed", "live_ready": "confirmed"}
+        state = {
+            "last_issue_centric_action": "issue_create",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+        self.assertFalse(m._is_completion_followup_eligible(summary, state))
+
+    def test_is_completion_followup_eligible_requires_current_issue_principal_kind(self):
+        """Returns False when principal_issue_kind is not current_issue."""
+        m = self._module()
+        summary = {"result": "completed", "live_ready": "confirmed"}
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue_kind": "parent_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+        self.assertFalse(m._is_completion_followup_eligible(summary, state))
+
+    def test_is_completion_followup_eligible_all_conditions_met(self):
+        """Returns True when all five conditions are met."""
+        m = self._module()
+        summary = {"result": "completed", "live_ready": "confirmed"}
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+        self.assertTrue(m._is_completion_followup_eligible(summary, state))
+
+    # ------------------------------------------------------------------
+    # Action-specific next-cycle context behaviour
+    # ------------------------------------------------------------------
+
+    def test_codex_run_resolved_issue_present_in_context(self):
+        """After codex_run, resolved_issue is populated and used as 3rd-priority fallback."""
+        m = self._module()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/5",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "codex_run")
+        self.assertEqual(ctx.resolved_issue, "https://github.com/org/repo/issues/5")
+        # next_request_target and principal_issue absent → resolved_issue wins
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/5")
+
+    def test_close_action_close_order_captured_in_context(self):
+        """After close_current_issue, close_order is captured in the context."""
+        m = self._module()
+        state = {
+            "last_issue_centric_action": "close_current_issue",
+            "last_issue_centric_close_order": "3",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/11",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "close_current_issue")
+        self.assertEqual(ctx.close_order, "3")
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/11")
+
+    def test_whitespace_stripped_from_all_fields(self):
+        """Whitespace is stripped from every field on read."""
+        m = self._module()
+        state = {
+            "last_issue_centric_next_request_target": "  https://github.com/org/repo/issues/1  ",
+            "last_issue_centric_action": "  codex_run  ",
+            "last_issue_centric_close_order": "  1  ",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.next_request_target, "https://github.com/org/repo/issues/1")
+        self.assertEqual(ctx.action, "codex_run")
+        self.assertEqual(ctx.close_order, "1")
+
+
 if __name__ == "__main__":
     unittest.main()
