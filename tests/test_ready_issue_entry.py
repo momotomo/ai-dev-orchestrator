@@ -2581,5 +2581,247 @@ class AcquireRotatedHandoffHelperCachedPathTests(unittest.TestCase):
         self.assertEqual(handoff_received_log, "log:handoff_received")
 
 
+class ResolveReportRequestEntryPlanTests(unittest.TestCase):
+    """Tests for _resolve_report_request_entry_plan."""
+
+    def _invoke(self, state: dict, argv: list | None = None):
+        import argparse
+
+        from request_prompt_from_report import (
+            _resolve_report_request_entry_plan,
+            parse_args,
+        )
+
+        args = parse_args(argv or [])
+        return _resolve_report_request_entry_plan(state, args)
+
+    def test_retryable_resume_path(self) -> None:
+        """When a retryable prepared request exists, path is retryable_resume."""
+        import unittest.mock as mock
+
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.load_retryable_prepared_request",
+            return_value=("text", "hash", "source"),
+        ), mock.patch(
+            "request_prompt_from_report.read_last_report_text",
+            return_value="REPORT",
+        ):
+            plan = self._invoke(state)
+
+        self.assertEqual(plan.path, "retryable_resume")
+        self.assertEqual(plan.retryable_request, ("text", "hash", "source"))
+        self.assertEqual(plan.last_report, "REPORT")
+
+    def test_awaiting_user_stop_path(self) -> None:
+        """When mode is awaiting_user and resume_note is empty, path is awaiting_user_stop."""
+        import unittest.mock as mock
+
+        state = {"mode": "awaiting_user"}
+        with mock.patch(
+            "request_prompt_from_report.load_retryable_prepared_request",
+            return_value=None,
+        ), mock.patch(
+            "request_prompt_from_report.resolve_resume_note",
+            return_value="",
+        ):
+            plan = self._invoke(state)
+
+        self.assertEqual(plan.path, "awaiting_user_stop")
+        self.assertIsNone(plan.retryable_request)
+
+    def test_awaiting_user_resume_path(self) -> None:
+        """When mode is awaiting_user with a non-empty resume_note, path is awaiting_user_resume."""
+        import unittest.mock as mock
+
+        state = {"mode": "awaiting_user"}
+        with mock.patch(
+            "request_prompt_from_report.load_retryable_prepared_request",
+            return_value=None,
+        ), mock.patch(
+            "request_prompt_from_report.resolve_resume_note",
+            return_value="補足メモ",
+        ), mock.patch(
+            "request_prompt_from_report.read_last_report_text",
+            return_value="REPORT",
+        ), mock.patch(
+            "request_prompt_from_report._clean_stale_pending_handoff_if_needed",
+            side_effect=lambda s: s,
+        ):
+            plan = self._invoke(state)
+
+        self.assertEqual(plan.path, "awaiting_user_resume")
+        self.assertEqual(plan.resume_note, "補足メモ")
+
+    def test_rotated_path(self) -> None:
+        """When rotation is needed, path is rotated."""
+        import unittest.mock as mock
+
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.load_retryable_prepared_request",
+            return_value=None,
+        ), mock.patch(
+            "request_prompt_from_report.resolve_resume_note",
+            return_value="",
+        ), mock.patch(
+            "request_prompt_from_report.read_last_report_text",
+            return_value="REPORT",
+        ), mock.patch(
+            "request_prompt_from_report._clean_stale_pending_handoff_if_needed",
+            side_effect=lambda s: s,
+        ), mock.patch(
+            "request_prompt_from_report.should_rotate_before_next_chat_request",
+            return_value=True,
+        ):
+            plan = self._invoke(state)
+
+        self.assertEqual(plan.path, "rotated")
+        self.assertEqual(plan.last_report, "REPORT")
+
+    def test_normal_resume_path(self) -> None:
+        """Default case with no rotation produces normal_resume."""
+        import unittest.mock as mock
+
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.load_retryable_prepared_request",
+            return_value=None,
+        ), mock.patch(
+            "request_prompt_from_report.resolve_resume_note",
+            return_value="",
+        ), mock.patch(
+            "request_prompt_from_report.read_last_report_text",
+            return_value="REPORT",
+        ), mock.patch(
+            "request_prompt_from_report._clean_stale_pending_handoff_if_needed",
+            side_effect=lambda s: s,
+        ), mock.patch(
+            "request_prompt_from_report.should_rotate_before_next_chat_request",
+            return_value=False,
+        ):
+            plan = self._invoke(state)
+
+        self.assertEqual(plan.path, "normal_resume")
+
+    def test_stale_handoff_cleaned_in_plan(self) -> None:
+        """_clean_stale_pending_handoff_if_needed is applied during plan resolution."""
+        import unittest.mock as mock
+
+        original_state = {"mode": "idle", "pending_handoff_log": "bridge/logs/h.md"}
+        cleaned_state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.load_retryable_prepared_request",
+            return_value=None,
+        ), mock.patch(
+            "request_prompt_from_report.resolve_resume_note",
+            return_value="",
+        ), mock.patch(
+            "request_prompt_from_report.read_last_report_text",
+            return_value="REPORT",
+        ), mock.patch(
+            "request_prompt_from_report._clean_stale_pending_handoff_if_needed",
+            return_value=cleaned_state,
+        ) as mock_clean, mock.patch(
+            "request_prompt_from_report.should_rotate_before_next_chat_request",
+            return_value=False,
+        ):
+            plan = self._invoke(original_state)
+
+        mock_clean.assert_called_once_with(original_state)
+        self.assertIs(plan.state, cleaned_state)
+
+
+class ExecuteReportRequestEntryPlanTests(unittest.TestCase):
+    """Tests for _execute_report_request_entry_plan."""
+
+    def _make_plan(self, path: str, **kwargs):
+        import argparse
+
+        from request_prompt_from_report import _ReportRequestEntryPlan
+
+        defaults = {
+            "state": {"mode": "idle"},
+            "args": argparse.Namespace(next_todo="", open_questions="", current_status=None, resume_note=""),
+            "last_report": "REPORT",
+            "resume_note": "",
+            "retryable_request": None,
+        }
+        defaults.update(kwargs)
+        return _ReportRequestEntryPlan(path=path, **defaults)
+
+    def _invoke(self, plan) -> int:
+        from request_prompt_from_report import _execute_report_request_entry_plan
+
+        return _execute_report_request_entry_plan(plan)
+
+    def test_awaiting_user_stop_prints_and_returns_0(self) -> None:
+        import io
+        import unittest.mock as mock
+
+        plan = self._make_plan("awaiting_user_stop")
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            result = self._invoke(plan)
+
+        self.assertEqual(result, 0)
+        self.assertIn("空のため送信しませんでした", mock_out.getvalue())
+
+    def test_retryable_resume_delegates(self) -> None:
+        import unittest.mock as mock
+
+        plan = self._make_plan("retryable_resume", retryable_request=("t", "h", "s"))
+        with mock.patch(
+            "request_prompt_from_report.run_resume_request",
+            return_value=0,
+        ) as mock_run:
+            result = self._invoke(plan)
+
+        self.assertEqual(result, 0)
+        call_args = mock_run.call_args
+        self.assertEqual(call_args[0][4], ("t", "h", "s"))
+
+    def test_awaiting_user_resume_delegates(self) -> None:
+        import unittest.mock as mock
+
+        plan = self._make_plan("awaiting_user_resume", resume_note="補足")
+        with mock.patch(
+            "request_prompt_from_report.run_resume_request",
+            return_value=0,
+        ) as mock_run:
+            result = self._invoke(plan)
+
+        self.assertEqual(result, 0)
+        call_args = mock_run.call_args
+        self.assertEqual(call_args[0][3], "補足")
+
+    def test_rotated_delegates(self) -> None:
+        import unittest.mock as mock
+
+        plan = self._make_plan("rotated")
+        with mock.patch(
+            "request_prompt_from_report.run_rotated_report_request",
+            return_value=0,
+        ) as mock_run:
+            result = self._invoke(plan)
+
+        self.assertEqual(result, 0)
+        mock_run.assert_called_once()
+
+    def test_normal_resume_delegates(self) -> None:
+        import unittest.mock as mock
+
+        plan = self._make_plan("normal_resume")
+        with mock.patch(
+            "request_prompt_from_report.run_resume_request",
+            return_value=0,
+        ) as mock_run:
+            result = self._invoke(plan)
+
+        self.assertEqual(result, 0)
+        call_args = mock_run.call_args
+        # resume_note must be empty string for normal_resume
+        self.assertEqual(call_args[0][3], "")
+
+
 if __name__ == "__main__":
     unittest.main()

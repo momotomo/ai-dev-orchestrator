@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import re
 import sys
@@ -884,27 +885,121 @@ def _clean_stale_pending_handoff_if_needed(state: dict[str, object]) -> dict[str
     return state
 
 
+@dataclasses.dataclass
+class _ReportRequestEntryPlan:
+    """Resolved entry plan for a report request cycle.
+
+    ``path`` names the execution branch:
+
+    * ``"retryable_resume"``    — retryable prepared request detected; call
+      ``run_resume_request`` immediately with ``retryable_request``.
+    * ``"awaiting_user_stop"``  — mode is ``awaiting_user`` but ``resume_note``
+      is empty; print guidance and return 0.
+    * ``"awaiting_user_resume"`` — mode is ``awaiting_user`` with a non-empty
+      ``resume_note``; call ``run_resume_request`` with the note.
+    * ``"rotated"``             — chat rotation needed; call
+      ``run_rotated_report_request``.
+    * ``"normal_resume"``       — standard report-based continuation; call
+      ``run_resume_request`` with an empty note.
+    """
+
+    path: str
+    state: dict[str, object]
+    args: argparse.Namespace
+    last_report: str
+    resume_note: str
+    retryable_request: tuple[str, str, str] | None
+
+
+def _resolve_report_request_entry_plan(
+    state: dict[str, object],
+    args: argparse.Namespace,
+) -> _ReportRequestEntryPlan:
+    """Resolve the entry plan for a report request cycle.
+
+    Reads retryable request, resume note, and state flags; applies stale
+    pending handoff cleanup when needed; and returns a
+    ``_ReportRequestEntryPlan`` that names the execution path without
+    performing any side effects beyond the cleanup save.
+    """
+    retryable_request = load_retryable_prepared_request(state)
+    if retryable_request is not None:
+        return _ReportRequestEntryPlan(
+            path="retryable_resume",
+            state=state,
+            args=args,
+            last_report=read_last_report_text(state),
+            resume_note="",
+            retryable_request=retryable_request,
+        )
+    resume_note = resolve_resume_note(state, args)
+    if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
+        return _ReportRequestEntryPlan(
+            path="awaiting_user_stop",
+            state=state,
+            args=args,
+            last_report="",
+            resume_note=resume_note,
+            retryable_request=None,
+        )
+    last_report = read_last_report_text(state)
+    state = _clean_stale_pending_handoff_if_needed(state)
+    if str(state.get("mode", "")).strip() == "awaiting_user":
+        return _ReportRequestEntryPlan(
+            path="awaiting_user_resume",
+            state=state,
+            args=args,
+            last_report=last_report,
+            resume_note=resume_note,
+            retryable_request=None,
+        )
+    if should_rotate_before_next_chat_request(state):
+        return _ReportRequestEntryPlan(
+            path="rotated",
+            state=state,
+            args=args,
+            last_report=last_report,
+            resume_note="",
+            retryable_request=None,
+        )
+    return _ReportRequestEntryPlan(
+        path="normal_resume",
+        state=state,
+        args=args,
+        last_report=last_report,
+        resume_note="",
+        retryable_request=None,
+    )
+
+
+def _execute_report_request_entry_plan(plan: _ReportRequestEntryPlan) -> int:
+    """Execute the resolved entry plan for a report request cycle."""
+    if plan.path == "awaiting_user_stop":
+        print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
+        return 0
+    if plan.path == "retryable_resume":
+        return run_resume_request(plan.state, plan.args, plan.last_report, "", plan.retryable_request)
+    if plan.path == "awaiting_user_resume":
+        return run_resume_request(plan.state, plan.args, plan.last_report, plan.resume_note)
+    if plan.path == "rotated":
+        return run_rotated_report_request(plan.state, plan.args, plan.last_report)
+    # normal_resume
+    return run_resume_request(plan.state, plan.args, plan.last_report, "")
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
+    # 1. preflight
     if should_prioritize_unarchived_report(state):
         raise BridgeStop(
             "bridge/outbox/codex_report.md に未退避 report が残っているため、"
             "handoff / 新チャット送信へは進みません。先に report archive から再開してください。"
         )
+    # 2. args
     args = parse_args(argv)
-    retryable_request = load_retryable_prepared_request(state)
-    if retryable_request is not None:
-        return run_resume_request(state, args, read_last_report_text(state), "", retryable_request)
-    resume_note = resolve_resume_note(state, args)
-    if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
-        print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
-        return 0
-    last_report = read_last_report_text(state)
-    state = _clean_stale_pending_handoff_if_needed(state)
-    if str(state.get("mode", "")).strip() == "awaiting_user":
-        return run_resume_request(state, args, last_report, resume_note)
-    if should_rotate_before_next_chat_request(state):
-        return run_rotated_report_request(state, args, last_report)
-    return run_resume_request(state, args, last_report, "")
+    # 3. entry plan
+    plan = _resolve_report_request_entry_plan(state, args)
+    # 4. execute
+    return _execute_report_request_entry_plan(plan)
 
 
 def _issue_centric_next_request_state_updates(
