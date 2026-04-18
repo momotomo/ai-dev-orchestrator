@@ -2250,5 +2250,83 @@ class ResolveReportRequestIcContextHelperTests(unittest.TestCase):
         self.assertEqual(route, "issue_centric")
 
 
+class ResolveResumeRequestPayloadHelperTests(unittest.TestCase):
+    """Unit tests for _resolve_resume_request_payload."""
+
+    def _make_args(self, *, next_todo: str = "do next", open_questions: str = "", current_status: str = "") -> object:
+        import argparse
+        args = argparse.Namespace()
+        args.next_todo = next_todo
+        args.open_questions = open_questions
+        args.current_status = current_status
+        return args
+
+    def test_retryable_request_provided_is_reused(self) -> None:
+        """When retryable_request is passed directly, it is returned as-is with prepared_status."""
+        import request_prompt_from_report
+        state = {"prepared_request_status": "prepared"}
+        retryable = ("TEXT", "HASH", "report:source")
+        text, hash_, source, prepared_status = request_prompt_from_report._resolve_resume_request_payload(
+            state,
+            retryable_request=retryable,
+            args=self._make_args(),
+            last_report="report text",
+            resume_note="",
+            effective_next_todo="do next",
+            effective_open_questions="",
+            issue_centric_next_request_section="IC SECTION",
+        )
+        self.assertEqual(text, "TEXT")
+        self.assertEqual(hash_, "HASH")
+        self.assertEqual(source, "report:source")
+        self.assertEqual(prepared_status, "prepared")
+
+    def test_no_retryable_fresh_build_returns_none_prepared_status(self) -> None:
+        """When no retryable request is available, fresh build returns prepared_status=None."""
+        import request_prompt_from_report
+        from unittest.mock import MagicMock, patch
+        state: dict = {}
+        with patch.object(request_prompt_from_report, "load_retryable_prepared_request", return_value=None):
+            with patch.object(request_prompt_from_report, "build_chatgpt_request", return_value="FRESH TEXT"):
+                with patch.object(request_prompt_from_report, "stable_text_hash", return_value="FRESH HASH"):
+                    with patch.object(request_prompt_from_report, "build_report_request_source", return_value="report:fresh"):
+                        with patch.object(request_prompt_from_report, "_is_ready_bounded_completion_followup_request", return_value=False):
+                            text, hash_, source, prepared_status = request_prompt_from_report._resolve_resume_request_payload(
+                                state,
+                                retryable_request=None,
+                                args=self._make_args(),
+                                last_report="report text",
+                                resume_note="",
+                                effective_next_todo="do next",
+                                effective_open_questions="",
+                                issue_centric_next_request_section="IC SECTION",
+                            )
+        self.assertEqual(text, "FRESH TEXT")
+        self.assertEqual(hash_, "FRESH HASH")
+        self.assertEqual(source, "report:fresh")
+        self.assertIsNone(prepared_status)
+
+    def test_load_retryable_called_when_retryable_is_none(self) -> None:
+        """When retryable_request=None, load_retryable_prepared_request is called."""
+        import request_prompt_from_report
+        from unittest.mock import patch
+        loaded_retryable = ("LOADED TEXT", "LOADED HASH", "report:loaded")
+        state: dict = {"prepared_request_status": "retry_send"}
+        with patch.object(request_prompt_from_report, "load_retryable_prepared_request", return_value=loaded_retryable) as mock_load:
+            text, hash_, source, prepared_status = request_prompt_from_report._resolve_resume_request_payload(
+                state,
+                retryable_request=None,
+                args=self._make_args(),
+                last_report="report text",
+                resume_note="",
+                effective_next_todo="do next",
+                effective_open_questions="",
+                issue_centric_next_request_section="IC SECTION",
+            )
+        mock_load.assert_called_once_with(state)
+        self.assertEqual(text, "LOADED TEXT")
+        self.assertEqual(prepared_status, "retry_send")
+
+
 if __name__ == "__main__":
     unittest.main()

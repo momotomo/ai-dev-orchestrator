@@ -500,6 +500,66 @@ def _resolve_report_request_ic_context(
     )
 
 
+def _resolve_resume_request_payload(
+    state: dict[str, object],
+    *,
+    retryable_request: tuple[str, str, str] | None,
+    args: argparse.Namespace,
+    last_report: str,
+    resume_note: str,
+    effective_next_todo: str,
+    effective_open_questions: str,
+    issue_centric_next_request_section: str,
+) -> tuple[str, str, str, str | None]:
+    """Resolve the request payload for a resume request.
+
+    Returns ``(request_text, request_hash, request_source, prepared_status)``.
+
+    Two paths:
+
+    * **Retryable prepared request** — if ``retryable_request`` is provided it is used
+      directly; otherwise ``load_retryable_prepared_request(state)`` is tried.  When a
+      retryable request is found the returned ``prepared_status`` is the current
+      ``prepared_request_status`` value from *state* (may be ``"prepared"`` or another
+      status string, including empty string).
+
+    * **Fresh build** — when no retryable request is available,
+      ``build_chatgpt_request()`` assembles the text, ``stable_text_hash()`` hashes it,
+      and ``build_report_request_source()`` produces the source token.
+      ``prepared_status`` is ``None`` in this case.
+    """
+    if retryable_request is None:
+        retryable_request = load_retryable_prepared_request(state)
+    if retryable_request is not None:
+        request_text, request_hash, request_source = retryable_request
+        prepared_status: str | None = str(state.get("prepared_request_status", "")).strip()
+        return request_text, request_hash, request_source, prepared_status
+    template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
+    _request_guidance = (
+        _LIFECYCLE_ONLY_REQUEST_GUIDANCE
+        if _is_ready_bounded_completion_followup_request(
+            state,
+            effective_next_todo=effective_next_todo,
+            original_next_todo=args.next_todo,
+        )
+        else None
+    )
+    request_text = build_chatgpt_request(
+        state=state,
+        template_path=template_path,
+        next_todo=effective_next_todo,
+        open_questions=effective_open_questions,
+        current_status=args.current_status or None,
+        last_report=last_report,
+        resume_note=resume_note or None,
+        issue_centric_next_request_section=issue_centric_next_request_section,
+        request_guidance=_request_guidance,
+    )
+    request_hash = stable_text_hash(request_text)
+    request_source = build_report_request_source(state, resume_note)
+    return request_text, request_hash, request_source, None
+
+
 def run_resume_request(
     state: dict[str, object],
     args: argparse.Namespace,
@@ -525,11 +585,17 @@ def run_resume_request(
         )
     )
 
-    if retryable_request is None:
-        retryable_request = load_retryable_prepared_request(state)
-    if retryable_request is not None:
-        request_text, request_hash, request_source = retryable_request
-        prepared_status = str(state.get("prepared_request_status", "")).strip()
+    request_text, request_hash, request_source, prepared_status = _resolve_resume_request_payload(
+        state,
+        retryable_request=retryable_request,
+        args=args,
+        last_report=last_report,
+        resume_note=resume_note,
+        effective_next_todo=effective_next_todo,
+        effective_open_questions=effective_open_questions,
+        issue_centric_next_request_section=issue_centric_next_request_section,
+    )
+    if prepared_status is not None:
         if prepared_status == "prepared":
             if _route_selected == "issue_centric":
                 print("request: issue-centric preferred route の prepared ChatGPT request を再生成せず送信します。")
@@ -537,30 +603,6 @@ def run_resume_request(
                 print("request: legacy fallback へ寄せた prepared の ChatGPT request を再生成せず送信します。")
         else:
             print("request: 前回未送信の ChatGPT request を再送します。")
-    else:
-        template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
-        _request_guidance = (
-            _LIFECYCLE_ONLY_REQUEST_GUIDANCE
-            if _is_ready_bounded_completion_followup_request(
-                state,
-                effective_next_todo=effective_next_todo,
-                original_next_todo=args.next_todo,
-            )
-            else None
-        )
-        request_text = build_chatgpt_request(
-            state=state,
-            template_path=template_path,
-            next_todo=effective_next_todo,
-            open_questions=effective_open_questions,
-            current_status=args.current_status or None,
-            last_report=last_report,
-            resume_note=resume_note or None,
-            issue_centric_next_request_section=issue_centric_next_request_section,
-            request_guidance=_request_guidance,
-        )
-        request_hash = stable_text_hash(request_text)
-        request_source = build_report_request_source(state, resume_note)
 
     if (
         str(state.get("mode", "")).strip() == "waiting_prompt_reply"
