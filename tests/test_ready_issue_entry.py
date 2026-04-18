@@ -5745,5 +5745,457 @@ class RunLevelLifecycleIntegrationTests(unittest.TestCase):
         self.assertEqual(plan.effective_next_todo, "")
 
 
+class FetchExecuteNextRequestHandoffTests(unittest.TestCase):
+    """Phase 39 — fetch → execution → next request lifecycle handoff consistency.
+
+    Verifies that:
+    1. fetch clears all prior execution/continuation fields before dispatch
+    2. fetch sets action + target from the contract decision
+    3. fetch clears correction_count on successful contract fetch
+    4. codex_run stops before dispatch (BridgeStop raised before dispatch is called)
+    5. legacy reply stops with legacy_contract_detected (dispatch never called)
+    6. Loop state (after execution) is correctly read by _read_ic_next_cycle_context()
+    7. Continuation contract fields flow intact: action, hint, target, source
+    8. Completion followup eligibility boundary:
+       - no_action / human_review_needed → ineligible
+       - codex_run + continue_on_current_issue → eligible
+       - codex_run without hint → ineligible
+       - resolved_next_request_target uses next_request_target field first
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _fnp(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("fetch_next_prompt")
+
+    def _rpr(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("request_prompt_from_report")
+
+    def _ic(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_contract")
+
+    def _base_pending_state(self, *, source: str = "report:1") -> dict:
+        return {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash-abc",
+            "pending_request_source": source,
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+
+    def _build_raw(self, action: str, target_issue: str = "none") -> str:
+        import base64 as _b64
+        import json
+        ic = self._ic()
+        envelope = {
+            "action": action,
+            "target_issue": target_issue,
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": f"Test {action}.",
+        }
+        json_blob = json.dumps(envelope, ensure_ascii=True)
+        parts = [f"{ic.DECISION_JSON_START}\n{json_blob}\n{ic.DECISION_JSON_END}"]
+        if action == "issue_create":
+            body = _b64.b64encode(b"Issue body content.\n").decode("ascii")
+            parts.append(f"{ic.ISSUE_BODY_START}\n{body}\n{ic.ISSUE_BODY_END}")
+        elif action == "codex_run":
+            body = _b64.b64encode(b"Codex body content.\n").decode("ascii")
+            parts.append(f"{ic.CODEX_BODY_START}\n{body}\n{ic.CODEX_BODY_END}")
+        elif action == "human_review_needed":
+            body = _b64.b64encode(b"Review comment.\n").decode("ascii")
+            parts.append(f"{ic.REVIEW_BODY_START}\n{body}\n{ic.REVIEW_BODY_END}")
+        lines = ["あなた:", "request body", "ChatGPT:", *parts, ic.REPLY_COMPLETE_TAG]
+        return "\n".join(lines)
+
+    def _build_legacy_raw(self) -> str:
+        return "\n".join([
+            "あなた:",
+            "request body",
+            "ChatGPT:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "some legacy reply text",
+            "===END_CHATGPT_PROMPT_REPLY===",
+        ])
+
+    def _run_fetch_with_raw_file(
+        self,
+        raw: str,
+        *,
+        state: dict | None = None,
+        mock_dispatch: bool = True,
+    ):
+        """Run fetch_next_prompt.run() using --raw-file, capturing saved states
+        and the mutable_state passed to dispatch_issue_centric_execution.
+        Returns (saved_states, dispatch_mutable_states, exception_raised).
+        """
+        from contextlib import ExitStack
+        from unittest.mock import patch, MagicMock
+        fnp = self._fnp()
+        saved_states: list[dict] = []
+        dispatch_mutable_states: list[dict] = []
+        base_state = state if state is not None else self._base_pending_state()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw_file = tmp_path / "raw.txt"
+            raw_file.write_text(raw, encoding="utf-8")
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                p = tmp_path / f"{prefix}.{suffix}"
+                p.write_text(text, encoding="utf-8")
+                return p
+
+            def fake_dispatch(**kwargs):
+                mutable = kwargs.get("mutable_state", {})
+                dispatch_mutable_states.append(dict(mutable))
+                result = MagicMock()
+                result.final_state = dict(mutable)
+                result.stop_message = "mock dispatch complete"
+                return result
+
+            exc_caught = None
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(fnp, "read_pending_request_text", return_value="request body")
+                )
+                stack.enter_context(
+                    patch.object(fnp, "log_text", side_effect=fake_log_text)
+                )
+                stack.enter_context(
+                    patch.object(fnp, "save_state",
+                                 side_effect=lambda s: saved_states.append(dict(s)))
+                )
+                if mock_dispatch:
+                    stack.enter_context(
+                        patch.object(fnp, "dispatch_issue_centric_execution",
+                                     side_effect=fake_dispatch)
+                    )
+                    stack.enter_context(
+                        patch.object(fnp, "load_project_config", return_value={})
+                    )
+                    stack.enter_context(
+                        patch.object(fnp, "project_repo_path", return_value=Path("."))
+                    )
+                try:
+                    fnp.run(dict(base_state), ["--raw-file", str(raw_file)])
+                except Exception as exc:
+                    exc_caught = exc
+
+        return saved_states, dispatch_mutable_states, exc_caught
+
+    # ------------------------------------------------------------------
+    # Group 1: Fetch state before dispatch (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_fetch_no_action_sets_action_and_target_before_dispatch(self):
+        """fetch_next_prompt.run() with no_action → mutable_state passed to dispatch
+        has last_issue_centric_action=no_action and last_issue_centric_target_issue=none."""
+        raw = self._build_raw("no_action", "none")
+        saved, dispatch_calls, exc = self._run_fetch_with_raw_file(raw, mock_dispatch=True)
+        self.assertEqual(len(dispatch_calls), 1, f"dispatch should be called once; exc={exc}")
+        mutable = dispatch_calls[0]
+        self.assertEqual(mutable.get("last_issue_centric_action"), "no_action")
+        self.assertEqual(mutable.get("last_issue_centric_target_issue"), "none")
+
+    def test_fetch_clears_continuation_fields_before_dispatch(self):
+        """fetch clears all continuation contract fields in mutable_state before calling dispatch."""
+        raw = self._build_raw("no_action", "none")
+        prior_state = {
+            **self._base_pending_state(),
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/1",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/1",
+            "last_issue_centric_next_request_target_source": "runtime_snapshot",
+            "last_issue_centric_execution_status": "completed",
+            "last_issue_centric_dispatch_result": "logs/prev_dispatch.json",
+            "last_issue_centric_normalized_summary": "logs/prev_norm.json",
+        }
+        saved, dispatch_calls, exc = self._run_fetch_with_raw_file(
+            raw, state=prior_state, mock_dispatch=True
+        )
+        self.assertEqual(len(dispatch_calls), 1, f"dispatch should be called once; exc={exc}")
+        mutable = dispatch_calls[0]
+        self.assertEqual(mutable.get("last_issue_centric_principal_issue"), "")
+        self.assertEqual(mutable.get("last_issue_centric_next_request_hint"), "")
+        self.assertEqual(mutable.get("last_issue_centric_next_request_target"), "")
+        self.assertEqual(mutable.get("last_issue_centric_next_request_target_source"), "")
+        self.assertEqual(mutable.get("last_issue_centric_execution_status"), "")
+        self.assertEqual(mutable.get("last_issue_centric_dispatch_result"), "")
+        self.assertEqual(mutable.get("last_issue_centric_normalized_summary"), "")
+
+    def test_fetch_clears_correction_count_on_successful_fetch(self):
+        """Successful contract fetch resets last_issue_centric_contract_correction_count to 0."""
+        raw = self._build_raw("no_action", "none")
+        prior_state = {
+            **self._base_pending_state(),
+            "last_issue_centric_contract_correction_count": 2,
+            "last_issue_centric_contract_correction_log": "logs/corr.md",
+            "last_issue_centric_contract_correction_reason": "bad json",
+        }
+        saved, dispatch_calls, exc = self._run_fetch_with_raw_file(
+            raw, state=prior_state, mock_dispatch=True
+        )
+        self.assertEqual(len(dispatch_calls), 1, f"dispatch should be called once; exc={exc}")
+        mutable = dispatch_calls[0]
+        self.assertEqual(mutable.get("last_issue_centric_contract_correction_count"), 0)
+        self.assertEqual(mutable.get("last_issue_centric_contract_correction_log"), "")
+        self.assertEqual(mutable.get("last_issue_centric_contract_correction_reason"), "")
+
+    # ------------------------------------------------------------------
+    # Group 2: codex_run stops before dispatch (1 test)
+    # ------------------------------------------------------------------
+
+    def test_fetch_codex_run_stops_before_dispatch_is_called(self):
+        """codex_run reply → BridgeStop raised before dispatch_issue_centric_execution is called."""
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        from _bridge_common import BridgeStop
+        fnp = self._fnp()
+        raw = self._build_raw("codex_run", "#20")
+        saved_states: list[dict] = []
+        dispatch_called: list[dict] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw_file = tmp_path / "raw.txt"
+            raw_file.write_text(raw, encoding="utf-8")
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                p = tmp_path / f"{prefix}.{suffix}"
+                p.write_text(text, encoding="utf-8")
+                return p
+
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(fnp, "read_pending_request_text", return_value="request body")
+                )
+                stack.enter_context(
+                    patch.object(fnp, "log_text", side_effect=fake_log_text)
+                )
+                stack.enter_context(
+                    patch.object(fnp, "save_state",
+                                 side_effect=lambda s: saved_states.append(dict(s)))
+                )
+                stack.enter_context(
+                    patch.object(fnp, "dispatch_issue_centric_execution",
+                                 side_effect=lambda **kw: dispatch_called.append(kw))
+                )
+                with self.assertRaises(BridgeStop):
+                    fnp.run(dict(self._base_pending_state()), ["--raw-file", str(raw_file)])
+
+        self.assertEqual(len(dispatch_called), 0, "dispatch must not be called for codex_run")
+        self.assertEqual(len(saved_states), 1)
+        saved = saved_states[0]
+        self.assertEqual(saved.get("last_issue_centric_action"), "codex_run")
+        self.assertEqual(saved.get("last_issue_centric_artifact_kind"), "codex_body")
+
+    # ------------------------------------------------------------------
+    # Group 3: legacy reply stops without dispatch (1 test)
+    # ------------------------------------------------------------------
+
+    def test_legacy_reply_stops_with_legacy_contract_detected(self):
+        """Legacy reply → BridgeStop raised with legacy_contract_detected; dispatch never called."""
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        from _bridge_common import BridgeStop
+        fnp = self._fnp()
+        raw = self._build_legacy_raw()
+        dispatch_called: list[dict] = []
+        saved_states: list[dict] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw_file = tmp_path / "raw.txt"
+            raw_file.write_text(raw, encoding="utf-8")
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                p = tmp_path / f"{prefix}.{suffix}"
+                p.write_text(text, encoding="utf-8")
+                return p
+
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(fnp, "read_pending_request_text", return_value="request body")
+                )
+                stack.enter_context(
+                    patch.object(fnp, "log_text", side_effect=fake_log_text)
+                )
+                stack.enter_context(
+                    patch.object(fnp, "save_state",
+                                 side_effect=lambda s: saved_states.append(dict(s)))
+                )
+                stack.enter_context(
+                    patch.object(fnp, "dispatch_issue_centric_execution",
+                                 side_effect=lambda **kw: dispatch_called.append(kw))
+                )
+                with self.assertRaises(BridgeStop):
+                    fnp.run(dict(self._base_pending_state()), ["--raw-file", str(raw_file)])
+
+        self.assertEqual(len(dispatch_called), 0, "dispatch must not be called for legacy reply")
+        self.assertEqual(len(saved_states), 1)
+        saved = saved_states[0]
+        self.assertEqual(saved.get("chatgpt_decision"), "legacy_contract_detected")
+        self.assertEqual(saved.get("mode"), "awaiting_user")
+
+    # ------------------------------------------------------------------
+    # Group 4: Loop state → IcNextCycleContext (5 tests)
+    # ------------------------------------------------------------------
+
+    def test_loop_no_action_state_reads_action_in_ic_next_cycle_context(self):
+        """State written after no_action execution → IcNextCycleContext.action = no_action."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_target_issue": "#5",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_resolved_issue": "",
+            "last_issue_centric_close_order": "",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "no_action")
+        self.assertEqual(ctx.target_issue, "#5")
+
+    def test_loop_issue_create_state_reads_principal_issue_kind(self):
+        """State written after issue_create execution → IcNextCycleContext reflects created_issue."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "issue_create",
+            "last_issue_centric_target_issue": "#5",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/30",
+            "last_issue_centric_principal_issue_kind": "created_issue",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_resolved_issue": "",
+            "last_issue_centric_close_order": "",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "issue_create")
+        self.assertEqual(ctx.principal_issue_kind, "created_issue")
+        self.assertEqual(ctx.principal_issue, "https://github.com/org/repo/issues/30")
+
+    def test_loop_human_review_state_reads_target_issue(self):
+        """State written after human_review_needed execution → IcNextCycleContext preserves target."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "human_review_needed",
+            "last_issue_centric_target_issue": "#7",
+            "last_issue_centric_principal_issue": "#7",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_resolved_issue": "",
+            "last_issue_centric_close_order": "",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "human_review_needed")
+        self.assertEqual(ctx.target_issue, "#7")
+
+    def test_loop_codex_run_state_reads_hint_and_next_request_target(self):
+        """State written after codex_run execution → IcNextCycleContext reads hint + target."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_target_issue": "#10",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_resolved_issue": "",
+            "last_issue_centric_close_order": "",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "codex_run")
+        self.assertEqual(ctx.next_request_hint, "continue_on_current_issue")
+        self.assertEqual(ctx.next_request_target, "https://github.com/org/repo/issues/10")
+
+    def test_loop_resolved_next_request_target_uses_next_request_target_field(self):
+        """resolved_next_request_target uses last_issue_centric_next_request_target (highest priority)."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/77",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/99",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/42",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/88",
+            "last_issue_centric_close_order": "",
+        }
+        ctx = m._read_ic_next_cycle_context(state)
+        # next_request_target (42) takes priority over principal_issue (99),
+        # resolved_issue (88), and target_issue (77)
+        self.assertEqual(ctx.resolved_next_request_target,
+                         "https://github.com/org/repo/issues/42")
+
+    # ------------------------------------------------------------------
+    # Group 5: Completion followup eligibility boundary (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_loop_no_action_not_eligible_for_completion_followup(self):
+        """no_action loop state → _is_completion_followup_eligible returns False (action mismatch)."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+        summary_fields = {"result": "completed", "live_ready": "confirmed"}
+        result = m._is_completion_followup_eligible(summary_fields, state)
+        self.assertFalse(result)
+
+    def test_loop_codex_run_with_continue_hint_eligible(self):
+        """codex_run + continue_on_current_issue + current_issue → eligible."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+        summary_fields = {"result": "completed", "live_ready": "confirmed"}
+        result = m._is_completion_followup_eligible(summary_fields, state)
+        self.assertTrue(result)
+
+    def test_loop_codex_run_without_continue_hint_not_eligible(self):
+        """codex_run + empty next_request_hint → not eligible."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "",
+        }
+        summary_fields = {"result": "completed", "live_ready": "confirmed"}
+        result = m._is_completion_followup_eligible(summary_fields, state)
+        self.assertFalse(result)
+
+    def test_loop_human_review_not_eligible_for_completion_followup(self):
+        """human_review_needed loop state → not eligible (action mismatch)."""
+        m = self._rpr()
+        state = {
+            "last_issue_centric_action": "human_review_needed",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+        }
+        summary_fields = {"result": "completed", "live_ready": "confirmed"}
+        result = m._is_completion_followup_eligible(summary_fields, state)
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()
