@@ -270,7 +270,7 @@ python3 scripts/start_bridge.py \
 
 ### K. 未着手 / 今後課題
 
-- [ ] Plan A → visible DOM fallback の自動判定精度向上 (現状は parse 失敗で fallback)
+- [x] Plan A → visible DOM fallback の自動判定精度向上 (Phase 48: `_IcReplyRouteDecision` + `_resolve_ic_reply_route_decision` 追加 / Plan A 破損時は `stop_broken` で explicit stop / legacy fallback 非混在)
 - [x] `codex_run + close_current_issue = true` の dispatcher サポート (Phase 47: trigger → launch → post-launch close / matrix_path `codex_run_then_close`)
 - [ ] multi-flag 組み合わせの拡張 (narrow matrix 外)
 - [ ] 大規模 state machine rewrite / full contract cutover
