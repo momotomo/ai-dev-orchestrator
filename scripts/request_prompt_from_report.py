@@ -386,6 +386,70 @@ def log_wait_event(event: object) -> None:
     print(f"{event_name}: {stage_log}")
 
 
+def _stage_prepared_request_state(
+    state: dict[str, object],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log_rel: str,
+    issue_centric_runtime_snapshot: object | None,
+    status: str = "prepared",
+) -> None:
+    """Build, stage, and save a prepared request state snapshot.
+
+    Called for both the initial ``"prepared"`` staging and the
+    ``"retry_send"`` fallback staging when ``send_to_chatgpt`` raises.
+    IC generation binding is applied when ``issue_centric_runtime_snapshot``
+    is provided.
+    """
+    staged = clear_error_fields(dict(state))
+    clear_pending_request_fields(staged)
+    if issue_centric_runtime_snapshot is not None:
+        staged.update(
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="prepared")
+        )
+    stage_prepared_request(
+        staged,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=request_log_rel,
+        status=status,
+    )
+    save_state(staged)
+
+
+def _apply_pending_request_state(
+    state: dict[str, object],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log_path: str,
+    issue_centric_runtime_snapshot: object | None,
+    success_updates: dict[str, object] | None,
+) -> None:
+    """Build and save the pending request state after a successful send.
+
+    Clears error fields and pending handoff fields, promotes the prepared
+    request to pending, applies IC generation binding, merges any
+    caller-supplied ``success_updates``, and saves.
+    """
+    mutable = clear_error_fields(dict(state))
+    clear_pending_handoff_fields(mutable)
+    promote_pending_request(
+        mutable,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=repo_relative(request_log_path),
+    )
+    if issue_centric_runtime_snapshot is not None:
+        mutable.update(
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="pending")
+        )
+    if success_updates:
+        mutable.update(success_updates)
+    save_state(mutable)
+
+
 def dispatch_request(
     state: dict[str, object],
     *,
@@ -397,58 +461,40 @@ def dispatch_request(
     issue_centric_runtime_snapshot: object | None = None,
     success_updates: dict[str, object] | None = None,
 ) -> int:
+    # log
     prepared_log = log_text(prepared_prefix, request_text)
     prepared_log_rel = repo_relative(prepared_log)
-
-    prepared_state = clear_error_fields(dict(state))
-    clear_pending_request_fields(prepared_state)
-    if issue_centric_runtime_snapshot is not None:
-        prepared_state.update(
-            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="prepared")
-        )
-    stage_prepared_request(
-        prepared_state,
+    # state transition — prepared staging
+    _stage_prepared_request_state(
+        state,
         request_hash=request_hash,
         request_source=request_source,
-        request_log=prepared_log_rel,
+        request_log_rel=prepared_log_rel,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
     )
-    save_state(prepared_state)
-
     try:
         send_to_chatgpt(request_text)
     except Exception:
-        retry_state = clear_error_fields(dict(state))
-        clear_pending_request_fields(retry_state)
-        if issue_centric_runtime_snapshot is not None:
-            retry_state.update(
-                _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="prepared")
-            )
-        stage_prepared_request(
-            retry_state,
+        # state transition — retry_send fallback staging
+        _stage_prepared_request_state(
+            state,
             request_hash=request_hash,
             request_source=request_source,
-            request_log=prepared_log_rel,
+            request_log_rel=prepared_log_rel,
+            issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
             status="retry_send",
         )
-        save_state(retry_state)
         raise
-
+    # log + state transition — pending
     request_log = log_text(sent_prefix, request_text)
-    mutable_state = clear_error_fields(dict(state))
-    clear_pending_handoff_fields(mutable_state)
-    promote_pending_request(
-        mutable_state,
+    _apply_pending_request_state(
+        state,
         request_hash=request_hash,
         request_source=request_source,
-        request_log=repo_relative(request_log),
+        request_log_path=request_log,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        success_updates=success_updates,
     )
-    if issue_centric_runtime_snapshot is not None:
-        mutable_state.update(
-            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="pending")
-        )
-    if success_updates:
-        mutable_state.update(success_updates)
-    save_state(mutable_state)
     print(f"sent: {request_log}")
     return 0
 
@@ -766,6 +812,61 @@ def _acquire_rotated_handoff(
     return handoff_text, handoff_received_log
 
 
+def _apply_rotated_pending_request_state(
+    state: dict[str, object],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log_path: str,
+    rotation_signal: str,
+    rotated_chat: dict[str, object],
+    issue_centric_runtime_snapshot: object | None,
+    issue_centric_runtime_mode: object | None,
+) -> None:
+    """Build and save the pending request state for a rotated chat request.
+
+    Clears error, pending request, pending handoff, and chat rotation fields,
+    then populates all pending request fields including rotation metadata and
+    IC generation binding.
+    """
+    mutable = clear_error_fields(dict(state))
+    clear_pending_request_fields(mutable)
+    clear_pending_handoff_fields(mutable)
+    clear_chat_rotation_fields(mutable)
+    mutable.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "",
+            "chatgpt_decision_note": "",
+            "human_review_auto_continue_count": 0,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": repo_relative(request_log_path),
+            "pending_request_signal": rotation_signal,
+            "current_chat_session": rotated_chat.get("url", ""),
+            "github_source_attach_status": str(rotated_chat.get("github_source_attach_status", "")),
+            "github_source_attach_boundary": str(rotated_chat.get("github_source_attach_boundary", "")),
+            "github_source_attach_detail": str(rotated_chat.get("github_source_attach_detail", "")),
+            "github_source_attach_context": str(rotated_chat.get("github_source_attach_context", "")),
+            "github_source_attach_log": str(rotated_chat.get("github_source_attach_log", "")),
+            "request_send_continued_without_github_source": bool(
+                rotated_chat.get("request_send_continued_without_github_source")
+            ),
+        }
+    )
+    if issue_centric_runtime_snapshot is not None:
+        mutable.update(
+            _issue_centric_next_request_state_updates(
+                issue_centric_runtime_mode or issue_centric_runtime_snapshot,
+                phase="pending",
+            )
+        )
+    save_state(mutable)
+
+
 def _apply_rotated_request_result(
     state: dict[str, object],
     *,
@@ -781,6 +882,7 @@ def _apply_rotated_request_result(
     fields and IC context, saves state, and prints the rotation result.
     Returns 0.
     """
+    # log
     rotated_chat = rotate_chat_with_handoff(handoff_text)
     rotation_signal = str(rotated_chat.get("signal", "")).strip()
     soft_wait = rotation_signal == "submitted_unconfirmed"
@@ -810,42 +912,18 @@ def _apply_rotated_request_result(
         handoff_text,
     )
     request_hash = stable_text_hash(handoff_text)
-    mutable_state = clear_error_fields(dict(state))
-    clear_pending_request_fields(mutable_state)
-    clear_pending_handoff_fields(mutable_state)
-    clear_chat_rotation_fields(mutable_state)
-    mutable_state.update(
-        {
-            "mode": "waiting_prompt_reply",
-            "need_chatgpt_prompt": False,
-            "need_chatgpt_next": False,
-            "need_codex_run": False,
-            "chatgpt_decision": "",
-            "chatgpt_decision_note": "",
-            "human_review_auto_continue_count": 0,
-            "pending_request_hash": request_hash,
-            "pending_request_source": request_source,
-            "pending_request_log": repo_relative(request_log),
-            "pending_request_signal": rotation_signal,
-            "current_chat_session": rotated_chat.get("url", ""),
-            "github_source_attach_status": str(rotated_chat.get("github_source_attach_status", "")),
-            "github_source_attach_boundary": str(rotated_chat.get("github_source_attach_boundary", "")),
-            "github_source_attach_detail": str(rotated_chat.get("github_source_attach_detail", "")),
-            "github_source_attach_context": str(rotated_chat.get("github_source_attach_context", "")),
-            "github_source_attach_log": str(rotated_chat.get("github_source_attach_log", "")),
-            "request_send_continued_without_github_source": bool(
-                rotated_chat.get("request_send_continued_without_github_source")
-            ),
-        }
+    # state transition — pending
+    _apply_rotated_pending_request_state(
+        state,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log_path=request_log,
+        rotation_signal=rotation_signal,
+        rotated_chat=rotated_chat,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        issue_centric_runtime_mode=issue_centric_runtime_mode,
     )
-    if issue_centric_runtime_snapshot is not None:
-        mutable_state.update(
-            _issue_centric_next_request_state_updates(
-                issue_centric_runtime_mode or issue_centric_runtime_snapshot,
-                phase="pending",
-            )
-        )
-    save_state(mutable_state)
+    # print
     if handoff_received_log:
         print(f"handoff received: {handoff_received_log}")
     print(f"chat rotated: {chat_rotated_log}")
