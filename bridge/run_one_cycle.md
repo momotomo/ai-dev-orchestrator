@@ -17,8 +17,11 @@
 ## 通常入口
 
 - 通常起動は `python3 scripts/start_bridge.py --project-path /path/to/target-repo --max-execution-count 6` の 1 コマンドでよい
-- 初回だけ、bridge が短い例文を表示して本文入力を求める。この入力本文が初回 request の正本で、bridge は本文を改変せず固定の返答契約だけを追記して ChatGPT へ送る
+- **`--ready-issue-ref <ref>` が通常入口の主経路**: current open `ready` issue の参照 (例: `#123`) を引数で渡すと、bridge が最小 request を自動組み立てして送信する。引数を省略すると起動後に 1 行入力を求める
+- free-form 初回本文は例外 / override 経路であり、`--ready-issue-ref` がある場合は不要
 - 2 回目以降は既存どおり Codex 完了報告ベースで継続する
+- `initial_selection_stop`: ChatGPT が ready issue を選定して止まった場合は、`selected_ready_issue_ref` に書かれた ref を `--ready-issue-ref` に付けて再実行する
+- `human_review_needed`: ChatGPT が人レビューを求めた場合は `--resume` で補足入力へ進む
 - Safari fetch 待機は通常運用で 1800 秒前提。未完了なら追加 600 秒待機し、それでも未完了なら late completion mode で書き切りまで監視する
 - `max_execution_count` は上限であり、ChatGPT が `Codex 不要` を返した時は途中で正常停止しうる
 - `run_until_stop.py` は既定で継続実行する。archive 後の次 request / fetch へ進んでも、同じ report / same request は idempotency guard で再送しない
@@ -28,8 +31,9 @@
 - late completion 後の handoff/new-chat 前処理は `handoff_requested` → `handoff_received` → `chat_rotated` → `sent_prompt_request_from_report*` の順で見れば追いやすい
 - `sent_prompt_request_from_report_soft_wait` は、handoff 本文を新チャットへ送った可能性が高いため再送せず wait に入ったケースを表す
 - `human_review` は 1 回だけ自動継続し、2 回連続した時だけ `人確認待ち` に倒す
-- ChatGPT の通常返答契約は `CHATGPT_PROMPT_REPLY` と `CHATGPT_NO_CODEX` の 2 系統だけと考える
+- ChatGPT の通常返答契約は Plan A (`CHATGPT_DECISION_JSON`) を優先し、Plan A が使えない場合のみ `CHATGPT_PROMPT_REPLY` / `CHATGPT_NO_CODEX` の legacy fallback に落ちる
 - `CHATGPT_NO_CODEX` の先頭行は `completed`、`human_review`、`need_info` のいずれかで、完了 / 人確認待ち / 情報待ちを表す
+- operator-facing stop path の詳細な対応表は `docs/ISSUE_CENTRIC_RUNTIME_ACCEPTANCE.md` を参照する
 
 ## Codex worker の docs 読み順
 
