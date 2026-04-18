@@ -7365,5 +7365,132 @@ class IcOperatorStatusSurfaceTests(unittest.TestCase):
         self.assertNotIn("summary と doctor を確認し", note)
 
 
+class IcOrchestratorDoctorStatusSurfaceTests(unittest.TestCase):
+    """Phase 45 — bridge_orchestrator.run() IC stop path print 整合テスト.
+
+    Verifies that bridge_orchestrator.run() prints chatgpt_decision_note rather than
+    the generic plan note for IC stop paths.
+
+    Group 1: run() print for initial_selection_stop (2 tests)
+    Group 2: run() print for human_review_needed IC (2 tests)
+    Group 3: run() print for non-IC no_action (generic note) (2 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _bo(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("bridge_orchestrator")
+
+    def _initial_selection_stop_state(self, *, with_note: bool = True) -> dict:
+        state: dict = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "#7",
+            "error": False,
+        }
+        if with_note:
+            state["chatgpt_decision_note"] = (
+                "ChatGPT が ready issue #7 を選定しました。"
+                " --ready-issue-ref でその issue を指定して bridge を再実行してください。"
+            )
+        return state
+
+    def _human_review_needed_ic_state(self, *, with_note: bool = True) -> dict:
+        state: dict = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:human_review_needed",
+            "error": False,
+        }
+        if with_note:
+            state["chatgpt_decision_note"] = (
+                "ChatGPT が人レビュー待ち (#20) を返しました。"
+                " 補足を入れて bridge を再実行してください。"
+            )
+        return state
+
+    def _non_ic_no_action_state(self) -> dict:
+        return {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "",
+            "error": False,
+        }
+
+    def _run_and_capture(self, state: dict) -> str:
+        """Run bridge_orchestrator.run() with all side-effectful helpers patched, capture stdout."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import patch, MagicMock
+        bo = self._bo()
+
+        fake_plan = MagicMock()
+        fake_plan.next_action = "no_action"
+        fake_plan.note = "今回の 1 手はありません。必要なら state.json の詳細を確認してください。"
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            with patch.object(bo, "resolve_unified_next_action", return_value="no_action"):
+                with patch.object(bo, "resolve_runtime_dispatch_plan", return_value=fake_plan):
+                    with patch.object(bo, "should_prioritize_unarchived_report", return_value=False):
+                        with patch.object(bo, "has_pending_issue_centric_codex_dispatch", return_value=False):
+                            with patch.object(bo, "is_blocked_codex_lifecycle_state", return_value=False):
+                                with patch.object(bo, "load_project_config", return_value={}):
+                                    with patch.object(bo, "parse_args", return_value=MagicMock(
+                                        execution_agent="codex",
+                                        dry_run_codex=False,
+                                    )):
+                                        with patch.object(bo, "resolve_execution_agent", return_value="codex"):
+                                            with patch.object(bo, "print_project_config_warnings"):
+                                                bo.run(state, argv=[])
+        return buf.getvalue()
+
+    # ------------------------------------------------------------------
+    # Group 1: initial_selection_stop (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_run_initial_selection_stop_prints_ic_note(self):
+        """initial_selection_stop: run() prints chatgpt_decision_note, not generic note."""
+        output = self._run_and_capture(self._initial_selection_stop_state(with_note=True))
+        self.assertIn("--ready-issue-ref", output)
+        self.assertNotIn("今回の 1 手はありません", output)
+
+    def test_run_initial_selection_stop_no_note_falls_back_to_plan_note(self):
+        """initial_selection_stop without chatgpt_decision_note: falls back to plan.note."""
+        output = self._run_and_capture(self._initial_selection_stop_state(with_note=False))
+        self.assertIn("今回の 1 手はありません", output)
+
+    # ------------------------------------------------------------------
+    # Group 2: human_review_needed IC (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_run_human_review_needed_ic_prints_ic_note(self):
+        """human_review_needed IC: run() prints chatgpt_decision_note."""
+        output = self._run_and_capture(self._human_review_needed_ic_state(with_note=True))
+        self.assertIn("人レビュー待ち", output)
+        self.assertNotIn("今回の 1 手はありません", output)
+
+    def test_run_human_review_needed_ic_no_note_falls_back_to_plan_note(self):
+        """human_review_needed IC without chatgpt_decision_note: falls back to plan.note."""
+        output = self._run_and_capture(self._human_review_needed_ic_state(with_note=False))
+        self.assertIn("今回の 1 手はありません", output)
+
+    # ------------------------------------------------------------------
+    # Group 3: non-IC no_action (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_run_non_ic_no_action_prints_generic_note(self):
+        """Non-IC no_action: run() prints the generic plan note."""
+        output = self._run_and_capture(self._non_ic_no_action_state())
+        self.assertIn("今回の 1 手はありません", output)
+
+    def test_run_non_ic_no_action_does_not_print_ready_issue_ref(self):
+        """Non-IC no_action: run() must NOT print IC-specific guidance."""
+        output = self._run_and_capture(self._non_ic_no_action_state())
+        self.assertNotIn("--ready-issue-ref", output)
+
+
 if __name__ == "__main__":
     unittest.main()
