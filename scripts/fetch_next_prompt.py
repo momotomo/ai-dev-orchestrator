@@ -650,6 +650,278 @@ def _validate_ready_issue_target_binding(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Fetch handoff state family
+# ---------------------------------------------------------------------------
+# When fetch_next_prompt.run() receives a valid issue-centric contract reply,
+# the state family passed to dispatch_issue_centric_execution is assembled in
+# three steps:
+#
+#   1. _build_ic_fetch_handoff_state()   — capture what fetch learned from the
+#      ChatGPT reply into an immutable snapshot
+#   2. _apply_ic_continuation_reset()   — clear all prior-cycle continuation /
+#      execution fields so stale values do not contaminate the fresh dispatch
+#   3. _apply_ic_fetch_handoff_state()  — write the fetch-known values into
+#      mutable_state (action, target, artifact metadata, readiness, correction
+#      reset)
+#
+# The split makes the responsibility boundary explicit:
+#   * continuation fields (produced by execution) → cleared by reset helper
+#   * fetch-derived fields (from contract + materialized) → set by apply helper
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _IcFetchHandoffState:
+    """Immutable snapshot of what fetch learned from a successful ChatGPT reply.
+
+    Built after contract parse + artifact materialization.  Applied to
+    mutable_state *before* dispatch_issue_centric_execution is called (or
+    before the codex_run / initial_selection BridgeStop is raised).
+
+    These fields represent only what the *fetch step* knows.  The continuation
+    contract fields produced by *execution* are separately cleared by
+    _apply_ic_continuation_reset() and then filled in by _finalize_dispatch().
+    """
+
+    # ── Decision identity ──────────────────────────────────────────────────
+    action: str
+    target_issue: str
+    # ── Artifact metadata ──────────────────────────────────────────────────
+    artifact_kind: str
+    artifact_file: str
+    metadata_log: str
+    decision_log: str
+    stop_reason: str
+    # ── Reply identity ─────────────────────────────────────────────────────
+    reply_hash: str
+    processed_request_hash: str
+    # ── Readiness diagnostics ──────────────────────────────────────────────
+    readiness_status: str
+    readiness_reason: str
+    assistant_text_present: bool
+    thinking_visible: bool
+    decision_marker_present: bool
+    contract_parse_attempted: bool
+
+
+# All issue-centric state keys that track *prior-cycle* execution results and
+# must be cleared at the start of every fresh fetch→dispatch cycle.  Keeping
+# this list explicit makes it auditable and ensures nothing from the previous
+# cycle leaks into the new one.
+_IC_CONTINUATION_RESET_FIELDS: tuple[str, ...] = (
+    # dispatch / summary
+    "last_issue_centric_dispatch_result",
+    "last_issue_centric_normalized_summary",
+    # continuation contract
+    "last_issue_centric_principal_issue",
+    "last_issue_centric_principal_issue_kind",
+    "last_issue_centric_next_request_hint",
+    "last_issue_centric_next_request_target",
+    "last_issue_centric_next_request_target_source",
+    "last_issue_centric_next_request_fallback_reason",
+    # route / recovery
+    "last_issue_centric_route_selected",
+    "last_issue_centric_route_fallback_reason",
+    "last_issue_centric_recovery_status",
+    "last_issue_centric_recovery_source",
+    "last_issue_centric_recovery_fallback_reason",
+    # runtime snapshot / generation
+    "last_issue_centric_runtime_snapshot",
+    "last_issue_centric_snapshot_status",
+    "last_issue_centric_runtime_generation_id",
+    "last_issue_centric_generation_lifecycle",
+    "last_issue_centric_generation_lifecycle_reason",
+    "last_issue_centric_generation_lifecycle_source",
+    "last_issue_centric_prepared_generation_id",
+    "last_issue_centric_pending_generation_id",
+    # runtime mode / freshness
+    "last_issue_centric_runtime_mode",
+    "last_issue_centric_runtime_mode_reason",
+    "last_issue_centric_runtime_mode_source",
+    "last_issue_centric_freshness_status",
+    "last_issue_centric_freshness_reason",
+    "last_issue_centric_freshness_source",
+    "last_issue_centric_invalidation_status",
+    "last_issue_centric_invalidation_reason",
+    "last_issue_centric_invalidated_generation_id",
+    "last_issue_centric_consumed_generation_id",
+    # execution
+    "last_issue_centric_execution_status",
+    "last_issue_centric_execution_log",
+    "last_issue_centric_created_issue_number",
+    "last_issue_centric_created_issue_url",
+    "last_issue_centric_created_issue_title",
+    "last_issue_centric_primary_issue_number",
+    "last_issue_centric_primary_issue_url",
+    "last_issue_centric_primary_issue_title",
+    "last_issue_centric_resolved_issue",
+    "last_issue_centric_trigger_comment_id",
+    "last_issue_centric_trigger_comment_url",
+    "last_issue_centric_execution_payload_log",
+    # launch
+    "last_issue_centric_launch_status",
+    "last_issue_centric_launch_entrypoint",
+    "last_issue_centric_launch_prompt_log",
+    "last_issue_centric_launch_log",
+    # continuation / report
+    "last_issue_centric_continuation_status",
+    "last_issue_centric_continuation_log",
+    "last_issue_centric_report_status",
+    "last_issue_centric_report_file",
+    # project sync (current issue)
+    "last_issue_centric_project_sync_status",
+    "last_issue_centric_project_url",
+    "last_issue_centric_project_item_id",
+    "last_issue_centric_project_state_field",
+    "last_issue_centric_project_state_value",
+    # project sync (primary issue)
+    "last_issue_centric_primary_project_sync_status",
+    "last_issue_centric_primary_project_url",
+    "last_issue_centric_primary_project_item_id",
+    "last_issue_centric_primary_project_state_field",
+    "last_issue_centric_primary_project_state_value",
+    # followup
+    "last_issue_centric_followup_status",
+    "last_issue_centric_followup_log",
+    "last_issue_centric_followup_parent_issue",
+    "last_issue_centric_followup_issue_number",
+    "last_issue_centric_followup_issue_url",
+    "last_issue_centric_followup_issue_title",
+    "last_issue_centric_followup_project_sync_status",
+    "last_issue_centric_followup_project_url",
+    "last_issue_centric_followup_project_item_id",
+    "last_issue_centric_followup_project_state_field",
+    "last_issue_centric_followup_project_state_value",
+    # current project
+    "last_issue_centric_current_project_item_id",
+    "last_issue_centric_current_project_url",
+    # lifecycle sync
+    "last_issue_centric_lifecycle_sync_status",
+    "last_issue_centric_lifecycle_sync_log",
+    "last_issue_centric_lifecycle_sync_issue",
+    "last_issue_centric_lifecycle_sync_stage",
+    "last_issue_centric_lifecycle_sync_project_url",
+    "last_issue_centric_lifecycle_sync_project_item_id",
+    "last_issue_centric_lifecycle_sync_state_field",
+    "last_issue_centric_lifecycle_sync_state_value",
+    # close
+    "last_issue_centric_close_status",
+    "last_issue_centric_close_log",
+    "last_issue_centric_closed_issue_number",
+    "last_issue_centric_closed_issue_url",
+    "last_issue_centric_closed_issue_title",
+    "last_issue_centric_close_order",
+    # parent update
+    "last_issue_centric_parent_update_status",
+    "last_issue_centric_parent_update_log",
+    "last_issue_centric_parent_update_issue",
+    "last_issue_centric_parent_update_comment_id",
+    "last_issue_centric_parent_update_comment_url",
+    "last_issue_centric_parent_update_closed_issue",
+    # review
+    "last_issue_centric_review_status",
+    "last_issue_centric_review_log",
+    "last_issue_centric_review_comment_id",
+    "last_issue_centric_review_comment_url",
+    "last_issue_centric_review_close_policy",
+)
+
+
+def _build_ic_fetch_handoff_state(
+    contract_decision: IssueCentricDecision,
+    materialized: object,
+    *,
+    readiness: IssueCentricReplyReadiness,
+    decision_log: Path,
+    pending_request_hash: str,
+    prior_state: dict[str, object],
+) -> _IcFetchHandoffState:
+    """Build the fetch handoff state from a successfully parsed contract reply.
+
+    Captures the immutable snapshot of what fetch learned: action, target,
+    artifact metadata, readiness diagnostics, and reply hash.  This snapshot
+    is later applied to mutable_state by _apply_ic_fetch_handoff_state().
+    """
+    reply_hash = stable_text_hash(contract_decision.raw_segment.strip())
+    artifact_log_path = getattr(materialized, "artifact_log_path", None)
+    prepared = getattr(materialized, "prepared", None)
+    primary_body = getattr(prepared, "primary_body", None) if prepared is not None else None
+    return _IcFetchHandoffState(
+        action=contract_decision.action.value,
+        target_issue=contract_decision.target_issue or "none",
+        artifact_kind=(primary_body.kind.value if primary_body is not None else ""),
+        artifact_file=(
+            repo_relative(artifact_log_path) if artifact_log_path is not None else ""
+        ),
+        metadata_log=repo_relative(getattr(materialized, "metadata_log_path")),
+        decision_log=repo_relative(decision_log),
+        stop_reason=getattr(materialized, "safe_stop_reason", ""),
+        reply_hash=reply_hash,
+        processed_request_hash=(
+            pending_request_hash
+            or str(prior_state.get("last_processed_request_hash", "")).strip()
+        ),
+        readiness_status=readiness.status,
+        readiness_reason=readiness.reason,
+        assistant_text_present=readiness.assistant_text_present,
+        thinking_visible=readiness.thinking_visible,
+        decision_marker_present=readiness.decision_marker_present,
+        contract_parse_attempted=readiness.contract_parse_attempted,
+    )
+
+
+def _apply_ic_continuation_reset(mutable_state: dict[str, object]) -> None:
+    """Clear all prior-cycle issue-centric continuation / execution fields.
+
+    Must be called *before* _apply_ic_fetch_handoff_state() so that stale
+    values from the previous execution do not contaminate the fresh dispatch.
+    """
+    mutable_state.update({k: "" for k in _IC_CONTINUATION_RESET_FIELDS})
+
+
+def _apply_ic_fetch_handoff_state(
+    mutable_state: dict[str, object],
+    handoff: _IcFetchHandoffState,
+) -> None:
+    """Apply the fetch handoff state to mutable_state.
+
+    Writes action, target_issue, artifact metadata, stop reason, and readiness
+    diagnostics.  Also resets the contract correction retry counter because a
+    valid contract was successfully recovered.
+
+    Call after _apply_ic_continuation_reset() — only the fetch-known values
+    will overwrite the cleared fields; the rest remain "" until execution fills
+    them in via _finalize_dispatch().
+    """
+    mutable_state.update(
+        {
+            # ── Decision identity ──────────────────────────────────────────
+            "last_issue_centric_action": handoff.action,
+            "last_issue_centric_target_issue": handoff.target_issue,
+            # ── Artifact / log paths ───────────────────────────────────────
+            "last_issue_centric_decision_log": handoff.decision_log,
+            "last_issue_centric_metadata_log": handoff.metadata_log,
+            "last_issue_centric_artifact_file": handoff.artifact_file,
+            "last_issue_centric_artifact_kind": handoff.artifact_kind,
+            # ── Stop reason ────────────────────────────────────────────────
+            "last_issue_centric_stop_reason": handoff.stop_reason,
+            # ── Readiness diagnostics ──────────────────────────────────────
+            "reply_readiness_status": handoff.readiness_status,
+            "reply_readiness_reason": handoff.readiness_reason,
+            "assistant_text_present": handoff.assistant_text_present,
+            "thinking_visible": handoff.thinking_visible,
+            "decision_marker_present": handoff.decision_marker_present,
+            "contract_parse_attempted": handoff.contract_parse_attempted,
+            # ── Correction retry reset ─────────────────────────────────────
+            # A valid contract was recovered — clear any prior correction loop.
+            "last_issue_centric_contract_correction_count": 0,
+            "last_issue_centric_contract_correction_log": "",
+            "last_issue_centric_contract_correction_reason": "",
+        }
+    )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の ChatGPT 返答ブロックを抽出します。")
     parser.add_argument(
@@ -877,7 +1149,15 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         except IssueCentricTransportError as exc:
             raise BridgeError(f"issue-centric contract transport を準備できませんでした: {exc}") from exc
 
-        reply_hash = stable_text_hash(contract_decision.raw_segment.strip())
+        # ── Build fetch handoff snapshot ────────────────────────────────────
+        handoff = _build_ic_fetch_handoff_state(
+            contract_decision,
+            materialized,
+            readiness=readiness,
+            decision_log=decision_log,
+            pending_request_hash=pending_request_hash,
+            prior_state=state,
+        )
         mutable_state = clear_error_fields(dict(state))
         clear_pending_request_fields(mutable_state)
         if pending_generation_id:
@@ -899,6 +1179,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "last_issue_centric_freshness_source": "reply_recovery_state",
                 }
             )
+        # ── Base fetch state ────────────────────────────────────────────────
         mutable_state.update(
             {
                 "mode": "awaiting_user",
@@ -906,138 +1187,18 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 "need_chatgpt_next": False,
                 "need_codex_run": False,
                 "last_prompt_file": "",
-                "last_processed_request_hash": pending_request_hash
-                or str(state.get("last_processed_request_hash", "")).strip(),
-                "last_processed_reply_hash": reply_hash,
-                "chatgpt_decision": f"issue_centric:{contract_decision.action.value}",
-                "chatgpt_decision_note": materialized.safe_stop_reason,
-                "last_issue_centric_action": contract_decision.action.value,
-                "last_issue_centric_target_issue": contract_decision.target_issue or "none",
-                "last_issue_centric_decision_log": repo_relative(decision_log),
-                "last_issue_centric_metadata_log": repo_relative(materialized.metadata_log_path),
-                "last_issue_centric_artifact_file": (
-                    repo_relative(materialized.artifact_log_path)
-                    if materialized.artifact_log_path is not None
-                    else ""
-                ),
-                "last_issue_centric_dispatch_result": "",
-                "last_issue_centric_normalized_summary": "",
-                "last_issue_centric_principal_issue": "",
-                "last_issue_centric_principal_issue_kind": "",
-                "last_issue_centric_next_request_hint": "",
-                "last_issue_centric_next_request_target": "",
-                "last_issue_centric_next_request_target_source": "",
-                "last_issue_centric_next_request_fallback_reason": "",
-                "last_issue_centric_route_selected": "",
-                "last_issue_centric_route_fallback_reason": "",
-                "last_issue_centric_recovery_status": "",
-                "last_issue_centric_recovery_source": "",
-                "last_issue_centric_recovery_fallback_reason": "",
-                "last_issue_centric_runtime_snapshot": "",
-                "last_issue_centric_snapshot_status": "",
-                "last_issue_centric_runtime_generation_id": "",
-                "last_issue_centric_generation_lifecycle": "",
-                "last_issue_centric_generation_lifecycle_reason": "",
-                "last_issue_centric_generation_lifecycle_source": "",
-                "last_issue_centric_prepared_generation_id": "",
-                "last_issue_centric_pending_generation_id": "",
-                "last_issue_centric_runtime_mode": "",
-                "last_issue_centric_runtime_mode_reason": "",
-                "last_issue_centric_runtime_mode_source": "",
-                "last_issue_centric_freshness_status": "",
-                "last_issue_centric_freshness_reason": "",
-                "last_issue_centric_freshness_source": "",
-                "last_issue_centric_invalidation_status": "",
-                "last_issue_centric_invalidation_reason": "",
-                "last_issue_centric_invalidated_generation_id": "",
-                "last_issue_centric_consumed_generation_id": "",
-                "last_issue_centric_artifact_kind": (
-                    materialized.prepared.primary_body.kind.value
-                    if materialized.prepared.primary_body is not None
-                    else ""
-                ),
-                "last_issue_centric_execution_status": "",
-                "last_issue_centric_execution_log": "",
-                "last_issue_centric_created_issue_number": "",
-                "last_issue_centric_created_issue_url": "",
-                "last_issue_centric_created_issue_title": "",
-                "last_issue_centric_primary_issue_number": "",
-                "last_issue_centric_primary_issue_url": "",
-                "last_issue_centric_primary_issue_title": "",
-                "last_issue_centric_resolved_issue": "",
-                "last_issue_centric_trigger_comment_id": "",
-                "last_issue_centric_trigger_comment_url": "",
-                "last_issue_centric_execution_payload_log": "",
-                "last_issue_centric_launch_status": "",
-                "last_issue_centric_launch_entrypoint": "",
-                "last_issue_centric_launch_prompt_log": "",
-                "last_issue_centric_launch_log": "",
-                "last_issue_centric_continuation_status": "",
-                "last_issue_centric_continuation_log": "",
-                "last_issue_centric_report_status": "",
-                "last_issue_centric_report_file": "",
-                "last_issue_centric_project_sync_status": "",
-                "last_issue_centric_project_url": "",
-                "last_issue_centric_project_item_id": "",
-                "last_issue_centric_project_state_field": "",
-                "last_issue_centric_project_state_value": "",
-                "last_issue_centric_primary_project_sync_status": "",
-                "last_issue_centric_primary_project_url": "",
-                "last_issue_centric_primary_project_item_id": "",
-                "last_issue_centric_primary_project_state_field": "",
-                "last_issue_centric_primary_project_state_value": "",
-                "last_issue_centric_followup_status": "",
-                "last_issue_centric_followup_log": "",
-                "last_issue_centric_followup_parent_issue": "",
-                "last_issue_centric_followup_issue_number": "",
-                "last_issue_centric_followup_issue_url": "",
-                "last_issue_centric_followup_issue_title": "",
-                "last_issue_centric_followup_project_sync_status": "",
-                "last_issue_centric_followup_project_url": "",
-                "last_issue_centric_followup_project_item_id": "",
-                "last_issue_centric_followup_project_state_field": "",
-                "last_issue_centric_followup_project_state_value": "",
-                "last_issue_centric_current_project_item_id": "",
-                "last_issue_centric_current_project_url": "",
-                "last_issue_centric_lifecycle_sync_status": "",
-                "last_issue_centric_lifecycle_sync_log": "",
-                "last_issue_centric_lifecycle_sync_issue": "",
-                "last_issue_centric_lifecycle_sync_stage": "",
-                "last_issue_centric_lifecycle_sync_project_url": "",
-                "last_issue_centric_lifecycle_sync_project_item_id": "",
-                "last_issue_centric_lifecycle_sync_state_field": "",
-                "last_issue_centric_lifecycle_sync_state_value": "",
-                "last_issue_centric_close_status": "",
-                "last_issue_centric_close_log": "",
-                "last_issue_centric_closed_issue_number": "",
-                "last_issue_centric_closed_issue_url": "",
-                "last_issue_centric_closed_issue_title": "",
-                "last_issue_centric_close_order": "",
-                "last_issue_centric_parent_update_status": "",
-                "last_issue_centric_parent_update_log": "",
-                "last_issue_centric_parent_update_issue": "",
-                "last_issue_centric_parent_update_comment_id": "",
-                "last_issue_centric_parent_update_comment_url": "",
-                "last_issue_centric_parent_update_closed_issue": "",
-                "last_issue_centric_review_status": "",
-                "last_issue_centric_review_log": "",
-                "last_issue_centric_review_comment_id": "",
-                "last_issue_centric_review_comment_url": "",
-                "last_issue_centric_review_close_policy": "",
-                "last_issue_centric_stop_reason": materialized.safe_stop_reason,
-                "reply_readiness_status": readiness.status,
-                "reply_readiness_reason": readiness.reason,
-                "assistant_text_present": readiness.assistant_text_present,
-                "thinking_visible": readiness.thinking_visible,
-                "decision_marker_present": readiness.decision_marker_present,
-                "contract_parse_attempted": readiness.contract_parse_attempted,
-                # Clear correction retry state — a valid contract was recovered so
-                # the previous correction loop (if any) is no longer relevant.
-                "last_issue_centric_contract_correction_count": 0,
-                "last_issue_centric_contract_correction_log": "",
-                "last_issue_centric_contract_correction_reason": "",
+                "last_processed_request_hash": handoff.processed_request_hash,
+                "last_processed_reply_hash": handoff.reply_hash,
+                "chatgpt_decision": f"issue_centric:{handoff.action}",
+                "chatgpt_decision_note": handoff.stop_reason,
             }
         )
+        # ── Issue-centric state reset + fetch handoff ───────────────────────
+        # 1. Clear all prior-cycle continuation / execution fields.
+        _apply_ic_continuation_reset(mutable_state)
+        # 2. Write what this fetch cycle learned from the ChatGPT reply.
+        #    After this call mutable_state is the complete pre-dispatch handoff.
+        _apply_ic_fetch_handoff_state(mutable_state, handoff)
         if contract_decision.action is IssueCentricAction.CODEX_RUN:
             save_state(mutable_state)
             raise BridgeStop(

@@ -6197,5 +6197,272 @@ class FetchExecuteNextRequestHandoffTests(unittest.TestCase):
         self.assertFalse(result)
 
 
+class IcFetchHandoffStateHelpersTests(unittest.TestCase):
+    """Phase 40 — fetch handoff state family helper unit tests.
+
+    Verifies _IcFetchHandoffState, _IC_CONTINUATION_RESET_FIELDS,
+    _build_ic_fetch_handoff_state, _apply_ic_continuation_reset, and
+    _apply_ic_fetch_handoff_state introduced in Phase 40.
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _fnp(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("fetch_next_prompt")
+
+    def _make_minimal_decision(self, *, action: str = "no_action", target: str = "none"):
+        """Return a minimal IssueCentricDecision mock for helper tests."""
+        from unittest.mock import MagicMock
+        fnp = self._fnp()
+        d = MagicMock()
+        d.action = MagicMock()
+        d.action.value = action
+        d.target_issue = None if target == "none" else target
+        d.raw_segment = "raw_segment_text"
+        return d
+
+    def _make_minimal_materialized(self, *, artifact_kind: str = ""):
+        """Return a minimal materialized mock."""
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.safe_stop_reason = "test stop reason"
+        m.metadata_log_path = Path("/tmp/meta.json")
+        if artifact_kind:
+            m.artifact_log_path = Path("/tmp/artifact.txt")
+            body = MagicMock()
+            body.kind = MagicMock()
+            body.kind.value = artifact_kind
+            m.prepared = MagicMock()
+            m.prepared.primary_body = body
+        else:
+            m.artifact_log_path = None
+            m.prepared = MagicMock()
+            m.prepared.primary_body = None
+        return m
+
+    def _make_minimal_readiness(self):
+        from unittest.mock import MagicMock
+        fnp = self._fnp()
+        r = MagicMock(spec=fnp.IssueCentricReplyReadiness)
+        r.status = "reply_complete_valid_contract"
+        r.reason = "parsed"
+        r.assistant_text_present = True
+        r.thinking_visible = False
+        r.decision_marker_present = True
+        r.contract_parse_attempted = True
+        return r
+
+    # ------------------------------------------------------------------
+    # Group 1: _IcFetchHandoffState — field contract (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_build_ic_fetch_handoff_state_no_action(self):
+        """_build_ic_fetch_handoff_state: no_action → action/target/artifact set correctly."""
+        fnp = self._fnp()
+        decision = self._make_minimal_decision(action="no_action", target="none")
+        materialized = self._make_minimal_materialized()
+        readiness = self._make_minimal_readiness()
+        prior_state: dict = {"last_processed_request_hash": "prev-hash"}
+        with tempfile.TemporaryDirectory() as tmp:
+            decision_log = Path(tmp) / "decision.md"
+            decision_log.write_text("decision log", encoding="utf-8")
+            from unittest.mock import patch
+            with patch.object(fnp, "repo_relative", side_effect=lambda p: f"logs/{p.name}"):
+                handoff = fnp._build_ic_fetch_handoff_state(
+                    decision,
+                    materialized,
+                    readiness=readiness,
+                    decision_log=decision_log,
+                    pending_request_hash="hash-xyz",
+                    prior_state=prior_state,
+                )
+        self.assertEqual(handoff.action, "no_action")
+        self.assertEqual(handoff.target_issue, "none")
+        self.assertEqual(handoff.artifact_kind, "")
+        self.assertEqual(handoff.artifact_file, "")
+        self.assertEqual(handoff.stop_reason, "test stop reason")
+        self.assertEqual(handoff.processed_request_hash, "hash-xyz")
+        self.assertIsNotNone(handoff.reply_hash)
+        self.assertNotEqual(handoff.reply_hash, "")
+
+    def test_build_ic_fetch_handoff_state_issue_create_with_artifact(self):
+        """_build_ic_fetch_handoff_state: issue_create + artifact → artifact_kind + artifact_file set."""
+        fnp = self._fnp()
+        decision = self._make_minimal_decision(action="issue_create", target="#10")
+        materialized = self._make_minimal_materialized(artifact_kind="issue_body")
+        readiness = self._make_minimal_readiness()
+        with tempfile.TemporaryDirectory() as tmp:
+            decision_log = Path(tmp) / "decision.md"
+            decision_log.write_text("x", encoding="utf-8")
+            from unittest.mock import patch
+            with patch.object(fnp, "repo_relative", side_effect=lambda p: f"logs/{p.name}"):
+                handoff = fnp._build_ic_fetch_handoff_state(
+                    decision,
+                    materialized,
+                    readiness=readiness,
+                    decision_log=decision_log,
+                    pending_request_hash="h",
+                    prior_state={},
+                )
+        self.assertEqual(handoff.action, "issue_create")
+        self.assertEqual(handoff.target_issue, "#10")
+        self.assertEqual(handoff.artifact_kind, "issue_body")
+        self.assertIn("artifact.txt", handoff.artifact_file)
+
+    def test_build_ic_fetch_handoff_state_falls_back_to_prior_processed_hash(self):
+        """_build_ic_fetch_handoff_state: empty pending_request_hash → uses prior_state value."""
+        fnp = self._fnp()
+        decision = self._make_minimal_decision()
+        materialized = self._make_minimal_materialized()
+        readiness = self._make_minimal_readiness()
+        with tempfile.TemporaryDirectory() as tmp:
+            decision_log = Path(tmp) / "d.md"
+            decision_log.write_text("x", encoding="utf-8")
+            from unittest.mock import patch
+            with patch.object(fnp, "repo_relative", side_effect=lambda p: f"logs/{p.name}"):
+                handoff = fnp._build_ic_fetch_handoff_state(
+                    decision,
+                    materialized,
+                    readiness=readiness,
+                    decision_log=decision_log,
+                    pending_request_hash="",
+                    prior_state={"last_processed_request_hash": "fallback-hash"},
+                )
+        self.assertEqual(handoff.processed_request_hash, "fallback-hash")
+
+    # ------------------------------------------------------------------
+    # Group 2: _apply_ic_continuation_reset (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_apply_ic_continuation_reset_clears_all_reset_fields(self):
+        """_apply_ic_continuation_reset: all _IC_CONTINUATION_RESET_FIELDS → ""."""
+        fnp = self._fnp()
+        state: dict = {}
+        for field in fnp._IC_CONTINUATION_RESET_FIELDS:
+            state[field] = f"prior_value_{field}"
+        fnp._apply_ic_continuation_reset(state)
+        for field in fnp._IC_CONTINUATION_RESET_FIELDS:
+            self.assertEqual(state[field], "", f"Field {field!r} should be empty after reset")
+
+    def test_apply_ic_continuation_reset_does_not_clear_non_reset_fields(self):
+        """_apply_ic_continuation_reset: non-reset fields (action, etc.) are not touched."""
+        fnp = self._fnp()
+        state: dict = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_target_issue": "#5",
+            "mode": "waiting_prompt_reply",
+        }
+        fnp._apply_ic_continuation_reset(state)
+        # These must NOT be cleared by the reset helper
+        self.assertEqual(state["last_issue_centric_action"], "codex_run")
+        self.assertEqual(state["last_issue_centric_target_issue"], "#5")
+        self.assertEqual(state["mode"], "waiting_prompt_reply")
+
+    # ------------------------------------------------------------------
+    # Group 3: _apply_ic_fetch_handoff_state (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_apply_ic_fetch_handoff_state_writes_all_fields(self):
+        """_apply_ic_fetch_handoff_state: all handoff fields land in mutable_state."""
+        fnp = self._fnp()
+        handoff = fnp._IcFetchHandoffState(
+            action="no_action",
+            target_issue="none",
+            artifact_kind="",
+            artifact_file="",
+            metadata_log="logs/meta.json",
+            decision_log="logs/decision.md",
+            stop_reason="stop",
+            reply_hash="abc123",
+            processed_request_hash="req-hash",
+            readiness_status="reply_complete_valid_contract",
+            readiness_reason="parsed",
+            assistant_text_present=True,
+            thinking_visible=False,
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+        )
+        state: dict = {}
+        fnp._apply_ic_fetch_handoff_state(state, handoff)
+        self.assertEqual(state["last_issue_centric_action"], "no_action")
+        self.assertEqual(state["last_issue_centric_target_issue"], "none")
+        self.assertEqual(state["last_issue_centric_decision_log"], "logs/decision.md")
+        self.assertEqual(state["last_issue_centric_metadata_log"], "logs/meta.json")
+        self.assertEqual(state["last_issue_centric_artifact_file"], "")
+        self.assertEqual(state["last_issue_centric_artifact_kind"], "")
+        self.assertEqual(state["last_issue_centric_stop_reason"], "stop")
+        self.assertEqual(state["reply_readiness_status"], "reply_complete_valid_contract")
+        self.assertEqual(state["reply_readiness_reason"], "parsed")
+        self.assertTrue(state["assistant_text_present"])
+        self.assertFalse(state["thinking_visible"])
+        self.assertTrue(state["decision_marker_present"])
+        self.assertTrue(state["contract_parse_attempted"])
+        self.assertEqual(state["last_issue_centric_contract_correction_count"], 0)
+        self.assertEqual(state["last_issue_centric_contract_correction_log"], "")
+        self.assertEqual(state["last_issue_centric_contract_correction_reason"], "")
+
+    def test_apply_ic_fetch_handoff_state_resets_correction_count(self):
+        """_apply_ic_fetch_handoff_state: correction count reset to 0 even when prior > 0."""
+        fnp = self._fnp()
+        handoff = fnp._IcFetchHandoffState(
+            action="no_action",
+            target_issue="none",
+            artifact_kind="",
+            artifact_file="",
+            metadata_log="",
+            decision_log="",
+            stop_reason="",
+            reply_hash="",
+            processed_request_hash="",
+            readiness_status="",
+            readiness_reason="",
+            assistant_text_present=False,
+            thinking_visible=False,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+        state: dict = {
+            "last_issue_centric_contract_correction_count": 2,
+            "last_issue_centric_contract_correction_log": "logs/corr.md",
+            "last_issue_centric_contract_correction_reason": "bad json",
+        }
+        fnp._apply_ic_fetch_handoff_state(state, handoff)
+        self.assertEqual(state["last_issue_centric_contract_correction_count"], 0)
+        self.assertEqual(state["last_issue_centric_contract_correction_log"], "")
+        self.assertEqual(state["last_issue_centric_contract_correction_reason"], "")
+
+    def test_apply_ic_fetch_handoff_state_with_artifact(self):
+        """_apply_ic_fetch_handoff_state: codex_body artifact → artifact fields written."""
+        fnp = self._fnp()
+        handoff = fnp._IcFetchHandoffState(
+            action="codex_run",
+            target_issue="#20",
+            artifact_kind="codex_body",
+            artifact_file="logs/codex_body.txt",
+            metadata_log="logs/meta.json",
+            decision_log="logs/decision.md",
+            stop_reason="stop",
+            reply_hash="xyz",
+            processed_request_hash="req",
+            readiness_status="reply_complete_valid_contract",
+            readiness_reason="parsed",
+            assistant_text_present=True,
+            thinking_visible=False,
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+        )
+        state: dict = {}
+        fnp._apply_ic_fetch_handoff_state(state, handoff)
+        self.assertEqual(state["last_issue_centric_action"], "codex_run")
+        self.assertEqual(state["last_issue_centric_target_issue"], "#20")
+        self.assertEqual(state["last_issue_centric_artifact_kind"], "codex_body")
+        self.assertEqual(state["last_issue_centric_artifact_file"], "logs/codex_body.txt")
+
+
 if __name__ == "__main__":
     unittest.main()
