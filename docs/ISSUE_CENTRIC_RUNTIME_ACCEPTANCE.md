@@ -223,6 +223,12 @@ python3 scripts/start_bridge.py \
   - close は follow-up より先に実行しない
   - `_resolve_no_action_matrix_path()` helper で 4 パスが名前で読める
   - continuation state: followup ありの場合は followup が principal_issue に昇格、close のみの場合は closed issue を next cycle target に残さない
+- [x] `issue_create + close_current_issue` narrow path (Phase 50)
+  - 実行順: `issue_create → close_current_issue`
+  - create が失敗した場合は close を実行しない
+  - created primary issue が `principal_issue` / `principal_issue_kind = primary_issue` になる
+  - closed current issue は次 cycle target に残らない
+  - `_resolve_issue_create_matrix_path()` helper で 4 パス (`issue_create` / `issue_create_followup` / `issue_create_then_close` / `issue_create_followup_then_close`) が名前で読める
 
 ### D. Next request / continuation
 
@@ -280,8 +286,9 @@ python3 scripts/start_bridge.py \
 - [x] Plan A → visible DOM fallback の自動判定精度向上 (Phase 48: `_IcReplyRouteDecision` + `_resolve_ic_reply_route_decision` 追加 / Plan A 破損時は `stop_broken` で explicit stop / legacy fallback 非混在)
 - [x] `codex_run + close_current_issue = true` の dispatcher サポート (Phase 47: trigger → launch → post-launch close / matrix_path `codex_run_then_close`)
 - [ ] multi-flag 組み合わせの拡張 (narrow matrix 外)
-  - Phase 49 で `no_action` issue-management slices (followup-only / close-only / followup+close) を対応済み
-  - 残: `issue_create` / `codex_run` + 複合フラグの general 化、Projects update の全面対応
+  - Phase 49: `no_action` issue-management slices (followup-only / close-only / followup+close) 対応済み
+  - Phase 50: `issue_create + close_current_issue` → `issue_create_then_close` 対応済み
+  - 残: `issue_create + create_followup_issue + close_current_issue` general 化、`codex_run` 複合フラグ、Projects update 全面対応
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上
