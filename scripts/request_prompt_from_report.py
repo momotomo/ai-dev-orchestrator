@@ -499,47 +499,85 @@ def dispatch_request(
     return 0
 
 
+@dataclasses.dataclass
+class _IcResolvedContext:
+    """Resolved issue-centric context for a report request cycle.
+
+    Carries the four values that describe the IC resolution outcome so that
+    callers can read ``.runtime_snapshot``, ``.runtime_mode``,
+    ``.next_request_section``, and ``.route_selected`` as named fields
+    instead of relying on positional tuple destructuring.
+    """
+
+    runtime_snapshot: object | None = None
+    runtime_mode: object | None = None
+    next_request_section: str = ""
+    route_selected: str = ""
+
+
+def _build_ic_runtime_mode_state(
+    state: dict[str, object],
+    snapshot: object | None,
+) -> dict[str, object]:
+    """Build the runtime-mode-state dict used for IC mode and route resolution.
+
+    Copies ``state`` and, when ``snapshot`` is not None, overlays
+    ``last_issue_centric_runtime_snapshot`` and
+    ``last_issue_centric_snapshot_status`` from the snapshot so that
+    ``prepare_issue_centric_runtime_mode`` and
+    ``resolve_issue_centric_route_choice`` see the persisted snapshot values.
+    """
+    runtime_mode_state = dict(state)
+    if snapshot is not None:
+        runtime_mode_state.update(
+            {
+                "last_issue_centric_runtime_snapshot": str(getattr(snapshot, "snapshot_path", "") or "").strip(),
+                "last_issue_centric_snapshot_status": str(getattr(snapshot, "snapshot_status", "") or "").strip(),
+            }
+        )
+    return runtime_mode_state
+
+
 def _resolve_normal_ic_context(
     state: dict[str, object],
-) -> tuple[object | None, object | None, str, str]:
+) -> "_IcResolvedContext":
     """Resolve issue-centric context via the normal snapshot / mode / route path.
 
-    Prepares and persists the runtime snapshot, updates ``runtime_mode_state``
-    with snapshot path/status, then calls ``prepare_issue_centric_runtime_mode``
-    and ``resolve_issue_centric_route_choice``.
+    Three stages:
 
-    Returns ``(snapshot, runtime_mode, next_request_section, route_selected)``.
+    * **A — snapshot prepare / persist**: ``prepare_issue_centric_runtime_snapshot``
+      and ``_persist_runtime_snapshot_if_needed``.
+    * **B — runtime-mode-state build**: ``_build_ic_runtime_mode_state`` overlays
+      snapshot path/status onto a copy of ``state``.
+    * **C — mode / section / route resolution**: ``prepare_issue_centric_runtime_mode``
+      and ``resolve_issue_centric_route_choice``.
+
+    Returns an :class:`_IcResolvedContext` with named fields.
     Used by both ``_resolve_report_request_ic_context`` and
     ``run_rotated_report_request``.
     """
-    issue_centric_runtime_snapshot, _ = prepare_issue_centric_runtime_snapshot(state)
-    issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
-    runtime_mode_state = dict(state)
-    if issue_centric_runtime_snapshot is not None:
-        runtime_mode_state.update(
-            {
-                "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
-                "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
-            }
-        )
-    issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
-        runtime_mode_state
-    )
+    # A — snapshot
+    snapshot, _ = prepare_issue_centric_runtime_snapshot(state)
+    snapshot = _persist_runtime_snapshot_if_needed(snapshot)
+    # B — runtime-mode-state
+    runtime_mode_state = _build_ic_runtime_mode_state(state, snapshot)
+    # C — mode / section / route
+    runtime_mode, next_request_section = prepare_issue_centric_runtime_mode(runtime_mode_state)
     route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
-    return (
-        issue_centric_runtime_snapshot,
-        issue_centric_runtime_mode,
-        issue_centric_next_request_section,
-        route_choice.route_selected,
+    return _IcResolvedContext(
+        runtime_snapshot=snapshot,
+        runtime_mode=runtime_mode,
+        next_request_section=next_request_section,
+        route_selected=route_choice.route_selected,
     )
 
 
 def _resolve_report_request_ic_context(
     state: dict[str, object],
-) -> tuple[object | None, object | None, str, str]:
+) -> "_IcResolvedContext":
     """Resolve issue-centric context for a report-based resume request.
 
-    Returns ``(snapshot, runtime_mode, next_request_section, route_selected)``.
+    Returns an :class:`_IcResolvedContext` with named fields.
 
     Two paths:
 
@@ -552,11 +590,11 @@ def _resolve_report_request_ic_context(
     """
     if _should_use_pinned_ready_issue_path(state):
         _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
-        return (
-            None,
-            None,
-            build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref),
-            "issue_centric",
+        return _IcResolvedContext(
+            runtime_snapshot=None,
+            runtime_mode=None,
+            next_request_section=build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref),
+            route_selected="issue_centric",
         )
     return _resolve_normal_ic_context(state)
 
@@ -661,19 +699,14 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    (
-        issue_centric_runtime_snapshot,
-        issue_centric_runtime_mode,
-        issue_centric_next_request_section,
-        _route_selected,
-    ) = _resolve_report_request_ic_context(state)
+    _ic = _resolve_report_request_ic_context(state)
 
     issue_centric_next_request_section, effective_next_todo, effective_open_questions = (
         _resolve_completion_followup_request(
             state,
             last_report=last_report,
-            issue_centric_next_request_section=issue_centric_next_request_section,
-            route_selected=_route_selected,
+            issue_centric_next_request_section=_ic.next_request_section,
+            route_selected=_ic.route_selected,
             next_todo=args.next_todo,
             open_questions=args.open_questions,
         )
@@ -690,7 +723,7 @@ def run_resume_request(
         issue_centric_next_request_section=issue_centric_next_request_section,
     )
     if prepared_status is not None:
-        _log_prepared_request_reuse(prepared_status, _route_selected)
+        _log_prepared_request_reuse(prepared_status, _ic.route_selected)
 
     if _is_duplicate_pending_request(state, request_source):
         return 0
@@ -702,7 +735,7 @@ def run_resume_request(
         request_source=request_source,
         prepared_prefix="prepared_prompt_request_from_report",
         sent_prefix="sent_prompt_request_from_report",
-        issue_centric_runtime_snapshot=issue_centric_runtime_mode or issue_centric_runtime_snapshot,
+        issue_centric_runtime_snapshot=_ic.runtime_mode or _ic.runtime_snapshot,
         success_updates={
             "chatgpt_decision": "",
             "chatgpt_decision_note": "",
@@ -716,29 +749,21 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    (
-        issue_centric_runtime_snapshot,
-        issue_centric_runtime_mode,
-        issue_centric_next_request_section,
-        _route_selected,
-    ) = _resolve_normal_ic_context(state)
+    _ic = _resolve_normal_ic_context(state)
     request_source = build_report_request_source(state, "")
     handoff_text, handoff_received_log = _acquire_rotated_handoff(
         state,
         args,
         last_report,
         request_source=request_source,
-        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
-        issue_centric_runtime_mode=issue_centric_runtime_mode,
-        issue_centric_next_request_section=issue_centric_next_request_section,
+        ic_context=_ic,
     )
     return _apply_rotated_request_result(
         state,
         handoff_text=handoff_text,
         handoff_received_log=handoff_received_log,
         request_source=request_source,
-        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
-        issue_centric_runtime_mode=issue_centric_runtime_mode,
+        ic_context=_ic,
     )
 
 
@@ -748,9 +773,7 @@ def _acquire_rotated_handoff(
     last_report: str,
     *,
     request_source: str,
-    issue_centric_runtime_snapshot: object | None,
-    issue_centric_runtime_mode: object | None,
-    issue_centric_next_request_section: str,
+    ic_context: "_IcResolvedContext",
 ) -> tuple[str, str]:
     """Acquire handoff text for a rotated report request.
 
@@ -777,7 +800,7 @@ def _acquire_rotated_handoff(
         next_todo=args.next_todo,
         open_questions=args.open_questions,
         current_status=args.current_status or None,
-        issue_centric_next_request_section=issue_centric_next_request_section,
+        issue_centric_next_request_section=ic_context.next_request_section,
     )
     handoff_request_log = log_text("handoff_requested", handoff_request_text)
     send_to_chatgpt(handoff_request_text)
@@ -801,10 +824,10 @@ def _acquire_rotated_handoff(
             "pending_handoff_log": repo_relative(handoff_received_log),
         }
     )
-    if issue_centric_runtime_snapshot is not None:
+    if ic_context.runtime_snapshot is not None:
         handoff_state.update(
             _issue_centric_next_request_state_updates(
-                issue_centric_runtime_mode or issue_centric_runtime_snapshot,
+                ic_context.runtime_mode or ic_context.runtime_snapshot,
                 phase="prepared",
             )
         )
@@ -873,8 +896,7 @@ def _apply_rotated_request_result(
     handoff_text: str,
     handoff_received_log: str,
     request_source: str,
-    issue_centric_runtime_snapshot: object | None,
-    issue_centric_runtime_mode: object | None,
+    ic_context: "_IcResolvedContext",
 ) -> int:
     """Apply rotated report request result to state, logs, and stdout.
 
@@ -920,8 +942,8 @@ def _apply_rotated_request_result(
         request_log_path=request_log,
         rotation_signal=rotation_signal,
         rotated_chat=rotated_chat,
-        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
-        issue_centric_runtime_mode=issue_centric_runtime_mode,
+        issue_centric_runtime_snapshot=ic_context.runtime_snapshot,
+        issue_centric_runtime_mode=ic_context.runtime_mode,
     )
     # print
     if handoff_received_log:
