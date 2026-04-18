@@ -2067,6 +2067,103 @@ def _apply_ic_continuation_fields(
     )
 
 
+def _build_ic_continuation_payload_from_normalized(
+    normalized_summary: Mapping[str, object],
+    state: dict[str, object],
+) -> _IcContinuationPayload:
+    """Build an :class:`_IcContinuationPayload` from normalized summary + execution state.
+
+    This is the **writer constructor** — called during ``_finalize_dispatch``
+    after all ``_apply_*_execution_state`` helpers have run.  It assembles the
+    next-cycle continuation contract from two sources:
+
+    * *normalized_summary* — provides ``principal_issue``,
+      ``principal_issue_kind``, and ``next_request_hint`` (derived from the
+      normalized view of the execution result).
+    * *state* — provides the action-specific fields (``resolved_issue``,
+      ``created_issue_*``, ``followup_*``, ``close_order``, etc.) that were
+      already written by the ``_apply_*_execution_state`` helpers.
+
+    ``next_request_target`` and ``next_request_target_source`` are set to
+    ``""`` here — they are filled in by the ``runtime_snapshot`` step later
+    in ``_finalize_dispatch``.
+
+    Contrast with :func:`_build_ic_continuation_payload` (the **reader**),
+    which reconstructs a payload snapshot from already-saved state after the
+    full execution including the runtime_snapshot step.
+    """
+    principal_issue_candidate = normalized_summary.get("principal_issue_candidate")
+    principal_issue_ref = ""
+    if isinstance(principal_issue_candidate, Mapping):
+        principal_issue_ref = (
+            str(principal_issue_candidate.get("url", "")).strip()
+            or str(principal_issue_candidate.get("ref", "")).strip()
+        )
+    return _IcContinuationPayload(
+        principal_issue=principal_issue_ref,
+        principal_issue_kind=str(normalized_summary.get("principal_issue_kind", "")).strip(),
+        next_request_hint=str(normalized_summary.get("next_request_hint", "")).strip(),
+        next_request_target="",
+        next_request_target_source="",
+        action=str(state.get("last_issue_centric_action", "")).strip(),
+        target_issue=str(state.get("last_issue_centric_target_issue", "")).strip(),
+        resolved_issue=str(state.get("last_issue_centric_resolved_issue", "")).strip(),
+        created_issue_number=str(state.get("last_issue_centric_created_issue_number", "")).strip(),
+        created_issue_url=str(state.get("last_issue_centric_created_issue_url", "")).strip(),
+        followup_issue_number=str(state.get("last_issue_centric_followup_issue_number", "")).strip(),
+        followup_issue_url=str(state.get("last_issue_centric_followup_issue_url", "")).strip(),
+        followup_parent_issue=str(state.get("last_issue_centric_followup_parent_issue", "")).strip(),
+        close_order=str(state.get("last_issue_centric_close_order", "")).strip(),
+        execution_status=str(state.get("last_issue_centric_execution_status", "")).strip(),
+        stop_reason=str(state.get("last_issue_centric_stop_reason", "")).strip(),
+    )
+
+
+def _apply_ic_continuation_payload_to_state(
+    target_state: dict[str, object],
+    payload: _IcContinuationPayload,
+) -> None:
+    """Apply all :class:`_IcContinuationPayload` fields to *target_state*.
+
+    This is the **writer applier** — writes the typed continuation contract to
+    ``last_issue_centric_*`` state keys so the next request cycle can read
+    them via :func:`request_prompt_from_report._read_ic_next_cycle_context`.
+
+    Written field groups:
+
+    * **Normalized-summary fields** (new values derived during
+      ``_finalize_dispatch``): ``principal_issue``, ``principal_issue_kind``,
+      ``next_request_hint``.
+    * **Action-specific fields** (idempotent writes — already in state from
+      the ``_apply_*_execution_state`` helpers): ``resolved_issue``,
+      ``created_issue_*``, ``followup_*``, ``close_order``, ``action``,
+      ``target_issue``.
+    * **General** (idempotent): ``execution_status``, ``stop_reason``.
+
+    ``next_request_target`` and ``next_request_target_source`` are **not**
+    written here — they are set by the ``runtime_snapshot`` step in
+    ``_finalize_dispatch`` and are absent from the writer payload by design.
+    """
+    target_state.update(
+        {
+            "last_issue_centric_principal_issue": payload.principal_issue,
+            "last_issue_centric_principal_issue_kind": payload.principal_issue_kind,
+            "last_issue_centric_next_request_hint": payload.next_request_hint,
+            "last_issue_centric_action": payload.action,
+            "last_issue_centric_target_issue": payload.target_issue,
+            "last_issue_centric_resolved_issue": payload.resolved_issue,
+            "last_issue_centric_created_issue_number": payload.created_issue_number,
+            "last_issue_centric_created_issue_url": payload.created_issue_url,
+            "last_issue_centric_followup_issue_number": payload.followup_issue_number,
+            "last_issue_centric_followup_issue_url": payload.followup_issue_url,
+            "last_issue_centric_followup_parent_issue": payload.followup_parent_issue,
+            "last_issue_centric_close_order": payload.close_order,
+            "last_issue_centric_execution_status": payload.execution_status,
+            "last_issue_centric_stop_reason": payload.stop_reason,
+        }
+    )
+
+
 def _finalize_dispatch(
     *,
     matrix_path: str,
@@ -2134,12 +2231,12 @@ def _finalize_dispatch(
             str(principal_issue.get("url", "")).strip()
             or str(principal_issue.get("ref", "")).strip()
         )
-    _apply_ic_continuation_fields(mutable_state, normalized_summary=normalized_summary)
+    _continuation = _build_ic_continuation_payload_from_normalized(normalized_summary, mutable_state)
+    _apply_ic_continuation_payload_to_state(mutable_state, _continuation)
     mutable_state.update(
         {
             "last_issue_centric_dispatch_result": repo_relative(summary_log_path),
             "last_issue_centric_normalized_summary": repo_relative(normalized_summary_log_path),
-            "last_issue_centric_stop_reason": stop_reason,
             "chatgpt_decision_note": stop_reason,
         }
     )
