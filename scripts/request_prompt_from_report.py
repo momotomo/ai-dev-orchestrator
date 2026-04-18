@@ -1085,93 +1085,196 @@ def _issue_centric_next_request_state_updates(
     *,
     phase: str,
 ) -> dict[str, object]:
+    """Build the IC next-request state update dict for a prepared or pending request.
+
+    Extracts snapshot / runtime_mode / target / recovery base fields from
+    ``context``, delegates generation lifecycle resolution to
+    ``_resolve_ic_generation_lifecycle``, and assembles the final state update
+    dict.  External key names are unchanged.
+    """
+    # --- base fields from context ---
     snapshot_path = str(getattr(context, "snapshot_path", "") or "").strip()
     snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
     generation_id = str(getattr(context, "generation_id", "") or "").strip()
     runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
     runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
     runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
-    freshness_status = str(getattr(context, "freshness_status", "") or "").strip()
-    freshness_reason = str(getattr(context, "freshness_reason", "") or "").strip()
-    freshness_source = str(getattr(context, "freshness_source", "") or "").strip()
-    invalidation_status = str(getattr(context, "invalidation_status", "") or "").strip()
-    invalidation_reason = str(getattr(context, "invalidation_reason", "") or "").strip()
     target_issue = str(getattr(context, "target_issue", "") or "").strip()
     target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
     fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
     route_selected = str(getattr(context, "route_selected", "") or "").strip()
     recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
     recovery_source = str(getattr(context, "recovery_source", "") or "").strip()
-    generation_lifecycle = ""
-    generation_lifecycle_reason = ""
-    generation_lifecycle_source = ""
-    prepared_generation_id = ""
-    pending_generation_id = ""
-    consumed_generation_id = ""
-    invalidated_generation_id = ""
-    if generation_id and runtime_mode in {"issue_centric_degraded_fallback", "issue_centric_unavailable"}:
-        freshness_status = "issue_centric_invalidated"
-        freshness_reason = runtime_mode_reason or fallback_reason or "issue_centric_context_invalidated"
-        freshness_source = "legacy_fallback_selection"
-        invalidation_status = "issue_centric_invalidated"
-        invalidation_reason = runtime_mode_reason or fallback_reason or "issue_centric_context_invalidated"
-        generation_lifecycle = "issue_centric_invalidated"
-        generation_lifecycle_reason = invalidation_reason
-        generation_lifecycle_source = "legacy_fallback_selection"
-        invalidated_generation_id = generation_id
-        route_selected = "fallback_legacy"
-        fallback_reason = invalidation_reason
-    elif generation_id and phase == "prepared":
-        freshness_status = "issue_centric_fresh"
-        freshness_reason = "prepared_request_bound_to_generation"
-        freshness_source = "prepared_request_state"
-        generation_lifecycle = "fresh_prepared"
-        generation_lifecycle_reason = freshness_reason
-        generation_lifecycle_source = freshness_source
-        prepared_generation_id = generation_id
-    elif generation_id and phase == "pending":
-        freshness_status = "issue_centric_fresh"
-        freshness_reason = "pending_request_bound_to_generation"
-        freshness_source = "pending_request_state"
-        generation_lifecycle = "fresh_pending"
-        generation_lifecycle_reason = freshness_reason
-        generation_lifecycle_source = freshness_source
-        pending_generation_id = generation_id
-    elif generation_id:
-        freshness_status = "issue_centric_fresh"
-        freshness_reason = "latest_issue_centric_generation_available"
-        freshness_source = "runtime_snapshot_generation"
-        generation_lifecycle = "fresh_available"
-        generation_lifecycle_reason = freshness_reason
-        generation_lifecycle_source = freshness_source
+    # context-derived freshness / invalidation defaults (used only when no
+    # generation_id is present — see _resolve_ic_generation_lifecycle)
+    ctx_freshness_status = str(getattr(context, "freshness_status", "") or "").strip()
+    ctx_freshness_reason = str(getattr(context, "freshness_reason", "") or "").strip()
+    ctx_freshness_source = str(getattr(context, "freshness_source", "") or "").strip()
+    ctx_invalidation_status = str(getattr(context, "invalidation_status", "") or "").strip()
+    ctx_invalidation_reason = str(getattr(context, "invalidation_reason", "") or "").strip()
+    # --- generation lifecycle resolution ---
+    lc = _resolve_ic_generation_lifecycle(
+        generation_id,
+        runtime_mode=runtime_mode,
+        runtime_mode_reason=runtime_mode_reason,
+        fallback_reason=fallback_reason,
+        route_selected=route_selected,
+        phase=phase,
+        ctx_freshness_status=ctx_freshness_status,
+        ctx_freshness_reason=ctx_freshness_reason,
+        ctx_freshness_source=ctx_freshness_source,
+        ctx_invalidation_status=ctx_invalidation_status,
+        ctx_invalidation_reason=ctx_invalidation_reason,
+    )
+    # --- assemble payload ---
     return {
         "last_issue_centric_runtime_snapshot": snapshot_path,
         "last_issue_centric_snapshot_status": snapshot_status,
         "last_issue_centric_runtime_generation_id": generation_id,
-        "last_issue_centric_generation_lifecycle": generation_lifecycle,
-        "last_issue_centric_generation_lifecycle_reason": generation_lifecycle_reason,
-        "last_issue_centric_generation_lifecycle_source": generation_lifecycle_source,
-        "last_issue_centric_prepared_generation_id": prepared_generation_id,
-        "last_issue_centric_pending_generation_id": pending_generation_id,
+        "last_issue_centric_generation_lifecycle": lc.generation_lifecycle,
+        "last_issue_centric_generation_lifecycle_reason": lc.generation_lifecycle_reason,
+        "last_issue_centric_generation_lifecycle_source": lc.generation_lifecycle_source,
+        "last_issue_centric_prepared_generation_id": lc.prepared_generation_id,
+        "last_issue_centric_pending_generation_id": lc.pending_generation_id,
         "last_issue_centric_runtime_mode": runtime_mode,
         "last_issue_centric_runtime_mode_reason": runtime_mode_reason,
         "last_issue_centric_runtime_mode_source": runtime_mode_source,
-        "last_issue_centric_freshness_status": freshness_status,
-        "last_issue_centric_freshness_reason": freshness_reason,
-        "last_issue_centric_freshness_source": freshness_source,
-        "last_issue_centric_invalidation_status": invalidation_status,
-        "last_issue_centric_invalidation_reason": invalidation_reason,
-        "last_issue_centric_invalidated_generation_id": invalidated_generation_id,
-        "last_issue_centric_consumed_generation_id": consumed_generation_id,
+        "last_issue_centric_freshness_status": lc.freshness_status,
+        "last_issue_centric_freshness_reason": lc.freshness_reason,
+        "last_issue_centric_freshness_source": lc.freshness_source,
+        "last_issue_centric_invalidation_status": lc.invalidation_status,
+        "last_issue_centric_invalidation_reason": lc.invalidation_reason,
+        "last_issue_centric_invalidated_generation_id": lc.invalidated_generation_id,
+        "last_issue_centric_consumed_generation_id": lc.consumed_generation_id,
         "last_issue_centric_next_request_target": target_issue,
         "last_issue_centric_next_request_target_source": target_issue_source,
-        "last_issue_centric_next_request_fallback_reason": fallback_reason,
-        "last_issue_centric_route_selected": route_selected,
-        "last_issue_centric_route_fallback_reason": fallback_reason,
+        "last_issue_centric_next_request_fallback_reason": lc.fallback_reason,
+        "last_issue_centric_route_selected": lc.route_selected,
+        "last_issue_centric_route_fallback_reason": lc.fallback_reason,
         "last_issue_centric_recovery_status": recovery_status,
         "last_issue_centric_recovery_source": recovery_source,
-        "last_issue_centric_recovery_fallback_reason": fallback_reason,
+        "last_issue_centric_recovery_fallback_reason": lc.fallback_reason,
     }
+
+
+@dataclasses.dataclass
+class _IcGenerationLifecycle:
+    """Resolved IC generation lifecycle fields for a next-request state update.
+
+    All string fields default to empty string.  The ``route_selected`` and
+    ``fallback_reason`` fields carry either the context-derived originals (when no
+    override is needed) or the corrected values (in the degraded/unavailable case).
+    """
+
+    freshness_status: str = ""
+    freshness_reason: str = ""
+    freshness_source: str = ""
+    invalidation_status: str = ""
+    invalidation_reason: str = ""
+    generation_lifecycle: str = ""
+    generation_lifecycle_reason: str = ""
+    generation_lifecycle_source: str = ""
+    prepared_generation_id: str = ""
+    pending_generation_id: str = ""
+    consumed_generation_id: str = ""
+    invalidated_generation_id: str = ""
+    route_selected: str = ""
+    fallback_reason: str = ""
+
+
+def _resolve_ic_generation_lifecycle(
+    generation_id: str,
+    *,
+    runtime_mode: str,
+    runtime_mode_reason: str,
+    fallback_reason: str,
+    route_selected: str,
+    phase: str,
+    ctx_freshness_status: str = "",
+    ctx_freshness_reason: str = "",
+    ctx_freshness_source: str = "",
+    ctx_invalidation_status: str = "",
+    ctx_invalidation_reason: str = "",
+) -> _IcGenerationLifecycle:
+    """Resolve IC generation lifecycle fields for a next-request state update.
+
+    Five cases:
+
+    * **No generation_id** — lifecycle fields remain empty; freshness and
+      invalidation fall back to context-derived values.
+    * **degraded/unavailable fallback** — generation is marked invalidated;
+      ``route_selected`` is forced to ``"fallback_legacy"``.
+    * **phase=prepared** — generation is bound as ``prepared_generation_id``;
+      lifecycle is ``"fresh_prepared"``.
+    * **phase=pending** — generation is bound as ``pending_generation_id``;
+      lifecycle is ``"fresh_pending"``.
+    * **generation present, no phase match** — lifecycle is
+      ``"fresh_available"``; generation is not bound to a specific id slot.
+    """
+    if not generation_id:
+        # no generation: pass context defaults through unchanged
+        return _IcGenerationLifecycle(
+            freshness_status=ctx_freshness_status,
+            freshness_reason=ctx_freshness_reason,
+            freshness_source=ctx_freshness_source,
+            invalidation_status=ctx_invalidation_status,
+            invalidation_reason=ctx_invalidation_reason,
+            route_selected=route_selected,
+            fallback_reason=fallback_reason,
+        )
+    if runtime_mode in {"issue_centric_degraded_fallback", "issue_centric_unavailable"}:
+        # generation invalidated by degraded/unavailable fallback
+        invalidation_reason = runtime_mode_reason or fallback_reason or "issue_centric_context_invalidated"
+        return _IcGenerationLifecycle(
+            freshness_status="issue_centric_invalidated",
+            freshness_reason=invalidation_reason,
+            freshness_source="legacy_fallback_selection",
+            invalidation_status="issue_centric_invalidated",
+            invalidation_reason=invalidation_reason,
+            generation_lifecycle="issue_centric_invalidated",
+            generation_lifecycle_reason=invalidation_reason,
+            generation_lifecycle_source="legacy_fallback_selection",
+            invalidated_generation_id=generation_id,
+            route_selected="fallback_legacy",
+            fallback_reason=invalidation_reason,
+        )
+    if phase == "prepared":
+        # binds prepared_generation_id; lifecycle is fresh_prepared
+        return _IcGenerationLifecycle(
+            freshness_status="issue_centric_fresh",
+            freshness_reason="prepared_request_bound_to_generation",
+            freshness_source="prepared_request_state",
+            generation_lifecycle="fresh_prepared",
+            generation_lifecycle_reason="prepared_request_bound_to_generation",
+            generation_lifecycle_source="prepared_request_state",
+            prepared_generation_id=generation_id,
+            route_selected=route_selected,
+            fallback_reason=fallback_reason,
+        )
+    if phase == "pending":
+        # binds pending_generation_id; lifecycle is fresh_pending
+        return _IcGenerationLifecycle(
+            freshness_status="issue_centric_fresh",
+            freshness_reason="pending_request_bound_to_generation",
+            freshness_source="pending_request_state",
+            generation_lifecycle="fresh_pending",
+            generation_lifecycle_reason="pending_request_bound_to_generation",
+            generation_lifecycle_source="pending_request_state",
+            pending_generation_id=generation_id,
+            route_selected=route_selected,
+            fallback_reason=fallback_reason,
+        )
+    # generation present, no specific phase match → fresh_available
+    return _IcGenerationLifecycle(
+        freshness_status="issue_centric_fresh",
+        freshness_reason="latest_issue_centric_generation_available",
+        freshness_source="runtime_snapshot_generation",
+        generation_lifecycle="fresh_available",
+        generation_lifecycle_reason="latest_issue_centric_generation_available",
+        generation_lifecycle_source="runtime_snapshot_generation",
+        route_selected=route_selected,
+        fallback_reason=fallback_reason,
+    )
 
 
 def _persist_runtime_snapshot_if_needed(snapshot: object | None) -> object | None:
