@@ -1556,6 +1556,23 @@ def _apply_issue_create_execution_state(
     execution: object,
     repo_relative: Callable[[Path], str],
 ) -> None:
+    """Apply issue_create execution result to mutable state.
+
+    **Next-cycle contract** — the following state fields are written for the
+    next request cycle:
+
+    * ``last_issue_centric_created_issue_*`` — the newly created primary issue;
+      ``_finalize_dispatch`` promotes this to ``last_issue_centric_principal_issue``
+      via the normalized summary's ``principal_issue_candidate``.
+    * ``last_issue_centric_primary_issue_*`` — same issue, stored under the
+      ``primary_issue`` namespace for follow-up combo flows.
+    * ``last_issue_centric_project_sync_status / url / item_id / *_field / *_value``
+      — project-board state for the created issue.
+
+    The next request cycle reads ``last_issue_centric_principal_issue`` (written
+    by ``_finalize_dispatch``) as its primary target.  No ``resolved_issue`` is
+    written here — that field is reserved for ``codex_run`` / review paths.
+    """
     target_state.update(
         {
             "last_issue_centric_execution_status": execution.status,
@@ -1600,6 +1617,23 @@ def _apply_codex_execution_state(
     execution: object,
     repo_relative: Callable[[Path], str],
 ) -> None:
+    """Apply codex_run execution result to mutable state.
+
+    **Next-cycle contract** — the following state fields are written for the
+    next request cycle:
+
+    * ``last_issue_centric_resolved_issue`` — the issue closed/resolved by
+      this Codex run.  Used as the 3rd-priority fallback in the target
+      resolution chain when ``next_request_target`` and ``principal_issue``
+      are both absent.
+    * ``last_issue_centric_trigger_comment_*`` — the trigger comment posted
+      to start the Codex run.
+    * ``last_issue_centric_launch_status`` — whether the Codex run was
+      successfully launched.
+
+    ``principal_issue`` is **not** written here; it is derived by
+    ``_finalize_dispatch`` from the normalized summary.
+    """
     target_state.update(
         {
             "last_issue_centric_execution_status": execution.status,
@@ -1677,6 +1711,22 @@ def _apply_review_execution_state(
     review_execution: object,
     repo_relative: Callable[[Path], str],
 ) -> None:
+    """Apply human_review_needed execution result to mutable state.
+
+    **Next-cycle contract** — the following state fields are written for the
+    next request cycle:
+
+    * ``last_issue_centric_resolved_issue`` — carries the review target
+      (i.e. the issue awaiting human review).  Used as the 3rd-priority
+      fallback in the target resolution chain.  Falls back to the previous
+      ``last_issue_centric_resolved_issue`` value when the review execution
+      did not produce a new resolved issue.
+    * ``last_issue_centric_review_*`` — review status, log, comment, and
+      close policy for the review action.
+
+    ``principal_issue`` is determined by ``_finalize_dispatch`` via the
+    normalized summary; this helper does not write it.
+    """
     target_state.update(
         {
             "last_issue_centric_review_status": review_execution.review_status,
@@ -1709,6 +1759,27 @@ def _apply_followup_execution_state(
     followup_execution: object,
     repo_relative: Callable[[Path], str],
 ) -> None:
+    """Apply follow-up issue creation result to mutable state.
+
+    **Next-cycle contract** — the following state fields are written for the
+    next request cycle:
+
+    * ``last_issue_centric_created_issue_*`` — the newly created follow-up
+      issue.  This is distinct from the primary issue created in
+      ``issue_create`` flows.
+    * ``last_issue_centric_followup_issue_*`` — follow-up issue URL/number/
+      title stored under the ``followup_issue`` namespace.
+    * ``last_issue_centric_followup_parent_issue`` — the parent issue whose
+      work the follow-up continues.  The normalized summary uses this to
+      decide whether ``next_request_target`` should point to the follow-up
+      or to the parent.
+    * ``last_issue_centric_project_sync_*`` — project-board state for the
+      follow-up issue.
+
+    After a follow-up combo, ``_finalize_dispatch`` typically promotes the
+    follow-up issue to ``last_issue_centric_principal_issue`` so that the
+    next request cycle targets it.
+    """
     target_state.update(
         {
             "last_issue_centric_execution_status": followup_execution.status,

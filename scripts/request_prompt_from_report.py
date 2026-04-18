@@ -148,6 +148,79 @@ def _is_ready_bounded_continuation(state: dict[str, object]) -> bool:
     return "ready:" in ready_issue_ref.lower()
 
 
+@dataclasses.dataclass(frozen=True)
+class _IcNextCycleContext:
+    """Execution-summary fields that drive the next request cycle.
+
+    Built by :func:`_read_ic_next_cycle_context` from ``last_issue_centric_*``
+    state written by ``_finalize_dispatch`` (and the action-specific
+    ``_apply_*_execution_state`` helpers) after each execution cycle.
+
+    **Priority chain for target resolution** (see :attr:`resolved_next_request_target`):
+
+    1. ``next_request_target`` — explicitly set by the normalized summary when
+       the runtime snapshot names a specific issue to target next.
+    2. ``principal_issue`` — the issue that drove the last cycle; written by
+       ``_finalize_dispatch`` from ``principal_issue_candidate`` in the
+       normalized summary.
+    3. ``resolved_issue`` — the issue resolved by the last cycle; written by
+       ``_apply_codex_execution_state`` / ``_apply_review_execution_state``.
+    4. ``target_issue`` — the raw target ref saved at the start of the last
+       cycle; last-resort fallback.
+
+    **Action-specific provenance**:
+
+    * ``issue_create``  → ``principal_issue`` is the created primary issue
+    * ``codex_run``     → ``resolved_issue`` is the closed/resolved issue;
+      ``principal_issue`` is the issue that was being worked on
+    * ``human_review_needed`` → ``resolved_issue`` carries the review target
+    * follow-up combo  → ``next_request_target`` points to the follow-up issue
+    * ``close_current_issue`` → ``close_order`` is non-empty; target is the
+      closed issue's next sibling or parent
+    * ``no_action``    → ``next_request_hint`` drives the path; target is
+      unchanged from the prior cycle
+    """
+
+    next_request_target: str
+    principal_issue: str
+    principal_issue_kind: str
+    resolved_issue: str
+    target_issue: str
+    action: str
+    next_request_hint: str
+    close_order: str
+
+    @property
+    def resolved_next_request_target(self) -> str:
+        """Return the first non-empty value from the 4-field priority chain."""
+        for value in (
+            self.next_request_target,
+            self.principal_issue,
+            self.resolved_issue,
+            self.target_issue,
+        ):
+            if value:
+                return value
+        return ""
+
+
+def _read_ic_next_cycle_context(state: dict[str, object]) -> "_IcNextCycleContext":
+    """Read execution-summary state and build a :class:`_IcNextCycleContext`.
+
+    All values are stripped strings; missing keys yield empty strings.
+    """
+    return _IcNextCycleContext(
+        next_request_target=str(state.get("last_issue_centric_next_request_target", "")).strip(),
+        principal_issue=str(state.get("last_issue_centric_principal_issue", "")).strip(),
+        principal_issue_kind=str(state.get("last_issue_centric_principal_issue_kind", "")).strip(),
+        resolved_issue=str(state.get("last_issue_centric_resolved_issue", "")).strip(),
+        target_issue=str(state.get("last_issue_centric_target_issue", "")).strip(),
+        action=str(state.get("last_issue_centric_action", "")).strip(),
+        next_request_hint=str(state.get("last_issue_centric_next_request_hint", "")).strip(),
+        close_order=str(state.get("last_issue_centric_close_order", "")).strip(),
+    )
+
+
 def _is_completion_followup_eligible(
     summary_fields: dict[str, str],
     state: dict[str, object],
@@ -174,11 +247,12 @@ def _is_completion_followup_eligible(
         return False
     if summary_fields.get("live_ready", "").strip().lower() != "confirmed":
         return False
-    if str(state.get("last_issue_centric_action", "")).strip() != "codex_run":
+    ic = _read_ic_next_cycle_context(state)
+    if ic.action != "codex_run":
         return False
-    if str(state.get("last_issue_centric_principal_issue_kind", "")).strip() != "current_issue":
+    if ic.principal_issue_kind != "current_issue":
         return False
-    if str(state.get("last_issue_centric_next_request_hint", "")).strip() != "continue_on_current_issue":
+    if ic.next_request_hint != "continue_on_current_issue":
         return False
     return True
 
@@ -186,30 +260,18 @@ def _is_completion_followup_eligible(
 def _resolve_completion_followup_target_issue(state: dict[str, object]) -> str:
     """Resolve the target issue URL/ref for a completion followup section.
 
-    Tries state fields in priority order and returns the first non-empty value:
+    Delegates to :func:`_read_ic_next_cycle_context` and returns the first
+    non-empty value from the 4-field priority chain documented on
+    :class:`_IcNextCycleContext`:
 
-    1. ``last_issue_centric_next_request_target`` — explicitly set by the normalized
-       summary when the next request should target a specific issue.
-    2. ``last_issue_centric_principal_issue`` — the principal issue that drove the last
-       Codex run; used when no explicit next-request target was recorded.
-    3. ``last_issue_centric_resolved_issue`` — the issue that was resolved by the last
-       cycle; fallback when principal_issue is absent.
-    4. ``last_issue_centric_target_issue`` — the raw target issue ref saved at the start
-       of the last cycle; last-resort fallback.
+    1. ``next_request_target`` (``last_issue_centric_next_request_target``)
+    2. ``principal_issue``     (``last_issue_centric_principal_issue``)
+    3. ``resolved_issue``      (``last_issue_centric_resolved_issue``)
+    4. ``target_issue``        (``last_issue_centric_target_issue``)
 
-    Returns ``""`` if all four fields are empty or absent, which signals the caller that
-    a completion followup section cannot be built.
+    Returns ``""`` when all four fields are absent or empty.
     """
-    for key in (
-        "last_issue_centric_next_request_target",
-        "last_issue_centric_principal_issue",
-        "last_issue_centric_resolved_issue",
-        "last_issue_centric_target_issue",
-    ):
-        value = str(state.get(key, "")).strip()
-        if value:
-            return value
-    return ""
+    return _read_ic_next_cycle_context(state).resolved_next_request_target
 
 
 def _build_completion_followup_section(state: dict[str, object], report_text: str) -> str:
