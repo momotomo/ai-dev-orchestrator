@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from _bridge_common import bridge_lifecycle_sync_suffix
 from issue_centric_normalized_summary import (
@@ -2032,41 +2032,6 @@ def _build_ic_continuation_payload(state: dict[str, object]) -> _IcContinuationP
     )
 
 
-def _apply_ic_continuation_fields(
-    target_state: dict[str, object],
-    *,
-    normalized_summary: Mapping[str, object],
-) -> None:
-    """Write the next-cycle continuation fields derived from the normalized summary.
-
-    Extracts ``principal_issue``, ``principal_issue_kind``, and
-    ``next_request_hint`` from *normalized_summary* and writes them to
-    *target_state* as ``last_issue_centric_*`` keys.
-
-    These three fields form the **continuation contract from the normalized
-    summary** — they are the bridge between the execution result and what the
-    next request cycle can read via
-    :func:`request_prompt_from_report._read_ic_next_cycle_context`.
-    """
-    principal_issue_candidate = normalized_summary.get("principal_issue_candidate")
-    principal_issue_ref = ""
-    principal_issue_kind = str(normalized_summary.get("principal_issue_kind", "")).strip()
-    if isinstance(principal_issue_candidate, Mapping):
-        principal_issue_ref = (
-            str(principal_issue_candidate.get("url", "")).strip()
-            or str(principal_issue_candidate.get("ref", "")).strip()
-        )
-    target_state.update(
-        {
-            "last_issue_centric_principal_issue": principal_issue_ref,
-            "last_issue_centric_principal_issue_kind": principal_issue_kind,
-            "last_issue_centric_next_request_hint": str(
-                normalized_summary.get("next_request_hint", "")
-            ).strip(),
-        }
-    )
-
-
 def _build_ic_continuation_payload_from_normalized(
     normalized_summary: Mapping[str, object],
     state: dict[str, object],
@@ -2164,6 +2129,61 @@ def _apply_ic_continuation_payload_to_state(
     )
 
 
+def _bind_ic_continuation_with_runtime_snapshot(
+    payload: _IcContinuationPayload,
+    *,
+    next_request_target: str,
+    next_request_target_source: str,
+) -> _IcContinuationPayload:
+    """Return a new payload with runtime_snapshot-resolved target binding applied.
+
+    This is the **runtime_snapshot binding step** — it completes the final
+    continuation contract by filling in the two fields that the runtime snapshot
+    resolves (``next_request_target`` and ``next_request_target_source``) into
+    the writer payload built by
+    :func:`_build_ic_continuation_payload_from_normalized`.
+
+    The returned :class:`_IcContinuationPayload` represents the
+    **final continuation contract** — all 16 fields are populated and the
+    result can be saved to state and later read by
+    :func:`request_prompt_from_report._read_ic_next_cycle_context`.
+
+    Call :func:`_apply_ic_final_continuation_target_to_state` on the result to
+    write the two new fields into state and seal the contract.
+    """
+    return replace(
+        payload,
+        next_request_target=next_request_target,
+        next_request_target_source=next_request_target_source,
+    )
+
+
+def _apply_ic_final_continuation_target_to_state(
+    target_state: dict[str, object],
+    payload: _IcContinuationPayload,
+) -> None:
+    """Write the runtime_snapshot-resolved target fields from the final continuation contract.
+
+    Called after :func:`_bind_ic_continuation_with_runtime_snapshot` to seal
+    the final continuation contract in state by writing the two fields that
+    were not written by :func:`_apply_ic_continuation_payload_to_state`:
+
+    * ``last_issue_centric_next_request_target``
+    * ``last_issue_centric_next_request_target_source``
+
+    Together with :func:`_apply_ic_continuation_payload_to_state`, this
+    function completes the full 16-field write that makes the final
+    continuation contract readable by
+    :func:`request_prompt_from_report._read_ic_next_cycle_context`.
+    """
+    target_state.update(
+        {
+            "last_issue_centric_next_request_target": payload.next_request_target,
+            "last_issue_centric_next_request_target_source": payload.next_request_target_source,
+        }
+    )
+
+
 def _finalize_dispatch(
     *,
     matrix_path: str,
@@ -2223,14 +2243,7 @@ def _finalize_dispatch(
         json.dumps(normalized_summary, ensure_ascii=False, indent=2) + "\n",
         "json",
     )
-    principal_issue = normalized_summary.get("principal_issue_candidate")
-    principal_issue_ref = ""
-    principal_issue_kind = str(normalized_summary.get("principal_issue_kind", "")).strip()
-    if isinstance(principal_issue, Mapping):
-        principal_issue_ref = (
-            str(principal_issue.get("url", "")).strip()
-            or str(principal_issue.get("ref", "")).strip()
-        )
+    # --- WRITER: build and apply continuation payload (target/source not yet set) ---
     _continuation = _build_ic_continuation_payload_from_normalized(normalized_summary, mutable_state)
     _apply_ic_continuation_payload_to_state(mutable_state, _continuation)
     mutable_state.update(
@@ -2263,11 +2276,16 @@ def _finalize_dispatch(
                 "last_issue_centric_recovery_source": runtime_snapshot.recovery_source,
                 "last_issue_centric_recovery_fallback_reason": runtime_snapshot.recovery_fallback_reason
                 or runtime_snapshot.fallback_reason,
-                "last_issue_centric_next_request_target": runtime_snapshot.target_issue,
-                "last_issue_centric_next_request_target_source": runtime_snapshot.target_issue_source,
                 "last_issue_centric_next_request_fallback_reason": runtime_snapshot.fallback_reason,
             }
         )
+        # --- RUNTIME SNAPSHOT BINDING: seal the final continuation contract ---
+        _final_continuation = _bind_ic_continuation_with_runtime_snapshot(
+            _continuation,
+            next_request_target=runtime_snapshot.target_issue,
+            next_request_target_source=runtime_snapshot.target_issue_source,
+        )
+        _apply_ic_final_continuation_target_to_state(mutable_state, _final_continuation)
         runtime_mode = resolve_issue_centric_runtime_mode(mutable_state, repo_root=repo_root)
         if runtime_mode is not None:
             mutable_state.update(
