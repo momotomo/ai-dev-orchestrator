@@ -5928,5 +5928,366 @@ class IcIssueCreateCloseSliceTests(IssueCentricExecutionDispatcherTests):
             self.assertEqual(result.final_status, "completed")
 
 
+class IcIssueCreateFollowupCloseSliceTests(IssueCentricExecutionDispatcherTests):
+    """Phase 51 — issue_create + create_followup_issue + close_current_issue narrow path.
+
+    Verifies the full 3-step path:
+        issue_create → followup_issue_create → close_current_issue
+
+    Group 1 (3 tests): execution order
+    Group 2 (2 tests): failure gates — primary fail / followup fail
+    Group 3 (3 tests): continuation state
+    Group 4 (3 tests): regression — existing narrower paths unaffected
+    """
+
+    # ------------------------------------------------------------------
+    # Shared fake executors
+    # ------------------------------------------------------------------
+
+    def _fake_create(self, root: Path, number: int = 71, status: str = "completed"):
+        def fn(*args, **kwargs):
+            p = root / f"create_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                execution_log_path=p,
+                created_issue=fake_issue(number) if status == "completed" else None,
+                project_sync_status="issue_only_fallback",
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason=f"create #{number} status={status}",
+            )
+        return fn
+
+    def _fake_followup(self, root: Path, number: int = 72, status: str = "completed"):
+        def fn(*args, **kwargs):
+            p = root / f"followup_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                followup_status=status,
+                execution_log_path=p,
+                created_issue=fake_issue(number) if status == "completed" else None,
+                parent_issue=None,
+                project_sync_status="not_requested_no_project",
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason=f"followup #{number} status={status}",
+            )
+        return fn
+
+    def _fake_close(self, root: Path, number: int = 20):
+        def fn(*args, **kwargs):
+            p = root / f"close_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                close_status="completed",
+                close_order="after_issue_create_followup",
+                execution_log_path=p,
+                issue_before=fake_issue(number),
+                issue_after=fake_issue(number, state="closed"),
+                safe_stop_reason=f"closed #{number}",
+            )
+        return fn
+
+    def _decision_3step(self, root: Path):
+        return build_decision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue="#20",
+            close_current_issue=True,
+            create_followup_issue=True,
+            issue_text="# Primary issue\n\nPrimary body.\n",
+            followup_text="# Follow-up issue\n\nFollowup body.\n",
+        )
+
+    def _mat(self, decision, root: Path):
+        return materialized_from_decision(decision, root=root)
+
+    # ------------------------------------------------------------------
+    # Group 1: execution order (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_3step_executes_primary_followup_close_in_order(self):
+        """All 3 steps succeed → calls in order [issue_create, followup, close]."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            calls: list[str] = []
+
+            def track_create(*args, **kwargs):
+                calls.append("issue_create")
+                return self._fake_create(root, 71)(*args, **kwargs)
+
+            def track_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup(root, 72)(*args, **kwargs)
+
+            def track_close(*args, **kwargs):
+                calls.append("close")
+                return self._fake_close(root, 20)(*args, **kwargs)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=track_create,
+                execute_followup_issue_action_fn=track_followup,
+                execute_close_current_issue_fn=track_close,
+            )
+            self.assertEqual(calls, ["issue_create", "followup", "close"],
+                "primary must run before followup, followup before close")
+            self.assertEqual(result.matrix_path, "issue_create_followup_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                [step.name for step in result.steps],
+                ["issue_create", "followup_issue_create", "close_current_issue"],
+            )
+
+    def test_3step_matrix_path_is_issue_create_followup_then_close(self):
+        """_resolve_issue_create_matrix_path(True, True) matches execution matrix_path."""
+        self.assertEqual(
+            issue_centric_execution._resolve_issue_create_matrix_path(True, True),
+            "issue_create_followup_then_close",
+        )
+
+    def test_3step_close_uses_allow_issue_create_followup_close_flag(self):
+        """Close executor is called with allow_issue_create_followup_close=True via existing helper."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            close_kwargs: list[dict] = []
+
+            def capture_close(*args, **kwargs):
+                close_kwargs.append(dict(kwargs))
+                return self._fake_close(root, 20)(*args, **kwargs)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+                execute_followup_issue_action_fn=self._fake_followup(root, 72),
+                execute_close_current_issue_fn=capture_close,
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertTrue(len(close_kwargs) == 1)
+            self.assertTrue(
+                close_kwargs[0].get("allow_issue_create_followup_close", False),
+                "close must be called with allow_issue_create_followup_close=True",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 2: failure gates (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_3step_primary_fail_blocks_followup_and_close(self):
+        """Primary create fails → followup and close must NOT run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            calls: list[str] = []
+
+            def track_create_fail(*args, **kwargs):
+                calls.append("issue_create")
+                return self._fake_create(root, 71, status="failed")(*args, **kwargs)
+
+            # followup and close abort fns will raise if called
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=track_create_fail,
+            )
+            self.assertEqual(calls, ["issue_create"])
+            self.assertEqual(result.matrix_path, "issue_create_followup_then_close")
+            self.assertIn(result.final_status, {"partial", "failed"})
+            close_status = str(result.final_state.get("last_issue_centric_close_status", ""))
+            self.assertIn("not_attempted", close_status)
+
+    def test_3step_followup_fail_blocks_close(self):
+        """Followup create fails → close must NOT run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            calls: list[str] = []
+
+            def track_followup_fail(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup(root, 72, status="failed")(*args, **kwargs)
+
+            def track_create(*args, **kwargs):
+                calls.append("issue_create")
+                return self._fake_create(root, 71)(*args, **kwargs)
+
+            # close abort fn will raise if called
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=track_create,
+                execute_followup_issue_action_fn=track_followup_fail,
+            )
+            self.assertEqual(calls, ["issue_create", "followup"])
+            self.assertEqual(result.matrix_path, "issue_create_followup_then_close")
+            self.assertEqual(result.final_status, "partial")
+            self.assertEqual(
+                result.final_state["last_issue_centric_close_status"],
+                "not_attempted_followup_blocked",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 3: continuation state (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_3step_followup_becomes_principal(self):
+        """After 3-step success, followup issue is the principal (next cycle target)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+                execute_followup_issue_action_fn=self._fake_followup(root, 72),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.matrix_path, "issue_create_followup_then_close")
+            # followup issue (#72) should be the principal
+            principal = str(result.final_state.get("last_issue_centric_principal_issue", ""))
+            self.assertIn("72", principal,
+                "principal_issue must reference the followup issue #72")
+            self.assertEqual(
+                result.final_state.get("last_issue_centric_principal_issue_kind"),
+                "followup_issue",
+            )
+
+    def test_3step_primary_issue_recorded_in_primary_fields(self):
+        """Primary created issue (#71) is recorded in primary_issue fields."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+                execute_followup_issue_action_fn=self._fake_followup(root, 72),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.final_state.get("last_issue_centric_primary_issue_number"), "71")
+            self.assertEqual(result.final_state.get("last_issue_centric_followup_issue_number"), "72")
+
+    def test_3step_closed_issue_not_principal(self):
+        """Closed current issue (#20) must NOT become the principal for next cycle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_3step(root)
+            mat = self._mat(decision, root)
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+                execute_followup_issue_action_fn=self._fake_followup(root, 72),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.final_state.get("last_issue_centric_closed_issue_number"), "20")
+            kind = str(result.final_state.get("last_issue_centric_principal_issue_kind", ""))
+            self.assertNotEqual(kind, "current_issue",
+                "closed current issue must not become the principal for the next cycle")
+
+    # ------------------------------------------------------------------
+    # Group 4: regression (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_issue_create_plus_close_only_not_regressed(self):
+        """Phase 50 path: issue_create + close (no followup) → issue_create_then_close."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                close_current_issue=True,
+                issue_text="# New issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.matrix_path, "issue_create_then_close")
+            self.assertEqual(result.final_status, "completed")
+
+    def test_issue_create_plus_followup_only_not_regressed(self):
+        """issue_create + followup (no close) → issue_create_followup path, no close called."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                create_followup_issue=True,
+                issue_text="# Primary issue\n\nPrimary body.\n",
+                followup_text="# Follow-up issue\n\nFollowup body.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            # close abort fn is the default — if called, the test fails
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+                execute_followup_issue_action_fn=self._fake_followup(root, 72),
+            )
+            self.assertEqual(result.matrix_path, "issue_create_followup")
+            self.assertEqual(result.final_status, "completed")
+
+    def test_no_action_followup_then_close_not_regressed(self):
+        """Phase 49 path: no_action + followup + close → no_action_followup_then_close."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            def fake_followup(*args, **kwargs):
+                p = root / "followup.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    followup_status="completed",
+                    project_sync_status="not_requested_no_project",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    created_issue=fake_issue(30),
+                    parent_issue=None,
+                    execution_log_path=p,
+                    safe_stop_reason="created follow-up issue #30.",
+                )
+
+            def fake_close(*args, **kwargs):
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    close_status="completed",
+                    close_order="after_no_action",
+                    execution_log_path=p,
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="closed issue #20.",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+            )
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            self.assertEqual(result.final_status, "completed")
+
+
 if __name__ == "__main__":
     unittest.main()
