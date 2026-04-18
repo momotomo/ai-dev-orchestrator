@@ -2437,5 +2437,149 @@ class IsDuplicatePendingRequestHelperTests(unittest.TestCase):
         self.assertFalse(self._invoke({}, "report:file.md"))
 
 
+class CleanStalePendingHandoffHelperTests(unittest.TestCase):
+    """Tests for _clean_stale_pending_handoff_if_needed."""
+
+    def _invoke(self, state: dict) -> dict:
+        from request_prompt_from_report import _clean_stale_pending_handoff_if_needed
+
+        return _clean_stale_pending_handoff_if_needed(state)
+
+    def test_cleans_when_no_rotation_needed_and_log_present(self) -> None:
+        """When rotation is not needed and pending_handoff_log is set, fields are cleared."""
+        import unittest.mock as mock
+
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "pending_handoff_log": "bridge/logs/handoff.md",
+            "pending_handoff_hash": "abc123",
+            "pending_handoff_source": "report:x.md",
+        }
+        with mock.patch(
+            "request_prompt_from_report.should_rotate_before_next_chat_request",
+            return_value=False,
+        ), mock.patch("request_prompt_from_report.save_state") as mock_save:
+            result = self._invoke(state)
+
+        self.assertEqual(result.get("pending_handoff_log", ""), "")
+        self.assertEqual(result.get("pending_handoff_hash", ""), "")
+        mock_save.assert_called_once()
+
+    def test_noop_when_rotation_needed(self) -> None:
+        """When rotation is needed, state is returned unchanged."""
+        import unittest.mock as mock
+
+        state = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "pending_handoff_log": "bridge/logs/handoff.md",
+        }
+        with mock.patch(
+            "request_prompt_from_report.should_rotate_before_next_chat_request",
+            return_value=True,
+        ), mock.patch("request_prompt_from_report.save_state") as mock_save:
+            result = self._invoke(state)
+
+        self.assertIs(result, state)
+        mock_save.assert_not_called()
+
+    def test_noop_when_pending_handoff_log_absent(self) -> None:
+        """When pending_handoff_log is empty, state is returned unchanged."""
+        import unittest.mock as mock
+
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.should_rotate_before_next_chat_request",
+            return_value=False,
+        ), mock.patch("request_prompt_from_report.save_state") as mock_save:
+            result = self._invoke(state)
+
+        self.assertIs(result, state)
+        mock_save.assert_not_called()
+
+
+class AcquireRotatedHandoffHelperCachedPathTests(unittest.TestCase):
+    """Tests for _acquire_rotated_handoff — cached pending handoff path."""
+
+    def _invoke(self, state: dict, *, request_source: str = "report:x.md") -> tuple:
+        import argparse
+
+        from request_prompt_from_report import _acquire_rotated_handoff
+
+        args = argparse.Namespace(
+            next_todo="",
+            open_questions="",
+            current_status=None,
+        )
+        return _acquire_rotated_handoff(
+            state,
+            args,
+            "last_report_text",
+            request_source=request_source,
+            issue_centric_runtime_snapshot=None,
+            issue_centric_runtime_mode=None,
+            issue_centric_next_request_section="",
+        )
+
+    def test_returns_cached_handoff_when_source_matches(self) -> None:
+        """When pending_handoff_source matches and text is available, cached text is returned."""
+        import unittest.mock as mock
+
+        state = {
+            "pending_handoff_source": "report:x.md",
+            "pending_handoff_log": "bridge/logs/handoff.md",
+        }
+        with mock.patch(
+            "request_prompt_from_report.read_pending_handoff_text",
+            return_value="HANDOFF_TEXT",
+        ):
+            handoff_text, handoff_received_log = self._invoke(state)
+
+        self.assertEqual(handoff_text, "HANDOFF_TEXT")
+        self.assertEqual(handoff_received_log, "bridge/logs/handoff.md")
+
+    def test_proceeds_to_fresh_acquisition_when_source_differs(self) -> None:
+        """When pending_handoff_source does not match, fresh acquisition path is taken."""
+        import unittest.mock as mock
+
+        state = {
+            "pending_handoff_source": "report:OTHER.md",
+            "pending_handoff_log": "bridge/logs/handoff.md",
+        }
+        with mock.patch(
+            "request_prompt_from_report.build_chatgpt_handoff_request",
+            return_value="REQUEST_TEXT",
+        ), mock.patch(
+            "request_prompt_from_report.log_text",
+            side_effect=lambda tag, text: f"log:{tag}",
+        ), mock.patch(
+            "request_prompt_from_report.send_to_chatgpt",
+        ), mock.patch(
+            "request_prompt_from_report.wait_for_handoff_reply_text",
+            return_value="RAW",
+        ), mock.patch(
+            "request_prompt_from_report.extract_last_chatgpt_handoff",
+            return_value="FRESH_HANDOFF",
+        ), mock.patch(
+            "request_prompt_from_report.stable_text_hash",
+            return_value="HASH",
+        ), mock.patch(
+            "request_prompt_from_report.repo_relative",
+            side_effect=lambda x: x,
+        ), mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: d,
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_request_fields",
+        ), mock.patch(
+            "request_prompt_from_report.save_state",
+        ):
+            handoff_text, handoff_received_log = self._invoke(state, request_source="report:x.md")
+
+        self.assertEqual(handoff_text, "FRESH_HANDOFF")
+        self.assertEqual(handoff_received_log, "log:handoff_received")
+
+
 if __name__ == "__main__":
     unittest.main()
