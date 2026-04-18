@@ -18,6 +18,7 @@ from _bridge_common import (
     check_stop_conditions,
     codex_report_is_ready,
     format_lifecycle_sync_state_note,
+    detect_ic_stop_path,
     format_operator_stop_note,
     has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
@@ -389,6 +390,14 @@ def recommended_operator_step(
     if has_unarchived_report_conflict(final_state) or stale_codex_running:
         return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
     if action in {"completed", "no_action"}:
+        # IC stop paths (initial_selection_stop / human_review_needed) surface as no_action
+        # in the dispatch plan but need specific operator steps.  Check them before the
+        # generic "追加操作なし" / "なし" return.
+        _ic_path = detect_ic_stop_path(final_state)
+        if _ic_path == "initial_selection_stop":
+            return ("--ready-issue-ref を指定して再実行", format_start_bridge_command(args, mode="run"))
+        if _ic_path == "human_review_needed":
+            return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
         return ("追加操作なし", "なし")
     if action == "request_next_prompt":
         if getattr(args, "request_body", "").strip():
@@ -519,6 +528,18 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         _lc = bridge_lifecycle_sync_suffix(final_state)
         return f"追加の操作は不要です。{_lc}"
     if action == "no_action":
+        # IC stop paths: surface chatgpt_decision_note rather than generic doctor text.
+        _ic_path = detect_ic_stop_path(final_state)
+        if _ic_path == "initial_selection_stop":
+            _ic_sel_note = _build_ic_initial_selection_stop_note(final_state)
+            if _ic_sel_note is not None:
+                return _ic_sel_note
+        if _ic_path == "human_review_needed":
+            _ic_note = str(final_state.get("chatgpt_decision_note", "")).strip()
+            if _ic_note:
+                _lc = bridge_lifecycle_sync_suffix(final_state)
+                suffix = " bridge を再実行すると補足入力を受けて次 request を送ります。" if "bridge を再実行" not in _ic_note else ""
+                return f"{_ic_note}{suffix}{_lc}"
         return "summary と doctor を確認し、必要なら原因を解消してから再開してください。"
     return "summary と doctor を確認してから再実行してください。"
 
