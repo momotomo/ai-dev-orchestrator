@@ -229,6 +229,13 @@ python3 scripts/start_bridge.py \
   - created primary issue が `principal_issue` / `principal_issue_kind = primary_issue` になる
   - closed current issue は次 cycle target に残らない
   - `_resolve_issue_create_matrix_path()` helper で 4 パス (`issue_create` / `issue_create_followup` / `issue_create_then_close` / `issue_create_followup_then_close`) が名前で読める
+- [x] `issue_create + create_followup_issue + close_current_issue` 3 段 path (Phase 51)
+  - 実行順: `issue_create → followup_issue_create → close_current_issue` で固定
+  - primary create 失敗時は followup も close も実行しない
+  - followup create 失敗時は close を実行しない
+  - close は `allow_issue_create_followup_close=True` で既存 narrow close helper 経由
+  - followup issue が `principal_issue` / `principal_issue_kind = followup_issue` になる (current closed → next cycle principal にしない)
+  - primary issue は `last_issue_centric_primary_issue_number` に保持
 
 ### D. Next request / continuation
 
@@ -288,7 +295,8 @@ python3 scripts/start_bridge.py \
 - [ ] multi-flag 組み合わせの拡張 (narrow matrix 外)
   - Phase 49: `no_action` issue-management slices (followup-only / close-only / followup+close) 対応済み
   - Phase 50: `issue_create + close_current_issue` → `issue_create_then_close` 対応済み
-  - 残: `issue_create + create_followup_issue + close_current_issue` general 化、`codex_run` 複合フラグ、Projects update 全面対応
+  - Phase 51: `issue_create + create_followup_issue + close_current_issue` → `issue_create_followup_then_close` 対応済み
+  - 残: `codex_run` 複合フラグ general 化、Projects update 全面対応
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上
