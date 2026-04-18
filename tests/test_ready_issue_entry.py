@@ -3429,5 +3429,260 @@ class ResolveNormalIcContextNamedFieldsTests(unittest.TestCase):
         self.assertEqual(ctx.route_selected, "issue_centric")
 
 
+class ResumeRequestPlanTests(unittest.TestCase):
+    """Tests for _ResumeRequestPlan, _resolve_resume_request_plan,
+    and _execute_resume_request_plan (Phase 31)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def _make_args(self, *, next_todo="do next", open_questions="", current_status=""):
+        import argparse
+        args = argparse.Namespace()
+        args.next_todo = next_todo
+        args.open_questions = open_questions
+        args.current_status = current_status
+        return args
+
+    def _make_ic_context(self, route_selected="issue_centric"):
+        import sys
+        sys.path.insert(0, "scripts")
+        from request_prompt_from_report import _IcResolvedContext
+        return _IcResolvedContext(route_selected=route_selected)
+
+    def test_resolve_plan_returns_resume_request_plan_instance(self):
+        """_resolve_resume_request_plan returns a _ResumeRequestPlan with expected fields."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {}
+        args = self._make_args()
+        ic = self._make_ic_context()
+        with mock.patch.object(m, "_resolve_report_request_ic_context", return_value=ic), \
+             mock.patch.object(m, "_resolve_completion_followup_request",
+                               return_value=("IC SECTION", "do next", "")), \
+             mock.patch.object(m, "_resolve_resume_request_payload",
+                               return_value=("TEXT", "HASH", "report:x.md", None)):
+            plan = m._resolve_resume_request_plan(state, args, "last report", "resume note", None)
+
+        self.assertIsInstance(plan, m._ResumeRequestPlan)
+        self.assertIs(plan.state, state)
+        self.assertIs(plan.ic_context, ic)
+        self.assertEqual(plan.request_text, "TEXT")
+        self.assertEqual(plan.request_hash, "HASH")
+        self.assertEqual(plan.request_source, "report:x.md")
+        self.assertIsNone(plan.prepared_status)
+        self.assertEqual(plan.effective_section, "IC SECTION")
+
+    def test_resolve_plan_ic_snapshot_for_dispatch_prefers_runtime_mode(self):
+        """ic_snapshot_for_dispatch is runtime_mode when present, else runtime_snapshot."""
+        import unittest.mock as mock
+        m = self._module()
+        sentinel_mode = object()
+        sentinel_snap = object()
+        ic_with_mode = m._IcResolvedContext(runtime_snapshot=sentinel_snap, runtime_mode=sentinel_mode)
+        with mock.patch.object(m, "_resolve_report_request_ic_context", return_value=ic_with_mode), \
+             mock.patch.object(m, "_resolve_completion_followup_request", return_value=("", "", "")), \
+             mock.patch.object(m, "_resolve_resume_request_payload", return_value=("T", "H", "S", None)):
+            plan = m._resolve_resume_request_plan({}, self._make_args(), "", "", None)
+
+        self.assertIs(plan.ic_snapshot_for_dispatch, sentinel_mode)
+
+    def test_resolve_plan_ic_snapshot_falls_back_to_runtime_snapshot(self):
+        """ic_snapshot_for_dispatch is runtime_snapshot when runtime_mode is None."""
+        import unittest.mock as mock
+        m = self._module()
+        sentinel_snap = object()
+        ic_no_mode = m._IcResolvedContext(runtime_snapshot=sentinel_snap, runtime_mode=None)
+        with mock.patch.object(m, "_resolve_report_request_ic_context", return_value=ic_no_mode), \
+             mock.patch.object(m, "_resolve_completion_followup_request", return_value=("", "", "")), \
+             mock.patch.object(m, "_resolve_resume_request_payload", return_value=("T", "H", "S", None)):
+            plan = m._resolve_resume_request_plan({}, self._make_args(), "", "", None)
+
+        self.assertIs(plan.ic_snapshot_for_dispatch, sentinel_snap)
+
+    def test_execute_plan_calls_prepared_reuse_log_when_status_set(self):
+        """_execute_resume_request_plan logs prepared reuse when prepared_status is set."""
+        import unittest.mock as mock
+        m = self._module()
+        plan = m._ResumeRequestPlan(
+            state={"mode": "idle"},
+            args=self._make_args(),
+            last_report="",
+            resume_note="",
+            ic_context=self._make_ic_context(),
+            effective_section="",
+            effective_next_todo="",
+            effective_open_questions="",
+            request_text="TEXT",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_status="prepared",
+        )
+        with mock.patch.object(m, "_log_prepared_request_reuse") as mock_log, \
+             mock.patch.object(m, "_is_duplicate_pending_request", return_value=False), \
+             mock.patch.object(m, "dispatch_request", return_value=0):
+            m._execute_resume_request_plan(plan)
+
+        mock_log.assert_called_once_with("prepared", "issue_centric")
+
+    def test_execute_plan_no_log_when_prepared_status_is_none(self):
+        """_execute_resume_request_plan does not log reuse when prepared_status is None."""
+        import unittest.mock as mock
+        m = self._module()
+        plan = m._ResumeRequestPlan(
+            state={},
+            args=self._make_args(),
+            last_report="",
+            resume_note="",
+            ic_context=self._make_ic_context(),
+            effective_section="",
+            effective_next_todo="",
+            effective_open_questions="",
+            request_text="TEXT",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_status=None,
+        )
+        with mock.patch.object(m, "_log_prepared_request_reuse") as mock_log, \
+             mock.patch.object(m, "_is_duplicate_pending_request", return_value=False), \
+             mock.patch.object(m, "dispatch_request", return_value=0):
+            m._execute_resume_request_plan(plan)
+
+        mock_log.assert_not_called()
+
+    def test_execute_plan_returns_0_on_duplicate_pending(self):
+        """_execute_resume_request_plan returns 0 immediately on duplicate pending request."""
+        import unittest.mock as mock
+        m = self._module()
+        plan = m._ResumeRequestPlan(
+            state={},
+            args=self._make_args(),
+            last_report="",
+            resume_note="",
+            ic_context=self._make_ic_context(),
+            effective_section="",
+            effective_next_todo="",
+            effective_open_questions="",
+            request_text="TEXT",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_status=None,
+        )
+        with mock.patch.object(m, "_is_duplicate_pending_request", return_value=True), \
+             mock.patch.object(m, "dispatch_request") as mock_dispatch:
+            result = m._execute_resume_request_plan(plan)
+
+        self.assertEqual(result, 0)
+        mock_dispatch.assert_not_called()
+
+    def test_execute_plan_dispatches_with_correct_params(self):
+        """_execute_resume_request_plan passes correct params to dispatch_request."""
+        import unittest.mock as mock
+        m = self._module()
+        sentinel_snap = object()
+        plan = m._ResumeRequestPlan(
+            state={"mode": "idle"},
+            args=self._make_args(),
+            last_report="",
+            resume_note="",
+            ic_context=self._make_ic_context(),
+            effective_section="",
+            effective_next_todo="",
+            effective_open_questions="",
+            request_text="TEXT",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_status=None,
+            ic_snapshot_for_dispatch=sentinel_snap,
+        )
+        with mock.patch.object(m, "_is_duplicate_pending_request", return_value=False), \
+             mock.patch.object(m, "dispatch_request", return_value=0) as mock_dispatch:
+            m._execute_resume_request_plan(plan)
+
+        call_kwargs = mock_dispatch.call_args[1]
+        self.assertEqual(call_kwargs["request_text"], "TEXT")
+        self.assertEqual(call_kwargs["request_hash"], "HASH")
+        self.assertEqual(call_kwargs["request_source"], "report:x.md")
+        self.assertEqual(call_kwargs["prepared_prefix"], "prepared_prompt_request_from_report")
+        self.assertIs(call_kwargs["issue_centric_runtime_snapshot"], sentinel_snap)
+
+
+class RotatedRequestPlanTests(unittest.TestCase):
+    """Tests for _RotatedRequestPlan, _resolve_rotated_request_plan,
+    and _execute_rotated_request_plan (Phase 31)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def _make_args(self):
+        import argparse
+        args = argparse.Namespace()
+        args.next_todo = ""
+        args.open_questions = ""
+        args.current_status = None
+        return args
+
+    def test_resolve_plan_returns_rotated_request_plan_instance(self):
+        """_resolve_rotated_request_plan returns a _RotatedRequestPlan with expected fields."""
+        import unittest.mock as mock
+        m = self._module()
+        sentinel_ic = m._IcResolvedContext()
+        state: dict = {}
+        with mock.patch.object(m, "_resolve_normal_ic_context", return_value=sentinel_ic), \
+             mock.patch.object(m, "build_report_request_source", return_value="report:x.md"), \
+             mock.patch.object(m, "_acquire_rotated_handoff",
+                               return_value=("HANDOFF TEXT", "logs/handoff_received.md")):
+            plan = m._resolve_rotated_request_plan(state, self._make_args(), "last report")
+
+        self.assertIsInstance(plan, m._RotatedRequestPlan)
+        self.assertIs(plan.state, state)
+        self.assertIs(plan.ic_context, sentinel_ic)
+        self.assertEqual(plan.request_source, "report:x.md")
+        self.assertEqual(plan.handoff_text, "HANDOFF TEXT")
+        self.assertEqual(plan.handoff_received_log, "logs/handoff_received.md")
+
+    def test_execute_plan_delegates_to_apply_rotated_request_result(self):
+        """_execute_rotated_request_plan calls _apply_rotated_request_result with plan fields."""
+        import unittest.mock as mock
+        m = self._module()
+        ic = m._IcResolvedContext(route_selected="issue_centric")
+        plan = m._RotatedRequestPlan(
+            state={"mode": "idle"},
+            last_report="",
+            request_source="report:x.md",
+            ic_context=ic,
+            handoff_text="HANDOFF TEXT",
+            handoff_received_log="logs/handoff.md",
+        )
+        with mock.patch.object(m, "_apply_rotated_request_result", return_value=0) as mock_apply:
+            result = m._execute_rotated_request_plan(plan)
+
+        self.assertEqual(result, 0)
+        call_kwargs = mock_apply.call_args[1]
+        self.assertEqual(call_kwargs["handoff_text"], "HANDOFF TEXT")
+        self.assertEqual(call_kwargs["handoff_received_log"], "logs/handoff.md")
+        self.assertEqual(call_kwargs["request_source"], "report:x.md")
+        self.assertIs(call_kwargs["ic_context"], ic)
+
+    def test_run_rotated_report_request_calls_resolve_then_execute(self):
+        """run_rotated_report_request delegates to resolve then execute (2-step structure)."""
+        import unittest.mock as mock
+        m = self._module()
+        sentinel_plan = object()
+        with mock.patch.object(m, "_resolve_rotated_request_plan", return_value=sentinel_plan) as mock_resolve, \
+             mock.patch.object(m, "_execute_rotated_request_plan", return_value=0) as mock_execute:
+            result = m.run_rotated_report_request({"mode": "idle"}, self._make_args(), "report")
+
+        self.assertEqual(result, 0)
+        mock_resolve.assert_called_once()
+        mock_execute.assert_called_once_with(sentinel_plan)
+
+
 if __name__ == "__main__":
     unittest.main()
