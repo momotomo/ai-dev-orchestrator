@@ -783,6 +783,19 @@ def present_bridge_handoff(
         detail = suggested_note or f"追加の操作は不要です。{_lc_suffix}"
         return BridgeHandoffView("完了しました。", detail)
 
+    # Issue-centric initial_selection_stop: ChatGPT selected a ready issue.
+    # Fires after all error/blocked/completed guards so it only matches the
+    # deliberate stop path where selected_ready_issue_ref was written by
+    # _apply_ic_fetch_stop_state().
+    _selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
+    if _selected_ref and chatgpt_decision.startswith("issue_centric:"):
+        _ic_note = str(state.get("chatgpt_decision_note", "")).strip()
+        detail = suggested_note or _ic_note or f"--ready-issue-ref {_selected_ref} を指定して bridge を再実行してください。"
+        return BridgeHandoffView(
+            f"ChatGPT が ready issue を選定しました。--ready-issue-ref {_selected_ref} で bridge を再実行してください。",
+            detail,
+        )
+
     status = present_bridge_status(state, blocked=blocked, stale_codex_running=stale_codex_running)
     detail = suggested_note or status.detail
     if status.label == "人確認待ち":
