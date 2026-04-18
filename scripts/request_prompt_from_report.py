@@ -716,6 +716,23 @@ def run_rotated_report_request(
     return _execute_rotated_request_plan(plan)
 
 
+def _can_reuse_pending_handoff_for_rotation(
+    state: dict[str, object],
+    request_source: str,
+) -> bool:
+    """Return True when the cached pending handoff can be safely reused for rotation.
+
+    The handoff is reusable when its recorded source matches the current request
+    source *and* handoff text is available — indicating a prior rotation cycle was
+    interrupted and the same handoff can be replayed without sending a new request.
+    A source mismatch means the cached handoff belongs to a different report cycle
+    and must not be re-used.
+    """
+    if str(state.get("pending_handoff_source", "")).strip() != request_source:
+        return False
+    return bool(read_pending_handoff_text(state))
+
+
 def _acquire_rotated_handoff(
     state: dict[str, object],
     args: argparse.Namespace,
@@ -730,19 +747,16 @@ def _acquire_rotated_handoff(
 
     Two paths:
 
-    * **Cached pending handoff** — if ``pending_handoff_source`` matches
-      ``request_source`` and a pending handoff text is available, it is reused
-      directly without sending a new request.
+    * **Cached pending handoff** — if :func:`_can_reuse_pending_handoff_for_rotation`
+      returns True the cached handoff is replayed without sending a new request.
 
     * **Fresh acquisition** — builds and sends a handoff request, waits for the
       reply, extracts the handoff text, and persists the pending handoff state.
     """
-    pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
-    if pending_handoff_source == request_source:
+    if _can_reuse_pending_handoff_for_rotation(state, request_source):
         pending_handoff_text = read_pending_handoff_text(state)
-        if pending_handoff_text:
-            print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
-            return pending_handoff_text, str(state.get("pending_handoff_log", "") or "")
+        print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
+        return pending_handoff_text, str(state.get("pending_handoff_log", "") or "")
     handoff_request_text = build_chatgpt_handoff_request(
         state=state,
         last_report=last_report,
@@ -1087,20 +1101,140 @@ def _execute_rotated_request_plan(plan: "_RotatedRequestPlan") -> int:
     )
 
 
+def _needs_stale_pending_handoff_cleanup(state: dict[str, object]) -> bool:
+    """Return True when a stale pending handoff needs to be cleared before resuming.
+
+    A pending handoff is considered stale when the handoff log field is present but
+    chat rotation is no longer required — meaning a previous rotation cycle left behind
+    state that would falsely trigger handoff re-use on the normal resume path.
+    """
+    return (
+        not should_rotate_before_next_chat_request(state)
+        and bool(str(state.get("pending_handoff_log", "")).strip())
+    )
+
+
 def _clean_stale_pending_handoff_if_needed(state: dict[str, object]) -> dict[str, object]:
     """Clear a stale pending handoff from state when rotation is not needed.
 
-    If ``pending_handoff_log`` is present but ``should_rotate_before_next_chat_request``
-    returns False, the pending handoff is stale and must be cleared so that the normal
-    resume path does not accidentally pick it up.  The cleaned state is saved and
-    returned.  If no cleanup is needed the original state object is returned unchanged.
+    Delegates the staleness check to :func:`_needs_stale_pending_handoff_cleanup`.
+    When the handoff is stale, clears all pending-handoff fields, saves state,
+    and returns the cleaned state dict.  Otherwise returns the original unchanged.
     """
-    if not should_rotate_before_next_chat_request(state) and str(state.get("pending_handoff_log", "")).strip():
+    if _needs_stale_pending_handoff_cleanup(state):
         cleaned_state = dict(state)
         clear_pending_handoff_fields(cleaned_state)
         save_state(cleaned_state)
         return cleaned_state
     return state
+
+
+@dataclasses.dataclass
+class _RecoveryDecision:
+    """Recovery-path decision for a report request cycle.
+
+    Named boolean fields capture *why* each path was chosen, making
+    restart-safety reasoning visible from the entry plan resolver without
+    inspecting control flow.
+
+    ``path`` mirrors :attr:`_ReportRequestEntryPlan.path`.
+
+    ``state`` may differ from the input state when ``stale_handoff_cleaned``
+    is True — in that case pending-handoff fields have already been removed
+    and the cleaned state has been saved.
+    """
+
+    path: str
+    state: dict[str, object]
+    resume_note: str
+    retryable_request: "tuple[str, str, str] | None"
+    has_retryable_request: bool
+    is_awaiting_user_stop: bool
+    stale_handoff_cleaned: bool
+    needs_rotation: bool
+
+
+def _resolve_recovery_decision(
+    state: dict[str, object],
+    resume_note: str,
+    retryable_request: "tuple[str, str, str] | None",
+) -> "_RecoveryDecision":
+    """Resolve the recovery-path decision for a report request cycle.
+
+    Evaluates restart-safety conditions in priority order and returns a
+    :class:`_RecoveryDecision` that names the chosen path and records why it
+    was chosen.  Stale pending handoff cleanup is the only side effect — it is
+    applied before the awaiting-user and rotation checks so that those checks
+    operate on clean state.
+
+    Priority:
+
+    1. ``retryable_resume``     — retryable prepared request present
+    2. ``awaiting_user_stop``   — ``awaiting_user`` mode with empty resume note
+    3. ``awaiting_user_resume`` — ``awaiting_user`` mode with non-empty note
+    4. ``rotated``              — chat rotation required
+    5. ``normal_resume``        — default continuation path
+    """
+    if retryable_request is not None:
+        return _RecoveryDecision(
+            path="retryable_resume",
+            state=state,
+            resume_note="",
+            retryable_request=retryable_request,
+            has_retryable_request=True,
+            is_awaiting_user_stop=False,
+            stale_handoff_cleaned=False,
+            needs_rotation=False,
+        )
+    is_awaiting_user = str(state.get("mode", "")).strip() == "awaiting_user"
+    if is_awaiting_user and not resume_note.strip():
+        return _RecoveryDecision(
+            path="awaiting_user_stop",
+            state=state,
+            resume_note=resume_note,
+            retryable_request=None,
+            has_retryable_request=False,
+            is_awaiting_user_stop=True,
+            stale_handoff_cleaned=False,
+            needs_rotation=False,
+        )
+    stale_handoff_cleaned = False
+    if _needs_stale_pending_handoff_cleanup(state):
+        state = _clean_stale_pending_handoff_if_needed(state)
+        stale_handoff_cleaned = True
+    if is_awaiting_user:
+        return _RecoveryDecision(
+            path="awaiting_user_resume",
+            state=state,
+            resume_note=resume_note,
+            retryable_request=None,
+            has_retryable_request=False,
+            is_awaiting_user_stop=False,
+            stale_handoff_cleaned=stale_handoff_cleaned,
+            needs_rotation=False,
+        )
+    needs_rotation = should_rotate_before_next_chat_request(state)
+    if needs_rotation:
+        return _RecoveryDecision(
+            path="rotated",
+            state=state,
+            resume_note="",
+            retryable_request=None,
+            has_retryable_request=False,
+            is_awaiting_user_stop=False,
+            stale_handoff_cleaned=stale_handoff_cleaned,
+            needs_rotation=True,
+        )
+    return _RecoveryDecision(
+        path="normal_resume",
+        state=state,
+        resume_note="",
+        retryable_request=None,
+        has_retryable_request=False,
+        is_awaiting_user_stop=False,
+        stale_handoff_cleaned=stale_handoff_cleaned,
+        needs_rotation=False,
+    )
 
 
 @dataclasses.dataclass
@@ -1135,58 +1269,21 @@ def _resolve_report_request_entry_plan(
 ) -> _ReportRequestEntryPlan:
     """Resolve the entry plan for a report request cycle.
 
-    Reads retryable request, resume note, and state flags; applies stale
-    pending handoff cleanup when needed; and returns a
-    ``_ReportRequestEntryPlan`` that names the execution path without
-    performing any side effects beyond the cleanup save.
+    Reads retryable request and resume note, delegates path selection and stale
+    handoff cleanup to :func:`_resolve_recovery_decision`, then reads the report
+    text and bundles everything into a :class:`_ReportRequestEntryPlan`.
     """
     retryable_request = load_retryable_prepared_request(state)
-    if retryable_request is not None:
-        return _ReportRequestEntryPlan(
-            path="retryable_resume",
-            state=state,
-            args=args,
-            last_report=read_last_report_text(state),
-            resume_note="",
-            retryable_request=retryable_request,
-        )
-    resume_note = resolve_resume_note(state, args)
-    if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
-        return _ReportRequestEntryPlan(
-            path="awaiting_user_stop",
-            state=state,
-            args=args,
-            last_report="",
-            resume_note=resume_note,
-            retryable_request=None,
-        )
-    last_report = read_last_report_text(state)
-    state = _clean_stale_pending_handoff_if_needed(state)
-    if str(state.get("mode", "")).strip() == "awaiting_user":
-        return _ReportRequestEntryPlan(
-            path="awaiting_user_resume",
-            state=state,
-            args=args,
-            last_report=last_report,
-            resume_note=resume_note,
-            retryable_request=None,
-        )
-    if should_rotate_before_next_chat_request(state):
-        return _ReportRequestEntryPlan(
-            path="rotated",
-            state=state,
-            args=args,
-            last_report=last_report,
-            resume_note="",
-            retryable_request=None,
-        )
+    resume_note = "" if retryable_request is not None else resolve_resume_note(state, args)
+    decision = _resolve_recovery_decision(state, resume_note, retryable_request)
+    last_report = "" if decision.path == "awaiting_user_stop" else read_last_report_text(state)
     return _ReportRequestEntryPlan(
-        path="normal_resume",
-        state=state,
+        path=decision.path,
+        state=decision.state,
         args=args,
         last_report=last_report,
-        resume_note="",
-        retryable_request=None,
+        resume_note=decision.resume_note,
+        retryable_request=decision.retryable_request,
     )
 
 
@@ -1214,7 +1311,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
     # 2. args
     args = parse_args(argv)
-    # 3. entry plan
+    # 3. recovery decision → entry plan
     plan = _resolve_report_request_entry_plan(state, args)
     # 4. execute
     return _execute_report_request_entry_plan(plan)
