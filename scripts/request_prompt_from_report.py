@@ -699,49 +699,10 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    _ic = _resolve_report_request_ic_context(state)
-
-    issue_centric_next_request_section, effective_next_todo, effective_open_questions = (
-        _resolve_completion_followup_request(
-            state,
-            last_report=last_report,
-            issue_centric_next_request_section=_ic.next_request_section,
-            route_selected=_ic.route_selected,
-            next_todo=args.next_todo,
-            open_questions=args.open_questions,
-        )
-    )
-
-    request_text, request_hash, request_source, prepared_status = _resolve_resume_request_payload(
-        state,
-        retryable_request=retryable_request,
-        args=args,
-        last_report=last_report,
-        resume_note=resume_note,
-        effective_next_todo=effective_next_todo,
-        effective_open_questions=effective_open_questions,
-        issue_centric_next_request_section=issue_centric_next_request_section,
-    )
-    if prepared_status is not None:
-        _log_prepared_request_reuse(prepared_status, _ic.route_selected)
-
-    if _is_duplicate_pending_request(state, request_source):
-        return 0
-
-    return dispatch_request(
-        state,
-        request_text=request_text,
-        request_hash=request_hash,
-        request_source=request_source,
-        prepared_prefix="prepared_prompt_request_from_report",
-        sent_prefix="sent_prompt_request_from_report",
-        issue_centric_runtime_snapshot=_ic.runtime_mode or _ic.runtime_snapshot,
-        success_updates={
-            "chatgpt_decision": "",
-            "chatgpt_decision_note": "",
-            "human_review_auto_continue_count": 0,
-        },
-    )
+    # 1. resolve
+    plan = _resolve_resume_request_plan(state, args, last_report, resume_note, retryable_request)
+    # 2. execute
+    return _execute_resume_request_plan(plan)
 
 
 def run_rotated_report_request(
@@ -749,22 +710,10 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    _ic = _resolve_normal_ic_context(state)
-    request_source = build_report_request_source(state, "")
-    handoff_text, handoff_received_log = _acquire_rotated_handoff(
-        state,
-        args,
-        last_report,
-        request_source=request_source,
-        ic_context=_ic,
-    )
-    return _apply_rotated_request_result(
-        state,
-        handoff_text=handoff_text,
-        handoff_received_log=handoff_received_log,
-        request_source=request_source,
-        ic_context=_ic,
-    )
+    # 1. resolve
+    plan = _resolve_rotated_request_plan(state, args, last_report)
+    # 2. execute
+    return _execute_rotated_request_plan(plan)
 
 
 def _acquire_rotated_handoff(
@@ -967,6 +916,175 @@ def _apply_rotated_request_result(
     else:
         print(f"sent: {request_log}")
     return 0
+
+
+@dataclasses.dataclass
+class _ResumeRequestPlan:
+    """Resolved execution plan for a resume report-request cycle.
+
+    Built by ``_resolve_resume_request_plan`` and consumed by
+    ``_execute_resume_request_plan``.  Carries every value needed to execute
+    the resume path so that ``run_resume_request`` reads as two clear steps:
+    resolve → execute.
+    """
+
+    state: dict[str, object]
+    args: "argparse.Namespace"
+    last_report: str
+    resume_note: str
+    ic_context: "_IcResolvedContext"
+    effective_section: str
+    effective_next_todo: str
+    effective_open_questions: str
+    request_text: str
+    request_hash: str
+    request_source: str
+    prepared_status: "str | None"
+    # ``runtime_mode or runtime_snapshot`` — passed to dispatch as
+    # ``issue_centric_runtime_snapshot`` (mode object takes priority when present)
+    ic_snapshot_for_dispatch: object | None = None
+
+
+def _resolve_resume_request_plan(
+    state: dict[str, object],
+    args: "argparse.Namespace",
+    last_report: str,
+    resume_note: str,
+    retryable_request: "tuple[str, str, str] | None",
+) -> "_ResumeRequestPlan":
+    """Resolve all values required to execute a resume report-request cycle.
+
+    Resolves IC context, completion-followup adjustment, and the request payload,
+    then bundles everything into a :class:`_ResumeRequestPlan` ready for
+    :func:`_execute_resume_request_plan`.
+    """
+    ic = _resolve_report_request_ic_context(state)
+    effective_section, effective_next_todo, effective_open_questions = (
+        _resolve_completion_followup_request(
+            state,
+            last_report=last_report,
+            issue_centric_next_request_section=ic.next_request_section,
+            route_selected=ic.route_selected,
+            next_todo=args.next_todo,
+            open_questions=args.open_questions,
+        )
+    )
+    request_text, request_hash, request_source, prepared_status = _resolve_resume_request_payload(
+        state,
+        retryable_request=retryable_request,
+        args=args,
+        last_report=last_report,
+        resume_note=resume_note,
+        effective_next_todo=effective_next_todo,
+        effective_open_questions=effective_open_questions,
+        issue_centric_next_request_section=effective_section,
+    )
+    return _ResumeRequestPlan(
+        state=state,
+        args=args,
+        last_report=last_report,
+        resume_note=resume_note,
+        ic_context=ic,
+        effective_section=effective_section,
+        effective_next_todo=effective_next_todo,
+        effective_open_questions=effective_open_questions,
+        request_text=request_text,
+        request_hash=request_hash,
+        request_source=request_source,
+        prepared_status=prepared_status,
+        ic_snapshot_for_dispatch=ic.runtime_mode or ic.runtime_snapshot,
+    )
+
+
+def _execute_resume_request_plan(plan: "_ResumeRequestPlan") -> int:
+    """Execute a resolved :class:`_ResumeRequestPlan`.
+
+    Three steps:
+    1. Log prepared-request reuse if applicable.
+    2. Guard against duplicate pending request (early return 0).
+    3. Dispatch the request.
+    """
+    if plan.prepared_status is not None:
+        _log_prepared_request_reuse(plan.prepared_status, plan.ic_context.route_selected)
+    if _is_duplicate_pending_request(plan.state, plan.request_source):
+        return 0
+    return dispatch_request(
+        plan.state,
+        request_text=plan.request_text,
+        request_hash=plan.request_hash,
+        request_source=plan.request_source,
+        prepared_prefix="prepared_prompt_request_from_report",
+        sent_prefix="sent_prompt_request_from_report",
+        issue_centric_runtime_snapshot=plan.ic_snapshot_for_dispatch,
+        success_updates={
+            "chatgpt_decision": "",
+            "chatgpt_decision_note": "",
+            "human_review_auto_continue_count": 0,
+        },
+    )
+
+
+@dataclasses.dataclass
+class _RotatedRequestPlan:
+    """Resolved execution plan for a rotated report-request cycle.
+
+    Built by ``_resolve_rotated_request_plan`` and consumed by
+    ``_execute_rotated_request_plan``.  Carries the IC context, request source,
+    and acquired handoff so that ``run_rotated_report_request`` reads as two clear
+    steps: resolve → execute.
+    """
+
+    state: dict[str, object]
+    last_report: str
+    request_source: str
+    ic_context: "_IcResolvedContext"
+    handoff_text: str
+    handoff_received_log: str
+
+
+def _resolve_rotated_request_plan(
+    state: dict[str, object],
+    args: "argparse.Namespace",
+    last_report: str,
+) -> "_RotatedRequestPlan":
+    """Resolve all values required to execute a rotated report-request cycle.
+
+    Resolves IC context via the normal path, builds the request source, and
+    acquires the handoff text (from cache or fresh acquisition).  Returns a
+    :class:`_RotatedRequestPlan` ready for :func:`_execute_rotated_request_plan`.
+    """
+    ic = _resolve_normal_ic_context(state)
+    request_source = build_report_request_source(state, "")
+    handoff_text, handoff_received_log = _acquire_rotated_handoff(
+        state,
+        args,
+        last_report,
+        request_source=request_source,
+        ic_context=ic,
+    )
+    return _RotatedRequestPlan(
+        state=state,
+        last_report=last_report,
+        request_source=request_source,
+        ic_context=ic,
+        handoff_text=handoff_text,
+        handoff_received_log=handoff_received_log,
+    )
+
+
+def _execute_rotated_request_plan(plan: "_RotatedRequestPlan") -> int:
+    """Execute a resolved :class:`_RotatedRequestPlan`.
+
+    Delegates to ``_apply_rotated_request_result`` which handles chat rotation,
+    state transition, and result printing.
+    """
+    return _apply_rotated_request_result(
+        plan.state,
+        handoff_text=plan.handoff_text,
+        handoff_received_log=plan.handoff_received_log,
+        request_source=plan.request_source,
+        ic_context=plan.ic_context,
+    )
 
 
 def _clean_stale_pending_handoff_if_needed(state: dict[str, object]) -> dict[str, object]:
