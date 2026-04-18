@@ -2328,5 +2328,114 @@ class ResolveResumeRequestPayloadHelperTests(unittest.TestCase):
         self.assertEqual(prepared_status, "retry_send")
 
 
+class ResolveNormalIcContextHelperTests(unittest.TestCase):
+    """Unit tests for _resolve_normal_ic_context."""
+
+    def test_normal_ic_context_delegates_to_prepare_functions(self) -> None:
+        """_resolve_normal_ic_context calls prepare snapshot / mode / route and returns 4-tuple."""
+        import request_prompt_from_report
+        from unittest.mock import MagicMock, patch
+
+        mock_snapshot = MagicMock()
+        mock_snapshot.snapshot_path = "logs/snap.json"
+        mock_snapshot.snapshot_status = "ready"
+        mock_mode = MagicMock()
+        mock_section = "IC SECTION"
+        mock_route_choice = MagicMock()
+        mock_route_choice.route_selected = "issue_centric"
+
+        state: dict = {}
+        with patch.object(request_prompt_from_report, "prepare_issue_centric_runtime_snapshot", return_value=(mock_snapshot, None)):
+            with patch.object(request_prompt_from_report, "_persist_runtime_snapshot_if_needed", return_value=mock_snapshot):
+                with patch.object(request_prompt_from_report, "prepare_issue_centric_runtime_mode", return_value=(mock_mode, mock_section)):
+                    with patch.object(request_prompt_from_report, "resolve_issue_centric_route_choice", return_value=mock_route_choice):
+                        snapshot, mode, section, route = request_prompt_from_report._resolve_normal_ic_context(state)
+
+        self.assertIs(snapshot, mock_snapshot)
+        self.assertIs(mode, mock_mode)
+        self.assertEqual(section, mock_section)
+        self.assertEqual(route, "issue_centric")
+
+
+class LogPreparedRequestReuseHelperTests(unittest.TestCase):
+    """Unit tests for _log_prepared_request_reuse."""
+
+    def _invoke(self, prepared_status: str, route_selected: str) -> None:
+        import request_prompt_from_report
+        request_prompt_from_report._log_prepared_request_reuse(prepared_status, route_selected)
+
+    def test_prepared_ic_route_prints_ic_message(self) -> None:
+        """prepared + issue_centric route → IC wording."""
+        import io
+        import sys
+        buf = io.StringIO()
+        sys.stdout = buf
+        try:
+            self._invoke("prepared", "issue_centric")
+        finally:
+            sys.stdout = sys.__stdout__
+        self.assertIn("issue-centric preferred route", buf.getvalue())
+
+    def test_prepared_legacy_route_prints_legacy_message(self) -> None:
+        """prepared + non-IC route → legacy fallback wording."""
+        import io
+        import sys
+        buf = io.StringIO()
+        sys.stdout = buf
+        try:
+            self._invoke("prepared", "legacy_fallback")
+        finally:
+            sys.stdout = sys.__stdout__
+        self.assertIn("legacy fallback", buf.getvalue())
+
+    def test_non_prepared_status_prints_resend_message(self) -> None:
+        """Any status other than 'prepared' → unsent retry wording."""
+        import io
+        import sys
+        buf = io.StringIO()
+        sys.stdout = buf
+        try:
+            self._invoke("retry_send", "issue_centric")
+        finally:
+            sys.stdout = sys.__stdout__
+        self.assertIn("前回未送信", buf.getvalue())
+
+
+class IsDuplicatePendingRequestHelperTests(unittest.TestCase):
+    """Unit tests for _is_duplicate_pending_request."""
+
+    def _invoke(self, state: dict, request_source: str) -> bool:
+        import request_prompt_from_report
+        return request_prompt_from_report._is_duplicate_pending_request(state, request_source)
+
+    def test_matching_pending_source_returns_true(self) -> None:
+        """Same mode + matching source → True."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_source": "report:file.md",
+        }
+        self.assertTrue(self._invoke(state, "report:file.md"))
+
+    def test_different_source_returns_false(self) -> None:
+        """Same mode but different source → False."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_source": "report:other.md",
+        }
+        self.assertFalse(self._invoke(state, "report:file.md"))
+
+    def test_non_waiting_mode_returns_false(self) -> None:
+        """Mode not 'waiting_prompt_reply' → False even if source matches."""
+        state = {
+            "mode": "idle",
+            "pending_request_source": "report:file.md",
+        }
+        self.assertFalse(self._invoke(state, "report:file.md"))
+
+    def test_both_absent_returns_false(self) -> None:
+        """Empty state → False."""
+        self.assertFalse(self._invoke({}, "report:file.md"))
+
+
 if __name__ == "__main__":
     unittest.main()
