@@ -236,6 +236,19 @@ python3 scripts/start_bridge.py \
   - close は `allow_issue_create_followup_close=True` で既存 narrow close helper 経由
   - followup issue が `principal_issue` / `principal_issue_kind = followup_issue` になる (current closed → next cycle principal にしない)
   - primary issue は `last_issue_centric_primary_issue_number` に保持
+- [x] `codex_run + create_followup_issue` → `codex_run_followup` (Phase 52)
+  - 実行順: `codex trigger → codex launch/continuation → followup_issue_create`
+  - codex が `completed` のときのみ followup に進む
+  - followup issue URL/number が `last_issue_centric_followup_issue_*` に記録される
+  - `_resolve_codex_run_matrix_path(True, False)` == `"codex_run_followup"`
+- [x] `codex_run + create_followup_issue + close_current_issue` → `codex_run_followup_then_close` (Phase 52)
+  - 実行順: `codex trigger → codex launch/continuation → followup_issue_create → close_current_issue`
+  - codex launch が `completed` のときのみ followup に進む
+  - followup が `completed` のときのみ close に進む
+  - close は `allow_codex_run_followup_close=True` で既存 narrow close helper 経由
+  - followup issue が `principal_issue` / `principal_issue_kind = followup_issue` になる
+  - closed current issue は次 cycle principal / target に残らない
+  - `_resolve_codex_run_matrix_path(True, True)` == `"codex_run_followup_then_close"`
 
 ### D. Next request / continuation
 
@@ -296,7 +309,9 @@ python3 scripts/start_bridge.py \
   - Phase 49: `no_action` issue-management slices (followup-only / close-only / followup+close) 対応済み
   - Phase 50: `issue_create + close_current_issue` → `issue_create_then_close` 対応済み
   - Phase 51: `issue_create + create_followup_issue + close_current_issue` → `issue_create_followup_then_close` 対応済み
-  - 残: `codex_run` 複合フラグ general 化、Projects update 全面対応
+  - Phase 52: `codex_run + create_followup_issue` → `codex_run_followup` 対応済み
+  - Phase 52: `codex_run + create_followup_issue + close_current_issue` → `codex_run_followup_then_close` 対応済み、`_resolve_codex_run_matrix_path()` helper 追加
+  - 残: Projects update 全面対応
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上

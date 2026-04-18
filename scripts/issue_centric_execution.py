@@ -89,6 +89,29 @@ def _resolve_issue_create_matrix_path(
     return "issue_create"
 
 
+def _resolve_codex_run_matrix_path(
+    create_followup_issue: bool,
+    close_current_issue: bool,
+) -> str:
+    """Return the expected matrix_path for a codex_run decision based on flags.
+
+    Used by tests and for documentation clarity.  The actual execution
+    branches in ``dispatch_issue_centric_execution`` must match these values.
+
+    Execution order is always:
+        codex_run (trigger → launch) → (followup_issue_create →) close_current_issue.
+    Follow-up only runs when codex_run completes successfully.
+    Close only runs when the preceding step (followup or launch) completes successfully.
+    """
+    if create_followup_issue and close_current_issue:
+        return "codex_run_followup_then_close"
+    if create_followup_issue:
+        return "codex_run_followup"
+    if close_current_issue:
+        return "codex_run_then_close"
+    return "codex_run_launch_and_continuation"
+
+
 def dispatch_issue_centric_execution(
     *,
     contract_decision: object,

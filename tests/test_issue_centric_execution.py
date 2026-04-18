@@ -6289,5 +6289,537 @@ class IcIssueCreateFollowupCloseSliceTests(IssueCentricExecutionDispatcherTests)
             self.assertEqual(result.final_status, "completed")
 
 
+class IcCodexRunFollowupSliceTests(IssueCentricExecutionDispatcherTests):
+    """Phase 52 — codex_run + create_followup_issue follow-up slices.
+
+    Verifies:
+        A. codex_run + create_followup_issue → codex_run_followup
+        B. codex_run + create_followup_issue + close_current_issue → codex_run_followup_then_close
+
+    Execution order is always:
+        codex trigger → codex launch/continuation → followup_issue_create → (close_current_issue)
+
+    Group 1 (4 tests): _resolve_codex_run_matrix_path helper — 4 path variants
+    Group 2 (3 tests): execution order — followup / followup_then_close / close gate
+    Group 3 (2 tests): codex failure gate — followup must NOT run if codex not completed
+    Group 4 (2 tests): followup failure gate — close must NOT run if followup not completed
+    Group 5 (3 tests): continuation state — followup as principal / next-cycle / closed not target
+    Group 6 (3 tests): regression — codex_run_then_close / issue_create / no_action unaffected
+    """
+
+    # ------------------------------------------------------------------
+    # Shared fake executors
+    # ------------------------------------------------------------------
+
+    def _fake_trigger(self, root: Path, status: str = "completed"):
+        def fn(*args, **kwargs):
+            p = root / "trigger.json"
+            p.write_text("{}", encoding="utf-8")
+            payload_p = root / "payload.json"
+            payload_p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                created_comment=fake_comment(701, 20) if status == "completed" else None,
+                payload=SimpleNamespace(
+                    repo=str(REPO_ROOT),
+                    target_issue="https://github.com/example/repo/issues/20",
+                    request="Implement the issue.\n",
+                    trigger_comment="https://github.com/example/repo/issues/20#issuecomment-701",
+                ),
+                payload_log_path=payload_p,
+                execution_log_path=p,
+                launch_status="not_implemented",
+                launch_note="not implemented",
+                safe_stop_reason=f"trigger status={status}",
+            )
+        return fn
+
+    def _fake_launch(self, root: Path, status: str = "completed"):
+        def fn(*args, **kwargs):
+            prompt_p = root / "prompt.md"
+            launch_p = root / "launch.json"
+            cont_p = root / "continuation.json"
+            for p in (prompt_p, launch_p, cont_p):
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                launch_status="launched" if status == "completed" else status,
+                launch_entrypoint="launch_codex_once.run",
+                prompt_log_path=prompt_p,
+                launch_log_path=launch_p,
+                continuation_status=status,
+                continuation_log_path=cont_p,
+                report_status="",
+                report_file="",
+                final_mode="codex_running",
+                safe_stop_reason=f"launch status={status}",
+            )
+        return fn
+
+    def _fake_followup(self, root: Path, number: int = 81, status: str = "completed"):
+        def fn(*args, **kwargs):
+            p = root / f"followup_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                followup_status=status,
+                execution_log_path=p,
+                created_issue=fake_issue(number) if status == "completed" else None,
+                parent_issue=None,
+                project_sync_status="not_requested_no_project",
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason=f"followup #{number} status={status}",
+            )
+        return fn
+
+    def _fake_close(self, root: Path, number: int = 20):
+        def fn(*args, **kwargs):
+            p = root / f"close_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                close_status="completed",
+                close_order="after_codex_run_followup",
+                execution_log_path=p,
+                issue_before=fake_issue(number),
+                issue_after=fake_issue(number, state="closed"),
+                safe_stop_reason=f"closed #{number}",
+            )
+        return fn
+
+    def _decision_followup(self, root: Path):
+        """codex_run + create_followup_issue (no close)."""
+        return build_decision(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue="#20",
+            close_current_issue=False,
+            create_followup_issue=True,
+            issue_text=None,
+            followup_text="# Follow-up\n\nBody\n",
+            codex_text="Implement the issue.\n",
+        )
+
+    def _decision_followup_then_close(self, root: Path):
+        """codex_run + create_followup_issue + close_current_issue."""
+        return build_decision(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue="#20",
+            close_current_issue=True,
+            create_followup_issue=True,
+            issue_text=None,
+            followup_text="# Follow-up\n\nBody\n",
+            codex_text="Implement the issue.\n",
+        )
+
+    def _mat(self, decision, root: Path):
+        return materialized_from_decision(decision, root=root)
+
+    # ------------------------------------------------------------------
+    # Group 1: _resolve_codex_run_matrix_path helper (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_helper_followup_only(self):
+        """_resolve_codex_run_matrix_path(True, False) == 'codex_run_followup'."""
+        self.assertEqual(
+            issue_centric_execution._resolve_codex_run_matrix_path(True, False),
+            "codex_run_followup",
+        )
+
+    def test_helper_followup_then_close(self):
+        """_resolve_codex_run_matrix_path(True, True) == 'codex_run_followup_then_close'."""
+        self.assertEqual(
+            issue_centric_execution._resolve_codex_run_matrix_path(True, True),
+            "codex_run_followup_then_close",
+        )
+
+    def test_helper_close_only(self):
+        """_resolve_codex_run_matrix_path(False, True) == 'codex_run_then_close'."""
+        self.assertEqual(
+            issue_centric_execution._resolve_codex_run_matrix_path(False, True),
+            "codex_run_then_close",
+        )
+
+    def test_helper_plain_codex_run(self):
+        """_resolve_codex_run_matrix_path(False, False) == 'codex_run_launch_and_continuation'."""
+        self.assertEqual(
+            issue_centric_execution._resolve_codex_run_matrix_path(False, False),
+            "codex_run_launch_and_continuation",
+        )
+
+    # ------------------------------------------------------------------
+    # Group 2: execution order (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_followup_executes_trigger_launch_followup_in_order(self):
+        """codex_run + create_followup_issue → trigger, launch, followup in order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup(root)
+            mat = self._mat(decision, root)
+            calls: list[str] = []
+
+            def track_trigger(*args, **kwargs):
+                calls.append("trigger")
+                return self._fake_trigger(root)(*args, **kwargs)
+
+            def track_launch(*args, **kwargs):
+                calls.append("launch")
+                return self._fake_launch(root)(*args, **kwargs)
+
+            def track_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup(root, 81)(*args, **kwargs)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=track_trigger,
+                launch_issue_centric_codex_run_fn=track_launch,
+                execute_followup_issue_action_fn=track_followup,
+            )
+            self.assertEqual(calls, ["trigger", "launch", "followup"],
+                "trigger must run before launch, launch before followup")
+            self.assertEqual(result.matrix_path, "codex_run_followup")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                [step.name for step in result.steps],
+                ["codex_trigger_comment", "codex_launch_and_continuation", "followup_issue_create"],
+            )
+
+    def test_followup_then_close_executes_in_order(self):
+        """codex_run + create_followup + close → trigger, launch, followup, close in order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+            calls: list[str] = []
+
+            def track_trigger(*args, **kwargs):
+                calls.append("trigger")
+                return self._fake_trigger(root)(*args, **kwargs)
+
+            def track_launch(*args, **kwargs):
+                calls.append("launch")
+                return self._fake_launch(root)(*args, **kwargs)
+
+            def track_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup(root, 81)(*args, **kwargs)
+
+            def track_close(*args, **kwargs):
+                calls.append("close")
+                return self._fake_close(root, 20)(*args, **kwargs)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=track_trigger,
+                launch_issue_centric_codex_run_fn=track_launch,
+                execute_followup_issue_action_fn=track_followup,
+                execute_close_current_issue_fn=track_close,
+            )
+            self.assertEqual(calls, ["trigger", "launch", "followup", "close"],
+                "trigger → launch → followup → close must be the order")
+            self.assertEqual(result.matrix_path, "codex_run_followup_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                [step.name for step in result.steps],
+                ["codex_trigger_comment", "codex_launch_and_continuation",
+                 "followup_issue_create", "close_current_issue"],
+            )
+
+    def test_close_uses_allow_codex_run_followup_close_flag(self):
+        """Close is called with allow_codex_run_followup_close=True."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+            close_kwargs: list[dict] = []
+
+            def capture_close(*args, **kwargs):
+                close_kwargs.append(dict(kwargs))
+                return self._fake_close(root, 20)(*args, **kwargs)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81),
+                execute_close_current_issue_fn=capture_close,
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(len(close_kwargs), 1)
+            self.assertTrue(
+                close_kwargs[0].get("allow_codex_run_followup_close", False),
+                "close must be called with allow_codex_run_followup_close=True",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 3: codex failure gate (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_codex_consultation_needed_blocks_followup(self):
+        """codex trigger returns consultation_needed → followup must NOT run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root, status="consultation_needed"),
+            )
+            self.assertNotEqual(result.final_status, "completed")
+            step_names = [step.name for step in result.steps]
+            self.assertNotIn("followup_issue_create", step_names,
+                "followup must not run when codex trigger returns consultation_needed")
+
+    def test_codex_launch_failed_blocks_followup_and_close(self):
+        """codex launch returns failed → followup and close must NOT run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root, status="failed"),
+            )
+            self.assertNotEqual(result.final_status, "completed")
+            step_names = [step.name for step in result.steps]
+            self.assertNotIn("followup_issue_create", step_names,
+                "followup must not run when codex launch returns failed")
+            self.assertIn(
+                result.final_state.get("last_issue_centric_close_status", ""),
+                ["not_attempted_continuation_blocked", ""],
+                "close must not have run when codex launch failed",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 4: followup failure gate (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_followup_fail_blocks_close(self):
+        """followup create fails → close must NOT run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81, status="failed"),
+            )
+            self.assertNotEqual(result.final_status, "completed")
+            # close step may be present as a not_attempted sentinel; verify it was NOT actually executed
+            close_steps = [step for step in result.steps if step.name == "close_current_issue"]
+            if close_steps:
+                self.assertEqual(
+                    close_steps[0].status,
+                    "not_attempted_followup_blocked",
+                    "close step must have status not_attempted_followup_blocked when followup fails",
+                )
+            self.assertEqual(
+                result.final_state.get("last_issue_centric_close_status", ""),
+                "not_attempted_followup_blocked",
+                "close_status must be 'not_attempted_followup_blocked' when followup fails",
+            )
+
+    def test_followup_partial_blocks_close(self):
+        """followup create returns partial → close must NOT run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81, status="partial"),
+            )
+            # close step may be present as a not_attempted sentinel; verify it was NOT actually executed
+            close_steps = [step for step in result.steps if step.name == "close_current_issue"]
+            if close_steps:
+                self.assertNotEqual(
+                    close_steps[0].status,
+                    "completed",
+                    "close must not complete when followup returns partial",
+                )
+
+    # ------------------------------------------------------------------
+    # Group 5: continuation state (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_followup_is_next_cycle_principal(self):
+        """After codex_run_followup_then_close, followup issue is principal / next-cycle target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "81")
+            self.assertEqual(
+                result.final_state["last_issue_centric_principal_issue"],
+                "https://github.com/example/repo/issues/81",
+                "followup issue must be principal after codex_run_followup",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_principal_issue_kind"],
+                "followup_issue",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_next_request_hint"],
+                "continue_on_followup_issue",
+            )
+
+    def test_followup_only_is_next_cycle_principal(self):
+        """After codex_run_followup (no close), followup issue fields are recorded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_followup_issue_number"], "81")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_issue_url"],
+                "https://github.com/example/repo/issues/81",
+                "followup issue URL must be recorded after codex_run_followup",
+            )
+            self.assertEqual(result.matrix_path, "codex_run_followup")
+
+    def test_closed_issue_not_next_cycle_target(self):
+        """After codex_run_followup_then_close, closed issue is NOT next-cycle target."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = self._decision_followup_then_close(root)
+            mat = self._mat(decision, root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.final_status, "completed")
+            principal = str(result.final_state.get("last_issue_centric_principal_issue", ""))
+            # principal must NOT be the closed issue (#20)
+            self.assertNotIn("/issues/20", principal,
+                "closed issue #20 must not be next-cycle principal")
+            # principal SHOULD be the followup
+            self.assertIn("/issues/81", principal,
+                "followup issue #81 must be the next-cycle principal")
+            # close_order recorded
+            self.assertEqual(
+                result.final_state.get("last_issue_centric_close_order", ""),
+                "after_codex_run_followup",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 6: regression (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_regression_codex_run_then_close_unaffected(self):
+        """codex_run + close (no followup) still produces codex_run_then_close."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=False,
+                issue_text=None,
+                followup_text=None,
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.matrix_path, "codex_run_then_close")
+
+    def test_regression_issue_create_unaffected(self):
+        """issue_create path still produces issue_create matrix_path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                close_current_issue=False,
+                create_followup_issue=False,
+                issue_text="# Issue\n\nBody.\n",
+                followup_text=None,
+                codex_text=None,
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            def fake_create(*args, **kwargs):
+                p = root / "create.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    created_issue=fake_issue(71),
+                    project_sync_status="issue_only_fallback",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="created #71",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=fake_create,
+            )
+            self.assertIn(result.matrix_path, {"issue_create", "issue_create_narrow"})
+
+    def test_regression_no_action_unaffected(self):
+        """no_action path still produces prepared_artifact_only matrix_path (plain no_action)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                close_current_issue=False,
+                create_followup_issue=False,
+                issue_text=None,
+                followup_text=None,
+                codex_text=None,
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+            )
+            # plain no_action (no followup, no close) → prepared_artifact_only
+            self.assertEqual(result.matrix_path, "prepared_artifact_only")
+
+
 if __name__ == "__main__":
     unittest.main()
