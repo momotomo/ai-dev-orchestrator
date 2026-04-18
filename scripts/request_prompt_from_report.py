@@ -452,6 +452,54 @@ def dispatch_request(
     return 0
 
 
+def _resolve_report_request_ic_context(
+    state: dict[str, object],
+) -> tuple[object | None, object | None, str, str]:
+    """Resolve issue-centric context for a report-based resume request.
+
+    Returns ``(snapshot, runtime_mode, next_request_section, route_selected)``.
+
+    Two paths:
+
+    * **Pinned ready issue path** — when ``_should_use_pinned_ready_issue_path(state)``
+      is True, snapshot and runtime_mode are ``None`` and a fresh IC section is built
+      from the pinned ready issue ref.  Old ``last_issue_centric_*`` context is not
+      carried over.
+
+    * **Normal path** — snapshot is prepared and persisted, runtime_mode_state is
+      updated with snapshot fields, then ``prepare_issue_centric_runtime_mode`` and
+      ``resolve_issue_centric_route_choice`` produce the IC section and route.
+    """
+    if _should_use_pinned_ready_issue_path(state):
+        _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+        return (
+            None,
+            None,
+            build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref),
+            "issue_centric",
+        )
+    issue_centric_runtime_snapshot, _ = prepare_issue_centric_runtime_snapshot(state)
+    issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
+    runtime_mode_state = dict(state)
+    if issue_centric_runtime_snapshot is not None:
+        runtime_mode_state.update(
+            {
+                "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
+                "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
+            }
+        )
+    issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
+        runtime_mode_state
+    )
+    route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
+    return (
+        issue_centric_runtime_snapshot,
+        issue_centric_runtime_mode,
+        issue_centric_next_request_section,
+        route_choice.route_selected,
+    )
+
+
 def run_resume_request(
     state: dict[str, object],
     args: argparse.Namespace,
@@ -459,30 +507,12 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    if _should_use_pinned_ready_issue_path(state):
-        _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
-        issue_centric_runtime_snapshot = None
-        issue_centric_runtime_mode = None
-        issue_centric_next_request_section = build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref)
-        _route_selected = "issue_centric"
-    else:
-        issue_centric_runtime_snapshot, _ = (
-            prepare_issue_centric_runtime_snapshot(state)
-        )
-        issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
-        runtime_mode_state = dict(state)
-        if issue_centric_runtime_snapshot is not None:
-            runtime_mode_state.update(
-                {
-                    "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
-                    "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
-                }
-            )
-        issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
-            runtime_mode_state
-        )
-        route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
-        _route_selected = route_choice.route_selected
+    (
+        issue_centric_runtime_snapshot,
+        issue_centric_runtime_mode,
+        issue_centric_next_request_section,
+        _route_selected,
+    ) = _resolve_report_request_ic_context(state)
 
     issue_centric_next_request_section, effective_next_todo, effective_open_questions = (
         _resolve_completion_followup_request(
