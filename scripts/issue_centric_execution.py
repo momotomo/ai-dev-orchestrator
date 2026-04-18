@@ -33,6 +33,41 @@ class IssueCentricDispatchResult:
     stop_message: str
 
 
+# ---------------------------------------------------------------------------
+# no_action issue-management slice resolver
+# ---------------------------------------------------------------------------
+# Resolves the matrix_path for the four no_action sub-paths so that the
+# distinction between plain no_action, followup-only, close-only, and
+# followup+close is explicit and readable without inspecting the if-chain.
+#
+# Execution order for issue-management slices:
+#   plain no_action                  → (nothing; prepared_artifact_only)
+#   no_action + followup             → followup issue create
+#   no_action + close                → current issue close
+#   no_action + followup + close     → followup issue create → current issue close
+#
+# Close always comes AFTER followup when both flags are set.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_no_action_matrix_path(
+    create_followup_issue: bool,
+    close_current_issue: bool,
+) -> str:
+    """Return the expected matrix_path for a no_action decision based on flags.
+
+    Used by tests and for documentation clarity.  The actual execution
+    branches in ``dispatch_issue_centric_execution`` must match these values.
+    """
+    if create_followup_issue and close_current_issue:
+        return "no_action_followup_then_close"
+    if create_followup_issue:
+        return "no_action_followup"
+    if close_current_issue:
+        return "no_action_close"
+    return "prepared_artifact_only"
+
+
 def dispatch_issue_centric_execution(
     *,
     contract_decision: object,

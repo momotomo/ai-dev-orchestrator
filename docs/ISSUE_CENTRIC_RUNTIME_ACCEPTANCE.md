@@ -216,6 +216,13 @@ python3 scripts/start_bridge.py \
 - [x] `issue_create` / `codex_run` / `human_review_needed` / `no_action` が実行できる
 - [x] `close_current_issue` / `create_followup_issue` の附随ステップが動作する
 - [x] `current_issue_project_state_sync` が lifecycle sync を実行できる
+- [x] `no_action` issue-management slices (Phase 49)
+  - `no_action + create_followup_issue` → `no_action_followup` (follow-up issue create)
+  - `no_action + close_current_issue` → `no_action_close` (current issue close)
+  - `no_action + create_followup_issue + close_current_issue` → `no_action_followup_then_close` (follow-up → close の順)
+  - close は follow-up より先に実行しない
+  - `_resolve_no_action_matrix_path()` helper で 4 パスが名前で読める
+  - continuation state: followup ありの場合は followup が principal_issue に昇格、close のみの場合は closed issue を next cycle target に残さない
 
 ### D. Next request / continuation
 
@@ -273,6 +280,8 @@ python3 scripts/start_bridge.py \
 - [x] Plan A → visible DOM fallback の自動判定精度向上 (Phase 48: `_IcReplyRouteDecision` + `_resolve_ic_reply_route_decision` 追加 / Plan A 破損時は `stop_broken` で explicit stop / legacy fallback 非混在)
 - [x] `codex_run + close_current_issue = true` の dispatcher サポート (Phase 47: trigger → launch → post-launch close / matrix_path `codex_run_then_close`)
 - [ ] multi-flag 組み合わせの拡張 (narrow matrix 外)
+  - Phase 49 で `no_action` issue-management slices (followup-only / close-only / followup+close) を対応済み
+  - 残: `issue_create` / `codex_run` + 複合フラグの general 化、Projects update の全面対応
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上

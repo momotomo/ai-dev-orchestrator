@@ -5077,5 +5077,494 @@ class DispatchStopMessageLifecycleSyncSurfacingTests(unittest.TestCase):
             self.assertNotIn("lifecycle_sync", result.stop_message)
 
 
+class IcNoActionIssueManagementSliceTests(unittest.TestCase):
+    """Phase 49 — no_action issue-management slices.
+
+    Verifies the four no_action sub-paths in dispatch_issue_centric_execution:
+      - plain no_action (no flags)           → prepared_artifact_only
+      - no_action + create_followup_issue     → no_action_followup
+      - no_action + close_current_issue       → no_action_close
+      - no_action + followup + close          → no_action_followup_then_close
+
+    Also verifies:
+      - execution ORDER: followup always before close in the combined case
+      - continuation state: principal_issue / principal_issue_kind per slice
+      - _resolve_no_action_matrix_path helper returns correct matrix_path
+      - regression: issue_create / codex_run / human_review_needed paths unaffected
+
+    Group 1: _resolve_no_action_matrix_path helper (4 tests)
+    Group 2: execution paths and calls (4 tests)
+    Group 3: continuation state (3 tests)
+    Group 4: regression (2 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _no_project_sync_fn(self, root: Path):
+        def fn(*args, **kwargs):
+            p = root / "no-project-sync.json"
+            if not p.exists():
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="not_requested",
+                sync_status="not_requested_no_project",
+                lifecycle_stage=kwargs.get("lifecycle_stage", ""),
+                resolved_issue=None,
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                safe_stop_reason="No GitHub Project is configured.",
+            )
+        return fn
+
+    def _base_state(self) -> dict[str, object]:
+        """Minimal state dict for dispatcher calls."""
+        state: dict[str, object] = {
+            "last_issue_centric_action": "",
+            "last_issue_centric_target_issue": "",
+            "last_issue_centric_stop_reason": "",
+            "chatgpt_decision_note": "",
+            "last_issue_centric_dispatch_result": "",
+            "last_issue_centric_normalized_summary": "",
+            "last_issue_centric_runtime_snapshot": "",
+            "last_issue_centric_snapshot_status": "",
+            "last_issue_centric_runtime_generation_id": "",
+            "last_issue_centric_generation_lifecycle": "",
+            "last_issue_centric_generation_lifecycle_reason": "",
+            "last_issue_centric_generation_lifecycle_source": "",
+            "last_issue_centric_prepared_generation_id": "",
+            "last_issue_centric_pending_generation_id": "",
+            "last_issue_centric_principal_issue": "",
+            "last_issue_centric_principal_issue_kind": "",
+            "last_issue_centric_next_request_hint": "",
+            "last_issue_centric_next_request_target": "",
+            "last_issue_centric_next_request_target_source": "",
+            "last_issue_centric_next_request_fallback_reason": "",
+            "last_issue_centric_route_selected": "",
+            "last_issue_centric_route_fallback_reason": "",
+            "last_issue_centric_recovery_status": "",
+            "last_issue_centric_recovery_source": "",
+            "last_issue_centric_recovery_fallback_reason": "",
+            "last_issue_centric_runtime_mode": "",
+            "last_issue_centric_runtime_mode_reason": "",
+            "last_issue_centric_runtime_mode_source": "",
+            "last_issue_centric_freshness_status": "",
+            "last_issue_centric_freshness_reason": "",
+            "last_issue_centric_freshness_source": "",
+            "last_issue_centric_invalidation_status": "",
+            "last_issue_centric_invalidation_reason": "",
+            "last_issue_centric_invalidated_generation_id": "",
+            "last_issue_centric_consumed_generation_id": "",
+            "last_issue_centric_close_order": "",
+            "last_issue_centric_close_status": "",
+            "last_issue_centric_close_log": "",
+            "last_issue_centric_closed_issue_number": "",
+            "last_issue_centric_closed_issue_url": "",
+            "last_issue_centric_closed_issue_title": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_execution_status": "",
+            "last_issue_centric_execution_log": "",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_created_issue_url": "",
+            "last_issue_centric_created_issue_title": "",
+            "last_issue_centric_primary_issue_number": "",
+            "last_issue_centric_primary_issue_url": "",
+            "last_issue_centric_primary_issue_title": "",
+            "last_issue_centric_project_sync_status": "",
+            "last_issue_centric_project_url": "",
+            "last_issue_centric_project_item_id": "",
+            "last_issue_centric_project_state_field": "",
+            "last_issue_centric_project_state_value": "",
+            "last_issue_centric_primary_project_sync_status": "",
+            "last_issue_centric_primary_project_url": "",
+            "last_issue_centric_primary_project_item_id": "",
+            "last_issue_centric_primary_project_state_field": "",
+            "last_issue_centric_primary_project_state_value": "",
+            "last_issue_centric_followup_status": "",
+            "last_issue_centric_followup_log": "",
+            "last_issue_centric_followup_parent_issue": "",
+            "last_issue_centric_followup_issue_number": "",
+            "last_issue_centric_followup_issue_url": "",
+            "last_issue_centric_followup_issue_title": "",
+            "last_issue_centric_followup_project_sync_status": "",
+            "last_issue_centric_followup_project_url": "",
+            "last_issue_centric_followup_project_item_id": "",
+            "last_issue_centric_followup_project_state_field": "",
+            "last_issue_centric_followup_project_state_value": "",
+            "last_issue_centric_current_project_item_id": "",
+            "last_issue_centric_current_project_url": "",
+            "last_issue_centric_lifecycle_sync_status": "",
+            "last_issue_centric_lifecycle_sync_log": "",
+            "last_issue_centric_lifecycle_sync_issue": "",
+            "last_issue_centric_lifecycle_sync_stage": "",
+            "last_issue_centric_lifecycle_sync_project_url": "",
+            "last_issue_centric_lifecycle_sync_project_item_id": "",
+            "last_issue_centric_lifecycle_sync_state_field": "",
+            "last_issue_centric_lifecycle_sync_state_value": "",
+            "last_issue_centric_parent_update_status": "",
+            "last_issue_centric_parent_update_log": "",
+            "last_issue_centric_parent_update_issue": "",
+            "last_issue_centric_parent_update_comment_id": "",
+            "last_issue_centric_parent_update_comment_url": "",
+            "last_issue_centric_parent_update_closed_issue": "",
+            "last_issue_centric_review_status": "",
+            "last_issue_centric_review_log": "",
+            "last_issue_centric_review_comment_id": "",
+            "last_issue_centric_review_comment_url": "",
+            "last_issue_centric_review_close_policy": "",
+        }
+        return state
+
+    def _dispatch(
+        self,
+        *,
+        decision: issue_centric_contract.IssueCentricDecision,
+        root: Path,
+        execute_followup_issue_action_fn=None,
+        execute_close_current_issue_fn=None,
+    ) -> issue_centric_execution.IssueCentricDispatchResult:
+        mat = materialized_from_decision(decision, root=root)
+        state = self._base_state()
+        state["last_issue_centric_action"] = decision.action.value
+        state["last_issue_centric_target_issue"] = decision.target_issue or "none"
+        saved: list[dict] = []
+
+        def _abort(name: str):
+            def fn(*args, **kwargs):
+                raise AssertionError(f"{name} should not be called in this test")
+            return fn
+
+        return issue_centric_execution.dispatch_issue_centric_execution(
+            contract_decision=decision,
+            materialized=mat,
+            prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+            mutable_state=state,
+            project_config={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+            repo_path=REPO_ROOT,
+            source_raw_log="logs/raw.txt",
+            source_decision_log="logs/decision.md",
+            source_metadata_log="logs/metadata.json",
+            source_artifact_path="logs/artifact.md",
+            log_writer=TempLogWriter(root),
+            repo_relative=lambda p: str(p),
+            load_state_fn=lambda: dict(saved[-1]) if saved else dict(state),
+            save_state_fn=lambda s: saved.append(dict(s)),
+            execute_issue_create_action_fn=_abort("issue_create"),
+            execute_codex_run_action_fn=_abort("codex_run"),
+            launch_issue_centric_codex_run_fn=_abort("launch"),
+            execute_human_review_action_fn=_abort("human_review"),
+            execute_close_current_issue_fn=execute_close_current_issue_fn or _abort("close"),
+            execute_followup_issue_action_fn=execute_followup_issue_action_fn or _abort("followup"),
+            execute_current_issue_project_state_sync_fn=self._no_project_sync_fn(root),
+            launch_runner=lambda s, argv=None: 0,
+        )
+
+    def _fake_followup(self, root: Path, issue_number: int = 30) -> object:
+        """Return a fake followup executor that creates issue #{issue_number}."""
+        def fn(*args, **kwargs):
+            p = root / f"followup_{issue_number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                followup_status="completed",
+                project_sync_status="not_requested_no_project",
+                project_url="",
+                project_item_id="",
+                project_state_field_name="",
+                project_state_value_name="",
+                created_issue=SimpleNamespace(
+                    number=issue_number,
+                    url=f"https://github.com/example/repo/issues/{issue_number}",
+                    title=f"Follow-up issue {issue_number}",
+                ),
+                parent_issue=None,
+                execution_log_path=p,
+                safe_stop_reason=f"created follow-up issue #{issue_number}.",
+            )
+        return fn
+
+    def _fake_close(self, root: Path, issue_number: int = 20) -> object:
+        """Return a fake close executor that closes issue #{issue_number}."""
+        def fn(*args, **kwargs):
+            p = root / f"close_{issue_number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                close_status="completed",
+                close_order="after_no_action",
+                issue_before=fake_issue(issue_number),
+                issue_after=fake_issue(issue_number, state="closed"),
+                execution_log_path=p,
+                safe_stop_reason=f"closed issue #{issue_number}.",
+            )
+        return fn
+
+    # ------------------------------------------------------------------
+    # Group 1: _resolve_no_action_matrix_path helper (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_resolve_path_plain_no_action(self):
+        """plain no_action → prepared_artifact_only."""
+        self.assertEqual(
+            issue_centric_execution._resolve_no_action_matrix_path(False, False),
+            "prepared_artifact_only",
+        )
+
+    def test_resolve_path_followup_only(self):
+        """no_action + followup only → no_action_followup."""
+        self.assertEqual(
+            issue_centric_execution._resolve_no_action_matrix_path(True, False),
+            "no_action_followup",
+        )
+
+    def test_resolve_path_close_only(self):
+        """no_action + close only → no_action_close."""
+        self.assertEqual(
+            issue_centric_execution._resolve_no_action_matrix_path(False, True),
+            "no_action_close",
+        )
+
+    def test_resolve_path_followup_then_close(self):
+        """no_action + followup + close → no_action_followup_then_close."""
+        self.assertEqual(
+            issue_centric_execution._resolve_no_action_matrix_path(True, True),
+            "no_action_followup_then_close",
+        )
+
+    # ------------------------------------------------------------------
+    # Group 2: execution paths and calls (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_no_action_plain_routes_to_prepared_artifact_only(self):
+        """Plain no_action (no flags) → prepared_artifact_only; no executor is called."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            )
+            result = self._dispatch(decision=decision, root=root)
+            self.assertEqual(result.matrix_path, "prepared_artifact_only")
+            self.assertEqual(result.final_status, "prepared_only")
+
+    def test_no_action_followup_only_calls_followup_executor(self):
+        """no_action + create_followup_issue → followup executor called once, matrix_path=no_action_followup."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup(root, 30)(*args, **kwargs)
+
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_followup_issue_action_fn=fake_followup,
+            )
+            self.assertEqual(calls, ["followup"])
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            self.assertEqual(result.final_status, "completed")
+
+    def test_no_action_close_only_calls_close_executor(self):
+        """no_action + close_current_issue → close executor called once, matrix_path=no_action_close."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            calls: list[str] = []
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                return self._fake_close(root, 20)(*args, **kwargs)
+
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_close_current_issue_fn=fake_close,
+            )
+            self.assertEqual(calls, ["close"])
+            self.assertEqual(result.matrix_path, "no_action_close")
+            self.assertEqual(result.final_status, "completed")
+
+    def test_no_action_followup_then_close_executes_in_order(self):
+        """no_action + followup + close → followup called BEFORE close, in that order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup(*args, **kwargs):
+                calls.append("followup")
+                return self._fake_followup(root, 30)(*args, **kwargs)
+
+            def fake_close(*args, **kwargs):
+                calls.append("close")
+                return self._fake_close(root, 20)(*args, **kwargs)
+
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_followup_issue_action_fn=fake_followup,
+                execute_close_current_issue_fn=fake_close,
+            )
+            self.assertEqual(calls, ["followup", "close"], "followup must run before close")
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            self.assertEqual(result.final_status, "completed")
+
+    # ------------------------------------------------------------------
+    # Group 3: continuation state (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_no_action_followup_only_principal_is_followup(self):
+        """no_action + followup: principal_issue becomes the followup issue URL."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_followup_issue_action_fn=self._fake_followup(root, 30),
+            )
+            self.assertEqual(result.matrix_path, "no_action_followup")
+            # principal_issue should be the created followup issue URL
+            self.assertIn(
+                "30",
+                result.final_state["last_issue_centric_principal_issue"],
+                "principal_issue must reference the followup issue #30",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_principal_issue_kind"],
+                "followup_issue",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_issue_number"],
+                "30",
+            )
+
+    def test_no_action_close_only_close_recorded_not_principal(self):
+        """no_action + close: closed_issue_number recorded; principal_issue is not the closed issue."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                close_current_issue=True,
+            )
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.matrix_path, "no_action_close")
+            self.assertEqual(result.final_state["last_issue_centric_closed_issue_number"], "20")
+            # The closed issue must NOT appear as the principal issue for the next cycle
+            principal = str(result.final_state.get("last_issue_centric_principal_issue", ""))
+            # principal_issue_kind should not be "current_issue" pointing to the closed issue
+            # (it should be "unresolved" or empty since current is closed and no followup)
+            kind = str(result.final_state.get("last_issue_centric_principal_issue_kind", ""))
+            self.assertNotEqual(kind, "current_issue",
+                "closed issue must not become the principal issue for the next cycle")
+
+    def test_no_action_followup_then_close_principal_is_followup(self):
+        """no_action + followup + close: principal_issue is the followup (not the closed issue)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_followup_issue_action_fn=self._fake_followup(root, 30),
+                execute_close_current_issue_fn=self._fake_close(root, 20),
+            )
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            # followup is the principal, not the closed current issue
+            self.assertIn("30", result.final_state["last_issue_centric_principal_issue"])
+            self.assertEqual(
+                result.final_state["last_issue_centric_principal_issue_kind"],
+                "followup_issue",
+            )
+            # close also recorded
+            self.assertEqual(result.final_state["last_issue_centric_closed_issue_number"], "20")
+
+    # ------------------------------------------------------------------
+    # Group 4: regression (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_no_action_plain_does_not_call_any_executor(self):
+        """Plain no_action must not invoke followup or close executors."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            )
+            # Both abort fns are the default — if either is called, the test fails
+            result = self._dispatch(decision=decision, root=root)
+            self.assertEqual(result.matrix_path, "prepared_artifact_only")
+
+    def test_no_action_followup_does_not_call_close_when_followup_fails(self):
+        """no_action + followup + close: close must NOT run if followup fails."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="## Follow-up\n\nBody.\n",
+            )
+            calls: list[str] = []
+
+            def fake_followup_fail(*args, **kwargs):
+                calls.append("followup")
+                p = root / "followup_fail.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="failed",
+                    followup_status="failed",
+                    project_sync_status="",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    created_issue=None,
+                    parent_issue=None,
+                    execution_log_path=p,
+                    safe_stop_reason="followup issue creation failed.",
+                )
+
+            result = self._dispatch(
+                decision=decision, root=root,
+                execute_followup_issue_action_fn=fake_followup_fail,
+                # close must NOT be called — default abort fn for close
+            )
+            self.assertEqual(calls, ["followup"])
+            self.assertEqual(result.matrix_path, "no_action_followup_then_close")
+            # final_status should be partial (followup failed, close skipped)
+            self.assertEqual(result.final_status, "partial")
+            # close_status records the reason it was skipped
+            self.assertEqual(
+                result.final_state["last_issue_centric_close_status"],
+                "not_attempted_followup_blocked",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
