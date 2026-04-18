@@ -255,6 +255,12 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
         )
 
     def test_dispatcher_blocks_codex_run_close_before_trigger_comment(self) -> None:
+        """codex_run + close_current_issue (no followup) → codex_run_then_close after Phase 47.
+
+        The early-exit block was removed in Phase 47. The dispatcher now proceeds through
+        trigger comment → launch → post-launch close. This test verifies the new end-to-end
+        path produces matrix_path="codex_run_then_close" and "completed" status.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             decision = issue_centric_contract.IssueCentricDecision(
@@ -273,35 +279,73 @@ class IssueCentricExecutionDispatcherTests(unittest.TestCase):
             materialized = materialized_from_decision(decision, root=root)
             calls: list[str] = []
 
+            def fake_trigger(*args, **kwargs):
+                calls.append("trigger")
+                p = root / "trigger.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    payload_log_path=None,
+                    safe_stop_reason="trigger comment posted",
+                    created_comment=SimpleNamespace(
+                        comment_id=1,
+                        url="https://github.com/example/repo/issues/20#issuecomment-1",
+                    ),
+                    resolved_issue=None,
+                    launch_status="",
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                prompt_p = root / "prompt.md"
+                launch_p = root / "launch.md"
+                continuation_p = root / "continuation.md"
+                for p in (prompt_p, launch_p, continuation_p):
+                    p.touch()
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="completed",
+                    final_mode="launch",
+                    continuation_status="completed",
+                    launch_entrypoint="codex_run",
+                    prompt_log_path=prompt_p,
+                    launch_log_path=launch_p,
+                    continuation_log_path=continuation_p,
+                    report_status="",
+                    report_file="",
+                    safe_stop_reason="launch completed",
+                )
+
             def fake_close(*args, **kwargs):
                 calls.append("close")
-                log_path = root / "close.json"
-                log_path.write_text("{}", encoding="utf-8")
+                p = root / "close.json"
+                p.write_text("{}", encoding="utf-8")
                 return SimpleNamespace(
-                    status="blocked",
-                    close_status="blocked",
-                    close_order="blocked_codex_run",
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_codex_run",
                     resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
-                    issue_before=None,
-                    issue_after=None,
-                    execution_log_path=log_path,
-                    safe_stop_reason="action=codex_run cannot execute close_current_issue in this slice.",
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    execution_log_path=p,
+                    safe_stop_reason="close_current_issue closed issue #20 after the issue-centric Codex launch / continuation path succeeded.",
                 )
 
             result = self.dispatch(
                 decision=decision,
                 materialized=materialized,
                 root=root,
+                execute_codex_run_action_fn=fake_trigger,
+                launch_issue_centric_codex_run_fn=fake_launch,
                 execute_close_current_issue_fn=fake_close,
             )
 
-            self.assertEqual(calls, ["close"])
-            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
-            self.assertEqual(result.final_status, "blocked")
-            self.assertEqual(result.final_state["last_issue_centric_close_status"], "blocked")
-            self.assertEqual(result.final_state["last_issue_centric_close_order"], "blocked_codex_run")
-            self.assertEqual(result.final_state["last_issue_centric_execution_status"], "")
-            self.assertIn("codex_run + close_current_issue", result.stop_message)
+            self.assertEqual(calls, ["trigger", "launch", "close"])
+            self.assertEqual(result.matrix_path, "codex_run_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "closed")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run")
 
     def test_dispatcher_runs_codex_followup_then_close_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2919,14 +2963,14 @@ class IssueCentricCodexRunHumanReviewDispatchTests(unittest.TestCase):
             self.assertEqual(result.final_state["last_issue_centric_execution_status"], "completed")
             self.assertEqual(result.final_state["last_issue_centric_trigger_comment_id"], "1001")
 
-    # ---- codex_run: close without followup is blocked at dispatcher ----
+    # ---- codex_run: close after launch (Phase 47 new path) ----
 
     def test_dispatcher_codex_run_close_blocked_without_followup(self) -> None:
-        """codex_run + close_current_issue (no followup) → blocked_codex_run_close.
+        """codex_run + close_current_issue (no followup) → codex_run_then_close after Phase 47.
 
-        The dispatcher passes the close call to execute_close_current_issue_fn
-        but records the result as blocked regardless of what the executor returns.
-        This confirms the currently intended behavior.
+        Phase 47 removed the early-exit block. The close now runs post-launch.
+        This test verifies trigger → launch → close proceeds and records
+        matrix_path="codex_run_then_close".
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2938,31 +2982,69 @@ class IssueCentricCodexRunHumanReviewDispatchTests(unittest.TestCase):
             )
             calls: list[str] = []
 
+            def fake_trigger(*args, **kwargs):
+                calls.append("trigger")
+                p = root / "trigger.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="",
+                    execution_log_path=p,
+                    payload_log_path=None,
+                    safe_stop_reason="trigger ok",
+                    created_comment=fake_comment(1, 20),
+                    resolved_issue=None,
+                )
+
+            def fake_launch(*args, **kwargs):
+                calls.append("launch")
+                launch_p = root / "launch.md"
+                cont_p = root / "continuation.md"
+                prompt_p = root / "prompt.md"
+                for p in (launch_p, cont_p, prompt_p):
+                    p.touch()
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="completed",
+                    launch_entrypoint="codex_run",
+                    final_mode="launch",
+                    continuation_status="completed",
+                    launch_log_path=launch_p,
+                    continuation_log_path=cont_p,
+                    prompt_log_path=prompt_p,
+                    report_status="",
+                    report_file="",
+                    safe_stop_reason="launch ok",
+                )
+
             def fake_close(*args, **kwargs):
                 calls.append("close")
                 p = root / "close.json"
                 p.write_text("{}", encoding="utf-8")
                 return SimpleNamespace(
-                    status="blocked",
-                    close_status="blocked",
-                    close_order="blocked_codex_run",
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_codex_run",
                     execution_log_path=p,
-                    issue_before=None,
-                    issue_after=None,
-                    safe_stop_reason="action=codex_run cannot execute close_current_issue in this slice.",
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="close_current_issue closed issue #20 after the issue-centric Codex launch / continuation path succeeded.",
                 )
 
             result = self._dispatch(
                 decision=decision,
                 root=root,
+                execute_codex_run_action_fn=fake_trigger,
+                launch_issue_centric_codex_run_fn=fake_launch,
                 execute_close_current_issue_fn=fake_close,
             )
 
-            self.assertEqual(calls, ["close"])
-            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
-            self.assertEqual(result.final_status, "blocked")
-            self.assertEqual([s.name for s in result.steps], ["close_current_issue"])
-            self.assertIn("codex_run + close_current_issue", result.stop_message)
+            self.assertEqual(calls, ["trigger", "launch", "close"])
+            self.assertEqual(result.matrix_path, "codex_run_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual([s.name for s in result.steps if s.name in ("codex_trigger_comment", "codex_launch_and_continuation", "close_current_issue")],
+                             ["codex_trigger_comment", "codex_launch_and_continuation", "close_current_issue"])
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run")
 
     # ---- codex_run: create_followup_issue missing codex artifact blocked at dispatcher ----
 
@@ -3437,11 +3519,11 @@ class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
     # ---- codex_run + close (no followup): state fields recorded ----
 
     def test_combo_codex_run_close_state_fields_recorded(self) -> None:
-        """codex_run + close_current_issue (no followup) → blocked_codex_run_close.
+        """codex_run + close_current_issue (no followup) → codex_run_then_close after Phase 47.
 
-        The dispatcher calls execute_close_current_issue_fn and applies its result to
-        mutable_state before finalizing as blocked. Confirms close_status and close_order
-        fields are recorded from the executor response.
+        Phase 47 removed the early-exit block. The close now runs post-launch.
+        Confirms close_status and close_order fields are recorded from the executor
+        response after trigger → launch → close.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3452,29 +3534,64 @@ class IssueCentricComboMatrixDispatchTests(unittest.TestCase):
                 codex_text="Implement the issue.\n",
             )
 
+            def fake_trigger(*args, **kwargs):
+                p = root / "trigger.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="",
+                    execution_log_path=p,
+                    payload_log_path=None,
+                    safe_stop_reason="trigger ok",
+                    created_comment=fake_comment(1, 20),
+                    resolved_issue=None,
+                )
+
+            def fake_launch(*args, **kwargs):
+                launch_p = root / "launch.md"
+                cont_p = root / "continuation.md"
+                prompt_p = root / "prompt.md"
+                for p in (launch_p, cont_p, prompt_p):
+                    p.touch()
+                return SimpleNamespace(
+                    status="completed",
+                    launch_status="completed",
+                    launch_entrypoint="codex_run",
+                    final_mode="launch",
+                    continuation_status="completed",
+                    launch_log_path=launch_p,
+                    continuation_log_path=cont_p,
+                    prompt_log_path=prompt_p,
+                    report_status="",
+                    report_file="",
+                    safe_stop_reason="launch ok",
+                )
+
             def fake_close(*args, **kwargs):
                 p = root / "close_combo.json"
                 p.write_text("{}", encoding="utf-8")
                 return SimpleNamespace(
-                    status="blocked",
-                    close_status="blocked_codex_run",
-                    close_order="blocked_codex_run",
+                    status="completed",
+                    close_status="closed",
+                    close_order="after_codex_run",
                     execution_log_path=p,
-                    issue_before=None,
-                    issue_after=None,
-                    safe_stop_reason="codex_run cannot close in this slice.",
+                    issue_before=fake_issue(20),
+                    issue_after=fake_issue(20, state="closed"),
+                    safe_stop_reason="close_current_issue closed issue #20 after the issue-centric Codex launch / continuation path succeeded.",
                 )
 
             result = self._dispatch(
                 decision=decision,
                 root=root,
+                execute_codex_run_action_fn=fake_trigger,
+                launch_issue_centric_codex_run_fn=fake_launch,
                 execute_close_current_issue_fn=fake_close,
             )
 
-            self.assertEqual(result.matrix_path, "blocked_codex_run_close")
-            self.assertEqual(result.final_status, "blocked")
-            self.assertEqual(result.final_state["last_issue_centric_close_status"], "blocked_codex_run")
-            self.assertEqual(result.final_state["last_issue_centric_close_order"], "blocked_codex_run")
+            self.assertEqual(result.matrix_path, "codex_run_then_close")
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(result.final_state["last_issue_centric_close_status"], "closed")
+            self.assertEqual(result.final_state["last_issue_centric_close_order"], "after_codex_run")
 
     # ---- human_review_needed + create_followup_issue: missing review body guard ----
 
