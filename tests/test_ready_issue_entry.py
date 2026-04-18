@@ -2206,7 +2206,7 @@ class ShouldUsePinnedReadyIssuePathHelperTests(unittest.TestCase):
 class ResolveReportRequestIcContextHelperTests(unittest.TestCase):
     """Unit tests for _resolve_report_request_ic_context."""
 
-    def _invoke(self, state: dict) -> tuple:
+    def _invoke(self, state: dict):
         import request_prompt_from_report
         return request_prompt_from_report._resolve_report_request_ic_context(state)
 
@@ -2218,11 +2218,11 @@ class ResolveReportRequestIcContextHelperTests(unittest.TestCase):
             "current_ready_issue_ref": "#7 Ready: verify cycles",
         }
         with patch("_bridge_common.load_project_config", return_value={"github_repository": "owner/repo"}):
-            snapshot, mode, section, route = self._invoke(state)
-        self.assertIsNone(snapshot)
-        self.assertIsNone(mode)
-        self.assertIn("#7 Ready: verify cycles", section)
-        self.assertEqual(route, "issue_centric")
+            ctx = self._invoke(state)
+        self.assertIsNone(ctx.runtime_snapshot)
+        self.assertIsNone(ctx.runtime_mode)
+        self.assertIn("#7 Ready: verify cycles", ctx.next_request_section)
+        self.assertEqual(ctx.route_selected, "issue_centric")
 
     def test_normal_path_delegates_to_prepare_functions(self) -> None:
         """Normal path calls prepare snapshot / mode / route helpers and returns results."""
@@ -2242,12 +2242,12 @@ class ResolveReportRequestIcContextHelperTests(unittest.TestCase):
             with patch.object(request_prompt_from_report, "_persist_runtime_snapshot_if_needed", return_value=mock_snapshot):
                 with patch.object(request_prompt_from_report, "prepare_issue_centric_runtime_mode", return_value=(mock_mode, mock_section)):
                     with patch.object(request_prompt_from_report, "resolve_issue_centric_route_choice", return_value=mock_route_choice):
-                        snapshot, mode, section, route = self._invoke(state)
+                        ctx = self._invoke(state)
 
-        self.assertIs(snapshot, mock_snapshot)
-        self.assertIs(mode, mock_mode)
-        self.assertEqual(section, mock_section)
-        self.assertEqual(route, "issue_centric")
+        self.assertIs(ctx.runtime_snapshot, mock_snapshot)
+        self.assertIs(ctx.runtime_mode, mock_mode)
+        self.assertEqual(ctx.next_request_section, mock_section)
+        self.assertEqual(ctx.route_selected, "issue_centric")
 
 
 class ResolveResumeRequestPayloadHelperTests(unittest.TestCase):
@@ -2332,7 +2332,7 @@ class ResolveNormalIcContextHelperTests(unittest.TestCase):
     """Unit tests for _resolve_normal_ic_context."""
 
     def test_normal_ic_context_delegates_to_prepare_functions(self) -> None:
-        """_resolve_normal_ic_context calls prepare snapshot / mode / route and returns 4-tuple."""
+        """_resolve_normal_ic_context calls prepare snapshot / mode / route and returns _IcResolvedContext."""
         import request_prompt_from_report
         from unittest.mock import MagicMock, patch
 
@@ -2349,12 +2349,13 @@ class ResolveNormalIcContextHelperTests(unittest.TestCase):
             with patch.object(request_prompt_from_report, "_persist_runtime_snapshot_if_needed", return_value=mock_snapshot):
                 with patch.object(request_prompt_from_report, "prepare_issue_centric_runtime_mode", return_value=(mock_mode, mock_section)):
                     with patch.object(request_prompt_from_report, "resolve_issue_centric_route_choice", return_value=mock_route_choice):
-                        snapshot, mode, section, route = request_prompt_from_report._resolve_normal_ic_context(state)
+                        ctx = request_prompt_from_report._resolve_normal_ic_context(state)
 
-        self.assertIs(snapshot, mock_snapshot)
-        self.assertIs(mode, mock_mode)
-        self.assertEqual(section, mock_section)
-        self.assertEqual(route, "issue_centric")
+        self.assertIsInstance(ctx, request_prompt_from_report._IcResolvedContext)
+        self.assertIs(ctx.runtime_snapshot, mock_snapshot)
+        self.assertIs(ctx.runtime_mode, mock_mode)
+        self.assertEqual(ctx.next_request_section, mock_section)
+        self.assertEqual(ctx.route_selected, "issue_centric")
 
 
 class LogPreparedRequestReuseHelperTests(unittest.TestCase):
@@ -2505,7 +2506,7 @@ class AcquireRotatedHandoffHelperCachedPathTests(unittest.TestCase):
     def _invoke(self, state: dict, *, request_source: str = "report:x.md") -> tuple:
         import argparse
 
-        from request_prompt_from_report import _acquire_rotated_handoff
+        from request_prompt_from_report import _acquire_rotated_handoff, _IcResolvedContext
 
         args = argparse.Namespace(
             next_todo="",
@@ -2517,9 +2518,7 @@ class AcquireRotatedHandoffHelperCachedPathTests(unittest.TestCase):
             args,
             "last_report_text",
             request_source=request_source,
-            issue_centric_runtime_snapshot=None,
-            issue_centric_runtime_mode=None,
-            issue_centric_next_request_section="",
+            ic_context=_IcResolvedContext(),
         )
 
     def test_returns_cached_handoff_when_source_matches(self) -> None:
@@ -3308,6 +3307,126 @@ class IcNextRequestStateUpdatesTests(unittest.TestCase):
             self.assertIn(k, result, f"missing key: {k}")
         self.assertEqual(result["last_issue_centric_prepared_generation_id"], "gen-2")
         self.assertEqual(result["last_issue_centric_generation_lifecycle"], "fresh_prepared")
+
+
+class IcResolvedContextDataclassTests(unittest.TestCase):
+    """Tests for _IcResolvedContext dataclass (Phase 30)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def test_default_fields_are_none_and_empty(self):
+        m = self._module()
+        ctx = m._IcResolvedContext()
+        self.assertIsNone(ctx.runtime_snapshot)
+        self.assertIsNone(ctx.runtime_mode)
+        self.assertEqual(ctx.next_request_section, "")
+        self.assertEqual(ctx.route_selected, "")
+
+    def test_fields_settable_by_name(self):
+        m = self._module()
+        sentinel_snapshot = object()
+        sentinel_mode = object()
+        ctx = m._IcResolvedContext(
+            runtime_snapshot=sentinel_snapshot,
+            runtime_mode=sentinel_mode,
+            next_request_section="IC SECTION",
+            route_selected="issue_centric",
+        )
+        self.assertIs(ctx.runtime_snapshot, sentinel_snapshot)
+        self.assertIs(ctx.runtime_mode, sentinel_mode)
+        self.assertEqual(ctx.next_request_section, "IC SECTION")
+        self.assertEqual(ctx.route_selected, "issue_centric")
+
+
+class BuildIcRuntimeModeStateHelperTests(unittest.TestCase):
+    """Tests for _build_ic_runtime_mode_state (Phase 30)."""
+
+    def _call(self, state: dict, snapshot) -> dict:
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m._build_ic_runtime_mode_state(state, snapshot)
+
+    def test_no_snapshot_returns_copy_of_state(self):
+        state = {"mode": "idle", "foo": "bar"}
+        result = self._call(state, None)
+        self.assertEqual(result, state)
+        # must be a copy, not the same object
+        self.assertIsNot(result, state)
+
+    def test_snapshot_overlays_snapshot_fields(self):
+        class _FakeSnap:
+            snapshot_path = "logs/snap.json"
+            snapshot_status = "ready"
+
+        state = {"mode": "idle"}
+        result = self._call(state, _FakeSnap())
+        self.assertEqual(result["last_issue_centric_runtime_snapshot"], "logs/snap.json")
+        self.assertEqual(result["last_issue_centric_snapshot_status"], "ready")
+        # original state keys must still be present
+        self.assertEqual(result["mode"], "idle")
+
+    def test_snapshot_with_empty_path_produces_empty_string(self):
+        class _FakeSnap:
+            snapshot_path = ""
+            snapshot_status = ""
+
+        state: dict = {}
+        result = self._call(state, _FakeSnap())
+        self.assertEqual(result["last_issue_centric_runtime_snapshot"], "")
+        self.assertEqual(result["last_issue_centric_snapshot_status"], "")
+
+    def test_state_not_mutated(self):
+        class _FakeSnap:
+            snapshot_path = "logs/snap.json"
+            snapshot_status = "ok"
+
+        state = {"mode": "idle"}
+        self._call(state, _FakeSnap())
+        self.assertNotIn("last_issue_centric_runtime_snapshot", state)
+
+
+class ResolveNormalIcContextNamedFieldsTests(unittest.TestCase):
+    """Extra tests for _resolve_normal_ic_context — named field contracts (Phase 30)."""
+
+    def _call(self, state: dict):
+        import sys
+        sys.path.insert(0, "scripts")
+        from unittest.mock import MagicMock, patch
+        import request_prompt_from_report as m
+
+        mock_snapshot = MagicMock()
+        mock_snapshot.snapshot_path = "logs/snap.json"
+        mock_snapshot.snapshot_status = "ready"
+        mock_mode = MagicMock()
+        mock_route = MagicMock()
+        mock_route.route_selected = "issue_centric"
+
+        with patch.object(m, "prepare_issue_centric_runtime_snapshot", return_value=(mock_snapshot, None)):
+            with patch.object(m, "_persist_runtime_snapshot_if_needed", return_value=mock_snapshot):
+                with patch.object(m, "prepare_issue_centric_runtime_mode", return_value=(mock_mode, "IC SECTION")):
+                    with patch.object(m, "resolve_issue_centric_route_choice", return_value=mock_route):
+                        ctx = m._resolve_normal_ic_context(state)
+        return ctx, mock_snapshot, mock_mode
+
+    def test_returns_ic_resolved_context_instance(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        ctx, _, _ = self._call({})
+        self.assertIsInstance(ctx, m._IcResolvedContext)
+
+    def test_snapshot_field_matches_persist_result(self):
+        ctx, mock_snapshot, _ = self._call({})
+        self.assertIs(ctx.runtime_snapshot, mock_snapshot)
+
+    def test_route_selected_from_route_choice(self):
+        ctx, _, _ = self._call({})
+        self.assertEqual(ctx.route_selected, "issue_centric")
 
 
 if __name__ == "__main__":
