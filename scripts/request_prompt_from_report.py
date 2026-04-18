@@ -452,32 +452,19 @@ def dispatch_request(
     return 0
 
 
-def _resolve_report_request_ic_context(
+def _resolve_normal_ic_context(
     state: dict[str, object],
 ) -> tuple[object | None, object | None, str, str]:
-    """Resolve issue-centric context for a report-based resume request.
+    """Resolve issue-centric context via the normal snapshot / mode / route path.
+
+    Prepares and persists the runtime snapshot, updates ``runtime_mode_state``
+    with snapshot path/status, then calls ``prepare_issue_centric_runtime_mode``
+    and ``resolve_issue_centric_route_choice``.
 
     Returns ``(snapshot, runtime_mode, next_request_section, route_selected)``.
-
-    Two paths:
-
-    * **Pinned ready issue path** — when ``_should_use_pinned_ready_issue_path(state)``
-      is True, snapshot and runtime_mode are ``None`` and a fresh IC section is built
-      from the pinned ready issue ref.  Old ``last_issue_centric_*`` context is not
-      carried over.
-
-    * **Normal path** — snapshot is prepared and persisted, runtime_mode_state is
-      updated with snapshot fields, then ``prepare_issue_centric_runtime_mode`` and
-      ``resolve_issue_centric_route_choice`` produce the IC section and route.
+    Used by both ``_resolve_report_request_ic_context`` and
+    ``run_rotated_report_request``.
     """
-    if _should_use_pinned_ready_issue_path(state):
-        _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
-        return (
-            None,
-            None,
-            build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref),
-            "issue_centric",
-        )
     issue_centric_runtime_snapshot, _ = prepare_issue_centric_runtime_snapshot(state)
     issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
     runtime_mode_state = dict(state)
@@ -498,6 +485,33 @@ def _resolve_report_request_ic_context(
         issue_centric_next_request_section,
         route_choice.route_selected,
     )
+
+
+def _resolve_report_request_ic_context(
+    state: dict[str, object],
+) -> tuple[object | None, object | None, str, str]:
+    """Resolve issue-centric context for a report-based resume request.
+
+    Returns ``(snapshot, runtime_mode, next_request_section, route_selected)``.
+
+    Two paths:
+
+    * **Pinned ready issue path** — when ``_should_use_pinned_ready_issue_path(state)``
+      is True, snapshot and runtime_mode are ``None`` and a fresh IC section is built
+      from the pinned ready issue ref.  Old ``last_issue_centric_*`` context is not
+      carried over.
+
+    * **Normal path** — delegates to ``_resolve_normal_ic_context``.
+    """
+    if _should_use_pinned_ready_issue_path(state):
+        _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+        return (
+            None,
+            None,
+            build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref),
+            "issue_centric",
+        )
+    return _resolve_normal_ic_context(state)
 
 
 def _resolve_resume_request_payload(
@@ -560,6 +574,39 @@ def _resolve_resume_request_payload(
     return request_text, request_hash, request_source, None
 
 
+def _log_prepared_request_reuse(prepared_status: str, route_selected: str) -> None:
+    """Print the appropriate reuse message for a prepared request.
+
+    Called only when a prepared request is being reused (``prepared_status`` is not
+    ``None``).  Distinguishes the "re-generate skipped" prepared path from the
+    "unsent retry" path, and within the former selects the route-specific wording.
+    """
+    if prepared_status == "prepared":
+        if route_selected == "issue_centric":
+            print("request: issue-centric preferred route の prepared ChatGPT request を再生成せず送信します。")
+        else:
+            print("request: legacy fallback へ寄せた prepared の ChatGPT request を再生成せず送信します。")
+    else:
+        print("request: 前回未送信の ChatGPT request を再送します。")
+
+
+def _is_duplicate_pending_request(state: dict[str, object], request_source: str) -> bool:
+    """Return True when the same request source is already pending.
+
+    Prints the duplicate-detection message (and the pending log path if available)
+    as a side-effect when a duplicate is detected.
+    """
+    if (
+        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
+        and str(state.get("pending_request_source", "")).strip() == request_source
+    ):
+        print("request: 同じ report からの request は送信済みのため再送しませんでした。")
+        if str(state.get("pending_request_log", "")).strip():
+            print(f"pending: {state.get('pending_request_log', '')}")
+        return True
+    return False
+
+
 def run_resume_request(
     state: dict[str, object],
     args: argparse.Namespace,
@@ -596,21 +643,9 @@ def run_resume_request(
         issue_centric_next_request_section=issue_centric_next_request_section,
     )
     if prepared_status is not None:
-        if prepared_status == "prepared":
-            if _route_selected == "issue_centric":
-                print("request: issue-centric preferred route の prepared ChatGPT request を再生成せず送信します。")
-            else:
-                print("request: legacy fallback へ寄せた prepared の ChatGPT request を再生成せず送信します。")
-        else:
-            print("request: 前回未送信の ChatGPT request を再送します。")
+        _log_prepared_request_reuse(prepared_status, _route_selected)
 
-    if (
-        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
-        and str(state.get("pending_request_source", "")).strip() == request_source
-    ):
-        print("request: 同じ report からの request は送信済みのため再送しませんでした。")
-        if str(state.get("pending_request_log", "")).strip():
-            print(f"pending: {state.get('pending_request_log', '')}")
+    if _is_duplicate_pending_request(state, request_source):
         return 0
 
     return dispatch_request(
@@ -634,22 +669,12 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    issue_centric_runtime_snapshot, _ = (
-        prepare_issue_centric_runtime_snapshot(state)
-    )
-    issue_centric_runtime_snapshot = _persist_runtime_snapshot_if_needed(issue_centric_runtime_snapshot)
-    runtime_mode_state = dict(state)
-    if issue_centric_runtime_snapshot is not None:
-        runtime_mode_state.update(
-            {
-                "last_issue_centric_runtime_snapshot": str(getattr(issue_centric_runtime_snapshot, "snapshot_path", "") or "").strip(),
-                "last_issue_centric_snapshot_status": str(getattr(issue_centric_runtime_snapshot, "snapshot_status", "") or "").strip(),
-            }
-        )
-    issue_centric_runtime_mode, issue_centric_next_request_section = prepare_issue_centric_runtime_mode(
-        runtime_mode_state
-    )
-    route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
+    (
+        issue_centric_runtime_snapshot,
+        issue_centric_runtime_mode,
+        issue_centric_next_request_section,
+        _route_selected,
+    ) = _resolve_normal_ic_context(state)
     request_source = build_report_request_source(state, "")
     pending_handoff_text = ""
     pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
