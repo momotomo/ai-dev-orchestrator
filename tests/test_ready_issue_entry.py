@@ -2823,5 +2823,270 @@ class ExecuteReportRequestEntryPlanTests(unittest.TestCase):
         self.assertEqual(call_args[0][3], "")
 
 
+class StagePreparedRequestStateTests(unittest.TestCase):
+    """Tests for _stage_prepared_request_state."""
+
+    def _invoke(self, state: dict, *, status: str = "prepared", snapshot=None) -> None:
+        from request_prompt_from_report import _stage_prepared_request_state
+
+        _stage_prepared_request_state(
+            state,
+            request_hash="HASH",
+            request_source="report:x.md",
+            request_log_rel="bridge/logs/prepared.md",
+            issue_centric_runtime_snapshot=snapshot,
+            status=status,
+        )
+
+    def test_prepared_staging_saves_state(self) -> None:
+        import unittest.mock as mock
+
+        state = {"mode": "idle", "error": "old_error"}
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: {k: v for k, v in d.items() if k != "error"},
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_request_fields",
+        ), mock.patch(
+            "request_prompt_from_report.stage_prepared_request",
+        ) as mock_stage, mock.patch(
+            "request_prompt_from_report.save_state",
+        ) as mock_save:
+            self._invoke(state)
+
+        mock_stage.assert_called_once()
+        call_kwargs = mock_stage.call_args[1]
+        self.assertEqual(call_kwargs["request_hash"], "HASH")
+        self.assertEqual(call_kwargs["request_source"], "report:x.md")
+        self.assertEqual(call_kwargs["status"], "prepared")
+        mock_save.assert_called_once()
+
+    def test_retry_send_status_passed_through(self) -> None:
+        import unittest.mock as mock
+
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: dict(d),
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_request_fields",
+        ), mock.patch(
+            "request_prompt_from_report.stage_prepared_request",
+        ) as mock_stage, mock.patch(
+            "request_prompt_from_report.save_state",
+        ):
+            self._invoke(state, status="retry_send")
+
+        call_kwargs = mock_stage.call_args[1]
+        self.assertEqual(call_kwargs["status"], "retry_send")
+
+    def test_ic_generation_binding_applied_when_snapshot_present(self) -> None:
+        import unittest.mock as mock
+
+        class _FakeSnapshot:
+            snapshot_path = "bridge/ic.json"
+            snapshot_status = "ok"
+            generation_id = "gen-1"
+            runtime_mode = "issue_centric"
+            runtime_mode_reason = ""
+            runtime_mode_source = ""
+            freshness_status = "issue_centric_fresh"
+            freshness_reason = ""
+            freshness_source = ""
+            invalidation_status = ""
+            invalidation_reason = ""
+            target_issue = "#1"
+            target_issue_source = "snapshot"
+            fallback_reason = ""
+            route_selected = "issue_centric"
+            recovery_status = ""
+            recovery_source = ""
+
+        staged_state = {}
+        ic_updates = {"ic_generation_id_prepared": "gen-1"}
+
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: dict(d),
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_request_fields",
+        ), mock.patch(
+            "request_prompt_from_report._issue_centric_next_request_state_updates",
+            return_value=ic_updates,
+        ) as mock_ic, mock.patch(
+            "request_prompt_from_report.stage_prepared_request",
+        ), mock.patch(
+            "request_prompt_from_report.save_state",
+            side_effect=lambda s: staged_state.update(s),
+        ):
+            self._invoke(state={"mode": "idle"}, snapshot=_FakeSnapshot())
+
+        mock_ic.assert_called_once()
+        _call_kwargs = mock_ic.call_args[1]
+        self.assertEqual(_call_kwargs["phase"], "prepared")
+        # The ic updates should be in the saved state
+        self.assertIn("ic_generation_id_prepared", staged_state)
+
+
+class ApplyPendingRequestStateTests(unittest.TestCase):
+    """Tests for _apply_pending_request_state."""
+
+    def _invoke(self, state: dict, *, snapshot=None, success_updates=None) -> None:
+        from request_prompt_from_report import _apply_pending_request_state
+
+        _apply_pending_request_state(
+            state,
+            request_hash="HASH",
+            request_source="report:x.md",
+            request_log_path="bridge/logs/sent.md",
+            issue_centric_runtime_snapshot=snapshot,
+            success_updates=success_updates,
+        )
+
+    def test_pending_state_saved(self) -> None:
+        import unittest.mock as mock
+
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: dict(d),
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_handoff_fields",
+        ), mock.patch(
+            "request_prompt_from_report.promote_pending_request",
+        ) as mock_promote, mock.patch(
+            "request_prompt_from_report.repo_relative",
+            side_effect=lambda x: x,
+        ), mock.patch(
+            "request_prompt_from_report.save_state",
+        ) as mock_save:
+            self._invoke(state)
+
+        mock_promote.assert_called_once()
+        call_kwargs = mock_promote.call_args[1]
+        self.assertEqual(call_kwargs["request_hash"], "HASH")
+        mock_save.assert_called_once()
+
+    def test_success_updates_merged(self) -> None:
+        import unittest.mock as mock
+
+        saved = {}
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: dict(d),
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_handoff_fields",
+        ), mock.patch(
+            "request_prompt_from_report.promote_pending_request",
+        ), mock.patch(
+            "request_prompt_from_report.repo_relative",
+            side_effect=lambda x: x,
+        ), mock.patch(
+            "request_prompt_from_report.save_state",
+            side_effect=lambda s: saved.update(s),
+        ):
+            self._invoke(state, success_updates={"chatgpt_decision": "", "human_review_auto_continue_count": 0})
+
+        self.assertIn("chatgpt_decision", saved)
+        self.assertEqual(saved["human_review_auto_continue_count"], 0)
+
+
+class ApplyRotatedPendingRequestStateTests(unittest.TestCase):
+    """Tests for _apply_rotated_pending_request_state."""
+
+    def _make_rotated_chat(self, **kwargs) -> dict:
+        base = {
+            "url": "https://chat.openai.com/c/test",
+            "title": "Test chat",
+            "signal": "",
+            "github_source_attach_status": "",
+            "github_source_attach_boundary": "",
+            "github_source_attach_detail": "",
+            "github_source_attach_context": "",
+            "github_source_attach_log": "",
+            "request_send_continued_without_github_source": False,
+            "match_kind": "",
+            "matched_hint": "",
+            "project_name": "",
+            "warning": "",
+        }
+        base.update(kwargs)
+        return base
+
+    def _invoke(self, state: dict, *, rotation_signal: str = "", snapshot=None, mode=None) -> None:
+        from request_prompt_from_report import _apply_rotated_pending_request_state
+
+        _apply_rotated_pending_request_state(
+            state,
+            request_hash="HASH",
+            request_source="report:x.md",
+            request_log_path="bridge/logs/sent.md",
+            rotation_signal=rotation_signal,
+            rotated_chat=self._make_rotated_chat(),
+            issue_centric_runtime_snapshot=snapshot,
+            issue_centric_runtime_mode=mode,
+        )
+
+    def test_pending_fields_saved(self) -> None:
+        import unittest.mock as mock
+
+        saved = {}
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: dict(d),
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_request_fields",
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_handoff_fields",
+        ), mock.patch(
+            "request_prompt_from_report.clear_chat_rotation_fields",
+        ), mock.patch(
+            "request_prompt_from_report.repo_relative",
+            side_effect=lambda x: x,
+        ), mock.patch(
+            "request_prompt_from_report.save_state",
+            side_effect=lambda s: saved.update(s),
+        ):
+            self._invoke(state)
+
+        self.assertEqual(saved.get("mode"), "waiting_prompt_reply")
+        self.assertEqual(saved.get("pending_request_hash"), "HASH")
+        self.assertEqual(saved.get("pending_request_source"), "report:x.md")
+        self.assertEqual(saved.get("current_chat_session"), "https://chat.openai.com/c/test")
+
+    def test_ic_generation_binding_applied_when_snapshot_present(self) -> None:
+        import unittest.mock as mock
+
+        class _FakeSnapshot:
+            pass
+
+        ic_updates = {"ic_generation_id_pending": "gen-1"}
+        state = {"mode": "idle"}
+        with mock.patch(
+            "request_prompt_from_report.clear_error_fields",
+            side_effect=lambda d: dict(d),
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_request_fields",
+        ), mock.patch(
+            "request_prompt_from_report.clear_pending_handoff_fields",
+        ), mock.patch(
+            "request_prompt_from_report.clear_chat_rotation_fields",
+        ), mock.patch(
+            "request_prompt_from_report.repo_relative",
+            side_effect=lambda x: x,
+        ), mock.patch(
+            "request_prompt_from_report._issue_centric_next_request_state_updates",
+            return_value=ic_updates,
+        ) as mock_ic, mock.patch(
+            "request_prompt_from_report.save_state",
+        ):
+            snap = _FakeSnapshot()
+            self._invoke(state, snapshot=snap)
+
+        mock_ic.assert_called_once_with(snap, phase="pending")
+
+
 if __name__ == "__main__":
     unittest.main()
