@@ -3684,5 +3684,340 @@ class RotatedRequestPlanTests(unittest.TestCase):
         mock_execute.assert_called_once_with(sentinel_plan)
 
 
+class NeedsStaleHandoffCleanupHelperTests(unittest.TestCase):
+    """Tests for _needs_stale_pending_handoff_cleanup (Phase 32)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def test_returns_false_when_no_pending_handoff_log(self):
+        """Returns False when pending_handoff_log is absent."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {}
+        with mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False):
+            result = m._needs_stale_pending_handoff_cleanup(state)
+        self.assertFalse(result)
+
+    def test_returns_false_when_rotation_still_needed(self):
+        """Returns False when rotation is still required (handoff is not stale)."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"pending_handoff_log": "logs/handoff.md"}
+        with mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=True):
+            result = m._needs_stale_pending_handoff_cleanup(state)
+        self.assertFalse(result)
+
+    def test_returns_true_when_handoff_log_present_and_no_rotation_needed(self):
+        """Returns True when handoff_log present but rotation no longer needed."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"pending_handoff_log": "logs/handoff.md"}
+        with mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False):
+            result = m._needs_stale_pending_handoff_cleanup(state)
+        self.assertTrue(result)
+
+
+class CanReusePendingHandoffForRotationTests(unittest.TestCase):
+    """Tests for _can_reuse_pending_handoff_for_rotation (Phase 32)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def test_returns_false_when_source_mismatch(self):
+        """Returns False when pending_handoff_source does not match request_source."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"pending_handoff_source": "report:other.md"}
+        result = m._can_reuse_pending_handoff_for_rotation(state, "report:current.md")
+        self.assertFalse(result)
+
+    def test_returns_false_when_source_matches_but_no_handoff_text(self):
+        """Returns False when source matches but no handoff text is stored."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"pending_handoff_source": "report:current.md"}
+        with mock.patch.object(m, "read_pending_handoff_text", return_value=""):
+            result = m._can_reuse_pending_handoff_for_rotation(state, "report:current.md")
+        self.assertFalse(result)
+
+    def test_returns_true_when_source_matches_and_handoff_text_present(self):
+        """Returns True when source matches and handoff text is available."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"pending_handoff_source": "report:current.md"}
+        with mock.patch.object(m, "read_pending_handoff_text", return_value="HANDOFF"):
+            result = m._can_reuse_pending_handoff_for_rotation(state, "report:current.md")
+        self.assertTrue(result)
+
+
+class RecoveryDecisionResolverTests(unittest.TestCase):
+    """Tests for _RecoveryDecision and _resolve_recovery_decision (Phase 32)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def test_retryable_request_yields_retryable_resume_path(self):
+        """When retryable_request is set, path is retryable_resume with correct flags."""
+        m = self._module()
+        retryable = ("TEXT", "HASH", "report:x.md")
+        decision = m._resolve_recovery_decision({}, "", retryable)
+
+        self.assertIsInstance(decision, m._RecoveryDecision)
+        self.assertEqual(decision.path, "retryable_resume")
+        self.assertTrue(decision.has_retryable_request)
+        self.assertFalse(decision.is_awaiting_user_stop)
+        self.assertFalse(decision.stale_handoff_cleaned)
+        self.assertFalse(decision.needs_rotation)
+        self.assertIs(decision.retryable_request, retryable)
+
+    def test_awaiting_user_empty_note_yields_awaiting_user_stop(self):
+        """awaiting_user mode + empty resume_note → awaiting_user_stop."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"mode": "awaiting_user"}
+        decision = m._resolve_recovery_decision(state, "", None)
+
+        self.assertEqual(decision.path, "awaiting_user_stop")
+        self.assertTrue(decision.is_awaiting_user_stop)
+        self.assertFalse(decision.has_retryable_request)
+
+    def test_awaiting_user_with_note_yields_awaiting_user_resume(self):
+        """awaiting_user mode + non-empty note → awaiting_user_resume."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {"mode": "awaiting_user"}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=False):
+            decision = m._resolve_recovery_decision(state, "補足メモ", None)
+
+        self.assertEqual(decision.path, "awaiting_user_resume")
+        self.assertFalse(decision.is_awaiting_user_stop)
+        self.assertEqual(decision.resume_note, "補足メモ")
+
+    def test_stale_handoff_is_cleaned_before_path_selection(self):
+        """stale_handoff_cleaned is True when cleanup runs; state is updated."""
+        import unittest.mock as mock
+        m = self._module()
+        cleaned_state: dict = {"mode": "idle", "_cleaned": True}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed", return_value=cleaned_state) as mock_clean, \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False):
+            decision = m._resolve_recovery_decision({"mode": "idle"}, "", None)
+
+        self.assertTrue(decision.stale_handoff_cleaned)
+        mock_clean.assert_called_once()
+        self.assertIs(decision.state, cleaned_state)
+
+    def test_rotation_needed_yields_rotated_path(self):
+        """should_rotate_before_next_chat_request True → rotated path."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=False), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=True):
+            decision = m._resolve_recovery_decision({"mode": "idle"}, "", None)
+
+        self.assertEqual(decision.path, "rotated")
+        self.assertTrue(decision.needs_rotation)
+
+    def test_default_yields_normal_resume_path(self):
+        """No special conditions → normal_resume path."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=False), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False):
+            decision = m._resolve_recovery_decision({"mode": "idle"}, "", None)
+
+        self.assertEqual(decision.path, "normal_resume")
+        self.assertFalse(decision.needs_rotation)
+        self.assertFalse(decision.stale_handoff_cleaned)
+
+    def test_stale_not_cleaned_for_retryable_path(self):
+        """stale_handoff_cleaned stays False on retryable_resume — no cleanup runs."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup") as mock_check:
+            decision = m._resolve_recovery_decision({}, "", ("T", "H", "S"))
+
+        mock_check.assert_not_called()
+        self.assertFalse(decision.stale_handoff_cleaned)
+
+
+class RecoveryPathIntegrationTests(unittest.TestCase):
+    """Integration tests confirming recovery safety at the run() / entry-plan level (Phase 32)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def _make_args(self):
+        import argparse
+        args = argparse.Namespace()
+        args.next_todo = ""
+        args.open_questions = ""
+        args.current_status = None
+        args.resume_note = ""
+        return args
+
+    def test_retryable_yields_retryable_resume_entry_plan(self):
+        """Retryable prepared request → entry plan path is retryable_resume."""
+        import unittest.mock as mock
+        m = self._module()
+        retryable = ("TEXT", "HASH", "report:x.md")
+        with mock.patch.object(m, "load_retryable_prepared_request", return_value=retryable), \
+             mock.patch.object(m, "read_last_report_text", return_value="last report"):
+            plan = m._resolve_report_request_entry_plan({"mode": "idle"}, self._make_args())
+
+        self.assertEqual(plan.path, "retryable_resume")
+        self.assertIs(plan.retryable_request, retryable)
+
+    def test_awaiting_user_empty_input_yields_stop_plan(self):
+        """awaiting_user + empty note → awaiting_user_stop plan (does not dispatch)."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "load_retryable_prepared_request", return_value=None), \
+             mock.patch.object(m, "resolve_resume_note", return_value=""):
+            plan = m._resolve_report_request_entry_plan({"mode": "awaiting_user"}, self._make_args())
+
+        self.assertEqual(plan.path, "awaiting_user_stop")
+        self.assertEqual(plan.last_report, "")  # no report read for stop path
+
+    def test_stale_handoff_cleaned_in_normal_resume_path(self):
+        """Stale pending handoff is cleaned when normal_resume path is chosen."""
+        import unittest.mock as mock
+        m = self._module()
+        cleaned: dict = {"mode": "idle", "_cleaned": True}
+        with mock.patch.object(m, "load_retryable_prepared_request", return_value=None), \
+             mock.patch.object(m, "resolve_resume_note", return_value=""), \
+             mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed", return_value=cleaned), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False), \
+             mock.patch.object(m, "read_last_report_text", return_value=""):
+            plan = m._resolve_report_request_entry_plan({"mode": "idle"}, self._make_args())
+
+        self.assertEqual(plan.path, "normal_resume")
+        self.assertIs(plan.state, cleaned)
+
+    def test_matching_pending_handoff_reused_in_rotated_path(self):
+        """Matching pending_handoff_source → rotated path uses cached handoff."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_can_reuse_pending_handoff_for_rotation", return_value=True), \
+             mock.patch.object(m, "read_pending_handoff_text", return_value="CACHED HANDOFF"):
+            state = {"pending_handoff_source": "report:x.md"}
+            import argparse
+            args = argparse.Namespace(next_todo="", open_questions="", current_status=None)
+            handoff_text, handoff_log = m._acquire_rotated_handoff(
+                state, args, "",
+                request_source="report:x.md",
+                ic_context=m._IcResolvedContext(),
+            )
+
+        self.assertEqual(handoff_text, "CACHED HANDOFF")
+
+    def test_non_matching_pending_handoff_triggers_fresh_acquisition(self):
+        """Non-matching pending_handoff_source → fresh handoff acquisition path."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_can_reuse_pending_handoff_for_rotation", return_value=False), \
+             mock.patch.object(m, "build_chatgpt_handoff_request", return_value="HANDOFF_REQ"), \
+             mock.patch.object(m, "log_text", return_value="logs/handoff_req.md"), \
+             mock.patch.object(m, "send_to_chatgpt"), \
+             mock.patch.object(m, "wait_for_handoff_reply_text", return_value="RAW"), \
+             mock.patch.object(m, "extract_last_chatgpt_handoff", return_value="FRESH HANDOFF"), \
+             mock.patch.object(m, "stable_text_hash", return_value="HASH"), \
+             mock.patch.object(m, "clear_error_fields", side_effect=lambda s: s), \
+             mock.patch.object(m, "clear_pending_request_fields"), \
+             mock.patch.object(m, "save_state"), \
+             mock.patch.object(m, "repo_relative", return_value="logs/r.md"):
+            import argparse
+            args = argparse.Namespace(next_todo="", open_questions="", current_status=None)
+            handoff_text, _ = m._acquire_rotated_handoff(
+                {}, args, "",
+                request_source="report:other.md",
+                ic_context=m._IcResolvedContext(),
+            )
+
+        self.assertEqual(handoff_text, "FRESH HANDOFF")
+
+    def test_duplicate_pending_request_not_dispatched(self):
+        """duplicate pending request → _execute_resume_request_plan returns 0 without dispatch."""
+        import unittest.mock as mock
+        m = self._module()
+        plan = m._ResumeRequestPlan(
+            state={"mode": "waiting_prompt_reply", "pending_request_source": "report:x.md"},
+            args=self._make_args(),
+            last_report="",
+            resume_note="",
+            ic_context=m._IcResolvedContext(),
+            effective_section="",
+            effective_next_todo="",
+            effective_open_questions="",
+            request_text="TEXT",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_status=None,
+        )
+        with mock.patch.object(m, "_is_duplicate_pending_request", return_value=True), \
+             mock.patch.object(m, "dispatch_request") as mock_dispatch:
+            result = m._execute_resume_request_plan(plan)
+
+        self.assertEqual(result, 0)
+        mock_dispatch.assert_not_called()
+
+    def test_resume_dispatch_not_blocked_when_no_duplicate(self):
+        """Non-duplicate pending request → dispatch_request is called."""
+        import unittest.mock as mock
+        m = self._module()
+        plan = m._ResumeRequestPlan(
+            state={"mode": "idle"},
+            args=self._make_args(),
+            last_report="",
+            resume_note="",
+            ic_context=m._IcResolvedContext(),
+            effective_section="",
+            effective_next_todo="",
+            effective_open_questions="",
+            request_text="TEXT",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_status=None,
+        )
+        with mock.patch.object(m, "_is_duplicate_pending_request", return_value=False), \
+             mock.patch.object(m, "dispatch_request", return_value=0) as mock_dispatch:
+            m._execute_resume_request_plan(plan)
+
+        mock_dispatch.assert_called_once()
+
+    def test_rotated_execute_delegates_to_apply_rotated_result(self):
+        """_execute_rotated_request_plan always delegates to _apply_rotated_request_result."""
+        import unittest.mock as mock
+        m = self._module()
+        ic = m._IcResolvedContext()
+        plan = m._RotatedRequestPlan(
+            state={},
+            last_report="",
+            request_source="report:x.md",
+            ic_context=ic,
+            handoff_text="HANDOFF",
+            handoff_received_log="logs/h.md",
+        )
+        with mock.patch.object(m, "_apply_rotated_request_result", return_value=0) as mock_apply:
+            result = m._execute_rotated_request_plan(plan)
+
+        self.assertEqual(result, 0)
+        mock_apply.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
