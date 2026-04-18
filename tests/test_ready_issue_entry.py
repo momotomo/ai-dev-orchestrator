@@ -5450,5 +5450,300 @@ class IcFinalContinuationContractTests(unittest.TestCase):
         self.assertEqual(final.close_order, ctx.close_order)
 
 
+class RunLevelLifecycleIntegrationTests(unittest.TestCase):
+    """Phase 38 — run-level lifecycle integration hardening.
+
+    Verifies that the final continuation contract saved by execution is
+    correctly consumed by the next cycle's run-level helpers:
+
+    * completion followup section building
+    * priority chain target resolution
+    * recovery decision path selection
+    * duplicate pending request guard
+    * stale handoff cleanup consistency
+    * resume plan integration
+    """
+
+    def _module(self):
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("request_prompt_from_report")
+
+    def _make_args(self, *, next_todo="", open_questions="", current_status=None, resume_note=""):
+        import argparse
+        args = argparse.Namespace()
+        args.next_todo = next_todo
+        args.open_questions = open_questions
+        args.current_status = current_status
+        args.resume_note = resume_note
+        return args
+
+    def _eligible_ic_state(self, *, next_request_target="https://github.com/org/repo/issues/10"):
+        """Build a state dict representing a final continuation contract that makes
+        completion followup eligible."""
+        return {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_next_request_target": next_request_target,
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/9",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/8",
+        }
+
+    def _eligible_report_text(self):
+        """Minimal report body that satisfies completion followup eligibility."""
+        return "- result: completed\n- live_ready: confirmed\n"
+
+    # ------------------------------------------------------------------
+    # Group 1: completion followup section building with final contract state
+    # ------------------------------------------------------------------
+
+    def test_completion_followup_eligible_state_builds_section(self):
+        """Eligible IC state + eligible report → section is built and contains target."""
+        m = self._module()
+        state = self._eligible_ic_state()
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        self.assertIn("issue_centric_completion_followup", section)
+        self.assertIn("https://github.com/org/repo/issues/10", section)
+
+    def test_completion_followup_target_explicit_next_request_target_wins(self):
+        """Explicit next_request_target → used as target_issue in followup section."""
+        m = self._module()
+        state = self._eligible_ic_state(next_request_target="https://github.com/org/repo/issues/42")
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        self.assertIn("issues/42", section)
+        # The explicit target line should not contain issues/10 (principal) or issues/9 (resolved)
+        target_line = [ln for ln in section.splitlines() if "target_issue:" in ln][0]
+        self.assertIn("42", target_line)
+
+    def test_completion_followup_target_principal_fallback_when_no_explicit_target(self):
+        """`next_request_target` empty → principal_issue becomes the followup target."""
+        m = self._module()
+        state = self._eligible_ic_state(next_request_target="")
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        target_line = [ln for ln in section.splitlines() if "target_issue:" in ln][0]
+        self.assertIn("issues/10", target_line)
+
+    def test_completion_followup_target_resolved_issue_fallback(self):
+        """`next_request_target` and `principal_issue` empty → resolved_issue becomes target."""
+        m = self._module()
+        state = self._eligible_ic_state(next_request_target="")
+        state["last_issue_centric_principal_issue"] = ""
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        target_line = [ln for ln in section.splitlines() if "target_issue:" in ln][0]
+        self.assertIn("issues/9", target_line)
+
+    def test_completion_followup_target_target_issue_last_resort(self):
+        """All higher-priority fields empty → target_issue used as last resort."""
+        m = self._module()
+        state = self._eligible_ic_state(next_request_target="")
+        state["last_issue_centric_principal_issue"] = ""
+        state["last_issue_centric_resolved_issue"] = ""
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        target_line = [ln for ln in section.splitlines() if "target_issue:" in ln][0]
+        self.assertIn("issues/8", target_line)
+
+    def test_no_action_state_not_eligible_for_completion_followup(self):
+        """action=no_action → _build_completion_followup_section returns empty."""
+        m = self._module()
+        state = self._eligible_ic_state()
+        state["last_issue_centric_action"] = "no_action"
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        self.assertEqual(section, "")
+
+    def test_issue_create_action_not_eligible_for_completion_followup(self):
+        """action=issue_create → _build_completion_followup_section returns empty."""
+        m = self._module()
+        state = self._eligible_ic_state()
+        state["last_issue_centric_action"] = "issue_create"
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        self.assertEqual(section, "")
+
+    def test_non_current_issue_kind_not_eligible_for_completion_followup(self):
+        """principal_issue_kind != current_issue → not eligible, empty section."""
+        m = self._module()
+        state = self._eligible_ic_state()
+        state["last_issue_centric_principal_issue_kind"] = "parent_issue"
+        section = m._build_completion_followup_section(state, self._eligible_report_text())
+        self.assertEqual(section, "")
+
+    # ------------------------------------------------------------------
+    # Group 2: _resolve_completion_followup_request at run-level
+    # ------------------------------------------------------------------
+
+    def test_resolve_completion_followup_non_ic_route_returns_original(self):
+        """Non IC route → _resolve_completion_followup_request returns original params."""
+        m = self._module()
+        orig_section, orig_todo, orig_q = "SECTION", "TODO", "QUESTIONS"
+        result = m._resolve_completion_followup_request(
+            {},
+            last_report="",
+            issue_centric_next_request_section=orig_section,
+            route_selected="legacy",
+            next_todo=orig_todo,
+            open_questions=orig_q,
+        )
+        self.assertEqual(result, (orig_section, orig_todo, orig_q))
+
+    def test_resolve_completion_followup_eligible_overrides_section_and_todo(self):
+        """IC route + eligible state → section merged, todo overridden."""
+        import unittest.mock as mock
+        m = self._module()
+        state = self._eligible_ic_state()
+        with mock.patch.object(
+            m, "_build_completion_followup_section",
+            return_value="## issue_centric_completion_followup\n- target: X",
+        ):
+            result_section, result_todo, result_q = m._resolve_completion_followup_request(
+                state,
+                last_report=self._eligible_report_text(),
+                issue_centric_next_request_section="ORIGINAL_SECTION",
+                route_selected="issue_centric",
+                next_todo="ORIGINAL_TODO",
+                open_questions="ORIGINAL_Q",
+            )
+        self.assertIn("issue_centric_completion_followup", result_section)
+        self.assertIn("ORIGINAL_SECTION", result_section)
+        self.assertNotEqual(result_todo, "ORIGINAL_TODO")
+
+    def test_resolve_completion_followup_empty_section_keeps_original(self):
+        """IC route + ineligible (empty section) → original params returned unchanged."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_build_completion_followup_section", return_value=""):
+            result_section, result_todo, result_q = m._resolve_completion_followup_request(
+                {},
+                last_report="",
+                issue_centric_next_request_section="ORIG",
+                route_selected="issue_centric",
+                next_todo="TODO",
+                open_questions="Q",
+            )
+        self.assertEqual(result_section, "ORIG")
+        self.assertEqual(result_todo, "TODO")
+        self.assertEqual(result_q, "Q")
+
+    # ------------------------------------------------------------------
+    # Group 3: recovery decision + run-level lifecycle with IC state
+    # ------------------------------------------------------------------
+
+    def test_awaiting_user_resume_path_with_ic_continuation_state(self):
+        """awaiting_user + non-empty note → awaiting_user_resume (IC state does not block)."""
+        m = self._module()
+        state = {**self._eligible_ic_state(), "mode": "awaiting_user"}
+        decision = m._resolve_recovery_decision(state, "my note here", None)
+        self.assertEqual(decision.path, "awaiting_user_resume")
+        self.assertEqual(decision.resume_note, "my note here")
+        # IC fields still present in decision state
+        self.assertEqual(
+            decision.state.get("last_issue_centric_action"), "codex_run"
+        )
+
+    def test_retryable_resume_takes_priority_over_ic_continuation_state(self):
+        """IC continuation state present + retryable request → retryable_resume wins."""
+        m = self._module()
+        state = {**self._eligible_ic_state(), "mode": "idle"}
+        retryable = ("TEXT", "HASH", "report:x.md")
+        decision = m._resolve_recovery_decision(state, "", retryable)
+        self.assertEqual(decision.path, "retryable_resume")
+        self.assertIs(decision.retryable_request, retryable)
+
+    def test_duplicate_pending_guard_not_broken_by_ic_state(self):
+        """IC continuation state + same pending_request_source → duplicate guard returns True."""
+        m = self._module()
+        state = {
+            **self._eligible_ic_state(),
+            "mode": "waiting_prompt_reply",
+            "pending_request_source": "report:x.md",
+        }
+        result = m._is_duplicate_pending_request(state, "report:x.md")
+        self.assertTrue(result)
+
+    def test_stale_handoff_cleanup_consistent_with_ic_continuation_state(self):
+        """IC continuation state + stale handoff → cleanup proceeds, IC fields preserved."""
+        import unittest.mock as mock
+        m = self._module()
+        base_state = {
+            **self._eligible_ic_state(),
+            "mode": "idle",
+            "pending_handoff_log": "logs/h.md",
+        }
+        cleaned = {k: v for k, v in base_state.items() if k != "pending_handoff_log"}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed", return_value=cleaned), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False):
+            decision = m._resolve_recovery_decision(base_state, "", None)
+        self.assertEqual(decision.path, "normal_resume")
+        self.assertTrue(decision.stale_handoff_cleaned)
+        # IC fields survive cleanup
+        self.assertEqual(decision.state.get("last_issue_centric_action"), "codex_run")
+        self.assertNotIn("pending_handoff_log", decision.state)
+
+    def test_normal_resume_ic_state_does_not_require_rotation(self):
+        """Eligible IC state in normal mode → normal_resume (no rotation triggered)."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {**self._eligible_ic_state(), "mode": "idle"}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=False), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False):
+            decision = m._resolve_recovery_decision(state, "", None)
+        self.assertEqual(decision.path, "normal_resume")
+
+    # ------------------------------------------------------------------
+    # Group 4: resume plan level integration
+    # ------------------------------------------------------------------
+
+    def test_resolve_resume_request_plan_completion_followup_overrides_todo(self):
+        """_resolve_resume_request_plan: eligible IC state → effective_next_todo overridden."""
+        import unittest.mock as mock
+        m = self._module()
+        state = self._eligible_ic_state()
+        args = self._make_args()
+        ic_ctx = m._IcResolvedContext(
+            runtime_snapshot=None,
+            runtime_mode=None,
+            next_request_section="SECTION",
+            route_selected="issue_centric",
+        )
+        with mock.patch.object(m, "_resolve_report_request_ic_context", return_value=ic_ctx), \
+             mock.patch.object(
+                 m, "_build_completion_followup_section",
+                 return_value="## issue_centric_completion_followup\n- target: X",
+             ), \
+             mock.patch.object(
+                 m, "_resolve_resume_request_payload",
+                 return_value=("TEXT", "HASH", "SRC", None),
+             ):
+            plan = m._resolve_resume_request_plan(state, args, "report text", "", None)
+        # Completion followup section is merged into effective_section
+        self.assertIn("issue_centric_completion_followup", plan.effective_section)
+        # next_todo overridden by completion wording (not original empty)
+        self.assertNotEqual(plan.effective_next_todo, "")
+
+    def test_resolve_resume_request_plan_ineligible_keeps_original_section(self):
+        """_resolve_resume_request_plan: ineligible → effective_section and todo unchanged."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {"last_issue_centric_action": "no_action"}
+        args = self._make_args()
+        ic_ctx = m._IcResolvedContext(
+            runtime_snapshot=None,
+            runtime_mode=None,
+            next_request_section="ORIGINAL",
+            route_selected="issue_centric",
+        )
+        with mock.patch.object(m, "_resolve_report_request_ic_context", return_value=ic_ctx), \
+             mock.patch.object(m, "_build_completion_followup_section", return_value=""), \
+             mock.patch.object(
+                 m, "_resolve_resume_request_payload",
+                 return_value=("TEXT", "HASH", "SRC", None),
+             ):
+            plan = m._resolve_resume_request_plan(state, args, "", "", None)
+        self.assertEqual(plan.effective_section, "ORIGINAL")
+        self.assertEqual(plan.effective_next_todo, "")
+
+
 if __name__ == "__main__":
     unittest.main()
