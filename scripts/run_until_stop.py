@@ -407,6 +407,30 @@ def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]
     return recommended_operator_step(args, final_state)[1]
 
 
+def _build_ic_initial_selection_stop_note(state: dict[str, Any]) -> str | None:
+    """Return an operator-facing note for initial_selection_stop, or None if not applicable.
+
+    Fires when ChatGPT selected a ready issue (selected_ready_issue_ref set) and
+    the chatgpt_decision is an issue_centric: value, indicating that the operator
+    must re-run with --ready-issue-ref to continue.
+
+    Returns the chatgpt_decision_note when available (set by Phase 42's
+    _build_ic_operator_decision_note), otherwise a fallback Japanese sentence.
+    Returns None for any state that does not match the initial_selection_stop pattern.
+    """
+    selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not selected_ref or not chatgpt_decision.startswith("issue_centric:"):
+        return None
+    note = str(state.get("chatgpt_decision_note", "")).strip()
+    if note:
+        return note
+    return (
+        f"ChatGPT が ready issue {selected_ref} を選定しました。"
+        " --ready-issue-ref でその issue を指定して bridge を再実行してください。"
+    )
+
+
 def suggested_next_note(final_state: dict[str, Any]) -> str:
     """Return the suggested next note for the operator.
 
@@ -458,6 +482,10 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "dispatch_issue_centric_codex_run":
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
         if note:
+            # Avoid duplicating the dispatch guidance when the note already contains it
+            # (Phase 42 _build_ic_operator_decision_note already embeds "bridge を再実行すると").
+            if "bridge を再実行すると" in note:
+                return note
             return f"{note} bridge を再実行すると issue-centric codex_run dispatch を進めます。"
         return "prepared Codex body は保存済みです。bridge を再実行すると issue-centric codex_run dispatch を進めます。"
     if action == "launch_codex_once":
@@ -472,6 +500,11 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         return "report はそろっているので、archive と次 request へ進めるため再実行してください。"
     if action == "request_prompt_from_report":
         _lc = bridge_lifecycle_sync_suffix(final_state)
+        # initial_selection_stop: ChatGPT selected a ready issue; use IC-specific note
+        # rather than the generic "Safari の current tab" guidance.
+        _ic_sel_note = _build_ic_initial_selection_stop_note(final_state)
+        if _ic_sel_note is not None:
+            return _ic_sel_note
         if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
             base = (
                 "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"

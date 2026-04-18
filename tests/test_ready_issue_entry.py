@@ -6960,5 +6960,168 @@ class IcOperatorLifecycleStatusTests(unittest.TestCase):
         )
 
 
+class IcRunUntilStopHandoffSummaryTests(unittest.TestCase):
+    """Phase 43 — run_until_stop operator-facing lifecycle summary / handoff summary 整流.
+
+    Verifies that IC-specific stop patterns produce operator-appropriate guidance
+    in suggested_next_note(), _build_ic_initial_selection_stop_note(), and
+    present_bridge_handoff().
+
+    Group 1: _build_ic_initial_selection_stop_note() unit tests (3 tests)
+    Group 2: suggested_next_note() for IC stop patterns (3 tests)
+    Group 3: present_bridge_handoff() for IC stop patterns (4 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _rus(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("run_until_stop")
+
+    def _initial_selection_stop_state(self, *, with_note: bool = True) -> dict:
+        state: dict = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "#7",
+            "error": False,
+        }
+        if with_note:
+            state["chatgpt_decision_note"] = (
+                "ChatGPT が ready issue #7 を選定しました。"
+                " --ready-issue-ref でその issue を指定して bridge を再実行してください。"
+            )
+        return state
+
+    def _codex_run_stop_state(self, *, with_note: bool = True) -> dict:
+        state: dict = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:codex_run",
+            "last_issue_centric_artifact_kind": "codex_body",
+            "last_issue_centric_metadata_log": "logs/metadata.md",
+            "need_codex_run": False,
+            "last_issue_centric_execution_status": "",
+            "error": False,
+        }
+        if with_note:
+            state["chatgpt_decision_note"] = (
+                "ChatGPT が Codex 実行指示 (#20) を返しました。"
+                " prepared Codex body は保存済みです。"
+                " bridge を再実行すると issue-centric codex_run dispatch を進めます。"
+            )
+        return state
+
+    def _legacy_contract_detected_state(self) -> dict:
+        return {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "legacy_contract_detected",
+            "error": True,
+            "error_message": "Legacy reply detected. Re-send with issue-centric contract.",
+        }
+
+    # ------------------------------------------------------------------
+    # Group 1: _build_ic_initial_selection_stop_note() unit tests (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_build_ic_initial_selection_stop_note_returns_decision_note(self):
+        """IC selection stop state with chatgpt_decision_note → returns the note as-is."""
+        rus = self._rus()
+        state = self._initial_selection_stop_state(with_note=True)
+        result = rus._build_ic_initial_selection_stop_note(state)
+        self.assertIsNotNone(result)
+        self.assertIn("ready issue", result)
+        self.assertIn("--ready-issue-ref", result)
+        self.assertIn("#7", result)
+
+    def test_build_ic_initial_selection_stop_note_returns_fallback_without_note(self):
+        """IC selection stop without chatgpt_decision_note → fallback sentence includes ref."""
+        rus = self._rus()
+        state = self._initial_selection_stop_state(with_note=False)
+        result = rus._build_ic_initial_selection_stop_note(state)
+        self.assertIsNotNone(result)
+        self.assertIn("#7", result)
+        self.assertIn("--ready-issue-ref", result)
+
+    def test_build_ic_initial_selection_stop_note_returns_none_without_ref(self):
+        """State without selected_ready_issue_ref → returns None (not an IC selection stop)."""
+        rus = self._rus()
+        state = {
+            "mode": "waiting_prompt_reply",
+            "chatgpt_decision": "issue_centric:no_action",
+            "chatgpt_decision_note": "some note",
+        }
+        result = rus._build_ic_initial_selection_stop_note(state)
+        self.assertIsNone(result)
+
+    # ------------------------------------------------------------------
+    # Group 2: suggested_next_note() for IC stop patterns (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_suggested_next_note_initial_selection_stop_uses_decision_note(self):
+        """suggested_next_note for initial_selection_stop → chatgpt_decision_note, not generic Safari text."""
+        rus = self._rus()
+        state = self._initial_selection_stop_state(with_note=True)
+        with patch.object(rus, "resolve_unified_next_action", return_value="request_prompt_from_report"):
+            note = rus.suggested_next_note(state)
+        self.assertIn("ready issue", note)
+        self.assertIn("--ready-issue-ref", note)
+        self.assertNotIn("Safari", note)
+
+    def test_suggested_next_note_codex_run_stop_no_duplicate_bridge_suffix(self):
+        """chatgpt_decision_note already has 'bridge を再実行すると' → no duplicate suffix added."""
+        rus = self._rus()
+        state = self._codex_run_stop_state(with_note=True)
+        with patch.object(rus, "resolve_unified_next_action", return_value="dispatch_issue_centric_codex_run"):
+            note = rus.suggested_next_note(state)
+        count = note.count("bridge を再実行すると")
+        self.assertEqual(count, 1, f"Expected exactly 1 occurrence, got {count} in: {note!r}")
+
+    def test_suggested_next_note_codex_run_stop_without_note_gets_suffix(self):
+        """Empty chatgpt_decision_note for codex_run_stop → fallback text includes dispatch guidance."""
+        rus = self._rus()
+        state = self._codex_run_stop_state(with_note=False)
+        with patch.object(rus, "resolve_unified_next_action", return_value="dispatch_issue_centric_codex_run"):
+            note = rus.suggested_next_note(state)
+        self.assertIn("prepared Codex body", note)
+        self.assertIn("bridge を再実行すると", note)
+
+    # ------------------------------------------------------------------
+    # Group 3: present_bridge_handoff() for IC stop patterns (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_present_bridge_handoff_initial_selection_stop_specific_title(self):
+        """initial_selection_stop → handoff title explicitly mentions ready issue and --ready-issue-ref."""
+        state = self._initial_selection_stop_state(with_note=True)
+        handoff = _bridge_common.present_bridge_handoff(state)
+        self.assertIn("ready issue", handoff.title)
+        self.assertIn("--ready-issue-ref", handoff.title)
+        self.assertIn("#7", handoff.title)
+
+    def test_present_bridge_handoff_initial_selection_stop_detail_from_note(self):
+        """initial_selection_stop → handoff detail uses chatgpt_decision_note content."""
+        state = self._initial_selection_stop_state(with_note=True)
+        handoff = _bridge_common.present_bridge_handoff(state)
+        self.assertIn("--ready-issue-ref", handoff.detail)
+        self.assertIn("#7", handoff.detail)
+
+    def test_present_bridge_handoff_legacy_contract_detected_uses_error_branch(self):
+        """legacy_contract_detected sets error=True → error branch fires, title is 異常."""
+        state = self._legacy_contract_detected_state()
+        handoff = _bridge_common.present_bridge_handoff(state)
+        self.assertIn("異常", handoff.title)
+        self.assertNotIn("完了", handoff.title)
+        self.assertNotIn("選定", handoff.title)
+
+    def test_present_bridge_handoff_codex_run_stop_codex_ready_title(self):
+        """codex_run_stop → Codex 準備完了の title, not error, not selection-stop."""
+        state = self._codex_run_stop_state(with_note=True)
+        handoff = _bridge_common.present_bridge_handoff(state)
+        self.assertNotIn("異常", handoff.title)
+        self.assertNotIn("--ready-issue-ref", handoff.title)
+        self.assertIn("Codex", handoff.title)
+
+
 if __name__ == "__main__":
     unittest.main()
