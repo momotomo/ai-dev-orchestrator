@@ -1947,6 +1947,126 @@ def _run_current_issue_project_state_sync(
     return sync_execution
 
 
+@dataclass(frozen=True)
+class _IcContinuationPayload:
+    """Normalized next-cycle continuation fields collected from execution state.
+
+    Built by :func:`_build_ic_continuation_payload` after all
+    ``_apply_*_execution_state`` helpers and ``_finalize_dispatch`` have
+    written their ``last_issue_centric_*`` fields.  Provides a single named
+    view of everything the next request cycle will receive, making
+    action-specific provenance explicit and testable without coupling callers
+    to raw key strings.
+
+    **Shared with** :class:`request_prompt_from_report._IcNextCycleContext` —
+    the fields below that are also present in ``_IcNextCycleContext`` map to
+    the same ``last_issue_centric_*`` state keys, so the priority chain
+    ``resolved_next_request_target`` on the request side reads exactly what
+    execution writes here.
+
+    **Action-specific provenance**:
+
+    * ``issue_create``  → ``created_issue_url`` / ``created_issue_number``
+      are set; ``principal_issue`` is promoted from the created issue by
+      ``_finalize_dispatch`` via the normalized summary.
+    * ``codex_run``     → ``resolved_issue`` carries the closed/resolved
+      issue URL; ``principal_issue`` is the issue that was being worked on.
+    * ``human_review_needed`` → ``resolved_issue`` carries the review target.
+    * follow-up combo  → ``followup_issue_url`` / ``followup_issue_number``
+      are set; ``next_request_target`` is expected to point to the follow-up.
+    * ``close_current_issue`` → ``close_order`` is non-empty.
+    * ``no_action``    → only ``next_request_hint`` / ``next_request_target``
+      carry useful signal; action-specific issue fields are typically empty.
+    """
+
+    # --- from _finalize_dispatch / normalized_summary ---
+    principal_issue: str          # last_issue_centric_principal_issue
+    principal_issue_kind: str     # last_issue_centric_principal_issue_kind
+    next_request_hint: str        # last_issue_centric_next_request_hint
+    # --- from _finalize_dispatch / runtime_snapshot ---
+    next_request_target: str           # last_issue_centric_next_request_target
+    next_request_target_source: str    # last_issue_centric_next_request_target_source
+    # --- from dispatch entry (set before _apply_*) ---
+    action: str                   # last_issue_centric_action
+    target_issue: str             # last_issue_centric_target_issue
+    # --- from codex_run / review _apply_* helpers ---
+    resolved_issue: str           # last_issue_centric_resolved_issue
+    # --- from issue_create / followup _apply_* helpers ---
+    created_issue_number: str     # last_issue_centric_created_issue_number
+    created_issue_url: str        # last_issue_centric_created_issue_url
+    # --- from followup _apply_* helper only ---
+    followup_issue_number: str    # last_issue_centric_followup_issue_number
+    followup_issue_url: str       # last_issue_centric_followup_issue_url
+    followup_parent_issue: str    # last_issue_centric_followup_parent_issue
+    # --- from close _apply_* helper ---
+    close_order: str              # last_issue_centric_close_order
+    # --- general ---
+    execution_status: str         # last_issue_centric_execution_status
+    stop_reason: str              # last_issue_centric_stop_reason
+
+
+def _build_ic_continuation_payload(state: dict[str, object]) -> _IcContinuationPayload:
+    """Build an :class:`_IcContinuationPayload` from execution state.
+
+    Should be called *after* all ``_apply_*_execution_state`` helpers and
+    ``_finalize_dispatch`` have written their ``last_issue_centric_*`` fields.
+    All values are stripped strings; missing keys yield empty strings.
+    """
+    return _IcContinuationPayload(
+        principal_issue=str(state.get("last_issue_centric_principal_issue", "")).strip(),
+        principal_issue_kind=str(state.get("last_issue_centric_principal_issue_kind", "")).strip(),
+        next_request_hint=str(state.get("last_issue_centric_next_request_hint", "")).strip(),
+        next_request_target=str(state.get("last_issue_centric_next_request_target", "")).strip(),
+        next_request_target_source=str(state.get("last_issue_centric_next_request_target_source", "")).strip(),
+        action=str(state.get("last_issue_centric_action", "")).strip(),
+        target_issue=str(state.get("last_issue_centric_target_issue", "")).strip(),
+        resolved_issue=str(state.get("last_issue_centric_resolved_issue", "")).strip(),
+        created_issue_number=str(state.get("last_issue_centric_created_issue_number", "")).strip(),
+        created_issue_url=str(state.get("last_issue_centric_created_issue_url", "")).strip(),
+        followup_issue_number=str(state.get("last_issue_centric_followup_issue_number", "")).strip(),
+        followup_issue_url=str(state.get("last_issue_centric_followup_issue_url", "")).strip(),
+        followup_parent_issue=str(state.get("last_issue_centric_followup_parent_issue", "")).strip(),
+        close_order=str(state.get("last_issue_centric_close_order", "")).strip(),
+        execution_status=str(state.get("last_issue_centric_execution_status", "")).strip(),
+        stop_reason=str(state.get("last_issue_centric_stop_reason", "")).strip(),
+    )
+
+
+def _apply_ic_continuation_fields(
+    target_state: dict[str, object],
+    *,
+    normalized_summary: Mapping[str, object],
+) -> None:
+    """Write the next-cycle continuation fields derived from the normalized summary.
+
+    Extracts ``principal_issue``, ``principal_issue_kind``, and
+    ``next_request_hint`` from *normalized_summary* and writes them to
+    *target_state* as ``last_issue_centric_*`` keys.
+
+    These three fields form the **continuation contract from the normalized
+    summary** — they are the bridge between the execution result and what the
+    next request cycle can read via
+    :func:`request_prompt_from_report._read_ic_next_cycle_context`.
+    """
+    principal_issue_candidate = normalized_summary.get("principal_issue_candidate")
+    principal_issue_ref = ""
+    principal_issue_kind = str(normalized_summary.get("principal_issue_kind", "")).strip()
+    if isinstance(principal_issue_candidate, Mapping):
+        principal_issue_ref = (
+            str(principal_issue_candidate.get("url", "")).strip()
+            or str(principal_issue_candidate.get("ref", "")).strip()
+        )
+    target_state.update(
+        {
+            "last_issue_centric_principal_issue": principal_issue_ref,
+            "last_issue_centric_principal_issue_kind": principal_issue_kind,
+            "last_issue_centric_next_request_hint": str(
+                normalized_summary.get("next_request_hint", "")
+            ).strip(),
+        }
+    )
+
+
 def _finalize_dispatch(
     *,
     matrix_path: str,
@@ -2014,15 +2134,11 @@ def _finalize_dispatch(
             str(principal_issue.get("url", "")).strip()
             or str(principal_issue.get("ref", "")).strip()
         )
+    _apply_ic_continuation_fields(mutable_state, normalized_summary=normalized_summary)
     mutable_state.update(
         {
             "last_issue_centric_dispatch_result": repo_relative(summary_log_path),
             "last_issue_centric_normalized_summary": repo_relative(normalized_summary_log_path),
-            "last_issue_centric_principal_issue": principal_issue_ref,
-            "last_issue_centric_principal_issue_kind": principal_issue_kind,
-            "last_issue_centric_next_request_hint": str(
-                normalized_summary.get("next_request_hint", "")
-            ).strip(),
             "last_issue_centric_stop_reason": stop_reason,
             "chatgpt_decision_note": stop_reason,
         }
