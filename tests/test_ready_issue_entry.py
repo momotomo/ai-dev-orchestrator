@@ -4019,5 +4019,235 @@ class RecoveryPathIntegrationTests(unittest.TestCase):
         mock_apply.assert_called_once()
 
 
+class CycleBoundaryStateConsistencyTests(unittest.TestCase):
+    """Cycle boundary state consistency integration tests (Phase 33).
+
+    Verifies that prepared / pending / pending_handoff / chat_rotation
+    state families do not bleed across cycle boundaries.
+    """
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    # ------------------------------------------------------------------
+    # _stage_prepared_request_state cleanup
+    # ------------------------------------------------------------------
+
+    def test_stage_prepared_clears_pending_handoff_fields(self):
+        """_stage_prepared_request_state clears pending_handoff fields before staging."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {"pending_handoff_log": "logs/h.md", "pending_handoff_source": "report:x.md"}
+        with mock.patch.object(m, "clear_error_fields", side_effect=lambda s: s), \
+             mock.patch.object(m, "clear_pending_request_fields"), \
+             mock.patch.object(m, "clear_pending_handoff_fields") as mock_clear_hoff, \
+             mock.patch.object(m, "clear_chat_rotation_fields"), \
+             mock.patch.object(m, "stage_prepared_request"), \
+             mock.patch.object(m, "save_state"), \
+             mock.patch.object(m, "repo_relative", side_effect=lambda p: p):
+            m._stage_prepared_request_state(
+                state,
+                request_hash="H",
+                request_source="report:x.md",
+                request_log_rel="logs/p.md",
+                issue_centric_runtime_snapshot=None,
+            )
+        mock_clear_hoff.assert_called_once()
+
+    def test_stage_prepared_clears_chat_rotation_fields(self):
+        """_stage_prepared_request_state clears chat_rotation fields before staging."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {}
+        with mock.patch.object(m, "clear_error_fields", side_effect=lambda s: s), \
+             mock.patch.object(m, "clear_pending_request_fields"), \
+             mock.patch.object(m, "clear_pending_handoff_fields"), \
+             mock.patch.object(m, "clear_chat_rotation_fields") as mock_clear_rot, \
+             mock.patch.object(m, "stage_prepared_request"), \
+             mock.patch.object(m, "save_state"):
+            m._stage_prepared_request_state(
+                state,
+                request_hash="H",
+                request_source="report:x.md",
+                request_log_rel="logs/p.md",
+                issue_centric_runtime_snapshot=None,
+            )
+        mock_clear_rot.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # _apply_pending_request_state cleanup
+    # ------------------------------------------------------------------
+
+    def test_apply_pending_clears_chat_rotation_fields(self):
+        """_apply_pending_request_state clears chat_rotation fields on pending apply."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {}
+        with mock.patch.object(m, "clear_error_fields", side_effect=lambda s: s), \
+             mock.patch.object(m, "clear_pending_handoff_fields"), \
+             mock.patch.object(m, "clear_chat_rotation_fields") as mock_clear_rot, \
+             mock.patch.object(m, "promote_pending_request"), \
+             mock.patch.object(m, "save_state"), \
+             mock.patch.object(m, "repo_relative", return_value="logs/sent.md"):
+            m._apply_pending_request_state(
+                state,
+                request_hash="H",
+                request_source="report:x.md",
+                request_log_path="logs/sent.md",
+                issue_centric_runtime_snapshot=None,
+                success_updates=None,
+            )
+        mock_clear_rot.assert_called_once()
+
+    def test_apply_pending_clears_pending_handoff_fields(self):
+        """_apply_pending_request_state clears pending_handoff fields on apply."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {}
+        with mock.patch.object(m, "clear_error_fields", side_effect=lambda s: s), \
+             mock.patch.object(m, "clear_pending_handoff_fields") as mock_clear_hoff, \
+             mock.patch.object(m, "clear_chat_rotation_fields"), \
+             mock.patch.object(m, "promote_pending_request"), \
+             mock.patch.object(m, "save_state"), \
+             mock.patch.object(m, "repo_relative", return_value="logs/sent.md"):
+            m._apply_pending_request_state(
+                state,
+                request_hash="H",
+                request_source="report:x.md",
+                request_log_path="logs/sent.md",
+                issue_centric_runtime_snapshot=None,
+                success_updates=None,
+            )
+        mock_clear_hoff.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # _apply_rotated_pending_request_state cleanup
+    # ------------------------------------------------------------------
+
+    def test_apply_rotated_pending_clears_all_four_field_families(self):
+        """_apply_rotated_pending_request_state clears all 4 stale field families."""
+        import unittest.mock as mock
+        m = self._module()
+        state: dict = {}
+        with mock.patch.object(m, "clear_error_fields", side_effect=lambda s: s), \
+             mock.patch.object(m, "clear_pending_request_fields") as mock_clear_req, \
+             mock.patch.object(m, "clear_pending_handoff_fields") as mock_clear_hoff, \
+             mock.patch.object(m, "clear_chat_rotation_fields") as mock_clear_rot, \
+             mock.patch.object(m, "save_state"), \
+             mock.patch.object(m, "repo_relative", return_value="logs/sent.md"):
+            m._apply_rotated_pending_request_state(
+                state,
+                request_hash="H",
+                request_source="report:x.md",
+                request_log_path="logs/sent.md",
+                rotation_signal="confirmed",
+                rotated_chat={},
+                issue_centric_runtime_snapshot=None,
+                issue_centric_runtime_mode=None,
+            )
+        mock_clear_req.assert_called_once()
+        mock_clear_hoff.assert_called_once()
+        mock_clear_rot.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # awaiting_user_stop stale handoff cleanup
+    # ------------------------------------------------------------------
+
+    def test_awaiting_user_stop_cleans_stale_pending_handoff(self):
+        """awaiting_user_stop path cleans stale pending handoff before stopping."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {"mode": "awaiting_user", "pending_handoff_log": "logs/h.md"}
+        cleaned = {"mode": "awaiting_user", "_cleaned": True}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed", return_value=cleaned) as mock_clean:
+            decision = m._resolve_recovery_decision(state, "", None)
+
+        self.assertEqual(decision.path, "awaiting_user_stop")
+        self.assertTrue(decision.stale_handoff_cleaned)
+        mock_clean.assert_called_once()
+        self.assertIs(decision.state, cleaned)
+
+    def test_awaiting_user_stop_no_cleanup_when_not_stale(self):
+        """awaiting_user_stop does not call cleanup when no stale handoff."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {"mode": "awaiting_user"}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=False), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed") as mock_clean:
+            decision = m._resolve_recovery_decision(state, "", None)
+
+        self.assertEqual(decision.path, "awaiting_user_stop")
+        self.assertFalse(decision.stale_handoff_cleaned)
+        mock_clean.assert_not_called()
+
+    def test_retryable_resume_never_calls_stale_cleanup(self):
+        """retryable_resume path never runs stale cleanup — preserves prepared state."""
+        import unittest.mock as mock
+        m = self._module()
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup") as mock_check:
+            decision = m._resolve_recovery_decision({}, "", ("T", "H", "S"))
+
+        mock_check.assert_not_called()
+        self.assertFalse(decision.stale_handoff_cleaned)
+
+    def test_rotated_path_preserves_matching_pending_handoff(self):
+        """rotated path does not clean pending_handoff when rotation is needed."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {"mode": "idle", "pending_handoff_log": "logs/h.md",
+                 "pending_handoff_source": "report:x.md"}
+        with mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=False), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed") as mock_clean:
+            decision = m._resolve_recovery_decision(state, "", None)
+
+        self.assertEqual(decision.path, "rotated")
+        mock_clean.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # end-to-end field-consistency via entry plan
+    # ------------------------------------------------------------------
+
+    def test_normal_resume_entry_plan_clears_stale_handoff_via_decision(self):
+        """normal_resume entry plan state reflects cleaned handoff when stale."""
+        import unittest.mock as mock
+        import argparse
+        m = self._module()
+        cleaned = {"mode": "idle", "_cleaned": True}
+        args = argparse.Namespace(next_todo="", open_questions="", current_status=None,
+                                  resume_note="")
+        with mock.patch.object(m, "load_retryable_prepared_request", return_value=None), \
+             mock.patch.object(m, "resolve_resume_note", return_value=""), \
+             mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed", return_value=cleaned), \
+             mock.patch.object(m, "should_rotate_before_next_chat_request", return_value=False), \
+             mock.patch.object(m, "read_last_report_text", return_value=""):
+            plan = m._resolve_report_request_entry_plan({"mode": "idle"}, args)
+
+        self.assertEqual(plan.path, "normal_resume")
+        self.assertIs(plan.state, cleaned)
+
+    def test_awaiting_user_stop_entry_plan_reflects_cleaned_state(self):
+        """awaiting_user_stop entry plan carries cleaned state after handoff cleanup."""
+        import unittest.mock as mock
+        import argparse
+        m = self._module()
+        cleaned = {"mode": "awaiting_user", "_cleaned": True}
+        args = argparse.Namespace(next_todo="", open_questions="", current_status=None,
+                                  resume_note="")
+        with mock.patch.object(m, "load_retryable_prepared_request", return_value=None), \
+             mock.patch.object(m, "resolve_resume_note", return_value=""), \
+             mock.patch.object(m, "_needs_stale_pending_handoff_cleanup", return_value=True), \
+             mock.patch.object(m, "_clean_stale_pending_handoff_if_needed", return_value=cleaned):
+            plan = m._resolve_report_request_entry_plan({"mode": "awaiting_user"}, args)
+
+        self.assertEqual(plan.path, "awaiting_user_stop")
+        self.assertIs(plan.state, cleaned)
+
+
 if __name__ == "__main__":
     unittest.main()

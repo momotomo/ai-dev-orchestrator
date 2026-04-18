@@ -399,11 +399,25 @@ def _stage_prepared_request_state(
 
     Called for both the initial ``"prepared"`` staging and the
     ``"retry_send"`` fallback staging when ``send_to_chatgpt`` raises.
+
+    **Cycle boundary cleanup** — the following stale state families are cleared
+    so that a new request cycle starts from a consistent baseline:
+
+    * error / retry_send remnants — via :func:`clear_error_fields`
+    * previous pending request fields — via :func:`clear_pending_request_fields`
+    * stale pending handoff fields — via :func:`clear_pending_handoff_fields`
+      (a prior rotation cycle's handoff must not bleed into a fresh prepared
+      request that is not part of a rotation)
+    * stale chat rotation fields — via :func:`clear_chat_rotation_fields`
+      (chat rotation metadata from a previous cycle must not persist)
+
     IC generation binding is applied when ``issue_centric_runtime_snapshot``
     is provided.
     """
     staged = clear_error_fields(dict(state))
     clear_pending_request_fields(staged)
+    clear_pending_handoff_fields(staged)
+    clear_chat_rotation_fields(staged)
     if issue_centric_runtime_snapshot is not None:
         staged.update(
             _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="prepared")
@@ -429,12 +443,24 @@ def _apply_pending_request_state(
 ) -> None:
     """Build and save the pending request state after a successful send.
 
-    Clears error fields and pending handoff fields, promotes the prepared
-    request to pending, applies IC generation binding, merges any
-    caller-supplied ``success_updates``, and saves.
+    **Cycle boundary cleanup** — the following stale state families are cleared
+    before the pending-request fields are written:
+
+    * error / retry_send remnants — via :func:`clear_error_fields`
+    * stale pending handoff fields — via :func:`clear_pending_handoff_fields`
+      (the handoff was consumed by the rotation and must not persist into the
+      new pending-request cycle)
+    * stale chat rotation fields — via :func:`clear_chat_rotation_fields`
+      (chat rotation metadata from the previous cycle is no longer meaningful
+      once the request is in ``waiting_prompt_reply``)
+
+    After cleanup, promotes the prepared request to pending, applies IC
+    generation binding, merges any caller-supplied ``success_updates``, and
+    saves.
     """
     mutable = clear_error_fields(dict(state))
     clear_pending_handoff_fields(mutable)
+    clear_chat_rotation_fields(mutable)
     promote_pending_request(
         mutable,
         request_hash=request_hash,
@@ -811,9 +837,20 @@ def _apply_rotated_pending_request_state(
 ) -> None:
     """Build and save the pending request state for a rotated chat request.
 
-    Clears error, pending request, pending handoff, and chat rotation fields,
-    then populates all pending request fields including rotation metadata and
-    IC generation binding.
+    **Cycle boundary cleanup** — all four stale-state families are cleared
+    before the rotated pending-request fields are written, because rotation
+    constitutes a full cycle boundary:
+
+    * error / retry_send remnants — via :func:`clear_error_fields`
+    * previous pending request fields — via :func:`clear_pending_request_fields`
+      (the prior cycle's pending request is superseded by this rotation)
+    * pending handoff fields — via :func:`clear_pending_handoff_fields`
+      (the handoff has been consumed; it must not be replayed after this)
+    * chat rotation fields — via :func:`clear_chat_rotation_fields`
+      (the rotation signal is stored in ``pending_request_signal`` instead)
+
+    After cleanup, populates all rotated pending-request fields including
+    rotation metadata and IC generation binding.
     """
     mutable = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable)
@@ -1188,6 +1225,13 @@ def _resolve_recovery_decision(
         )
     is_awaiting_user = str(state.get("mode", "")).strip() == "awaiting_user"
     if is_awaiting_user and not resume_note.strip():
+        # awaiting_user_stop: clean any stale pending handoff before stopping.
+        # Rotation is not going to proceed, so a pending handoff is stale and
+        # must not be carried forward to the next cycle after the user resumes.
+        stale_handoff_cleaned = False
+        if _needs_stale_pending_handoff_cleanup(state):
+            state = _clean_stale_pending_handoff_if_needed(state)
+            stale_handoff_cleaned = True
         return _RecoveryDecision(
             path="awaiting_user_stop",
             state=state,
@@ -1195,7 +1239,7 @@ def _resolve_recovery_decision(
             retryable_request=None,
             has_retryable_request=False,
             is_awaiting_user_stop=True,
-            stale_handoff_cleaned=False,
+            stale_handoff_cleaned=stale_handoff_cleaned,
             needs_rotation=False,
         )
     stale_handoff_cleaned = False
