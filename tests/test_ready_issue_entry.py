@@ -7822,5 +7822,174 @@ class IcOrchestratorDoctorStatusSurfaceTests(unittest.TestCase):
         self.assertNotIn("--ready-issue-ref", output)
 
 
+class IcPlanARouteDecisionTests(unittest.TestCase):
+    """Phase 48 — _IcReplyRouteDecision + _resolve_ic_reply_route_decision.
+
+    Verifies that the route decision helper correctly separates:
+      - "Plan A present but broken" (stop_broken) from
+      - "Plan A absent" (correction_retry)
+      - "legacy markers detected" (legacy_stop)
+      - "valid Plan A" (ic_proceed)
+      - "reply not yet complete" (not_ready)
+
+    Key invariants tested:
+      - plan_a_present=True  → route is "ic_proceed" or "stop_broken" only
+      - legacy_stop          → plan_a_present=False always
+      - ic_proceed           → plan_a_present=True AND plan_a_parseable=True
+
+    Group 1: route values for each readiness status (5 tests)
+    Group 2: invariant checks (3 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _fnp(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("fetch_next_prompt")
+
+    def _make_readiness(
+        self,
+        status: str,
+        *,
+        decision_marker_present: bool = False,
+        contract_parse_attempted: bool = False,
+        reply_complete_tag_present: bool = False,
+        assistant_text_present: bool = True,
+    ) -> object:
+        fnp = self._fnp()
+        return fnp.IssueCentricReplyReadiness(
+            status=status,
+            reason=f"reason for {status}",
+            assistant_text_present=assistant_text_present,
+            thinking_visible=False,
+            decision_marker_present=decision_marker_present,
+            contract_parse_attempted=contract_parse_attempted,
+            reply_complete_tag_present=reply_complete_tag_present,
+        )
+
+    # ------------------------------------------------------------------
+    # Group 1: route values for each readiness status (5 tests)
+    # ------------------------------------------------------------------
+
+    def test_valid_plan_a_routes_to_ic_proceed(self):
+        """reply_complete_valid_contract → ic_proceed, plan_a_present=True, plan_a_parseable=True."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_valid_contract",
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+            reply_complete_tag_present=True,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "ic_proceed")
+        self.assertTrue(rd.plan_a_present)
+        self.assertTrue(rd.plan_a_parseable)
+        self.assertFalse(rd.legacy_present)
+
+    def test_plan_a_present_broken_routes_to_stop_broken(self):
+        """reply_complete_invalid_contract + decision_marker_present → stop_broken."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_invalid_contract",
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+            reply_complete_tag_present=True,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "stop_broken")
+        self.assertTrue(rd.plan_a_present)
+        self.assertFalse(rd.plan_a_parseable)
+        self.assertFalse(rd.legacy_present)
+
+    def test_plan_a_absent_no_legacy_routes_to_correction_retry(self):
+        """reply_complete_no_marker → correction_retry, plan_a_present=False."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_no_marker",
+            decision_marker_present=False,
+            reply_complete_tag_present=True,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "correction_retry")
+        self.assertFalse(rd.plan_a_present)
+        self.assertFalse(rd.plan_a_parseable)
+        self.assertFalse(rd.legacy_present)
+
+    def test_legacy_detected_routes_to_legacy_stop(self):
+        """reply_complete_legacy_contract → legacy_stop, legacy_present=True."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_legacy_contract",
+            decision_marker_present=False,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "legacy_stop")
+        self.assertTrue(rd.legacy_present)
+        self.assertFalse(rd.plan_a_present)
+        self.assertFalse(rd.plan_a_parseable)
+
+    def test_not_ready_routes_to_not_ready(self):
+        """reply_not_ready → not_ready."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_not_ready",
+            decision_marker_present=False,
+            assistant_text_present=True,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "not_ready")
+        self.assertFalse(rd.plan_a_present)
+        self.assertFalse(rd.plan_a_parseable)
+        self.assertFalse(rd.legacy_present)
+
+    # ------------------------------------------------------------------
+    # Group 2: invariant checks (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_plan_a_present_broken_never_routes_to_correction_retry_or_legacy_stop(self):
+        """Broken Plan A (plan_a_present=True) must NOT route to correction_retry or legacy_stop."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_invalid_contract",
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+            reply_complete_tag_present=True,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertNotEqual(rd.route, "correction_retry")
+        self.assertNotEqual(rd.route, "legacy_stop")
+        self.assertTrue(rd.plan_a_present)
+
+    def test_legacy_stop_implies_plan_a_not_present(self):
+        """legacy_stop route must always have plan_a_present=False and plan_a_parseable=False."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_legacy_contract",
+            decision_marker_present=False,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "legacy_stop")
+        self.assertFalse(rd.plan_a_present)
+        self.assertFalse(rd.plan_a_parseable)
+
+    def test_ic_proceed_implies_plan_a_present_and_parseable(self):
+        """ic_proceed route must always have plan_a_present=True and plan_a_parseable=True."""
+        fnp = self._fnp()
+        readiness = self._make_readiness(
+            "reply_complete_valid_contract",
+            decision_marker_present=True,
+            contract_parse_attempted=True,
+            reply_complete_tag_present=True,
+        )
+        rd = fnp._resolve_ic_reply_route_decision(readiness)
+        self.assertEqual(rd.route, "ic_proceed")
+        self.assertTrue(rd.plan_a_present)
+        self.assertTrue(rd.plan_a_parseable)
+        self.assertFalse(rd.legacy_present)
+
+
 if __name__ == "__main__":
     unittest.main()

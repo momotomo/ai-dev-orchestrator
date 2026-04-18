@@ -609,6 +609,117 @@ def stop_for_invalid_issue_centric_contract(
     raise BridgeError(user_message)
 
 
+# ---------------------------------------------------------------------------
+# Plan A / legacy fallback route decision
+# ---------------------------------------------------------------------------
+# After classify_issue_centric_reply_readiness() returns, _resolve_ic_reply_route_decision()
+# derives an explicit routing intent from the readiness status.
+#
+# The key distinction this helper makes:
+#   "Plan A marker present but broken" (plan_a_present=True, route=stop_broken)
+#   vs "Plan A marker absent" (plan_a_present=False, route=correction_retry)
+#
+# This ensures:
+#   - Broken Plan A NEVER falls to a legacy success path (route is always stop_broken)
+#   - Plan A absent routes to correction_retry (not legacy fallback)
+#   - Legacy markers always produce legacy_stop regardless of Plan A state
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _IcReplyRouteDecision:
+    """Explicit routing intent derived from IssueCentricReplyReadiness.
+
+    Separates "Plan A marker present but broken" from "Plan A marker absent"
+    so that run() can apply the correct stop / retry policy without any risk
+    of inadvertently falling to a legacy success path.
+
+    Fields
+    ------
+    plan_a_present:   True when ===CHATGPT_DECISION_JSON=== was found in the
+                      assistant segment (decision_marker_present was True).
+    plan_a_parseable: True only when classify returned "reply_complete_valid_contract".
+    legacy_present:   True when legacy reply markers (===CHATGPT_PROMPT_REPLY===
+                      / ===CHATGPT_NO_CODEX===) were detected.
+
+    route values
+    ------------
+    "ic_proceed"      — Plan A present and parsed OK; proceed to materialize + dispatch.
+    "stop_broken"     — Plan A marker present but parse / validate failed.
+                        Correction retry may be attempted before the final stop,
+                        but the reply NEVER falls to a legacy success path.
+    "legacy_stop"     — Legacy markers detected; explicit stop, no retry.
+    "correction_retry"— Plan A marker absent, no legacy markers detected.
+                        Correction request to ChatGPT to re-emit the full contract.
+    "not_ready"       — Reply not yet complete; continue polling.
+    """
+
+    plan_a_present: bool
+    plan_a_parseable: bool
+    legacy_present: bool
+    route: str  # "ic_proceed" | "stop_broken" | "legacy_stop" | "correction_retry" | "not_ready"
+
+
+def _resolve_ic_reply_route_decision(
+    readiness: IssueCentricReplyReadiness,
+) -> _IcReplyRouteDecision:
+    """Derive an explicit route decision from a readiness classification result.
+
+    Invariants enforced by this function:
+    - plan_a_present=True  → route is "ic_proceed" or "stop_broken" only.
+                             Never "legacy_stop" or "correction_retry".
+    - legacy_present=True  → route is "legacy_stop" always.
+    - not_ready status     → route is "not_ready" always.
+    - no marker, no legacy → route is "correction_retry" (Plan A absent).
+    """
+    plan_a_present = readiness.decision_marker_present
+    plan_a_parseable = readiness.status == "reply_complete_valid_contract"
+    legacy_present = readiness.status == "reply_complete_legacy_contract"
+
+    if readiness.status == "reply_not_ready":
+        return _IcReplyRouteDecision(
+            plan_a_present=plan_a_present,
+            plan_a_parseable=False,
+            legacy_present=False,
+            route="not_ready",
+        )
+
+    if legacy_present:
+        return _IcReplyRouteDecision(
+            plan_a_present=False,
+            plan_a_parseable=False,
+            legacy_present=True,
+            route="legacy_stop",
+        )
+
+    if plan_a_parseable:
+        return _IcReplyRouteDecision(
+            plan_a_present=True,
+            plan_a_parseable=True,
+            legacy_present=False,
+            route="ic_proceed",
+        )
+
+    if plan_a_present:
+        # Decision marker was present but parse / validate failed (invalid_contract).
+        # Explicit stop path — correction retry may be applied before the final stop,
+        # but this NEVER falls to a legacy success path.
+        return _IcReplyRouteDecision(
+            plan_a_present=True,
+            plan_a_parseable=False,
+            legacy_present=False,
+            route="stop_broken",
+        )
+
+    # Plan A marker absent (no_marker), no legacy detected → correction retry candidate.
+    return _IcReplyRouteDecision(
+        plan_a_present=False,
+        plan_a_parseable=False,
+        legacy_present=False,
+        route="correction_retry",
+    )
+
+
 def _validate_ready_issue_target_binding(
     decision: IssueCentricDecision,
     *,
@@ -1194,13 +1305,18 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             raw_text = exc.raw_text
     raw_log = log_text("raw_chatgpt_prompt_dump", raw_text, suffix="txt")
     readiness = classify_issue_centric_reply_readiness(raw_text, after_text=request_text or None)
-    if readiness.status == "reply_not_ready":
+    # Derive an explicit route decision so routing intent is auditable and
+    # tested.  The key invariant: plan_a_present=True never routes to a legacy
+    # success path; stop_broken and legacy_stop are always explicit stops.
+    route_decision = _resolve_ic_reply_route_decision(readiness)
+    if route_decision.route == "not_ready":
         raise BridgeError("ChatGPT reply はまだ未完成です。もう一度 fetch を待ってください。")
 
     # --- retryable invalid contract handling ---
-    # reply_complete_no_marker and reply_complete_invalid_contract are both retryable
-    # because they mean ChatGPT produced a complete response but with bad formatting.
-    if _is_retryable_contract_error(readiness.reason, readiness.status):
+    # stop_broken (Plan A marker present but parse failed) and correction_retry
+    # (Plan A marker absent) are both retryable: ChatGPT produced a complete
+    # response but with bad formatting / missing contract.
+    if route_decision.route in ("stop_broken", "correction_retry"):
         correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
         if correction_count < _MAX_CONTRACT_CORRECTIONS:
             correction_text = _build_contract_correction_request(readiness.reason)
@@ -1237,7 +1353,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # net for accidental / stale old-format replies only.  Normal operation
     # should never reach here because outbound requests always carry the
     # IC-only reply contract section.
-    if readiness.status == "reply_complete_legacy_contract":
+    # route_decision.route == "legacy_stop" guarantees legacy_present=True and
+    # plan_a_present=False — Plan A never falls through to this branch.
+    if route_decision.route == "legacy_stop":
         legacy_summary = "\n".join(
             [
                 "# Legacy Visible-Text Reply Detected",
