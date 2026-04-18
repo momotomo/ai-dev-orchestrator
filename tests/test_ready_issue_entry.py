@@ -2203,5 +2203,52 @@ class ShouldUsePinnedReadyIssuePathHelperTests(unittest.TestCase):
         self.assertFalse(self._invoke({}))
 
 
+class ResolveReportRequestIcContextHelperTests(unittest.TestCase):
+    """Unit tests for _resolve_report_request_ic_context."""
+
+    def _invoke(self, state: dict) -> tuple:
+        import request_prompt_from_report
+        return request_prompt_from_report._resolve_report_request_ic_context(state)
+
+    def test_pinned_ready_issue_path_returns_none_snapshot_and_ic_route(self) -> None:
+        """When pinned ready issue path is active, snapshot and mode are None,
+        section is built from the pinned ref, and route_selected is 'issue_centric'."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "current_ready_issue_ref": "#7 Ready: verify cycles",
+        }
+        with patch("_bridge_common.load_project_config", return_value={"github_repository": "owner/repo"}):
+            snapshot, mode, section, route = self._invoke(state)
+        self.assertIsNone(snapshot)
+        self.assertIsNone(mode)
+        self.assertIn("#7 Ready: verify cycles", section)
+        self.assertEqual(route, "issue_centric")
+
+    def test_normal_path_delegates_to_prepare_functions(self) -> None:
+        """Normal path calls prepare snapshot / mode / route helpers and returns results."""
+        import request_prompt_from_report
+        from unittest.mock import MagicMock
+
+        mock_snapshot = MagicMock()
+        mock_snapshot.snapshot_path = "logs/snap.json"
+        mock_snapshot.snapshot_status = "ready"
+        mock_mode = MagicMock()
+        mock_section = "IC SECTION"
+        mock_route_choice = MagicMock()
+        mock_route_choice.route_selected = "issue_centric"
+
+        state = {"pending_request_source": "report:hash", "current_ready_issue_ref": ""}
+        with patch.object(request_prompt_from_report, "prepare_issue_centric_runtime_snapshot", return_value=(mock_snapshot, None)):
+            with patch.object(request_prompt_from_report, "_persist_runtime_snapshot_if_needed", return_value=mock_snapshot):
+                with patch.object(request_prompt_from_report, "prepare_issue_centric_runtime_mode", return_value=(mock_mode, mock_section)):
+                    with patch.object(request_prompt_from_report, "resolve_issue_centric_route_choice", return_value=mock_route_choice):
+                        snapshot, mode, section, route = self._invoke(state)
+
+        self.assertIs(snapshot, mock_snapshot)
+        self.assertIs(mode, mock_mode)
+        self.assertEqual(section, mock_section)
+        self.assertEqual(route, "issue_centric")
+
+
 if __name__ == "__main__":
     unittest.main()
