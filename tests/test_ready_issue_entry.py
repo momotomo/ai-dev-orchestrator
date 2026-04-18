@@ -6464,5 +6464,263 @@ class IcFetchHandoffStateHelpersTests(unittest.TestCase):
         self.assertEqual(state["last_issue_centric_artifact_file"], "logs/codex_body.txt")
 
 
+class IcFetchOutcomeRoutingTests(unittest.TestCase):
+    """Phase 41 — fetch outcome routing / stop policy unit tests.
+
+    Verifies _IcFetchOutcome, _resolve_ic_fetch_outcome, and
+    _apply_ic_fetch_stop_state introduced in Phase 41, and confirms that
+    run() routes correctly through the outcome helper.
+
+    Group 1: _resolve_ic_fetch_outcome routing decisions (4 tests)
+    Group 2: _apply_ic_fetch_stop_state state mutations (2 tests)
+    Group 3: run() integration — initial_selection / codex_run paths (2 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _fnp(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("fetch_next_prompt")
+
+    def _ic(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_contract")
+
+    def _make_decision(self, action_enum, *, target_issue=None, summary="test summary"):
+        from unittest.mock import MagicMock
+        d = MagicMock()
+        d.action = action_enum
+        d.target_issue = target_issue
+        d.summary = summary
+        return d
+
+    def _base_pending_state(self, *, source: str = "report:1") -> dict:
+        return {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash-abc",
+            "pending_request_source": source,
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+
+    def _build_raw(self, action: str, target_issue: str = "none") -> str:
+        import base64 as _b64
+        import json as _json
+        ic = self._ic()
+        envelope = {
+            "action": action,
+            "target_issue": target_issue,
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": f"Test {action}.",
+        }
+        json_blob = _json.dumps(envelope, ensure_ascii=True)
+        parts = [f"{ic.DECISION_JSON_START}\n{json_blob}\n{ic.DECISION_JSON_END}"]
+        if action == "codex_run":
+            body = _b64.b64encode(b"Codex body content.\n").decode("ascii")
+            parts.append(f"{ic.CODEX_BODY_START}\n{body}\n{ic.CODEX_BODY_END}")
+        lines = ["あなた:", "request body", "ChatGPT:", *parts, ic.REPLY_COMPLETE_TAG]
+        return "\n".join(lines)
+
+    def _run_fetch_with_raw_file(
+        self,
+        raw: str,
+        *,
+        state: dict | None = None,
+        mock_dispatch: bool = True,
+    ):
+        from contextlib import ExitStack
+        from unittest.mock import patch, MagicMock
+        fnp = self._fnp()
+        saved_states: list[dict] = []
+        dispatch_mutable_states: list[dict] = []
+        base_state = state if state is not None else self._base_pending_state()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw_file = tmp_path / "raw.txt"
+            raw_file.write_text(raw, encoding="utf-8")
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                p = tmp_path / f"{prefix}.{suffix}"
+                p.write_text(text, encoding="utf-8")
+                return p
+
+            def fake_dispatch(**kwargs):
+                mutable = kwargs.get("mutable_state", {})
+                dispatch_mutable_states.append(dict(mutable))
+                result = MagicMock()
+                result.final_state = dict(mutable)
+                result.stop_message = "mock dispatch complete"
+                return result
+
+            exc_caught = None
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(fnp, "read_pending_request_text", return_value="request body")
+                )
+                stack.enter_context(
+                    patch.object(fnp, "log_text", side_effect=fake_log_text)
+                )
+                stack.enter_context(
+                    patch.object(fnp, "save_state",
+                                 side_effect=lambda s: saved_states.append(dict(s)))
+                )
+                if mock_dispatch:
+                    stack.enter_context(
+                        patch.object(fnp, "dispatch_issue_centric_execution",
+                                     side_effect=fake_dispatch)
+                    )
+                    stack.enter_context(
+                        patch.object(fnp, "load_project_config", return_value={})
+                    )
+                    stack.enter_context(
+                        patch.object(fnp, "project_repo_path", return_value=Path("."))
+                    )
+                try:
+                    fnp.run(dict(base_state), ["--raw-file", str(raw_file)])
+                except Exception as exc:
+                    exc_caught = exc
+
+        return saved_states, dispatch_mutable_states, exc_caught
+
+    # ------------------------------------------------------------------
+    # Group 1: _resolve_ic_fetch_outcome routing decisions (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_resolve_outcome_codex_run_returns_codex_run_stop(self):
+        """CODEX_RUN action → path="codex_run_stop", stop_message contains metadata_log_rel."""
+        fnp = self._fnp()
+        ic = self._ic()
+        decision = self._make_decision(ic.IssueCentricAction.CODEX_RUN, target_issue="#20")
+        outcome = fnp._resolve_ic_fetch_outcome(
+            decision,
+            "report:1",
+            raw_log_rel="logs/raw.txt",
+            decision_log_rel="logs/decision.md",
+            metadata_log_rel="logs/meta.json",
+            artifact_log_rel="logs/artifact.txt",
+        )
+        self.assertEqual(outcome.path, "codex_run_stop")
+        self.assertIn("logs/meta.json", outcome.stop_message)
+        self.assertIn("logs/raw.txt", outcome.stop_message)
+        self.assertIn("logs/artifact.txt", outcome.stop_message)
+        self.assertEqual(outcome.selected_issue_ref, "")
+
+    def test_resolve_outcome_initial_selection_with_target_returns_selection_stop(self):
+        """initial_selection: + NO_ACTION + target → path="initial_selection_stop"."""
+        fnp = self._fnp()
+        ic = self._ic()
+        decision = self._make_decision(ic.IssueCentricAction.NO_ACTION, target_issue="#7")
+        outcome = fnp._resolve_ic_fetch_outcome(
+            decision,
+            "initial_selection:report",
+            raw_log_rel="logs/raw.txt",
+            decision_log_rel="logs/decision.md",
+            metadata_log_rel="logs/meta.json",
+            artifact_log_rel="",
+        )
+        self.assertEqual(outcome.path, "initial_selection_stop")
+        self.assertEqual(outcome.selected_issue_ref, "#7")
+        self.assertIn("#7", outcome.stop_message)
+
+    def test_resolve_outcome_initial_selection_without_target_returns_dispatch(self):
+        """initial_selection: + NO_ACTION + no target → path="dispatch" (target required)."""
+        fnp = self._fnp()
+        ic = self._ic()
+        decision = self._make_decision(ic.IssueCentricAction.NO_ACTION, target_issue=None)
+        outcome = fnp._resolve_ic_fetch_outcome(
+            decision,
+            "initial_selection:report",
+            raw_log_rel="logs/raw.txt",
+            decision_log_rel="logs/decision.md",
+            metadata_log_rel="logs/meta.json",
+            artifact_log_rel="",
+        )
+        self.assertEqual(outcome.path, "dispatch")
+        self.assertEqual(outcome.stop_message, "")
+
+    def test_resolve_outcome_no_action_normal_source_returns_dispatch(self):
+        """no_action + non-initial_selection source → path="dispatch"."""
+        fnp = self._fnp()
+        ic = self._ic()
+        decision = self._make_decision(ic.IssueCentricAction.NO_ACTION, target_issue="#5")
+        outcome = fnp._resolve_ic_fetch_outcome(
+            decision,
+            "report:1",
+            raw_log_rel="logs/raw.txt",
+            decision_log_rel="logs/decision.md",
+            metadata_log_rel="logs/meta.json",
+            artifact_log_rel="",
+        )
+        self.assertEqual(outcome.path, "dispatch")
+        self.assertEqual(outcome.stop_message, "")
+        self.assertEqual(outcome.selected_issue_ref, "")
+
+    # ------------------------------------------------------------------
+    # Group 2: _apply_ic_fetch_stop_state (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_apply_fetch_stop_state_codex_run_does_not_mutate_state(self):
+        """codex_run_stop outcome → _apply_ic_fetch_stop_state makes no state changes."""
+        fnp = self._fnp()
+        outcome = fnp._IcFetchOutcome(
+            path="codex_run_stop",
+            stop_message="stop for codex",
+            selected_issue_ref="",
+        )
+        state: dict = {"last_issue_centric_action": "codex_run"}
+        fnp._apply_ic_fetch_stop_state(state, outcome)
+        self.assertNotIn("selected_ready_issue_ref", state)
+        self.assertEqual(state["last_issue_centric_action"], "codex_run")
+
+    def test_apply_fetch_stop_state_initial_selection_writes_issue_ref(self):
+        """initial_selection_stop outcome → selected_ready_issue_ref written to state."""
+        fnp = self._fnp()
+        outcome = fnp._IcFetchOutcome(
+            path="initial_selection_stop",
+            stop_message="initial selection stop",
+            selected_issue_ref="#9",
+        )
+        state: dict = {}
+        fnp._apply_ic_fetch_stop_state(state, outcome)
+        self.assertEqual(state.get("selected_ready_issue_ref"), "#9")
+
+    # ------------------------------------------------------------------
+    # Group 3: run() integration — initial_selection / codex_run paths (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_run_initial_selection_stop_sets_selected_ready_issue_ref(self):
+        """initial_selection: source + no_action reply → BridgeStop; selected_ready_issue_ref saved."""
+        from _bridge_common import BridgeStop
+        raw = self._build_raw("no_action", "#7")
+        state = self._base_pending_state(source="initial_selection:report")
+        saved, dispatch_calls, exc = self._run_fetch_with_raw_file(
+            raw, state=state, mock_dispatch=True
+        )
+        self.assertIsInstance(exc, BridgeStop, f"Expected BridgeStop, got: {exc!r}")
+        self.assertEqual(len(dispatch_calls), 0, "dispatch must not be called for initial_selection")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].get("selected_ready_issue_ref"), "#7")
+        self.assertEqual(saved[0].get("mode"), "awaiting_user")
+
+    def test_run_codex_run_stop_message_contains_metadata(self):
+        """codex_run reply → BridgeStop message (via outcome) contains metadata reference."""
+        from _bridge_common import BridgeStop
+        raw = self._build_raw("codex_run", "#20")
+        saved, dispatch_calls, exc = self._run_fetch_with_raw_file(
+            raw, mock_dispatch=True
+        )
+        self.assertIsInstance(exc, BridgeStop, f"Expected BridgeStop, got: {exc!r}")
+        self.assertEqual(len(dispatch_calls), 0, "dispatch must not be called for codex_run")
+        self.assertIn("metadata", str(exc))
+
+
 if __name__ == "__main__":
     unittest.main()
