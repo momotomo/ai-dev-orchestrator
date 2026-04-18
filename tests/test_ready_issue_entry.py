@@ -7123,5 +7123,247 @@ class IcRunUntilStopHandoffSummaryTests(unittest.TestCase):
         self.assertIn("Codex", handoff.title)
 
 
+class IcOperatorStatusSurfaceTests(unittest.TestCase):
+    """Phase 44 — operator-facing status surface 最終整流テスト.
+
+    Verifies that status / summary / handoff surfaces are mutually consistent for
+    each IC stop pattern.  Tests cover:
+      Group 1: detect_ic_stop_path() unit tests (4 tests)
+      Group 2: present_bridge_status() label / detail for IC stop patterns (3 tests)
+      Group 3: present_bridge_handoff() title for human_review_needed IC (2 tests)
+      Group 4: format_operator_stop_note() for IC stop patterns (2 tests)
+      Group 5: recommended_operator_step() for IC stop patterns (2 tests)
+      Group 6: suggested_next_note() with real action=no_action for IC stops (2 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _bc(self):
+        return _bridge_common
+
+    def _rus(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("run_until_stop")
+
+    def _initial_selection_stop_state(self, *, with_note: bool = True) -> dict:
+        state: dict = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "#7",
+            "error": False,
+        }
+        if with_note:
+            state["chatgpt_decision_note"] = (
+                "ChatGPT が ready issue #7 を選定しました。"
+                " --ready-issue-ref でその issue を指定して bridge を再実行してください。"
+            )
+        return state
+
+    def _human_review_needed_ic_state(self, *, with_note: bool = True) -> dict:
+        state: dict = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:human_review_needed",
+            "error": False,
+        }
+        if with_note:
+            state["chatgpt_decision_note"] = (
+                "ChatGPT が人レビュー待ち (#20) を返しました。"
+                " bridge を再実行すると補足入力を受けて次 request を送ります。"
+            )
+        return state
+
+    def _codex_run_stop_state(self) -> dict:
+        return {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:codex_run",
+            "last_issue_centric_artifact_kind": "codex_body",
+            "last_issue_centric_metadata_log": "logs/metadata.md",
+            "need_codex_run": False,
+            "last_issue_centric_execution_status": "",
+            "error": False,
+            "chatgpt_decision_note": (
+                "ChatGPT が Codex 実行指示 (#20) を返しました。"
+                " prepared Codex body は保存済みです。"
+                " bridge を再実行すると issue-centric codex_run dispatch を進めます。"
+            ),
+        }
+
+    def _non_ic_idle_state(self) -> dict:
+        return {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "chatgpt_decision": "",
+            "error": False,
+        }
+
+    def _make_args(self):
+        import argparse
+        args = argparse.Namespace()
+        args.request_body = ""
+        args.ready_issue_ref = ""
+        args.dry_run = False
+        args.start_mode = "run"
+        args.clear_error = False
+        args.worker_repo_path = ""
+        args.max_steps = 6
+        return args
+
+    def _fake_plan(self, next_action: str = "no_action"):
+        """Build a minimal RuntimeDispatchPlan-like mock."""
+        from unittest.mock import MagicMock
+        plan = MagicMock()
+        plan.next_action = next_action
+        plan.runtime_action = "need_next_generation"
+        plan.is_fallback = False
+        plan.note = "mock plan note"
+        return plan
+
+    # ------------------------------------------------------------------
+    # Group 1: detect_ic_stop_path() unit tests (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_detect_ic_stop_path_codex_run_stop(self):
+        """has_pending_issue_centric_codex_dispatch state → 'codex_run_stop'."""
+        bc = self._bc()
+        state = self._codex_run_stop_state()
+        self.assertEqual(bc.detect_ic_stop_path(state), "codex_run_stop")
+
+    def test_detect_ic_stop_path_initial_selection_stop(self):
+        """selected_ready_issue_ref + IC decision → 'initial_selection_stop'."""
+        bc = self._bc()
+        state = self._initial_selection_stop_state()
+        self.assertEqual(bc.detect_ic_stop_path(state), "initial_selection_stop")
+
+    def test_detect_ic_stop_path_human_review_needed(self):
+        """IC human_review_needed decision → 'human_review_needed'."""
+        bc = self._bc()
+        state = self._human_review_needed_ic_state()
+        self.assertEqual(bc.detect_ic_stop_path(state), "human_review_needed")
+
+    def test_detect_ic_stop_path_non_ic_returns_empty(self):
+        """Non-IC state (no IC decision, no selected_ref) → ''."""
+        bc = self._bc()
+        state = self._non_ic_idle_state()
+        self.assertEqual(bc.detect_ic_stop_path(state), "")
+
+    # ------------------------------------------------------------------
+    # Group 2: present_bridge_status() for IC stop patterns (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_present_bridge_status_initial_selection_stop_specific_label(self):
+        """initial_selection_stop → status label is 'ready issue選定済み', not '人確認待ち'."""
+        bc = self._bc()
+        state = self._initial_selection_stop_state(with_note=True)
+        status = bc.present_bridge_status(state)
+        self.assertEqual(status.label, "ready issue選定済み")
+        self.assertIn("--ready-issue-ref", status.detail)
+        self.assertIn("#7", status.detail)
+
+    def test_present_bridge_status_codex_run_stop_codex_label(self):
+        """codex_run_stop → status label is 'Codex実行待ち' (regression)."""
+        bc = self._bc()
+        state = self._codex_run_stop_state()
+        status = bc.present_bridge_status(state)
+        self.assertEqual(status.label, "Codex実行待ち")
+
+    def test_present_bridge_status_human_review_needed_ic_human_confirm_label(self):
+        """human_review_needed IC → status label is '人確認待ち' with IC note as detail."""
+        bc = self._bc()
+        state = self._human_review_needed_ic_state(with_note=True)
+        status = bc.present_bridge_status(state)
+        self.assertEqual(status.label, "人確認待ち")
+        self.assertIn("人レビュー待ち", status.detail)
+
+    # ------------------------------------------------------------------
+    # Group 3: present_bridge_handoff() for human_review_needed IC (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_present_bridge_handoff_human_review_needed_specific_title(self):
+        """human_review_needed IC → explicit handoff title, not generic '人の確認が必要です'."""
+        bc = self._bc()
+        state = self._human_review_needed_ic_state(with_note=True)
+        handoff = bc.present_bridge_handoff(state)
+        self.assertIn("補足", handoff.title)
+        self.assertNotIn("summary と doctor を確認してください", handoff.title)
+
+    def test_present_bridge_handoff_human_review_needed_detail_from_ic_note(self):
+        """human_review_needed IC → handoff detail uses chatgpt_decision_note."""
+        bc = self._bc()
+        state = self._human_review_needed_ic_state(with_note=True)
+        handoff = bc.present_bridge_handoff(state)
+        self.assertIn("人レビュー待ち", handoff.detail)
+
+    # ------------------------------------------------------------------
+    # Group 4: format_operator_stop_note() for IC stop patterns (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_format_operator_stop_note_initial_selection_stop_uses_ic_note(self):
+        """initial_selection_stop + chatgpt_decision_note → returns the IC note, not 'no_action' text."""
+        bc = self._bc()
+        state = self._initial_selection_stop_state(with_note=True)
+        plan = self._fake_plan(next_action="no_action")
+        note = bc.format_operator_stop_note(state, plan=plan)
+        self.assertIn("--ready-issue-ref", note)
+        self.assertNotIn("次の 1 手が見つかりません", note)
+
+    def test_format_operator_stop_note_human_review_needed_uses_ic_note(self):
+        """human_review_needed IC + chatgpt_decision_note → returns the IC note, not 'no_action' text."""
+        bc = self._bc()
+        state = self._human_review_needed_ic_state(with_note=True)
+        plan = self._fake_plan(next_action="no_action")
+        note = bc.format_operator_stop_note(state, plan=plan)
+        self.assertIn("人レビュー待ち", note)
+        self.assertNotIn("次の 1 手が見つかりません", note)
+
+    # ------------------------------------------------------------------
+    # Group 5: recommended_operator_step() for IC stop patterns (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_recommended_operator_step_initial_selection_stop_not_none(self):
+        """initial_selection_stop → recommended step label mentions '--ready-issue-ref', command is not 'なし'."""
+        rus = self._rus()
+        state = self._initial_selection_stop_state(with_note=True)
+        args = self._make_args()
+        with patch.object(rus, "resolve_unified_next_action", return_value="no_action"):
+            label, command = rus.recommended_operator_step(args, state)
+        self.assertIn("ready-issue-ref", label)
+        self.assertNotEqual(command, "なし")
+
+    def test_recommended_operator_step_human_review_needed_resume(self):
+        """human_review_needed IC → recommended step is resume (補足), not 'なし'."""
+        rus = self._rus()
+        state = self._human_review_needed_ic_state(with_note=True)
+        args = self._make_args()
+        with patch.object(rus, "resolve_unified_next_action", return_value="no_action"):
+            label, command = rus.recommended_operator_step(args, state)
+        self.assertIn("補足", label)
+        self.assertNotEqual(command, "なし")
+
+    # ------------------------------------------------------------------
+    # Group 6: suggested_next_note() with real action=no_action (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_suggested_next_note_initial_selection_stop_real_no_action(self):
+        """initial_selection_stop with action=no_action → returns IC note, not generic doctor text."""
+        rus = self._rus()
+        state = self._initial_selection_stop_state(with_note=True)
+        with patch.object(rus, "resolve_unified_next_action", return_value="no_action"):
+            note = rus.suggested_next_note(state)
+        self.assertIn("--ready-issue-ref", note)
+        self.assertNotIn("summary と doctor を確認し", note)
+
+    def test_suggested_next_note_human_review_needed_real_no_action(self):
+        """human_review_needed IC with action=no_action → returns IC note + bridge guidance."""
+        rus = self._rus()
+        state = self._human_review_needed_ic_state(with_note=True)
+        with patch.object(rus, "resolve_unified_next_action", return_value="no_action"):
+            note = rus.suggested_next_note(state)
+        self.assertIn("人レビュー待ち", note)
+        self.assertNotIn("summary と doctor を確認し", note)
+
+
 if __name__ == "__main__":
     unittest.main()

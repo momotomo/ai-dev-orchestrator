@@ -627,6 +627,16 @@ def present_bridge_status(
     # because human input is required before dispatch can resume.
     chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
     chatgpt_decision_note = str(state.get("chatgpt_decision_note", "")).strip()
+
+    # IC initial_selection_stop: ChatGPT selected a ready issue for the operator to confirm
+    # with --ready-issue-ref.  Use a specific status label rather than the generic "人確認待ち"
+    # so that the operator immediately understands the required next step.
+    _ic_stop = detect_ic_stop_path(state)
+    if _ic_stop == "initial_selection_stop":
+        _selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
+        _ic_note = chatgpt_decision_note or f"--ready-issue-ref {_selected_ref} を指定して bridge を再実行してください。"
+        return BridgeStatusView("ready issue選定済み", _ic_note)
+
     if is_awaiting_user_supplement(state) or chatgpt_decision in {"human_review", "need_info"}:
         _lc_suffix = _bridge_lifecycle_sync_suffix(state)
         _base = chatgpt_decision_note or "ChatGPT がここで人の補足を求めています。必要な判断や情報を入れてから続けます。"
@@ -761,6 +771,14 @@ def present_bridge_handoff(
         detail = suggested_note or f"不足している情報を補ってから再開してください。{_lc_suffix}"
         return BridgeHandoffView("情報が不足しています。入力内容を補って再開してください。", detail)
 
+    # IC human_review_needed: ChatGPT returned a human_review_needed decision in IC context.
+    # Provides a more specific title than the generic status-driven "人の確認が必要です。" fallthrough.
+    if chatgpt_decision.startswith("issue_centric:") and "human_review_needed" in chatgpt_decision:
+        _lc_suffix = _bridge_lifecycle_sync_suffix(state)
+        _ic_note = str(state.get("chatgpt_decision_note", "")).strip()
+        detail = suggested_note or _ic_note or f"stop summary の案内に沿って、次の判断や補足を入れてください。{_lc_suffix}"
+        return BridgeHandoffView("人の判断が必要です。補足を入れて bridge を再実行してください。", detail)
+
     if blocked or stale_codex_running or runtime_stop_path().exists() or bool(state.get("pause")):
         _lc_suffix = _bridge_lifecycle_sync_suffix(state)
         detail = suggested_note or f"自動では進めません。stop summary の案内に沿って確認してください。{_lc_suffix}"
@@ -802,6 +820,10 @@ def present_bridge_handoff(
         return BridgeHandoffView("人の確認が必要です。summary と doctor を確認してください。", detail)
     if status.label == "完了":
         return BridgeHandoffView("完了しました。", detail)
+    if status.label == "ready issue選定済み":
+        _sel = str(state.get("selected_ready_issue_ref", "")).strip()
+        _title = f"ChatGPT が ready issue を選定しました。--ready-issue-ref {_sel} で bridge を再実行してください。" if _sel else "ChatGPT が ready issue を選定しました。--ready-issue-ref を指定して bridge を再実行してください。"
+        return BridgeHandoffView(_title, detail)
     if status.label == "ready issue参照で開始待ち":
         return BridgeHandoffView("current ready issue の参照で開始してください。", detail)
     if status.label == "ChatGPTへ依頼準備中":
@@ -1088,6 +1110,37 @@ def has_pending_issue_centric_codex_dispatch(state: Mapping[str, Any]) -> bool:
         and not bool(state.get("need_codex_run"))
         and not bool(str(state.get("last_issue_centric_execution_status", "")).strip())
     )
+
+
+def detect_ic_stop_path(state: Mapping[str, Any]) -> str:
+    """Return the IC stop path for operator-facing surfaces, or '' if not applicable.
+
+    Used by present_bridge_status(), format_operator_stop_note(), and
+    run_until_stop.py surfaces to produce stop-path-specific guidance rather
+    than falling through to generic plan-based messages.
+
+    Returns one of:
+      "codex_run_stop"         — pending issue-centric codex dispatch (prepared body waiting)
+      "initial_selection_stop" — ChatGPT selected a ready issue; operator must re-run
+                                 with --ready-issue-ref
+      "human_review_needed"    — IC human_review_needed decision; operator must resume
+                                 with supplement input
+      ""                       — not an IC awaiting-user stop path
+
+    Evaluation order: codex_run_stop is checked first (uses has_pending_issue_centric_codex_dispatch),
+    then chatgpt_decision prefix check, then sub-classification by selected_ready_issue_ref /
+    "human_review_needed" substring.
+    """
+    if has_pending_issue_centric_codex_dispatch(state):
+        return "codex_run_stop"
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return ""
+    if str(state.get("selected_ready_issue_ref", "")).strip():
+        return "initial_selection_stop"
+    if "human_review_needed" in chatgpt_decision:
+        return "human_review_needed"
+    return ""
 
 
 def is_initial_bridge_state(state: Mapping[str, Any]) -> bool:
@@ -1855,6 +1908,15 @@ def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatch
     mode is only consulted via is_awaiting_user_supplement() rather than read
     directly, keeping mode as a compatibility signal in the background.
     """
+    # IC stop paths: surface chatgpt_decision_note rather than generic plan-based messages.
+    # detect_ic_stop_path() checks in order: codex_run_stop → initial_selection_stop → human_review_needed.
+    # codex_run_stop is already handled before summarize_run() calls this (plan.next_action would
+    # be "dispatch_issue_centric_codex_run"), so it won't appear here; but the guard is harmless.
+    _ic_path = detect_ic_stop_path(state)
+    if _ic_path in {"initial_selection_stop", "human_review_needed"}:
+        _ic_note = str(state.get("chatgpt_decision_note", "")).strip()
+        if _ic_note:
+            return _ic_note
     if plan.next_action == "completed":
         _lc = _bridge_lifecycle_sync_suffix(state)
         return f"追加の Codex 実行・ChatGPT 依頼は不要です。{_lc}"
