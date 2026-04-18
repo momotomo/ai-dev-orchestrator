@@ -1019,6 +1019,86 @@ def _apply_ic_fetch_stop_state(
         mutable_state["selected_ready_issue_ref"] = outcome.selected_issue_ref
 
 
+# ---------------------------------------------------------------------------
+# Operator-facing lifecycle status helpers
+# ---------------------------------------------------------------------------
+# These helpers translate internal issue-centric state values into operator-
+# readable decision notes.  The notes are stored in chatgpt_decision_note and
+# surfaced by run_until_stop.suggested_next_note() and the bridge summary.
+#
+# Responsibilities:
+#   _build_ic_operator_decision_note() — produce a user-facing note from an
+#     action value and optional context (target_issue, selected_issue_ref,
+#     outcome path).  Returns a short Japanese sentence suitable for display
+#     in the bridge summary / operator screen.
+#
+# The caller (run()) replaces the raw safe_stop_reason with this note so that
+# the operator always sees an action-appropriate next-step description rather
+# than a low-level technical stop reason.
+# ---------------------------------------------------------------------------
+
+
+def _build_ic_operator_decision_note(
+    action: str,
+    outcome_path: str,
+    *,
+    target_issue: str = "",
+    selected_issue_ref: str = "",
+    safe_stop_reason: str = "",
+) -> str:
+    """Return a Japanese operator-facing note for the given fetch outcome.
+
+    This note is stored in ``chatgpt_decision_note`` and read by
+    ``run_until_stop.suggested_next_note()`` to produce the operator guidance
+    shown after each bridge cycle.
+
+    Rules:
+    - codex_run_stop  → prepared artifact / next bridge step guidance
+    - initial_selection_stop → ready issue selection guidance
+    - dispatch + codex_run   → continuation note (execution will overwrite later)
+    - dispatch + no_action / human_review_needed / issue_create → appropriate guidance
+    - fallback: safe_stop_reason if non-empty, otherwise generic note
+    """
+    if outcome_path == "codex_run_stop":
+        issue_part = f" ({target_issue})" if target_issue and target_issue != "none" else ""
+        return (
+            f"ChatGPT が Codex 実行指示{issue_part}を返しました。"
+            " prepared Codex body は保存済みです。"
+            " bridge を再実行すると issue-centric codex_run dispatch を進めます。"
+        )
+    if outcome_path == "initial_selection_stop":
+        ref = selected_issue_ref or target_issue
+        ref_part = f" {ref}" if ref and ref != "none" else ""
+        return (
+            f"ChatGPT が ready issue{ref_part} を選定しました。"
+            " --ready-issue-ref でその issue を指定して bridge を再実行してください。"
+        )
+    # dispatch paths — execution will overwrite chatgpt_decision_note via
+    # _finalize_dispatch; this note acts as a pre-dispatch placeholder.
+    if action == "codex_run":
+        issue_part = f" ({target_issue})" if target_issue and target_issue != "none" else ""
+        return (
+            f"ChatGPT が Codex 実行指示{issue_part}を返しました。dispatch を継続します。"
+        )
+    if action == "issue_create":
+        issue_part = f" ({target_issue})" if target_issue and target_issue != "none" else ""
+        return f"ChatGPT が issue 作成指示{issue_part}を返しました。dispatch を継続します。"
+    if action == "human_review_needed":
+        issue_part = f" ({target_issue})" if target_issue and target_issue != "none" else ""
+        return (
+            f"ChatGPT が人レビュー待ち{issue_part}を返しました。"
+            " bridge を再実行すると補足入力を受けて次 request を送ります。"
+        )
+    if action == "no_action":
+        return (
+            "ChatGPT が no_action を返しました。dispatch を継続します。"
+        )
+    # Generic fallback — preserve safe_stop_reason when available.
+    if safe_stop_reason:
+        return safe_stop_reason
+    return f"ChatGPT が {action} を返しました。dispatch を継続します。"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の ChatGPT 返答ブロックを抽出します。")
     parser.add_argument(
@@ -1308,6 +1388,16 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 if materialized.artifact_log_path is not None
                 else ""
             ),
+        )
+        # ── Operator-facing decision note ───────────────────────────────────
+        # Replace the raw safe_stop_reason with an action-appropriate note so
+        # the operator always sees a meaningful next-step description.
+        mutable_state["chatgpt_decision_note"] = _build_ic_operator_decision_note(
+            handoff.action,
+            outcome.path,
+            target_issue=handoff.target_issue,
+            selected_issue_ref=outcome.selected_issue_ref,
+            safe_stop_reason=handoff.stop_reason,
         )
         if outcome.path != "dispatch":
             _apply_ic_fetch_stop_state(mutable_state, outcome)

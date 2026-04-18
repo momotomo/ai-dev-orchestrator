@@ -6722,5 +6722,243 @@ class IcFetchOutcomeRoutingTests(unittest.TestCase):
         self.assertIn("metadata", str(exc))
 
 
+class IcOperatorLifecycleStatusTests(unittest.TestCase):
+    """Phase 42 — operator-facing lifecycle summary / status consistency tests.
+
+    Verifies _build_ic_operator_decision_note() and that chatgpt_decision_note
+    in saved state is operator-appropriate for each fetch outcome path.
+
+    Group 1: _build_ic_operator_decision_note() unit tests (7 tests)
+    Group 2: chatgpt_decision_note in saved state after run() (3 tests)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _fnp(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("fetch_next_prompt")
+
+    def _ic(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_contract")
+
+    def _base_pending_state(self, *, source: str = "report:1") -> dict:
+        return {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash-abc",
+            "pending_request_source": source,
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+
+    def _build_raw(self, action: str, target_issue: str = "none") -> str:
+        import base64 as _b64
+        import json as _json
+        ic = self._ic()
+        envelope = {
+            "action": action,
+            "target_issue": target_issue,
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": f"Test {action}.",
+        }
+        json_blob = _json.dumps(envelope, ensure_ascii=True)
+        parts = [f"{ic.DECISION_JSON_START}\n{json_blob}\n{ic.DECISION_JSON_END}"]
+        if action == "codex_run":
+            body = _b64.b64encode(b"Codex body content.\n").decode("ascii")
+            parts.append(f"{ic.CODEX_BODY_START}\n{body}\n{ic.CODEX_BODY_END}")
+        elif action == "issue_create":
+            body = _b64.b64encode(b"Issue body content.\n").decode("ascii")
+            parts.append(f"{ic.ISSUE_BODY_START}\n{body}\n{ic.ISSUE_BODY_END}")
+        elif action == "human_review_needed":
+            body = _b64.b64encode(b"Review comment.\n").decode("ascii")
+            parts.append(f"{ic.REVIEW_BODY_START}\n{body}\n{ic.REVIEW_BODY_END}")
+        lines = ["あなた:", "request body", "ChatGPT:", *parts, ic.REPLY_COMPLETE_TAG]
+        return "\n".join(lines)
+
+    def _build_legacy_raw(self) -> str:
+        return "\n".join([
+            "あなた:",
+            "request body",
+            "ChatGPT:",
+            "===CHATGPT_PROMPT_REPLY===",
+            "some legacy reply text",
+            "===END_CHATGPT_PROMPT_REPLY===",
+        ])
+
+    def _run_fetch_with_raw_file(
+        self,
+        raw: str,
+        *,
+        state: dict | None = None,
+        mock_dispatch: bool = True,
+    ):
+        from contextlib import ExitStack
+        from unittest.mock import patch, MagicMock
+        fnp = self._fnp()
+        saved_states: list[dict] = []
+        dispatch_mutable_states: list[dict] = []
+        base_state = state if state is not None else self._base_pending_state()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            raw_file = tmp_path / "raw.txt"
+            raw_file.write_text(raw, encoding="utf-8")
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                p = tmp_path / f"{prefix}.{suffix}"
+                p.write_text(text, encoding="utf-8")
+                return p
+
+            def fake_dispatch(**kwargs):
+                mutable = kwargs.get("mutable_state", {})
+                dispatch_mutable_states.append(dict(mutable))
+                result = MagicMock()
+                result.final_state = dict(mutable)
+                result.stop_message = "mock dispatch complete"
+                return result
+
+            exc_caught = None
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch.object(fnp, "read_pending_request_text", return_value="request body")
+                )
+                stack.enter_context(
+                    patch.object(fnp, "log_text", side_effect=fake_log_text)
+                )
+                stack.enter_context(
+                    patch.object(fnp, "save_state",
+                                 side_effect=lambda s: saved_states.append(dict(s)))
+                )
+                if mock_dispatch:
+                    stack.enter_context(
+                        patch.object(fnp, "dispatch_issue_centric_execution",
+                                     side_effect=fake_dispatch)
+                    )
+                    stack.enter_context(
+                        patch.object(fnp, "load_project_config", return_value={})
+                    )
+                    stack.enter_context(
+                        patch.object(fnp, "project_repo_path", return_value=Path("."))
+                    )
+                try:
+                    fnp.run(dict(base_state), ["--raw-file", str(raw_file)])
+                except Exception as exc:
+                    exc_caught = exc
+
+        return saved_states, dispatch_mutable_states, exc_caught
+
+    # ------------------------------------------------------------------
+    # Group 1: _build_ic_operator_decision_note() unit tests (7 tests)
+    # ------------------------------------------------------------------
+
+    def test_note_codex_run_stop_contains_prepared_body_guidance(self):
+        """codex_run_stop → note mentions prepared Codex body and bridge re-run."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note(
+            "codex_run", "codex_run_stop", target_issue="#20"
+        )
+        self.assertIn("prepared Codex body", note)
+        self.assertIn("bridge", note)
+        self.assertIn("#20", note)
+
+    def test_note_initial_selection_stop_contains_ready_issue_guidance(self):
+        """initial_selection_stop → note mentions ready issue selection and --ready-issue-ref."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note(
+            "no_action", "initial_selection_stop", selected_issue_ref="#7"
+        )
+        self.assertIn("ready issue", note)
+        self.assertIn("#7", note)
+        self.assertIn("--ready-issue-ref", note)
+
+    def test_note_initial_selection_stop_uses_target_issue_when_no_ref(self):
+        """initial_selection_stop + no selected_issue_ref → falls back to target_issue."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note(
+            "no_action", "initial_selection_stop", target_issue="#9"
+        )
+        self.assertIn("#9", note)
+
+    def test_note_human_review_dispatch_contains_bridge_guidance(self):
+        """human_review_needed + dispatch → note mentions bridge re-run for supplement input."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note(
+            "human_review_needed", "dispatch", target_issue="#5"
+        )
+        self.assertIn("#5", note)
+        self.assertIn("bridge", note)
+
+    def test_note_no_action_dispatch_does_not_imply_codex_stop(self):
+        """no_action + dispatch → note does not mention 'prepared Codex body' (stop phrasing)."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note("no_action", "dispatch")
+        self.assertNotIn("prepared Codex body", note)
+        self.assertNotIn("--ready-issue-ref", note)
+
+    def test_note_issue_create_dispatch_contains_issue_guidance(self):
+        """issue_create + dispatch → note mentions issue 作成指示."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note(
+            "issue_create", "dispatch", target_issue="#11"
+        )
+        self.assertIn("issue", note)
+        self.assertIn("#11", note)
+
+    def test_note_codex_run_dispatch_not_stop_phrasing(self):
+        """codex_run + dispatch → note does NOT say 'prepared Codex body は保存済みです'."""
+        fnp = self._fnp()
+        note = fnp._build_ic_operator_decision_note("codex_run", "dispatch", target_issue="#8")
+        # dispatch path: should NOT say artifact prepared/stop-before-dispatch
+        self.assertNotIn("保存済みです。 bridge を再実行すると issue-centric codex_run dispatch を進めます", note)
+        self.assertIn("dispatch", note)
+
+    # ------------------------------------------------------------------
+    # Group 2: chatgpt_decision_note in saved state after run() (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_run_codex_run_stop_decision_note_mentions_prepared_artifact(self):
+        """codex_run stop → chatgpt_decision_note in saved state mentions prepared Codex body."""
+        raw = self._build_raw("codex_run", "#20")
+        saved, _, exc = self._run_fetch_with_raw_file(raw, mock_dispatch=True)
+        self.assertEqual(len(saved), 1)
+        note = saved[0].get("chatgpt_decision_note", "")
+        self.assertIn("prepared Codex body", str(note))
+        self.assertIn("#20", str(note))
+
+    def test_run_initial_selection_stop_decision_note_mentions_ready_issue(self):
+        """initial_selection: stop → chatgpt_decision_note mentions ready issue and --ready-issue-ref."""
+        raw = self._build_raw("no_action", "#7")
+        state = self._base_pending_state(source="initial_selection:report")
+        saved, _, exc = self._run_fetch_with_raw_file(raw, state=state, mock_dispatch=True)
+        self.assertEqual(len(saved), 1)
+        note = saved[0].get("chatgpt_decision_note", "")
+        self.assertIn("ready issue", str(note))
+        self.assertIn("--ready-issue-ref", str(note))
+
+    def test_run_legacy_reply_decision_note_is_not_success_phrasing(self):
+        """legacy_contract_detected → chatgpt_decision_note is legacy-warning, not success."""
+        raw = self._build_legacy_raw()
+        saved, _, exc = self._run_fetch_with_raw_file(raw, mock_dispatch=True)
+        self.assertEqual(len(saved), 1)
+        note = str(saved[0].get("chatgpt_decision_note", ""))
+        decision = str(saved[0].get("chatgpt_decision", ""))
+        # Must not look like a successful dispatch note
+        self.assertNotIn("dispatch を継続します", note)
+        self.assertNotIn("prepared Codex body は保存済みです", note)
+        self.assertEqual(decision, "legacy_contract_detected")
+        # Note should indicate legacy or contract required
+        self.assertTrue(
+            "legacy" in note.lower() or "contract" in note.lower(),
+            f"Expected legacy/contract in note, got: {note!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
