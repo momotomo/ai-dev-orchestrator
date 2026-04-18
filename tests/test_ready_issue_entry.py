@@ -4456,5 +4456,279 @@ class IcExecutionToNextCycleConsistencyTests(unittest.TestCase):
         self.assertEqual(ctx.close_order, "1")
 
 
+class IcContinuationPayloadTests(unittest.TestCase):
+    """Phase 35 — _IcContinuationPayload, _build_ic_continuation_payload,
+    _apply_ic_continuation_fields, and end-to-end execution→request consistency."""
+
+    def _iec(self):
+        """Return the issue_centric_execution module."""
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_execution")
+
+    def _req(self):
+        """Return the request_prompt_from_report module."""
+        import importlib
+        import sys
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("request_prompt_from_report")
+
+    # ------------------------------------------------------------------
+    # _build_ic_continuation_payload — field mapping
+    # ------------------------------------------------------------------
+
+    def test_build_continuation_payload_empty_state(self):
+        """Empty state produces all-empty fields without raising."""
+        iec = self._iec()
+        payload = iec._build_ic_continuation_payload({})
+        self.assertEqual(payload.principal_issue, "")
+        self.assertEqual(payload.principal_issue_kind, "")
+        self.assertEqual(payload.next_request_hint, "")
+        self.assertEqual(payload.next_request_target, "")
+        self.assertEqual(payload.next_request_target_source, "")
+        self.assertEqual(payload.action, "")
+        self.assertEqual(payload.target_issue, "")
+        self.assertEqual(payload.resolved_issue, "")
+        self.assertEqual(payload.created_issue_number, "")
+        self.assertEqual(payload.created_issue_url, "")
+        self.assertEqual(payload.followup_issue_number, "")
+        self.assertEqual(payload.followup_issue_url, "")
+        self.assertEqual(payload.followup_parent_issue, "")
+        self.assertEqual(payload.close_order, "")
+        self.assertEqual(payload.execution_status, "")
+        self.assertEqual(payload.stop_reason, "")
+
+    def test_build_continuation_payload_maps_all_fields(self):
+        """All 16 state keys are mapped to the correct payload fields."""
+        iec = self._iec()
+        state = {
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/11",
+            "last_issue_centric_next_request_target_source": "runtime_snapshot",
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/9",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/8",
+            "last_issue_centric_created_issue_number": "42",
+            "last_issue_centric_created_issue_url": "https://github.com/org/repo/issues/42",
+            "last_issue_centric_followup_issue_number": "43",
+            "last_issue_centric_followup_issue_url": "https://github.com/org/repo/issues/43",
+            "last_issue_centric_followup_parent_issue": "https://github.com/org/repo/issues/5",
+            "last_issue_centric_close_order": "2",
+            "last_issue_centric_execution_status": "success",
+            "last_issue_centric_stop_reason": "completed",
+        }
+        payload = iec._build_ic_continuation_payload(state)
+        self.assertEqual(payload.principal_issue, "https://github.com/org/repo/issues/10")
+        self.assertEqual(payload.principal_issue_kind, "current_issue")
+        self.assertEqual(payload.next_request_hint, "continue_on_current_issue")
+        self.assertEqual(payload.next_request_target, "https://github.com/org/repo/issues/11")
+        self.assertEqual(payload.next_request_target_source, "runtime_snapshot")
+        self.assertEqual(payload.action, "codex_run")
+        self.assertEqual(payload.target_issue, "https://github.com/org/repo/issues/9")
+        self.assertEqual(payload.resolved_issue, "https://github.com/org/repo/issues/8")
+        self.assertEqual(payload.created_issue_number, "42")
+        self.assertEqual(payload.created_issue_url, "https://github.com/org/repo/issues/42")
+        self.assertEqual(payload.followup_issue_number, "43")
+        self.assertEqual(payload.followup_issue_url, "https://github.com/org/repo/issues/43")
+        self.assertEqual(payload.followup_parent_issue, "https://github.com/org/repo/issues/5")
+        self.assertEqual(payload.close_order, "2")
+        self.assertEqual(payload.execution_status, "success")
+        self.assertEqual(payload.stop_reason, "completed")
+
+    def test_build_continuation_payload_strips_whitespace(self):
+        """Whitespace is stripped from every field."""
+        iec = self._iec()
+        state = {
+            "last_issue_centric_action": "  codex_run  ",
+            "last_issue_centric_close_order": "  3  ",
+            "last_issue_centric_next_request_target": "  https://github.com/org/repo/issues/1  ",
+        }
+        payload = iec._build_ic_continuation_payload(state)
+        self.assertEqual(payload.action, "codex_run")
+        self.assertEqual(payload.close_order, "3")
+        self.assertEqual(payload.next_request_target, "https://github.com/org/repo/issues/1")
+
+    # ------------------------------------------------------------------
+    # _apply_ic_continuation_fields — normalized_summary → state
+    # ------------------------------------------------------------------
+
+    def test_apply_ic_continuation_fields_principal_issue_url(self):
+        """Writes principal_issue from normalized_summary principal_issue_candidate URL."""
+        iec = self._iec()
+        state: dict = {}
+        normalized_summary = {
+            "principal_issue_candidate": {"url": "https://github.com/org/repo/issues/7", "ref": ""},
+            "principal_issue_kind": "current_issue",
+            "next_request_hint": "continue_on_current_issue",
+        }
+        iec._apply_ic_continuation_fields(state, normalized_summary=normalized_summary)
+        self.assertEqual(state["last_issue_centric_principal_issue"], "https://github.com/org/repo/issues/7")
+        self.assertEqual(state["last_issue_centric_principal_issue_kind"], "current_issue")
+        self.assertEqual(state["last_issue_centric_next_request_hint"], "continue_on_current_issue")
+
+    def test_apply_ic_continuation_fields_falls_back_to_ref(self):
+        """Falls back to ref when URL is absent in principal_issue_candidate."""
+        iec = self._iec()
+        state: dict = {}
+        normalized_summary = {
+            "principal_issue_candidate": {"url": "", "ref": "#99"},
+            "principal_issue_kind": "planned_issue",
+            "next_request_hint": "next_planned_issue",
+        }
+        iec._apply_ic_continuation_fields(state, normalized_summary=normalized_summary)
+        self.assertEqual(state["last_issue_centric_principal_issue"], "#99")
+        self.assertEqual(state["last_issue_centric_principal_issue_kind"], "planned_issue")
+
+    def test_apply_ic_continuation_fields_none_candidate(self):
+        """None principal_issue_candidate produces empty string."""
+        iec = self._iec()
+        state: dict = {}
+        normalized_summary = {
+            "principal_issue_candidate": None,
+            "principal_issue_kind": "",
+            "next_request_hint": "",
+        }
+        iec._apply_ic_continuation_fields(state, normalized_summary=normalized_summary)
+        self.assertEqual(state["last_issue_centric_principal_issue"], "")
+
+    # ------------------------------------------------------------------
+    # End-to-end: execution save → request read consistency
+    # ------------------------------------------------------------------
+
+    def test_e2e_issue_create_principal_resolves_as_next_target(self):
+        """issue_create: principal_issue becomes resolved_next_request_target (2nd priority)."""
+        req = self._req()
+        # Simulate state after issue_create + _finalize_dispatch:
+        # no next_request_target written yet (runtime_snapshot absent in test),
+        # principal_issue set from created issue.
+        state = {
+            "last_issue_centric_action": "issue_create",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/20",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_created_issue_url": "https://github.com/org/repo/issues/20",
+            "last_issue_centric_created_issue_number": "20",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "issue_create")
+        # next_request_target absent → falls back to principal_issue
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/20")
+
+    def test_e2e_codex_run_next_request_target_wins_over_principal(self):
+        """codex_run: next_request_target (from runtime_snapshot) wins over principal_issue."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/22",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/21",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/21",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/22")
+
+    def test_e2e_codex_run_principal_wins_over_resolved_issue(self):
+        """codex_run: principal_issue wins over resolved_issue when no next_request_target."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/21",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/19",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/21")
+
+    def test_e2e_codex_run_resolved_issue_fallback_when_no_principal(self):
+        """codex_run: resolved_issue used when next_request_target and principal_issue both absent."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/19",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/18",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/19")
+
+    def test_e2e_human_review_resolved_issue_preserved(self):
+        """human_review_needed: resolved_issue carries review target and is not lost."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "human_review_needed",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/30",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.action, "human_review_needed")
+        self.assertEqual(ctx.resolved_issue, "https://github.com/org/repo/issues/30")
+        # No principal_issue → resolved_issue used
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/30")
+
+    def test_e2e_followup_next_request_target_points_to_followup(self):
+        """follow-up combo: next_request_target (followup issue) wins over principal/resolved."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "followup",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/45",
+            "last_issue_centric_followup_issue_url": "https://github.com/org/repo/issues/45",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/5",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/45")
+
+    def test_e2e_close_action_next_request_target_preserved(self):
+        """close_current_issue: next_request_target still resolved correctly."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "close_current_issue",
+            "last_issue_centric_close_order": "1",
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/60",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.close_order, "1")
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/60")
+
+    def test_e2e_no_action_target_issue_last_resort(self):
+        """no_action: target_issue is the last-resort fallback when other fields absent."""
+        req = self._req()
+        state = {
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/3",
+        }
+        ctx = req._read_ic_next_cycle_context(state)
+        self.assertEqual(ctx.resolved_next_request_target, "https://github.com/org/repo/issues/3")
+
+    def test_e2e_missing_all_fields_safe_empty_fallback(self):
+        """All four priority fields absent → empty string, no exception."""
+        req = self._req()
+        ctx = req._read_ic_next_cycle_context({})
+        self.assertEqual(ctx.resolved_next_request_target, "")
+
+    def test_e2e_continuation_payload_shared_fields_match_next_cycle_context(self):
+        """_IcContinuationPayload and _IcNextCycleContext read the same fields from identical state."""
+        iec = self._iec()
+        req = self._req()
+        state = {
+            "last_issue_centric_next_request_target": "https://github.com/org/repo/issues/10",
+            "last_issue_centric_principal_issue": "https://github.com/org/repo/issues/9",
+            "last_issue_centric_principal_issue_kind": "current_issue",
+            "last_issue_centric_resolved_issue": "https://github.com/org/repo/issues/8",
+            "last_issue_centric_target_issue": "https://github.com/org/repo/issues/7",
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_close_order": "",
+        }
+        payload = iec._build_ic_continuation_payload(state)
+        ctx = req._read_ic_next_cycle_context(state)
+        # The shared fields must agree
+        self.assertEqual(payload.next_request_target, ctx.next_request_target)
+        self.assertEqual(payload.principal_issue, ctx.principal_issue)
+        self.assertEqual(payload.principal_issue_kind, ctx.principal_issue_kind)
+        self.assertEqual(payload.resolved_issue, ctx.resolved_issue)
+        self.assertEqual(payload.target_issue, ctx.target_issue)
+        self.assertEqual(payload.action, ctx.action)
+        self.assertEqual(payload.next_request_hint, ctx.next_request_hint)
+        self.assertEqual(payload.close_order, ctx.close_order)
+
+
 if __name__ == "__main__":
     unittest.main()
