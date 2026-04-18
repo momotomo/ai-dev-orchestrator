@@ -922,6 +922,103 @@ def _apply_ic_fetch_handoff_state(
     )
 
 
+# ---------------------------------------------------------------------------
+# Fetch outcome routing
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _IcFetchOutcome:
+    """Routing decision produced after the fetch handoff state is built.
+
+    path:
+      "dispatch"               — proceed to dispatch_issue_centric_execution()
+      "codex_run_stop"         — stop before dispatch; artifact ready for codex_run
+      "initial_selection_stop" — stop; ChatGPT returned a ready-issue selection
+
+    stop_message is populated for all non-dispatch paths.
+    selected_issue_ref is populated for initial_selection_stop only.
+    """
+
+    path: str  # "dispatch" | "codex_run_stop" | "initial_selection_stop"
+    stop_message: str
+    selected_issue_ref: str
+
+
+def _resolve_ic_fetch_outcome(
+    contract_decision: object,
+    pending_request_source: str,
+    *,
+    raw_log_rel: str,
+    decision_log_rel: str,
+    metadata_log_rel: str,
+    artifact_log_rel: str,
+) -> _IcFetchOutcome:
+    """Resolve the fetch outcome routing path after the handoff state is built.
+
+    Reads the contract decision action and the pending request source to
+    determine whether to proceed to dispatch or stop before it.
+
+    Returns _IcFetchOutcome describing the routing decision and, for stop
+    paths, the BridgeStop message and any additional state values.
+
+    Stop paths:
+      CODEX_RUN              — artifact is prepared; stop so operator can launch codex_run
+      initial_selection stop — source starts with "initial_selection:" and ChatGPT
+                               returned NO_ACTION with a target_issue selection
+    Dispatch path:
+      All other combinations — proceed to dispatch_issue_centric_execution()
+    """
+    if contract_decision.action is IssueCentricAction.CODEX_RUN:
+        artifact_part = f" artifact: {artifact_log_rel}" if artifact_log_rel else ""
+        stop_message = (
+            "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"
+            " prepared Codex body は次の bridge 手で codex_run dispatch に渡します。"
+            f" raw dump: {raw_log_rel}"
+            f" decision log: {decision_log_rel}"
+            f" metadata: {metadata_log_rel}"
+            + artifact_part
+        )
+        return _IcFetchOutcome(
+            path="codex_run_stop",
+            stop_message=stop_message,
+            selected_issue_ref="",
+        )
+
+    if (
+        pending_request_source.startswith("initial_selection:")
+        and contract_decision.action is IssueCentricAction.NO_ACTION
+        and contract_decision.target_issue
+    ):
+        stop_message = (
+            f"initial_selection: ChatGPT が ready issue を選定しました: {contract_decision.target_issue}."
+            f" summary: {contract_decision.summary!r}"
+            " 次は --ready-issue-ref でその issue を指定して実行を開始してください。"
+            f" raw dump: {raw_log_rel}"
+            f" decision log: {decision_log_rel}"
+        )
+        return _IcFetchOutcome(
+            path="initial_selection_stop",
+            stop_message=stop_message,
+            selected_issue_ref=contract_decision.target_issue,
+        )
+
+    return _IcFetchOutcome(path="dispatch", stop_message="", selected_issue_ref="")
+
+
+def _apply_ic_fetch_stop_state(
+    mutable_state: dict[str, object],
+    outcome: _IcFetchOutcome,
+) -> None:
+    """Apply outcome-specific state mutations for stop-before-dispatch paths.
+
+    For codex_run_stop:        no additional mutations (handoff state is sufficient).
+    For initial_selection_stop: writes selected_ready_issue_ref from outcome.
+    """
+    if outcome.path == "initial_selection_stop" and outcome.selected_issue_ref:
+        mutable_state["selected_ready_issue_ref"] = outcome.selected_issue_ref
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Safari の現在 ChatGPT タブから最後の ChatGPT 返答ブロックを抽出します。")
     parser.add_argument(
@@ -1199,34 +1296,23 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         # 2. Write what this fetch cycle learned from the ChatGPT reply.
         #    After this call mutable_state is the complete pre-dispatch handoff.
         _apply_ic_fetch_handoff_state(mutable_state, handoff)
-        if contract_decision.action is IssueCentricAction.CODEX_RUN:
+        # ── Outcome routing: resolve and execute ────────────────────────────
+        outcome = _resolve_ic_fetch_outcome(
+            contract_decision,
+            pending_request_source,
+            raw_log_rel=repo_relative(raw_log),
+            decision_log_rel=repo_relative(decision_log),
+            metadata_log_rel=repo_relative(materialized.metadata_log_path),
+            artifact_log_rel=(
+                repo_relative(materialized.artifact_log_path)
+                if materialized.artifact_log_path is not None
+                else ""
+            ),
+        )
+        if outcome.path != "dispatch":
+            _apply_ic_fetch_stop_state(mutable_state, outcome)
             save_state(mutable_state)
-            raise BridgeStop(
-                "issue-centric contract reply を検出し、BODY base64 transport の prepared artifact まで作成しました。"
-                " prepared Codex body は次の bridge 手で codex_run dispatch に渡します。"
-                f" raw dump: {repo_relative(raw_log)}"
-                f" decision log: {repo_relative(decision_log)}"
-                f" metadata: {repo_relative(materialized.metadata_log_path)}"
-                + (
-                    f" artifact: {repo_relative(materialized.artifact_log_path)}"
-                    if materialized.artifact_log_path is not None
-                    else ""
-                )
-            )
-        if (
-            pending_request_source.startswith("initial_selection:")
-            and contract_decision.action is IssueCentricAction.NO_ACTION
-            and contract_decision.target_issue
-        ):
-            mutable_state["selected_ready_issue_ref"] = contract_decision.target_issue
-            save_state(mutable_state)
-            raise BridgeStop(
-                f"initial_selection: ChatGPT が ready issue を選定しました: {contract_decision.target_issue}."
-                f" summary: {contract_decision.summary!r}"
-                " 次は --ready-issue-ref でその issue を指定して実行を開始してください。"
-                f" raw dump: {repo_relative(raw_log)}"
-                f" decision log: {repo_relative(decision_log)}"
-            )
+            raise BridgeStop(outcome.stop_message)
         project_config = load_project_config()
         dispatch_result = dispatch_issue_centric_execution(
             contract_decision=contract_decision,
