@@ -676,56 +676,110 @@ def run_rotated_report_request(
         _route_selected,
     ) = _resolve_normal_ic_context(state)
     request_source = build_report_request_source(state, "")
-    pending_handoff_text = ""
+    handoff_text, handoff_received_log = _acquire_rotated_handoff(
+        state,
+        args,
+        last_report,
+        request_source=request_source,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        issue_centric_runtime_mode=issue_centric_runtime_mode,
+        issue_centric_next_request_section=issue_centric_next_request_section,
+    )
+    return _apply_rotated_request_result(
+        state,
+        handoff_text=handoff_text,
+        handoff_received_log=handoff_received_log,
+        request_source=request_source,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        issue_centric_runtime_mode=issue_centric_runtime_mode,
+    )
+
+
+def _acquire_rotated_handoff(
+    state: dict[str, object],
+    args: argparse.Namespace,
+    last_report: str,
+    *,
+    request_source: str,
+    issue_centric_runtime_snapshot: object | None,
+    issue_centric_runtime_mode: object | None,
+    issue_centric_next_request_section: str,
+) -> tuple[str, str]:
+    """Acquire handoff text for a rotated report request.
+
+    Returns ``(handoff_text, handoff_received_log)``.
+
+    Two paths:
+
+    * **Cached pending handoff** — if ``pending_handoff_source`` matches
+      ``request_source`` and a pending handoff text is available, it is reused
+      directly without sending a new request.
+
+    * **Fresh acquisition** — builds and sends a handoff request, waits for the
+      reply, extracts the handoff text, and persists the pending handoff state.
+    """
     pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
     if pending_handoff_source == request_source:
         pending_handoff_text = read_pending_handoff_text(state)
-
-    if pending_handoff_text:
-        handoff_text = pending_handoff_text
-        handoff_received_log = state.get("pending_handoff_log", "") or ""
-        print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
-    else:
-        handoff_request_text = build_chatgpt_handoff_request(
-            state=state,
-            last_report=last_report,
-            next_todo=args.next_todo,
-            open_questions=args.open_questions,
-            current_status=args.current_status or None,
-            issue_centric_next_request_section=issue_centric_next_request_section,
-        )
-        handoff_request_log = log_text("handoff_requested", handoff_request_text)
-        send_to_chatgpt(handoff_request_text)
-        print(f"handoff requested: {handoff_request_log}")
-
-        raw_text = wait_for_handoff_reply_text(
-            request_text=handoff_request_text,
-            stage_callback=log_wait_event,
-        )
-        handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
-        handoff_received_log = log_text("handoff_received", handoff_text)
-        handoff_state = clear_error_fields(dict(state))
-        clear_pending_request_fields(handoff_state)
+        if pending_handoff_text:
+            print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
+            return pending_handoff_text, str(state.get("pending_handoff_log", "") or "")
+    handoff_request_text = build_chatgpt_handoff_request(
+        state=state,
+        last_report=last_report,
+        next_todo=args.next_todo,
+        open_questions=args.open_questions,
+        current_status=args.current_status or None,
+        issue_centric_next_request_section=issue_centric_next_request_section,
+    )
+    handoff_request_log = log_text("handoff_requested", handoff_request_text)
+    send_to_chatgpt(handoff_request_text)
+    print(f"handoff requested: {handoff_request_log}")
+    raw_text = wait_for_handoff_reply_text(
+        request_text=handoff_request_text,
+        stage_callback=log_wait_event,
+    )
+    handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
+    handoff_received_log = log_text("handoff_received", handoff_text)
+    handoff_state = clear_error_fields(dict(state))
+    clear_pending_request_fields(handoff_state)
+    handoff_state.update(
+        {
+            "mode": "idle",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": True,
+            "need_codex_run": False,
+            "pending_handoff_hash": stable_text_hash(handoff_text),
+            "pending_handoff_source": request_source,
+            "pending_handoff_log": repo_relative(handoff_received_log),
+        }
+    )
+    if issue_centric_runtime_snapshot is not None:
         handoff_state.update(
-            {
-                "mode": "idle",
-                "need_chatgpt_prompt": False,
-                "need_chatgpt_next": True,
-                "need_codex_run": False,
-                "pending_handoff_hash": stable_text_hash(handoff_text),
-                "pending_handoff_source": request_source,
-                "pending_handoff_log": repo_relative(handoff_received_log),
-            }
-        )
-        if issue_centric_runtime_snapshot is not None:
-            handoff_state.update(
-                _issue_centric_next_request_state_updates(
-                    issue_centric_runtime_mode or issue_centric_runtime_snapshot,
-                    phase="prepared",
-                )
+            _issue_centric_next_request_state_updates(
+                issue_centric_runtime_mode or issue_centric_runtime_snapshot,
+                phase="prepared",
             )
-        save_state(handoff_state)
+        )
+    save_state(handoff_state)
+    return handoff_text, handoff_received_log
 
+
+def _apply_rotated_request_result(
+    state: dict[str, object],
+    *,
+    handoff_text: str,
+    handoff_received_log: str,
+    request_source: str,
+    issue_centric_runtime_snapshot: object | None,
+    issue_centric_runtime_mode: object | None,
+) -> int:
+    """Apply rotated report request result to state, logs, and stdout.
+
+    Rotates the chat with the handoff text, updates state with pending request
+    fields and IC context, saves state, and prints the rotation result.
+    Returns 0.
+    """
     rotated_chat = rotate_chat_with_handoff(handoff_text)
     rotation_signal = str(rotated_chat.get("signal", "")).strip()
     soft_wait = rotation_signal == "submitted_unconfirmed"
@@ -755,7 +809,6 @@ def run_rotated_report_request(
         handoff_text,
     )
     request_hash = stable_text_hash(handoff_text)
-
     mutable_state = clear_error_fields(dict(state))
     clear_pending_request_fields(mutable_state)
     clear_pending_handoff_fields(mutable_state)
@@ -792,7 +845,6 @@ def run_rotated_report_request(
             )
         )
     save_state(mutable_state)
-
     if handoff_received_log:
         print(f"handoff received: {handoff_received_log}")
     print(f"chat rotated: {chat_rotated_log}")
@@ -816,6 +868,22 @@ def run_rotated_report_request(
     return 0
 
 
+def _clean_stale_pending_handoff_if_needed(state: dict[str, object]) -> dict[str, object]:
+    """Clear a stale pending handoff from state when rotation is not needed.
+
+    If ``pending_handoff_log`` is present but ``should_rotate_before_next_chat_request``
+    returns False, the pending handoff is stale and must be cleared so that the normal
+    resume path does not accidentally pick it up.  The cleaned state is saved and
+    returned.  If no cleanup is needed the original state object is returned unchanged.
+    """
+    if not should_rotate_before_next_chat_request(state) and str(state.get("pending_handoff_log", "")).strip():
+        cleaned_state = dict(state)
+        clear_pending_handoff_fields(cleaned_state)
+        save_state(cleaned_state)
+        return cleaned_state
+    return state
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if should_prioritize_unarchived_report(state):
         raise BridgeStop(
@@ -831,11 +899,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
         return 0
     last_report = read_last_report_text(state)
-    if not should_rotate_before_next_chat_request(state) and str(state.get("pending_handoff_log", "")).strip():
-        cleaned_state = dict(state)
-        clear_pending_handoff_fields(cleaned_state)
-        save_state(cleaned_state)
-        state = cleaned_state
+    state = _clean_stale_pending_handoff_if_needed(state)
     if str(state.get("mode", "")).strip() == "awaiting_user":
         return run_resume_request(state, args, last_report, resume_note)
     if should_rotate_before_next_chat_request(state):
