@@ -68,6 +68,27 @@ def _resolve_no_action_matrix_path(
     return "prepared_artifact_only"
 
 
+def _resolve_issue_create_matrix_path(
+    create_followup_issue: bool,
+    close_current_issue: bool,
+) -> str:
+    """Return the expected matrix_path for an issue_create decision based on flags.
+
+    Used by tests and for documentation clarity.  The actual execution
+    branches in ``dispatch_issue_centric_execution`` must match these values.
+
+    Execution order is always: issue_create → (followup_issue_create →) close_current_issue.
+    Close is never run before issue_create completes successfully.
+    """
+    if create_followup_issue and close_current_issue:
+        return "issue_create_followup_then_close"
+    if create_followup_issue:
+        return "issue_create_followup"
+    if close_current_issue:
+        return "issue_create_then_close"
+    return "issue_create"
+
+
 def dispatch_issue_centric_execution(
     *,
     contract_decision: object,
