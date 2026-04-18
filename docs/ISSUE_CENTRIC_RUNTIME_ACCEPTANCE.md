@@ -187,7 +187,7 @@ python3 scripts/start_bridge.py \
 | `===CHATGPT_PROMPT_REPLY===` / `===CHATGPT_NO_CODEX===` | legacy fallback として継続サポート |
 | `mode` フィールド | 後方互換のため維持。read-side は `last_issue_centric_state_view` 等を優先 |
 | free-form 初回本文 override | 例外経路として維持。通常入口は `--ready-issue-ref` |
-| `codex_run + close_current_issue = true` 組み合わせ | dispatcher がブロック (意図的) |
+| `codex_run + close_current_issue = true` 組み合わせ | Phase 47 で post-launch narrow close path を実装 (trigger → launch → close) |
 | multi-flag 組み合わせの制限 | narrow execution matrix の範囲内のみサポート |
 
 ---
@@ -271,7 +271,7 @@ python3 scripts/start_bridge.py \
 ### K. 未着手 / 今後課題
 
 - [ ] Plan A → visible DOM fallback の自動判定精度向上 (現状は parse 失敗で fallback)
-- [ ] `codex_run + close_current_issue = true` の dispatcher サポート (現状はブロック)
+- [x] `codex_run + close_current_issue = true` の dispatcher サポート (Phase 47: trigger → launch → post-launch close / matrix_path `codex_run_then_close`)
 - [ ] multi-flag 組み合わせの拡張 (narrow matrix 外)
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)

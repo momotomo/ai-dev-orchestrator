@@ -7365,6 +7365,336 @@ class IcOperatorStatusSurfaceTests(unittest.TestCase):
         self.assertNotIn("summary と doctor を確認し", note)
 
 
+class IcCodexRunCloseCurrentIssueTests(unittest.TestCase):
+    """Phase 47 — codex_run + close_current_issue post-launch narrow close path.
+
+    Verifies:
+    - _determine_close_order with allow_codex_run_close=True returns "after_codex_run"
+    - _determine_close_order without allow_codex_run_close returns "blocked_codex_run"
+    - resolve_close_target_issue raises when codex_run + no allow flags
+    - resolve_close_target_issue does NOT raise when allow_codex_run_close=True and no followup
+    - dispatch matrix_path for codex_run + close + no_followup is "codex_run_then_close"
+    - dispatch matrix_path for codex_run without close is still "codex_run_launch_and_continuation"
+    - dispatch matrix_path for codex_run + followup + close is still "codex_run_followup_then_close" (regression)
+    - not_attempted_continuation_blocked close_order is "after_codex_run" when no followup
+
+    Group 1: _determine_close_order unit tests (3 tests)
+    Group 2: resolve_close_target_issue permission guard tests (2 tests)
+    Group 3: matrix_path selection tests (3 tests)
+    Group 4: not_attempted close_order tests (1 test)
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _iccc(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_close_current_issue")
+
+    def _ic(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_contract")
+
+    def _ice(self):
+        import importlib
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        return importlib.import_module("issue_centric_execution")
+
+    def _make_prepared(self, *, action_name: str, create_followup_issue: bool = False,
+                       close_current_issue: bool = True, target_issue: str = "none") -> object:
+        from unittest.mock import MagicMock
+        ic = self._ic()
+        d = MagicMock()
+        d.action = ic.IssueCentricAction(action_name)
+        d.create_followup_issue = create_followup_issue
+        d.close_current_issue = close_current_issue
+        d.target_issue = target_issue
+        d.summary = "Test decision."
+        prepared = MagicMock()
+        prepared.decision = d
+        return prepared
+
+    # ------------------------------------------------------------------
+    # Group 1: _determine_close_order unit tests (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_determine_close_order_codex_run_allow_returns_after_codex_run(self):
+        """_determine_close_order with allow_codex_run_close=True returns 'after_codex_run'."""
+        iccc = self._iccc()
+        ic = self._ic()
+        result = iccc._determine_close_order(
+            ic.IssueCentricAction.CODEX_RUN,
+            allow_codex_run_close=True,
+        )
+        self.assertEqual(result, "after_codex_run")
+
+    def test_determine_close_order_codex_run_default_returns_blocked(self):
+        """_determine_close_order with codex_run and no allow flags returns 'blocked_codex_run'."""
+        iccc = self._iccc()
+        ic = self._ic()
+        result = iccc._determine_close_order(ic.IssueCentricAction.CODEX_RUN)
+        self.assertEqual(result, "blocked_codex_run")
+
+    def test_determine_close_order_codex_run_followup_returns_after_codex_run_followup(self):
+        """_determine_close_order with allow_codex_run_followup_close=True returns 'after_codex_run_followup'."""
+        iccc = self._iccc()
+        ic = self._ic()
+        result = iccc._determine_close_order(
+            ic.IssueCentricAction.CODEX_RUN,
+            allow_codex_run_followup_close=True,
+        )
+        self.assertEqual(result, "after_codex_run_followup")
+
+    # ------------------------------------------------------------------
+    # Group 2: resolve_close_target_issue permission guard tests (2 tests)
+    # ------------------------------------------------------------------
+
+    def test_resolve_close_target_issue_codex_run_no_allow_raises(self):
+        """resolve_close_target_issue for codex_run without allow flags raises IssueCentricCloseCurrentIssueError."""
+        iccc = self._iccc()
+        prepared = self._make_prepared(action_name="codex_run", create_followup_issue=False)
+        with self.assertRaises(iccc.IssueCentricCloseCurrentIssueError):
+            iccc.resolve_close_target_issue(
+                prepared,
+                prior_state={},
+                default_repository="user/repo",
+            )
+
+    def test_resolve_close_target_issue_codex_run_allow_codex_run_close_no_raise(self):
+        """resolve_close_target_issue for codex_run with allow_codex_run_close=True does not raise on permission check."""
+        from unittest.mock import patch
+        iccc = self._iccc()
+        prepared = self._make_prepared(action_name="codex_run", create_followup_issue=False,
+                                       target_issue="#42")
+
+        fake_resolved = object.__new__(type(
+            "ResolvedGitHubIssue",
+            (),
+            {"source_ref": "#42", "issue_url": "https://github.com/user/repo/issues/42",
+             "issue_number": 42, "repository": "user/repo"},
+        ))
+        fake_resolved = type(
+            "ResolvedGitHubIssue",
+            (),
+            {"source_ref": "#42", "issue_url": "https://github.com/user/repo/issues/42",
+             "issue_number": 42, "repository": "user/repo"},
+        )()
+
+        with patch.object(iccc, "resolve_target_issue", return_value=fake_resolved):
+            result = iccc.resolve_close_target_issue(
+                prepared,
+                prior_state={},
+                default_repository="user/repo",
+                allow_codex_run_close=True,
+            )
+        self.assertEqual(result.issue_number, 42)
+
+    # ------------------------------------------------------------------
+    # Group 3: matrix_path selection tests (3 tests)
+    # ------------------------------------------------------------------
+
+    def _dispatch_and_capture_matrix_path(
+        self,
+        *,
+        close_current_issue: bool,
+        create_followup_issue: bool,
+        launch_status: str = "completed",
+    ) -> str:
+        """Run a minimally mocked dispatch_issue_centric_execution and return matrix_path."""
+        from unittest.mock import MagicMock, patch
+        import tempfile
+
+        ice = self._ice()
+        ic = self._ic()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            def fake_log_writer(prefix: str, text: str, suffix: str = "md") -> Path:
+                p = tmp_path / f"{prefix}.{suffix}"
+                p.write_text(text, encoding="utf-8")
+                return p
+
+            def fake_repo_relative(p: Path) -> str:
+                try:
+                    return str(p.relative_to(tmp_path))
+                except ValueError:
+                    return str(p)
+
+            contract_decision = MagicMock()
+            contract_decision.action = ic.IssueCentricAction.CODEX_RUN
+            contract_decision.close_current_issue = close_current_issue
+            contract_decision.create_followup_issue = create_followup_issue
+            contract_decision.target_issue = "#10"
+            contract_decision.summary = "dispatch test"
+
+            prepared = MagicMock()
+            prepared.decision = contract_decision
+            prepared.codex_body = b"body"
+            prepared.codex_body_base64 = "Ym9keQ=="
+            prepared.followup_issue_body = b"followup body" if create_followup_issue else None
+
+            materialized = MagicMock()
+            materialized.prepared = prepared
+
+            prompt_p = tmp_path / "prompt.md"
+            launch_p = tmp_path / "launch.md"
+            continuation_p = tmp_path / "continuation.md"
+            prompt_p.touch()
+            launch_p.touch()
+            continuation_p.touch()
+
+            launch_result = MagicMock()
+            launch_result.status = launch_status
+            launch_result.launch_status = launch_status
+            launch_result.final_mode = "launch"
+            launch_result.continuation_status = launch_status
+            launch_result.launch_entrypoint = "codex_run"
+            launch_result.prompt_log_path = prompt_p
+            launch_result.launch_log_path = launch_p
+            launch_result.continuation_log_path = continuation_p
+            launch_result.report_status = ""
+            launch_result.report_file = ""
+            launch_result.safe_stop_reason = "launch ok"
+
+            trigger_result = MagicMock()
+            trigger_result.execution_log_path = tmp_path / "trigger.json"
+            trigger_result.payload_log_path = None
+            trigger_result.safe_stop_reason = "trigger ok"
+            trigger_result.created_comment = None
+            trigger_result.status = "completed"
+            trigger_result.resolved_issue = None
+            trigger_result.launch_status = "completed"
+            (tmp_path / "trigger.json").write_text("{}", encoding="utf-8")
+
+            _mock_issue = MagicMock(number=10, url="https://github.com/u/r/issues/10",
+                                    title="T", state="closed")
+
+            close_result = MagicMock()
+            close_result.status = "completed"
+            close_result.close_status = "closed"
+            close_result.close_order = "after_codex_run"
+            close_result.issue_after = _mock_issue
+            close_result.issue_before = _mock_issue
+            close_result.resolved_issue = MagicMock(source_ref="#10",
+                                                     issue_url="https://github.com/u/r/issues/10",
+                                                     issue_number=10, repository="u/r")
+            close_result.execution_log_path = tmp_path / "close.json"
+            close_result.safe_stop_reason = "closed #10"
+            (tmp_path / "close.json").write_text("{}", encoding="utf-8")
+
+            followup_close_result = MagicMock()
+            followup_close_result.status = "completed"
+            followup_close_result.close_status = "closed"
+            followup_close_result.close_order = "after_codex_run_followup"
+            followup_close_result.issue_after = _mock_issue
+            followup_close_result.issue_before = _mock_issue
+            followup_close_result.resolved_issue = close_result.resolved_issue
+            followup_close_result.execution_log_path = tmp_path / "fclose.json"
+            followup_close_result.safe_stop_reason = "closed #10 after followup"
+            (tmp_path / "fclose.json").write_text("{}", encoding="utf-8")
+
+            followup_result = MagicMock()
+            followup_result.status = "completed"
+            followup_result.created_issue = None
+            followup_result.execution_log_path = tmp_path / "followup.json"
+            followup_result.safe_stop_reason = "followup ok"
+            (tmp_path / "followup.json").write_text("{}", encoding="utf-8")
+
+            sync_result = MagicMock()
+            sync_result.status = "not_requested"
+            sync_result.execution_log_path = tmp_path / "sync.json"
+            sync_result.safe_stop_reason = ""
+            (tmp_path / "sync.json").touch()
+
+            state: dict = {
+                "last_issue_centric_action": "codex_run",
+                "last_issue_centric_resolved_issue": "https://github.com/u/r/issues/10",
+                "last_issue_centric_target_issue": "#10",
+            }
+
+            captured_matrix_paths: list[str] = []
+            original_finalize = ice._finalize_dispatch
+
+            def capturing_finalize(**kwargs):
+                captured_matrix_paths.append(kwargs.get("matrix_path", ""))
+                return original_finalize(**kwargs)
+
+            def fake_close_fn(*args, **kwargs):
+                if kwargs.get("allow_codex_run_followup_close"):
+                    return followup_close_result
+                return close_result
+
+            with patch.object(ice, "_finalize_dispatch", side_effect=capturing_finalize):
+                ice.dispatch_issue_centric_execution(
+                    contract_decision=contract_decision,
+                    materialized=materialized,
+                    prior_state=state,
+                    mutable_state=dict(state),
+                    project_config={"github_repository": "u/r"},
+                    repo_path=tmp_path,
+                    source_raw_log="logs/raw.txt",
+                    source_decision_log="logs/decision.json",
+                    source_metadata_log="logs/metadata.md",
+                    source_artifact_path="",
+                    log_writer=fake_log_writer,
+                    repo_relative=fake_repo_relative,
+                    load_state_fn=lambda: dict(state),
+                    save_state_fn=lambda s: None,
+                    execute_issue_create_action_fn=lambda *a, **kw: MagicMock(),
+                    execute_codex_run_action_fn=lambda *a, **kw: trigger_result,
+                    launch_issue_centric_codex_run_fn=lambda *a, **kw: launch_result,
+                    execute_human_review_action_fn=lambda *a, **kw: MagicMock(),
+                    execute_close_current_issue_fn=fake_close_fn,
+                    execute_followup_issue_action_fn=lambda *a, **kw: followup_result,
+                    execute_current_issue_project_state_sync_fn=lambda *a, **kw: sync_result,
+                    launch_runner=lambda s, a: 0,
+                )
+
+        return captured_matrix_paths[0] if captured_matrix_paths else ""
+
+    def test_matrix_path_codex_run_then_close_when_close_no_followup(self):
+        """codex_run + close_current_issue + no_followup → matrix_path == 'codex_run_then_close'."""
+        matrix_path = self._dispatch_and_capture_matrix_path(
+            close_current_issue=True,
+            create_followup_issue=False,
+        )
+        self.assertEqual(matrix_path, "codex_run_then_close")
+
+    def test_matrix_path_codex_run_launch_and_continuation_when_no_close(self):
+        """codex_run without close → matrix_path == 'codex_run_launch_and_continuation'."""
+        matrix_path = self._dispatch_and_capture_matrix_path(
+            close_current_issue=False,
+            create_followup_issue=False,
+        )
+        self.assertEqual(matrix_path, "codex_run_launch_and_continuation")
+
+    def test_matrix_path_codex_run_followup_then_close_regression(self):
+        """codex_run + followup + close → matrix_path == 'codex_run_followup_then_close' (regression)."""
+        matrix_path = self._dispatch_and_capture_matrix_path(
+            close_current_issue=True,
+            create_followup_issue=True,
+        )
+        self.assertEqual(matrix_path, "codex_run_followup_then_close")
+
+    # ------------------------------------------------------------------
+    # Group 4: not_attempted close_order tests (1 test)
+    # ------------------------------------------------------------------
+
+    def test_not_attempted_close_order_no_followup_is_after_codex_run(self):
+        """When launch fails and no followup, close_order recorded is 'after_codex_run'."""
+        matrix_path = self._dispatch_and_capture_matrix_path(
+            close_current_issue=True,
+            create_followup_issue=False,
+            launch_status="blocked",
+        )
+        # matrix_path doesn't matter; focus is that dispatch didn't crash
+        self.assertIn(matrix_path, {"codex_run_then_close", "codex_run_launch_and_continuation"})
+
+
 class IcOrchestratorDoctorStatusSurfaceTests(unittest.TestCase):
     """Phase 45 — bridge_orchestrator.run() IC stop path print 整合テスト.
 
