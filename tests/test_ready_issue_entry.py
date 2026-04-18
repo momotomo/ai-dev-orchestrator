@@ -3088,5 +3088,227 @@ class ApplyRotatedPendingRequestStateTests(unittest.TestCase):
         mock_ic.assert_called_once_with(snap, phase="pending")
 
 
+class IcGenerationLifecycleResolverTests(unittest.TestCase):
+    """Tests for _resolve_ic_generation_lifecycle (Phase 29)."""
+
+    def _call(self, generation_id="", *, runtime_mode="", runtime_mode_reason="",
+              fallback_reason="", route_selected="", phase="",
+              ctx_freshness_status="", ctx_freshness_reason="", ctx_freshness_source="",
+              ctx_invalidation_status="", ctx_invalidation_reason=""):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m._resolve_ic_generation_lifecycle(
+            generation_id,
+            runtime_mode=runtime_mode,
+            runtime_mode_reason=runtime_mode_reason,
+            fallback_reason=fallback_reason,
+            route_selected=route_selected,
+            phase=phase,
+            ctx_freshness_status=ctx_freshness_status,
+            ctx_freshness_reason=ctx_freshness_reason,
+            ctx_freshness_source=ctx_freshness_source,
+            ctx_invalidation_status=ctx_invalidation_status,
+            ctx_invalidation_reason=ctx_invalidation_reason,
+        )
+
+    def test_no_generation_id_returns_ctx_defaults(self):
+        lc = self._call(
+            generation_id="",
+            ctx_freshness_status="ctx_fresh",
+            ctx_freshness_reason="ctx_reason",
+            ctx_invalidation_status="ctx_inv_status",
+            route_selected="my_route",
+            fallback_reason="my_fallback",
+        )
+        self.assertEqual(lc.freshness_status, "ctx_fresh")
+        self.assertEqual(lc.freshness_reason, "ctx_reason")
+        self.assertEqual(lc.invalidation_status, "ctx_inv_status")
+        self.assertEqual(lc.route_selected, "my_route")
+        self.assertEqual(lc.fallback_reason, "my_fallback")
+        self.assertEqual(lc.generation_lifecycle, "")
+        self.assertEqual(lc.prepared_generation_id, "")
+        self.assertEqual(lc.pending_generation_id, "")
+        self.assertEqual(lc.invalidated_generation_id, "")
+
+    def test_degraded_fallback_marks_invalidated(self):
+        lc = self._call(
+            generation_id="gen-abc",
+            runtime_mode="issue_centric_degraded_fallback",
+            runtime_mode_reason="degraded_reason",
+            route_selected="original_route",
+            fallback_reason="orig_fallback",
+            phase="",
+        )
+        self.assertEqual(lc.generation_lifecycle, "issue_centric_invalidated")
+        self.assertEqual(lc.freshness_status, "issue_centric_invalidated")
+        self.assertEqual(lc.invalidation_status, "issue_centric_invalidated")
+        self.assertEqual(lc.invalidation_reason, "degraded_reason")
+        self.assertEqual(lc.invalidated_generation_id, "gen-abc")
+        self.assertEqual(lc.route_selected, "fallback_legacy")
+        self.assertEqual(lc.fallback_reason, "degraded_reason")
+        self.assertEqual(lc.prepared_generation_id, "")
+        self.assertEqual(lc.pending_generation_id, "")
+
+    def test_unavailable_mode_also_invalidates(self):
+        lc = self._call(
+            generation_id="gen-xyz",
+            runtime_mode="issue_centric_unavailable",
+            runtime_mode_reason="",
+            fallback_reason="unavail_fallback",
+            phase="",
+        )
+        self.assertEqual(lc.generation_lifecycle, "issue_centric_invalidated")
+        self.assertEqual(lc.invalidation_reason, "unavail_fallback")
+        self.assertEqual(lc.route_selected, "fallback_legacy")
+
+    def test_phase_prepared_binds_prepared_generation_id(self):
+        lc = self._call(
+            generation_id="gen-prep",
+            runtime_mode="issue_centric_normal",
+            phase="prepared",
+            route_selected="ic_route",
+            fallback_reason="",
+        )
+        self.assertEqual(lc.generation_lifecycle, "fresh_prepared")
+        self.assertEqual(lc.freshness_status, "issue_centric_fresh")
+        self.assertEqual(lc.freshness_reason, "prepared_request_bound_to_generation")
+        self.assertEqual(lc.prepared_generation_id, "gen-prep")
+        self.assertEqual(lc.pending_generation_id, "")
+        self.assertEqual(lc.invalidated_generation_id, "")
+        self.assertEqual(lc.route_selected, "ic_route")
+
+    def test_phase_pending_binds_pending_generation_id(self):
+        lc = self._call(
+            generation_id="gen-pend",
+            runtime_mode="issue_centric_normal",
+            phase="pending",
+            route_selected="ic_route",
+            fallback_reason="",
+        )
+        self.assertEqual(lc.generation_lifecycle, "fresh_pending")
+        self.assertEqual(lc.freshness_status, "issue_centric_fresh")
+        self.assertEqual(lc.freshness_reason, "pending_request_bound_to_generation")
+        self.assertEqual(lc.pending_generation_id, "gen-pend")
+        self.assertEqual(lc.prepared_generation_id, "")
+        self.assertEqual(lc.invalidated_generation_id, "")
+
+    def test_fresh_available_when_no_specific_phase(self):
+        lc = self._call(
+            generation_id="gen-avail",
+            runtime_mode="issue_centric_normal",
+            phase="other",
+            route_selected="some_route",
+            fallback_reason="",
+        )
+        self.assertEqual(lc.generation_lifecycle, "fresh_available")
+        self.assertEqual(lc.freshness_status, "issue_centric_fresh")
+        self.assertEqual(lc.freshness_reason, "latest_issue_centric_generation_available")
+        self.assertEqual(lc.prepared_generation_id, "")
+        self.assertEqual(lc.pending_generation_id, "")
+        self.assertEqual(lc.invalidated_generation_id, "")
+        self.assertEqual(lc.route_selected, "some_route")
+
+
+class IcNextRequestStateUpdatesTests(unittest.TestCase):
+    """Tests for _issue_centric_next_request_state_updates (Phase 29)."""
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, "scripts")
+        import request_prompt_from_report as m
+        return m
+
+    def _make_context(self, **kwargs):
+        class _Ctx:
+            pass
+        ctx = _Ctx()
+        for k, v in kwargs.items():
+            setattr(ctx, k, v)
+        return ctx
+
+    def test_route_override_when_degraded(self):
+        m = self._module()
+        ctx = self._make_context(
+            snapshot_path="snap/path",
+            snapshot_status="ok",
+            generation_id="gen-1",
+            runtime_mode="issue_centric_degraded_fallback",
+            runtime_mode_reason="degraded",
+            runtime_mode_source="",
+            target_issue="issue-42",
+            target_issue_source="ic",
+            fallback_reason="",
+            route_selected="ic_normal",
+            recovery_status="",
+            recovery_source="",
+            freshness_status="",
+            freshness_reason="",
+            freshness_source="",
+            invalidation_status="",
+            invalidation_reason="",
+        )
+        result = m._issue_centric_next_request_state_updates(ctx, phase="")
+        self.assertEqual(result["last_issue_centric_route_selected"], "fallback_legacy")
+        self.assertEqual(result["last_issue_centric_generation_lifecycle"], "issue_centric_invalidated")
+        self.assertEqual(result["last_issue_centric_invalidated_generation_id"], "gen-1")
+        self.assertEqual(result["last_issue_centric_next_request_target"], "issue-42")
+
+    def test_all_expected_keys_present(self):
+        m = self._module()
+        ctx = self._make_context(
+            snapshot_path="",
+            snapshot_status="",
+            generation_id="gen-2",
+            runtime_mode="issue_centric_normal",
+            runtime_mode_reason="",
+            runtime_mode_source="",
+            target_issue="issue-7",
+            target_issue_source="ic",
+            fallback_reason="",
+            route_selected="ic",
+            recovery_status="",
+            recovery_source="",
+            freshness_status="",
+            freshness_reason="",
+            freshness_source="",
+            invalidation_status="",
+            invalidation_reason="",
+        )
+        result = m._issue_centric_next_request_state_updates(ctx, phase="prepared")
+        expected_keys = [
+            "last_issue_centric_runtime_snapshot",
+            "last_issue_centric_snapshot_status",
+            "last_issue_centric_runtime_generation_id",
+            "last_issue_centric_generation_lifecycle",
+            "last_issue_centric_generation_lifecycle_reason",
+            "last_issue_centric_generation_lifecycle_source",
+            "last_issue_centric_prepared_generation_id",
+            "last_issue_centric_pending_generation_id",
+            "last_issue_centric_runtime_mode",
+            "last_issue_centric_runtime_mode_reason",
+            "last_issue_centric_runtime_mode_source",
+            "last_issue_centric_freshness_status",
+            "last_issue_centric_freshness_reason",
+            "last_issue_centric_freshness_source",
+            "last_issue_centric_invalidation_status",
+            "last_issue_centric_invalidation_reason",
+            "last_issue_centric_invalidated_generation_id",
+            "last_issue_centric_consumed_generation_id",
+            "last_issue_centric_next_request_target",
+            "last_issue_centric_next_request_target_source",
+            "last_issue_centric_next_request_fallback_reason",
+            "last_issue_centric_route_selected",
+            "last_issue_centric_route_fallback_reason",
+            "last_issue_centric_recovery_status",
+            "last_issue_centric_recovery_source",
+            "last_issue_centric_recovery_fallback_reason",
+        ]
+        for k in expected_keys:
+            self.assertIn(k, result, f"missing key: {k}")
+        self.assertEqual(result["last_issue_centric_prepared_generation_id"], "gen-2")
+        self.assertEqual(result["last_issue_centric_generation_lifecycle"], "fresh_prepared")
+
+
 if __name__ == "__main__":
     unittest.main()
