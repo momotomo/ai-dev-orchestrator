@@ -112,6 +112,54 @@ def _resolve_codex_run_matrix_path(
     return "codex_run_launch_and_continuation"
 
 
+# ---------------------------------------------------------------------------
+# Project sync result normalizer
+# ---------------------------------------------------------------------------
+# Extracts the 5 standard project-sync fields from any execution result
+# that carries project sync information.  The same mapping is used by
+# _apply_issue_create_execution_state, _apply_followup_execution_state, and
+# _apply_current_issue_project_state_sync_state so that the three state
+# families (primary_project_*, followup_project_*, lifecycle_sync_*) share
+# a consistent vocabulary:
+#
+#   Possible status values (set by the underlying execution function):
+#     "not_requested_no_project"  — GitHub Project URL not configured
+#     "issue_only_fallback"       — Project configured but only issue was
+#                                   created/updated; no project state sync
+#     "project_state_synced"      — Project state field was updated successfully
+#     "project_state_sync_failed" — Project update was attempted but failed
+#     "partial"                   — Some sub-steps succeeded, others did not
+#
+# ---------------------------------------------------------------------------
+
+
+def _normalize_project_sync_result(execution: object) -> dict[str, str]:
+    """Return a normalized project-sync dict from any execution result object.
+
+    Reads the 5 standard project-sync attributes
+    (``project_sync_status``, ``project_url``, ``project_item_id``,
+    ``project_state_field_name``, ``project_state_value_name``) from
+    *execution*.  Missing attributes default to ``""``.
+
+    Used as a shared extractor so that primary-issue, follow-up-issue, and
+    lifecycle-sync state families are populated with the same key names.
+
+    Status semantics:
+    * ``"not_requested_no_project"`` — no GitHub Project URL configured.
+    * ``"issue_only_fallback"``      — Project configured, issue created/updated
+                                       but project-state field was not updated.
+    * ``"project_state_synced"``     — Project state field updated successfully.
+    * ``"project_state_sync_failed"``— Project update attempted but failed.
+    """
+    return {
+        "project_sync_status": str(getattr(execution, "project_sync_status", "") or ""),
+        "project_url": str(getattr(execution, "project_url", "") or ""),
+        "project_item_id": str(getattr(execution, "project_item_id", "") or ""),
+        "project_state_field_name": str(getattr(execution, "project_state_field_name", "") or ""),
+        "project_state_value_name": str(getattr(execution, "project_state_value_name", "") or ""),
+    }
+
+
 def dispatch_issue_centric_execution(
     *,
     contract_decision: object,

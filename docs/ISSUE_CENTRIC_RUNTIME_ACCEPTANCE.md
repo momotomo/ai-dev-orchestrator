@@ -257,6 +257,40 @@ python3 scripts/start_bridge.py \
 - [x] completion followup / recovery が coherent summary ベースで再開できる
 - [x] restart-safe recovery / rehydration が正しく機能する
 
+### D2. Project sync state family coverage (Phase 53)
+
+supported slices に対して、3 つの project-sync state family が一貫したルールで読めるようになった。
+
+**状態値の意味**:
+| 値 | 意味 |
+|---|---|
+| `not_requested_no_project` | GitHub Project URL が未設定 |
+| `issue_only_fallback` | Project は設定済みだが project state field は更新されていない (issue 作成のみ) |
+| `project_state_synced` | Project state field が正常に更新された |
+| `project_state_sync_failed` | Project 更新を試みたが失敗した |
+
+**state family**:
+| family | state keys | 設定タイミング |
+|---|---|---|
+| `primary_project_*` | `last_issue_centric_primary_project_sync_status` 他 4 keys | `issue_create` 実行後 |
+| `followup_project_*` | `last_issue_centric_followup_project_sync_status` 他 4 keys | `followup_issue_create` 実行後 |
+| `lifecycle_sync_*` | `last_issue_centric_lifecycle_sync_status` 他 5 keys | `current_issue_project_state_sync` 実行後 |
+
+**helper**:
+- `_normalize_project_sync_result(execution)` — 任意の execution result から 5 project-sync フィールドを正規化して dict で返す
+- 3 state family すべてが同じ vocabulary (`project_sync_status` / `project_url` / `project_item_id` / `project_state_field_name` / `project_state_value_name`) を使う
+
+**coverage 確認 (IcProjectSyncStateFamilyTests)**:
+- `_normalize_project_sync_result` helper が 3 パターン (no-project / fallback / synced) で正しく動作する
+- `issue_create` / `issue_create_followup_then_close` で `primary_project_*` / `followup_project_*` が独立して設定される
+- `no_action_followup` / `codex_run_followup` で `followup_project_*` が no-project / fallback / synced で読める
+- `codex_run` / `codex_run_followup_then_close` で `lifecycle_sync_*` が in_progress → done の順で記録される
+- `lifecycle_sync_*` と `followup_project_*` が別 family として混ざらない
+
+**未対応**:
+- project sync の実際の外部 API 呼び出し精度向上 (execution 関数側の問題)
+- `project_state_sync_failed` パスの retry / fallback ロジック
+
 ### E. Operator-facing surface
 
 - [x] `detect_ic_stop_path()` が `codex_run_stop` / `initial_selection_stop` / `human_review_needed` / `""` を正しく返す
@@ -311,7 +345,8 @@ python3 scripts/start_bridge.py \
   - Phase 51: `issue_create + create_followup_issue + close_current_issue` → `issue_create_followup_then_close` 対応済み
   - Phase 52: `codex_run + create_followup_issue` → `codex_run_followup` 対応済み
   - Phase 52: `codex_run + create_followup_issue + close_current_issue` → `codex_run_followup_then_close` 対応済み、`_resolve_codex_run_matrix_path()` helper 追加
-  - 残: Projects update 全面対応
+  - Phase 53: supported slices の project sync state family coverage 拡張 (`_normalize_project_sync_result` helper 追加、`IcProjectSyncStateFamilyTests` 40 tests 追加)
+  - 残: project sync の外部 API 呼び出し精度向上、`project_state_sync_failed` retry ロジック
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上

@@ -6821,5 +6821,877 @@ class IcCodexRunFollowupSliceTests(IssueCentricExecutionDispatcherTests):
             self.assertEqual(result.matrix_path, "prepared_artifact_only")
 
 
+class IcProjectSyncStateFamilyTests(IssueCentricExecutionDispatcherTests):
+    """Phase 53 — project-sync state family coverage for supported slices.
+
+    Verifies that the three project-sync state families
+    (primary_project_*, followup_project_*, lifecycle_sync_*)
+    are populated consistently across supported execution paths and that
+    the distinction between no-project / issue-only-fallback / completed-sync
+    is readable from state.
+
+    Group 1 (3 tests): _normalize_project_sync_result helper
+    Group 2 (5 tests): issue_create family — no-project / fallback / synced
+    Group 3 (5 tests): followup family — no-project / fallback / synced
+    Group 4 (4 tests): lifecycle_sync family — no-project / synced
+    Group 5 (3 tests): multi-family consistency — followup principal path /
+                       codex_run_followup_then_close / issue_create_followup_then_close
+    Group 6 (3 tests): regression — plain paths unaffected
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _fake_create(self, root: Path, number: int = 71,
+                     status: str = "completed",
+                     project_sync_status: str = "issue_only_fallback",
+                     project_url: str = "",
+                     project_item_id: str = ""):
+        def fn(*args, **kwargs):
+            p = root / f"create_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                execution_log_path=p,
+                created_issue=fake_issue(number) if status == "completed" else None,
+                project_sync_status=project_sync_status,
+                project_url=project_url,
+                project_item_id=project_item_id,
+                project_state_field_name="State" if project_url else "",
+                project_state_value_name="ready" if project_url else "",
+                safe_stop_reason=f"create #{number} status={status}",
+            )
+        return fn
+
+    def _fake_followup(self, root: Path, number: int = 81,
+                       status: str = "completed",
+                       project_sync_status: str = "not_requested_no_project",
+                       project_url: str = "",
+                       project_item_id: str = ""):
+        def fn(*args, **kwargs):
+            p = root / f"followup_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                followup_status=status,
+                execution_log_path=p,
+                created_issue=fake_issue(number) if status == "completed" else None,
+                parent_issue=None,
+                project_sync_status=project_sync_status,
+                project_url=project_url,
+                project_item_id=project_item_id,
+                project_state_field_name="State" if project_url else "",
+                project_state_value_name="ready" if project_url else "",
+                safe_stop_reason=f"followup #{number} status={status}",
+            )
+        return fn
+
+    def _fake_close(self, root: Path, number: int = 20, close_order: str = "after_codex_run"):
+        def fn(*args, **kwargs):
+            p = root / f"close_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                close_status="completed",
+                close_order=close_order,
+                execution_log_path=p,
+                issue_before=fake_issue(number),
+                issue_after=fake_issue(number, state="closed"),
+                safe_stop_reason=f"closed #{number}",
+            )
+        return fn
+
+    def _fake_trigger(self, root: Path, status: str = "completed"):
+        def fn(*args, **kwargs):
+            p = root / "trigger.json"
+            p.write_text("{}", encoding="utf-8")
+            payload_p = root / "payload.json"
+            payload_p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                created_comment=fake_comment(701, 20) if status == "completed" else None,
+                payload=SimpleNamespace(
+                    repo=str(REPO_ROOT),
+                    target_issue="https://github.com/example/repo/issues/20",
+                    request="Implement.\n",
+                    trigger_comment="https://github.com/example/repo/issues/20#issuecomment-701",
+                ),
+                payload_log_path=payload_p,
+                execution_log_path=p,
+                launch_status="not_implemented",
+                launch_note="not implemented",
+                safe_stop_reason=f"trigger status={status}",
+            )
+        return fn
+
+    def _fake_launch(self, root: Path, status: str = "completed"):
+        def fn(*args, **kwargs):
+            prompt_p = root / "prompt.md"
+            launch_p = root / "launch.json"
+            cont_p = root / "continuation.json"
+            for p in (prompt_p, launch_p, cont_p):
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status=status,
+                launch_status="launched" if status == "completed" else status,
+                launch_entrypoint="launch_codex_once.run",
+                prompt_log_path=prompt_p,
+                launch_log_path=launch_p,
+                continuation_status=status,
+                continuation_log_path=cont_p,
+                report_status="",
+                report_file="",
+                final_mode="codex_running",
+                safe_stop_reason=f"launch status={status}",
+            )
+        return fn
+
+    # ------------------------------------------------------------------
+    # Group 1: _normalize_project_sync_result helper (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_normalize_project_sync_result_no_project(self):
+        """not_requested_no_project result normalizes to 5 expected keys."""
+        exec_result = SimpleNamespace(
+            project_sync_status="not_requested_no_project",
+            project_url="",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
+        )
+        result = issue_centric_execution._normalize_project_sync_result(exec_result)
+        self.assertEqual(result["project_sync_status"], "not_requested_no_project")
+        self.assertEqual(result["project_url"], "")
+        self.assertEqual(result["project_item_id"], "")
+        self.assertEqual(result["project_state_field_name"], "")
+        self.assertEqual(result["project_state_value_name"], "")
+
+    def test_normalize_project_sync_result_issue_only_fallback(self):
+        """issue_only_fallback result normalizes correctly."""
+        exec_result = SimpleNamespace(
+            project_sync_status="issue_only_fallback",
+            project_url="https://github.com/users/x/projects/1",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
+        )
+        result = issue_centric_execution._normalize_project_sync_result(exec_result)
+        self.assertEqual(result["project_sync_status"], "issue_only_fallback")
+        self.assertEqual(result["project_url"], "https://github.com/users/x/projects/1")
+
+    def test_normalize_project_sync_result_synced(self):
+        """project_state_synced result normalizes with all 5 fields."""
+        exec_result = SimpleNamespace(
+            project_sync_status="project_state_synced",
+            project_url="https://github.com/users/x/projects/1",
+            project_item_id="ITEM_81",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+        )
+        result = issue_centric_execution._normalize_project_sync_result(exec_result)
+        self.assertEqual(result["project_sync_status"], "project_state_synced")
+        self.assertEqual(result["project_url"], "https://github.com/users/x/projects/1")
+        self.assertEqual(result["project_item_id"], "ITEM_81")
+        self.assertEqual(result["project_state_field_name"], "State")
+        self.assertEqual(result["project_state_value_name"], "ready")
+
+    # ------------------------------------------------------------------
+    # Group 2: issue_create family (5 tests)
+    # ------------------------------------------------------------------
+
+    def test_issue_create_no_project_sets_primary_project_sync_status(self):
+        """issue_create with no project → primary_project_sync_status = not_requested_no_project."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(
+                    root, 71, project_sync_status="not_requested_no_project"
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "not_requested_no_project",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_project_sync_status"],
+                "not_requested_no_project",
+            )
+
+    def test_issue_create_issue_only_fallback_sets_primary_project_sync_status(self):
+        """issue_create with issue-only fallback → primary_project_sync_status = issue_only_fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(
+                    root, 71, project_sync_status="issue_only_fallback",
+                    project_url="https://github.com/users/x/projects/1",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "issue_only_fallback",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+
+    def test_issue_create_synced_sets_primary_project_url_and_item_id(self):
+        """issue_create with actual sync → primary_project_url / item_id populated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(
+                    root, 71,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_71",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "project_state_synced",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_item_id"],
+                "ITEM_71",
+            )
+
+    def test_issue_create_and_followup_both_project_families_set(self):
+        """issue_create + followup → primary_project_* AND followup_project_* both populated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                create_followup_issue=True,
+                issue_text="# Primary\n\nBody.\n",
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(
+                    root, 71,
+                    project_sync_status="issue_only_fallback",
+                    project_url="https://github.com/users/x/projects/1",
+                ),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="not_requested_no_project",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # primary family must reflect issue_create result
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "issue_only_fallback",
+            )
+            # followup family must reflect followup result
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "not_requested_no_project",
+            )
+
+    def test_issue_create_followup_then_close_project_families_distinct(self):
+        """issue_create_followup_then_close → primary_project_* ≠ followup_project_* when statuses differ."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                issue_text="# Primary\n\nBody.\n",
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(
+                    root, 71,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_71",
+                ),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="issue_only_fallback",
+                    project_url="https://github.com/users/x/projects/1",
+                ),
+                execute_close_current_issue_fn=self._fake_close(
+                    root, 20, close_order="after_issue_create_followup",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "project_state_synced",
+                "primary project sync must reflect issue_create result",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "issue_only_fallback",
+                "followup project sync must reflect followup result, not primary",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 3: followup family (5 tests)
+    # ------------------------------------------------------------------
+
+    def test_no_action_followup_no_project_sets_followup_project_sync_status(self):
+        """no_action + followup, no project → followup_project_sync_status = not_requested_no_project."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81, project_sync_status="not_requested_no_project",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "not_requested_no_project",
+            )
+
+    def test_no_action_followup_synced_sets_followup_project_url_and_item_id(self):
+        """no_action + followup, synced → followup_project_url / item_id populated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_81",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "project_state_synced",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_item_id"],
+                "ITEM_81",
+            )
+
+    def test_codex_run_followup_no_project_sets_followup_project_sync_status(self):
+        """codex_run + followup, no project → followup_project_sync_status = not_requested_no_project."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81, project_sync_status="not_requested_no_project",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "not_requested_no_project",
+            )
+
+    def test_codex_run_followup_issue_only_fallback_readable_from_state(self):
+        """codex_run + followup, issue-only fallback → followup_project_sync_status = issue_only_fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="issue_only_fallback",
+                    project_url="https://github.com/users/x/projects/1",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "issue_only_fallback",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+
+    def test_codex_run_followup_synced_project_info_readable(self):
+        """codex_run + followup, synced → followup_project_url / item_id readable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_81",
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "project_state_synced",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_item_id"],
+                "ITEM_81",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 4: lifecycle_sync family (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_no_action_close_lifecycle_sync_not_requested_when_no_project(self):
+        """no_action + close with no project → lifecycle_sync_status = not_requested_no_project."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                close_current_issue=True,
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_close_current_issue_fn=self._fake_close(root, 20, close_order="after_no_action"),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # lifecycle_sync runs but reports not_requested when no project configured
+            # The default execute_current_issue_project_state_sync_fn returns not_requested
+            lifecycle_status = result.final_state.get("last_issue_centric_lifecycle_sync_status", "")
+            # with default (no-project) sync fn, lifecycle_sync should be empty or not_requested
+            self.assertIn(
+                lifecycle_status,
+                {"", "not_requested", "not_requested_no_project"},
+                "lifecycle_sync_status must indicate no project was synced",
+            )
+
+    def test_codex_run_lifecycle_sync_in_progress_recorded(self):
+        """codex_run with lifecycle sync → lifecycle_sync_status recorded in state."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            sync_log_path = root / "lifecycle_sync.json"
+            sync_log_path.write_text("{}", encoding="utf-8")
+
+            def fake_lifecycle_sync(*args, **kwargs):
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=None,
+                    execution_log_path=sync_log_path,
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="in_progress",
+                    safe_stop_reason="project state synced to in_progress",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_current_issue_project_state_sync_fn=fake_lifecycle_sync,
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_synced",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_project_item_id"],
+                "ITEM_20",
+            )
+
+    def test_codex_run_followup_then_close_lifecycle_sync_done_recorded(self):
+        """codex_run_followup_then_close → lifecycle_sync_status = project_state_synced after close."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            sync_log_path = root / "lifecycle_sync.json"
+            sync_log_path.write_text("{}", encoding="utf-8")
+            sync_calls: list[str] = []
+
+            def fake_lifecycle_sync(*args, **kwargs):
+                stage = kwargs.get("lifecycle_stage", "")
+                sync_calls.append(stage)
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=stage,
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=None,
+                    execution_log_path=sync_log_path,
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name=stage,
+                    safe_stop_reason=f"synced to {stage}",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(root, 81),
+                execute_close_current_issue_fn=self._fake_close(root, 20, "after_codex_run_followup"),
+                execute_current_issue_project_state_sync_fn=fake_lifecycle_sync,
+            )
+            self.assertEqual(result.final_status, "completed")
+            # lifecycle sync runs in_progress after launch, then done after close
+            self.assertIn("in_progress", sync_calls, "lifecycle sync must run in_progress after launch")
+            self.assertIn("done", sync_calls, "lifecycle sync must run done after close")
+            # final state reflects the last lifecycle sync (done)
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_synced",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_stage"],
+                "done",
+            )
+
+    def test_lifecycle_sync_stage_distinguishable_from_followup_project_sync(self):
+        """lifecycle_sync_* and followup_project_* are separate state families."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            sync_log_path = root / "lifecycle_sync.json"
+            sync_log_path.write_text("{}", encoding="utf-8")
+
+            def fake_lifecycle_sync(*args, **kwargs):
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                    resolved_issue=SimpleNamespace(issue_url="https://github.com/example/repo/issues/20"),
+                    issue_snapshot=None,
+                    execution_log_path=sync_log_path,
+                    project_url="https://github.com/users/x/projects/99",
+                    project_item_id="CURRENT_20",
+                    project_state_field_name="State",
+                    project_state_value_name="in_progress",
+                    safe_stop_reason="synced current issue",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="project_state_synced",
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="FOLLOWUP_81",
+                ),
+                execute_current_issue_project_state_sync_fn=fake_lifecycle_sync,
+            )
+            self.assertEqual(result.final_status, "completed")
+            # followup_project_* must reflect followup issue
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_item_id"],
+                "FOLLOWUP_81",
+            )
+            # lifecycle_sync_* must reflect current issue lifecycle sync
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_project_item_id"],
+                "CURRENT_20",
+            )
+            # They must not be the same
+            self.assertNotEqual(
+                result.final_state["last_issue_centric_followup_project_item_id"],
+                result.final_state["last_issue_centric_lifecycle_sync_project_item_id"],
+            )
+
+    # ------------------------------------------------------------------
+    # Group 5: multi-family consistency (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_codex_run_followup_then_close_all_three_families_readable(self):
+        """codex_run_followup_then_close: followup_project_* / lifecycle_sync_* both readable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="not_requested_no_project",
+                ),
+                execute_close_current_issue_fn=self._fake_close(root, 20, "after_codex_run_followup"),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # followup project family populated
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "not_requested_no_project",
+            )
+            # followup is the principal issue
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_issue_number"],
+                "81",
+            )
+            # close_order is after_codex_run_followup
+            self.assertEqual(
+                result.final_state["last_issue_centric_close_order"],
+                "after_codex_run_followup",
+            )
+
+    def test_issue_create_followup_then_close_primary_and_followup_families_both_set(self):
+        """issue_create_followup_then_close: primary_project_* AND followup_project_* both set."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                issue_text="# Primary\n\nBody.\n",
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(
+                    root, 71, project_sync_status="not_requested_no_project",
+                ),
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81, project_sync_status="not_requested_no_project",
+                ),
+                execute_close_current_issue_fn=self._fake_close(root, 20, "after_issue_create_followup"),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # both families set from their respective executions
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "not_requested_no_project",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "not_requested_no_project",
+            )
+
+    def test_no_action_followup_then_close_followup_project_family_set(self):
+        """no_action_followup_then_close: followup_project_* readable after followup."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                close_current_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_followup_issue_action_fn=self._fake_followup(
+                    root, 81,
+                    project_sync_status="issue_only_fallback",
+                    project_url="https://github.com/users/x/projects/1",
+                ),
+                execute_close_current_issue_fn=self._fake_close(root, 20, "after_no_action"),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "issue_only_fallback",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 6: regression (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_regression_plain_issue_create_unaffected(self):
+        """plain issue_create matrix_path and final_status unaffected by project sync."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create(root, 71),
+            )
+            self.assertIn(result.matrix_path, {"issue_create", "issue_create_narrow"})
+            self.assertEqual(result.final_status, "completed")
+
+    def test_regression_plain_codex_run_unaffected(self):
+        """plain codex_run matrix_path and final_status unaffected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+            )
+            self.assertIn(
+                result.matrix_path,
+                {"codex_run_launch_and_continuation", "codex_run"},
+            )
+            self.assertEqual(result.final_status, "completed")
+
+    def test_regression_plain_no_action_unaffected(self):
+        """plain no_action matrix_path unaffected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+            )
+            self.assertEqual(result.matrix_path, "prepared_artifact_only")
+            self.assertEqual(result.final_status, "prepared_only")
+
+
 if __name__ == "__main__":
     unittest.main()
