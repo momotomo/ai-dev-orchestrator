@@ -440,8 +440,62 @@ Phase 56 で `_bridge_common.py` / `run_until_stop.py` に追加した warning s
 - Phase 56 の surfaces は回帰しない
 
 **未対応**:
-- `project_state_sync_failed` の operator alert delivery (外部通知)
+- `project_state_sync_failed` の alert delivery 前段 → Phase 58 で alert signal / payload / dedupe 実装済み
+- `project_state_sync_failed` の実際の外部通知 delivery (Slack / Discord / email 等)
 - multi-retry (2 retry 以上) の設計
+
+### D7. project_state_sync_failed — alert signal / payload / dedupe (Phase 58)
+
+Phase 57 までで warning surface を揃えた後、alert delivery の前段として runtime 内部で  
+alert を一意に検出・記録・再送可能にする signal / payload / log を整えた。
+
+**追加した helpers (`_bridge_common.py`)**:
+
+| helper / 定数 | 役割 |
+|---|---|
+| `ALERT_PAYLOAD_PATH` | alert payload artifact のパス (`bridge/project_sync_alert.json`) |
+| `_ALERT_FAMILY_STATE_KEYS` | family ごとの state キーマップ (primary / followup / lifecycle) |
+| `_ProjectSyncAlertCandidate` dataclass | 検出した alert candidate の内部表現 |
+| `_detect_project_sync_alert_candidate(state)` | alert candidate の唯一の検出ゲート |
+| `_build_project_sync_alert_candidate(state)` | state から candidate を構築 (失敗なし → None) |
+| `_build_project_sync_alert_payload(candidate)` | candidate → JSON-serializable dict |
+| `record_project_sync_alert_if_new(state)` | 新規 alert を記録 (dedupe あり) → "recorded" / "skipped_duplicate" / "none" |
+| `format_project_sync_alert_status(state)` | doctor 表示用 "pending file=..." / "none" |
+
+**DEFAULT_STATE 追加キー**:
+- `last_project_sync_alert_status` — "pending" / ""
+- `last_project_sync_alert_hash` — stable dedupe hash (key identity fields の SHA-256)
+- `last_project_sync_alert_file` — 最後に書いた payload file のパス
+
+**alert candidate の boundary**:
+- `project_state_sync_failed` のみが alert candidate
+- `not_requested_no_project` / `issue_only_fallback` → alert candidate にならない
+- hard error (`error=True`) / deliberate stop (IC stop paths) は alert candidate と独立した別信号
+
+**dedupe の考え方**:
+- `alert_hash` = SHA-256 of `sorted_families|sync_status|issue_ref|project_url|project_item_id|project_state_value`
+- 同じ state → 同じ hash → `skipped_duplicate` (payload 再生成しない)
+- 異なる issue / project_url / state_value → 異なる hash → 新規 payload 生成
+
+**operator-facing surface**:
+- `start_bridge.print_doctor()` に `project_sync_alert: pending file=.../none` 行追加
+- `run_until_stop.finish()` で `record_project_sync_alert_if_new(final_state)` を呼び出し (runs 終了時に自動記録)
+
+**coverage 確認 (ProjectSyncAlertSignalPayloadTests, 35 tests)**:
+- primary / followup / lifecycle sync failed → alert candidate 検出 ✓
+- not_requested_no_project / issue_only_fallback → alert candidate にならない ✓
+- hard error + sync failed → 2 つは独立信号 ✓
+- stable hash (same state → same hash / different event → different hash) ✓
+- payload contains required JSON fields / JSON serializable ✓
+- record "none" / "skipped_duplicate" / "recorded" ✓
+- doctor shows project_sync_alert pending/none ✓
+- warning surface と alert candidate の一貫性 ✓
+- Phase 57 回帰なし ✓
+
+**未対応**:
+- `project_state_sync_failed` の実際の外部通知 delivery (Slack / Discord / email 等)
+- multi-retry (2 retry 以上) の設計
+
 ### E. Operator-facing surface
 
 - [x] `detect_ic_stop_path()` が `codex_run_stop` / `initial_selection_stop` / `human_review_needed` / `""` を正しく返す
@@ -501,7 +555,8 @@ Phase 56 で `_bridge_common.py` / `run_until_stop.py` に追加した warning s
   - Phase 55: project sync 外部 GitHub API mutation 実装精度 (`"not_requested_no_project"` 語彙統一、`_map_project_mutation_result_to_sync_status` / `_ensure_project_item_for_issue` / `_sync_project_state_field` helper 追加、`"blocked_project_state_sync"` / `"failed_project_state_sync"` → `"project_state_sync_failed"` 修正、`IcProjectSyncGitHubMutationTests` 21 tests 追加)
   - Phase 56: `project_state_sync_failed` operator-facing warning surface (`_detect_project_sync_warning` / `_resolve_project_sync_warning_family` / `_build_project_sync_warning_note` / `bridge_project_sync_warning_suffix` / `format_project_sync_warning_note` helper 追加、`format_operator_stop_note` / `suggested_next_note` に warning 付加、stop summary に `project_sync_warning` 行追加、`ProjectSyncWarningOperatorSurfaceTests` 48 tests 追加)
   - Phase 57: project_state_sync_failed warning を残り operator-facing surface へ伝播 (`bridge_orchestrator` completed path に `format_operator_stop_note` 使用、`start_bridge.print_doctor` に `project_sync_warning:` 行追加、`entry_guidance` completed path に `bridge_project_sync_warning_suffix` 追加、`ProjectSyncWarningSurfaceAlignmentTests` 22 tests 追加)
-  - 残: `project_state_sync_failed` operator alert delivery (外部通知)
+  - Phase 58: project_state_sync_failed alert signal / payload / dedupe (`_ProjectSyncAlertCandidate` dataclass / `_detect_project_sync_alert_candidate` / `_build_project_sync_alert_candidate` / `_build_project_sync_alert_payload` / `record_project_sync_alert_if_new` / `format_project_sync_alert_status` helper 追加、DEFAULT_STATE に `last_project_sync_alert_status` / `_hash` / `_file` 追加、`start_bridge.print_doctor` に `project_sync_alert:` 行追加、`run_until_stop.finish` で alert 自動記録、`ProjectSyncAlertSignalPayloadTests` 35 tests 追加)
+  - 残: `project_state_sync_failed` の実際の外部通知 delivery (Slack / Discord / email 等)
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上

@@ -50,6 +50,7 @@ from _bridge_common import (
     resolve_issue_centric_route_choice,
     resolve_runtime_dispatch_plan,
     resolve_unified_next_action,
+    record_project_sync_alert_if_new,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -1179,6 +1180,10 @@ def finish(
     recommendation_label, recommended_command = recommended_operator_step(args, final_state, reason=reason)
     if suggested_next_command_override == "なし" and recommended_command != "なし":
         suggested_next_command_override = recommended_command
+
+    # Record project sync alert candidate if new (writes payload + updates state.json).
+    # Called before summarize_run so the state update is persisted before summary log.
+    record_project_sync_alert_if_new(final_state)
 
     summary = summarize_run(
         args=args,
