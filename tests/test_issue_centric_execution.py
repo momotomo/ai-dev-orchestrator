@@ -8713,7 +8713,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
             resolved_project = self._fake_resolved_project(project_url=project_url)
             resolver_called: list[bool] = []
 
-            def resolver(proj_id, node_id, token):
+            def resolver(*, project_id, issue_node_id, token):
                 resolver_called.append(True)
                 return self._fake_resolved_project_item()
 
@@ -8737,7 +8737,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
         resolved_project = self._fake_resolved_project()
         resolver_called: list[bool] = []
 
-        def resolver(proj_id, node_id, token):
+        def resolver(*, project_id, issue_node_id, token):
             resolver_called.append(True)
             return self._fake_resolved_project_item(item_id="RESOLVED_ITEM_20")
 
@@ -8762,8 +8762,8 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
         )
         calls: list[tuple] = []
 
-        def fake_setter(proj_id, item_id, field_id, option_id, token):
-            calls.append((proj_id, item_id, field_id, option_id))
+        def fake_setter(*, project_id, item_id, field_id, option_id, token):
+            calls.append((project_id, item_id, field_id, option_id))
 
         ic_state._sync_project_state_field(
             resolved_project=resolved_project,
@@ -8832,7 +8832,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: issue_snapshot,
                 project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
-                project_item_resolver=lambda proj_id, node_id, token: resolved_item,
+                project_item_resolver=lambda project_id, issue_node_id, token: resolved_item,
                 project_state_setter=lambda *args, **kwargs: None,
                 env={"GITHUB_TOKEN": "fake-token"},
             )
@@ -8852,7 +8852,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
             resolved_project = self._fake_resolved_project(project_url=project_url)
             issue_snapshot = self._fake_issue_snapshot(20)
 
-            def failing_resolver(proj_id, node_id, token):
+            def failing_resolver(*, project_id, issue_node_id, token):
                 raise IssueCentricGitHubError("project item resolve failed")
 
             result = ic_state.execute_current_issue_project_state_sync(
@@ -8918,7 +8918,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: issue_snapshot,
                 project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
-                project_item_resolver=lambda proj_id, node_id, token: resolved_item,
+                project_item_resolver=lambda project_id, issue_node_id, token: resolved_item,
                 project_state_setter=failing_setter,
                 env={"GITHUB_TOKEN": "fake-token"},
             )
@@ -9041,7 +9041,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: self._fake_issue_snapshot(20),
                 project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
-                project_item_resolver=lambda proj_id, node_id, token: self._fake_resolved_project_item(),
+                project_item_resolver=lambda project_id, issue_node_id, token: self._fake_resolved_project_item(),
                 project_state_setter=lambda *a, **kw: (_ for _ in ()).throw(
                     IssueCentricGitHubError("state setter failed")
                 ),
