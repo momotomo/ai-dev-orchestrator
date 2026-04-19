@@ -103,9 +103,9 @@ def execute_current_issue_project_state_sync(
             resolver = project_state_resolver or resolve_github_project_state
             resolved_project = resolver(
                 project_url,
-                state_field_name,
-                state_value_name,
-                token,
+                state_field_name=state_field_name,
+                state_option_name=state_value_name,
+                token=token,
             )
             project_state_field_name = resolved_project.state_field_name
             project_state_value_name = resolved_project.state_option_name

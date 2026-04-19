@@ -889,11 +889,11 @@ class FollowupIssueProjectSyncSignalTests(unittest.TestCase):
                     number=111, url="https://github.com/example/repo/issues/111",
                     title=title, repository=repo, node_id="NODE_111",
                 ),
-                project_state_resolver=lambda url, field, state, token: issue_centric_github.ResolvedGitHubProjectState(
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
                     project_id="PVT_p", project_url=url, project_title="Backlog",
                     owner_login="example", owner_kind="users",
-                    state_field_id="FIELD_s", state_field_name=field,
-                    state_option_id="OPT_r", state_option_name=state,
+                    state_field_id="FIELD_s", state_field_name=state_field_name,
+                    state_option_id="OPT_r", state_option_name=state_option_name,
                 ),
                 project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
                     item_id="ITEM_111", project_id=pid
@@ -956,11 +956,11 @@ class FollowupIssueProjectSyncSignalTests(unittest.TestCase):
                     number=113, url="https://github.com/example/repo/issues/113",
                     title=title, repository=repo, node_id="NODE_113",
                 ),
-                project_state_resolver=lambda url, field, state, token: issue_centric_github.ResolvedGitHubProjectState(
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
                     project_id="PVT_p", project_url=url, project_title="Backlog",
                     owner_login="example", owner_kind="users",
-                    state_field_id="FIELD_s", state_field_name=field,
-                    state_option_id="OPT_r", state_option_name=state,
+                    state_field_id="FIELD_s", state_field_name=state_field_name,
+                    state_option_id="OPT_r", state_option_name=state_option_name,
                 ),
                 project_item_creator=lambda pid, nid, token: (_ for _ in ()).throw(
                     issue_centric_github.IssueCentricGitHubError("item create failed")

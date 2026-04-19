@@ -8584,7 +8584,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_creator=lambda proj_id, node_id, token: created_item,
                 project_state_setter=lambda *args, **kwargs: None,
                 env={"GITHUB_TOKEN": "fake-token"},
@@ -8625,7 +8625,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_creator=failing_item_creator,
                 env={"GITHUB_TOKEN": "fake-token"},
             )
@@ -8670,7 +8670,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_creator=lambda proj_id, node_id, token: created_item,
                 project_state_setter=failing_state_setter,
                 env={"GITHUB_TOKEN": "fake-token"},
@@ -8831,7 +8831,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: issue_snapshot,
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_resolver=lambda proj_id, node_id, token: resolved_item,
                 project_state_setter=lambda *args, **kwargs: None,
                 env={"GITHUB_TOKEN": "fake-token"},
@@ -8874,7 +8874,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: issue_snapshot,
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_resolver=failing_resolver,
                 env={"GITHUB_TOKEN": "fake-token"},
             )
@@ -8917,7 +8917,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: issue_snapshot,
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_resolver=lambda proj_id, node_id, token: resolved_item,
                 project_state_setter=failing_setter,
                 env={"GITHUB_TOKEN": "fake-token"},
@@ -9010,7 +9010,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_creator=lambda *a, **kw: (_ for _ in ()).throw(
                     IssueCentricGitHubError("item create failed")
                 ),
@@ -9040,7 +9040,7 @@ class IcProjectSyncGitHubMutationTests(unittest.TestCase):
                 log_writer=writer,
                 repo_relative=self._repo_relative(root),
                 issue_fetcher=lambda repo, number, token: self._fake_issue_snapshot(20),
-                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: resolved_project,
                 project_item_resolver=lambda proj_id, node_id, token: self._fake_resolved_project_item(),
                 project_state_setter=lambda *a, **kw: (_ for _ in ()).throw(
                     IssueCentricGitHubError("state setter failed")
