@@ -539,6 +539,103 @@ def bridge_lifecycle_sync_suffix(state: Mapping[str, Any]) -> str:
     return _bridge_lifecycle_sync_suffix(state)
 
 
+# ---------------------------------------------------------------------------
+# Project sync warning helpers (Phase 56)
+# ---------------------------------------------------------------------------
+# Covers the three project-sync families.  Lifecycle sync is already surfaced
+# via _bridge_lifecycle_sync_suffix; the helpers below extend coverage to the
+# primary (issue-create) and followup families, and provide a unified detection
+# helper used by stop summaries and operator-facing notes.
+
+_PROJECT_SYNC_FAILED = "project_state_sync_failed"
+
+# Primary and followup families.  Lifecycle is handled separately by
+# _bridge_lifecycle_sync_suffix to avoid duplicate reporting in inline suffixes.
+_PROJECT_SYNC_IC_FAMILIES: dict[str, str] = {
+    "primary": "last_issue_centric_primary_project_sync_status",
+    "followup": "last_issue_centric_followup_project_sync_status",
+}
+
+
+def _detect_project_sync_warning(state: Mapping[str, Any]) -> bool:
+    """Return True if any of the three project sync families recorded project_state_sync_failed.
+
+    Checks primary, followup, AND lifecycle sync families so callers can use a
+    single boolean gate for 'any project sync failed' decisions.
+    """
+    all_keys = list(_PROJECT_SYNC_IC_FAMILIES.values()) + [
+        "last_issue_centric_lifecycle_sync_status",
+    ]
+    return any(str(state.get(k, "")).strip() == _PROJECT_SYNC_FAILED for k in all_keys)
+
+
+def _resolve_project_sync_warning_family(state: Mapping[str, Any]) -> list[str]:
+    """Return the family names (primary, followup, lifecycle) that have project_state_sync_failed."""
+    all_families: dict[str, str] = {
+        **_PROJECT_SYNC_IC_FAMILIES,
+        "lifecycle": "last_issue_centric_lifecycle_sync_status",
+    }
+    return [
+        name
+        for name, key in all_families.items()
+        if str(state.get(key, "")).strip() == _PROJECT_SYNC_FAILED
+    ]
+
+
+def _build_project_sync_warning_note(state: Mapping[str, Any]) -> str:
+    """Return an inline warning note when primary or followup project sync failed.
+
+    Covers only primary and followup families — lifecycle sync is already surfaced
+    via _bridge_lifecycle_sync_suffix and is intentionally excluded here to avoid
+    duplicate reporting in status/handoff text.
+
+    Returns empty string when no primary/followup project sync failure is present.
+
+    Severity: 'success with warning'.  The main action (issue create / followup)
+    completed; only Project state sync failed.  This is NOT a hard runtime error.
+    Operator guidance: check GitHub Project config / state field / token / permissions.
+    """
+    failed = [
+        name
+        for name, key in _PROJECT_SYNC_IC_FAMILIES.items()
+        if str(state.get(key, "")).strip() == _PROJECT_SYNC_FAILED
+    ]
+    if not failed:
+        return ""
+    families_str = "+".join(failed)
+    return (
+        f" [project_sync: warning family={families_str}"
+        " 主処理は完了しましたが Project state sync に失敗しました。"
+        " GitHub Project 設定・state field・token・permissions を確認してください。]"
+    )
+
+
+def bridge_project_sync_warning_suffix(state: Mapping[str, Any]) -> str:
+    """Public wrapper for primary/followup project sync warning note.
+
+    Returns a compact bracketed warning suitable for inline use in status/handoff
+    text, or empty string when no primary/followup project sync failure is present.
+    Lifecycle sync failures are covered by bridge_lifecycle_sync_suffix instead.
+    """
+    return _build_project_sync_warning_note(state)
+
+
+def format_project_sync_warning_note(state: Mapping[str, Any]) -> str:
+    """Return a diagnostic note covering all three project-sync families for stop summaries.
+
+    Unlike bridge_project_sync_warning_suffix (primary+followup only), this function
+    covers primary, followup, AND lifecycle so stop summaries give a complete picture.
+
+    Returns e.g. 'family=primary+lifecycle failed=project_state_sync_failed' or
+    'none' when no project sync failure is present.
+    """
+    failed_families = _resolve_project_sync_warning_family(state)
+    if not failed_families:
+        return "none"
+    families_str = "+".join(failed_families)
+    return f"family={families_str} failed={_PROJECT_SYNC_FAILED}"
+
+
 def format_lifecycle_sync_state_note(state: Mapping[str, Any]) -> str:
     """Return a short lifecycle sync diagnostic note for stop summaries and doctor output.
 
@@ -1919,7 +2016,8 @@ def format_operator_stop_note(state: Mapping[str, Any], *, plan: RuntimeDispatch
             return _ic_note
     if plan.next_action == "completed":
         _lc = _bridge_lifecycle_sync_suffix(state)
-        return f"追加の Codex 実行・ChatGPT 依頼は不要です。{_lc}"
+        _pw = _build_project_sync_warning_note(state)
+        return f"追加の Codex 実行・ChatGPT 依頼は不要です。{_lc}{_pw}"
     if plan.next_action == "no_action":
         _lc = _bridge_lifecycle_sync_suffix(state)
         return f"次の 1 手が見つかりません。state と doctor を確認してください。{_lc}"

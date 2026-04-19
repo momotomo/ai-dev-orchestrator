@@ -3335,3 +3335,477 @@ class LegacyPathDeprecationTests(unittest.TestCase):
         self.assertIsNone(readiness.decision)
 
 
+class ProjectSyncWarningOperatorSurfaceTests(unittest.TestCase):
+    """Phase 56 — project_state_sync_failed operator-facing warning surface.
+
+    Verifies that:
+    - primary / followup / lifecycle project sync failed → operator-facing warning note
+    - no-project / issue-only-fallback → NO warning note
+    - main runtime hard errors / deliberate stops are NOT mixed with sync warnings
+    - warning vocabulary is consistent across all three families
+    - existing stop paths (completed, no_action, codex stops, etc.) do not regress
+    - bridge_project_sync_warning_suffix and format_project_sync_warning_note are exported
+    """
+
+    # ------------------------------------------------------------------
+    # Helper: build a minimal terminal state
+    # ------------------------------------------------------------------
+
+    def _completed_state(self, **extra: object) -> dict:
+        return {"mode": "idle", **extra}
+
+    # ------------------------------------------------------------------
+    # Group 1: _detect_project_sync_warning / _resolve_project_sync_warning_family
+    # ------------------------------------------------------------------
+
+    def test_detect_project_sync_warning_primary_failed(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_followup_failed(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {"last_issue_centric_followup_project_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_lifecycle_failed(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {"last_issue_centric_lifecycle_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_all_three_failed(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_lifecycle_sync_status": "project_state_sync_failed",
+        }
+        self.assertTrue(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_no_failed(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_synced",
+            "last_issue_centric_followup_project_sync_status": "not_requested_no_project",
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+        }
+        self.assertFalse(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_no_project_not_warning(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {
+            "last_issue_centric_primary_project_sync_status": "not_requested_no_project",
+            "last_issue_centric_followup_project_sync_status": "not_requested_no_project",
+        }
+        self.assertFalse(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_issue_only_fallback_not_warning(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        state = {
+            "last_issue_centric_primary_project_sync_status": "issue_only_fallback",
+            "last_issue_centric_followup_project_sync_status": "issue_only_fallback",
+        }
+        self.assertFalse(_detect_project_sync_warning(state))
+
+    def test_detect_project_sync_warning_empty_state(self) -> None:
+        from _bridge_common import _detect_project_sync_warning
+        self.assertFalse(_detect_project_sync_warning({}))
+
+    def test_resolve_warning_family_primary_only(self) -> None:
+        from _bridge_common import _resolve_project_sync_warning_family
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        self.assertEqual(_resolve_project_sync_warning_family(state), ["primary"])
+
+    def test_resolve_warning_family_followup_only(self) -> None:
+        from _bridge_common import _resolve_project_sync_warning_family
+        state = {"last_issue_centric_followup_project_sync_status": "project_state_sync_failed"}
+        self.assertEqual(_resolve_project_sync_warning_family(state), ["followup"])
+
+    def test_resolve_warning_family_lifecycle_only(self) -> None:
+        from _bridge_common import _resolve_project_sync_warning_family
+        state = {"last_issue_centric_lifecycle_sync_status": "project_state_sync_failed"}
+        self.assertEqual(_resolve_project_sync_warning_family(state), ["lifecycle"])
+
+    def test_resolve_warning_family_primary_and_followup(self) -> None:
+        from _bridge_common import _resolve_project_sync_warning_family
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+        }
+        families = _resolve_project_sync_warning_family(state)
+        self.assertIn("primary", families)
+        self.assertIn("followup", families)
+
+    def test_resolve_warning_family_empty_when_no_failures(self) -> None:
+        from _bridge_common import _resolve_project_sync_warning_family
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_synced"}
+        self.assertEqual(_resolve_project_sync_warning_family(state), [])
+
+    # ------------------------------------------------------------------
+    # Group 2: bridge_project_sync_warning_suffix (primary+followup only)
+    # ------------------------------------------------------------------
+
+    def test_bridge_project_sync_warning_suffix_primary_failed(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        suffix = bridge_project_sync_warning_suffix(state)
+        self.assertIn("project_sync", suffix)
+        self.assertIn("warning", suffix)
+        self.assertIn("primary", suffix)
+        self.assertIn("Project state sync", suffix)
+
+    def test_bridge_project_sync_warning_suffix_followup_failed(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {"last_issue_centric_followup_project_sync_status": "project_state_sync_failed"}
+        suffix = bridge_project_sync_warning_suffix(state)
+        self.assertIn("project_sync", suffix)
+        self.assertIn("warning", suffix)
+        self.assertIn("followup", suffix)
+
+    def test_bridge_project_sync_warning_suffix_lifecycle_failed_is_empty(self) -> None:
+        """Lifecycle sync is handled by bridge_lifecycle_sync_suffix; warning suffix returns empty."""
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {"last_issue_centric_lifecycle_sync_status": "project_state_sync_failed"}
+        suffix = bridge_project_sync_warning_suffix(state)
+        # Lifecycle is intentionally NOT covered here — it's covered by _bridge_lifecycle_sync_suffix
+        self.assertEqual(suffix, "")
+
+    def test_bridge_project_sync_warning_suffix_no_project_is_empty(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {
+            "last_issue_centric_primary_project_sync_status": "not_requested_no_project",
+            "last_issue_centric_followup_project_sync_status": "not_requested_no_project",
+        }
+        self.assertEqual(bridge_project_sync_warning_suffix(state), "")
+
+    def test_bridge_project_sync_warning_suffix_issue_only_fallback_is_empty(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {
+            "last_issue_centric_primary_project_sync_status": "issue_only_fallback",
+            "last_issue_centric_followup_project_sync_status": "issue_only_fallback",
+        }
+        self.assertEqual(bridge_project_sync_warning_suffix(state), "")
+
+    def test_bridge_project_sync_warning_suffix_synced_is_empty(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_synced",
+            "last_issue_centric_followup_project_sync_status": "project_state_synced",
+        }
+        self.assertEqual(bridge_project_sync_warning_suffix(state), "")
+
+    def test_bridge_project_sync_warning_suffix_empty_state_is_empty(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        self.assertEqual(bridge_project_sync_warning_suffix({}), "")
+
+    def test_bridge_project_sync_warning_suffix_primary_and_followup_both_failed(self) -> None:
+        from _bridge_common import bridge_project_sync_warning_suffix
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+        }
+        suffix = bridge_project_sync_warning_suffix(state)
+        self.assertIn("primary", suffix)
+        self.assertIn("followup", suffix)
+
+    # ------------------------------------------------------------------
+    # Group 3: format_project_sync_warning_note (all 3 families)
+    # ------------------------------------------------------------------
+
+    def test_format_project_sync_warning_note_none_when_no_failures(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {}
+        self.assertEqual(format_project_sync_warning_note(state), "none")
+
+    def test_format_project_sync_warning_note_primary_failed(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        note = format_project_sync_warning_note(state)
+        self.assertIn("primary", note)
+        self.assertIn("project_state_sync_failed", note)
+        self.assertNotEqual(note, "none")
+
+    def test_format_project_sync_warning_note_followup_failed(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {"last_issue_centric_followup_project_sync_status": "project_state_sync_failed"}
+        note = format_project_sync_warning_note(state)
+        self.assertIn("followup", note)
+        self.assertIn("project_state_sync_failed", note)
+
+    def test_format_project_sync_warning_note_lifecycle_failed(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {"last_issue_centric_lifecycle_sync_status": "project_state_sync_failed"}
+        note = format_project_sync_warning_note(state)
+        self.assertIn("lifecycle", note)
+        self.assertIn("project_state_sync_failed", note)
+
+    def test_format_project_sync_warning_note_all_three_failed(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_lifecycle_sync_status": "project_state_sync_failed",
+        }
+        note = format_project_sync_warning_note(state)
+        self.assertIn("primary", note)
+        self.assertIn("followup", note)
+        self.assertIn("lifecycle", note)
+
+    def test_format_project_sync_warning_note_no_project_returns_none(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {
+            "last_issue_centric_primary_project_sync_status": "not_requested_no_project",
+        }
+        self.assertEqual(format_project_sync_warning_note(state), "none")
+
+    # ------------------------------------------------------------------
+    # Group 4: format_operator_stop_note with project sync warning
+    # ------------------------------------------------------------------
+
+    def test_format_operator_stop_note_completed_shows_primary_project_sync_warning(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("primary", note)
+
+    def test_format_operator_stop_note_completed_shows_followup_project_sync_warning(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_followup_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("followup", note)
+
+    def test_format_operator_stop_note_completed_no_warning_when_no_project(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="not_requested_no_project",
+            last_issue_centric_followup_project_sync_status="not_requested_no_project",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_format_operator_stop_note_completed_no_warning_for_issue_only_fallback(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="issue_only_fallback",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_format_operator_stop_note_completed_no_warning_when_synced(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_synced",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_format_operator_stop_note_completed_warning_with_remediation_hint(self) -> None:
+        """Warning note should include remediation guidance for the operator."""
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("Project", note)
+        self.assertIn("設定", note)
+
+    def test_format_operator_stop_note_completed_lifecycle_and_primary_both_failed(self) -> None:
+        """Both lifecycle (via _lc) and primary (via _pw) warnings can appear together."""
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_lifecycle_sync_status="project_state_sync_failed",
+            last_issue_centric_lifecycle_sync_stage="closing",
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        # lifecycle → _bridge_lifecycle_sync_suffix
+        self.assertIn("lifecycle_sync", note)
+        self.assertIn("signal=sync_failed", note)
+        # primary → _build_project_sync_warning_note
+        self.assertIn("project_sync: warning", note)
+        self.assertIn("primary", note)
+
+    # ------------------------------------------------------------------
+    # Group 5: suggested_next_note with project sync warning
+    # ------------------------------------------------------------------
+
+    def test_suggested_next_note_completed_shows_primary_project_sync_warning(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("primary", note)
+
+    def test_suggested_next_note_completed_shows_followup_project_sync_warning(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_followup_project_sync_status="project_state_sync_failed",
+        )
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("followup", note)
+
+    def test_suggested_next_note_completed_no_warning_when_no_project(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="not_requested_no_project",
+        )
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_suggested_next_note_completed_no_warning_for_issue_only_fallback(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="issue_only_fallback",
+        )
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_suggested_next_note_completed_no_warning_when_synced(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_synced",
+        )
+        note = run_until_stop.suggested_next_note(state)
+        self.assertNotIn("project_sync: warning", note)
+
+    # ------------------------------------------------------------------
+    # Group 6: error state is NOT a project sync warning
+    # ------------------------------------------------------------------
+
+    def test_error_state_is_not_project_sync_warning(self) -> None:
+        """runtime hard error (state.error = True) must not show 'success with warning'."""
+        from _bridge_common import present_bridge_status
+        state = {
+            "error": True,
+            "error_message": "something went wrong",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        status = present_bridge_status(state)
+        self.assertEqual(status.label, "異常")
+        self.assertNotIn("project_sync: warning", status.detail)
+
+    def test_deliberate_stop_does_not_show_project_sync_warning(self) -> None:
+        """IC initial_selection_stop (deliberate stop) does not confuse with project_sync_warning."""
+        from _bridge_common import detect_ic_stop_path, bridge_project_sync_warning_suffix
+        # IC initial_selection_stop: ChatGPT selected a ready issue → operator must confirm
+        state = {
+            "chatgpt_decision": "issue_selected",
+            "selected_ready_issue_ref": "#7",
+            "chatgpt_decision_note": "ready issue #7 を選択。",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        ic_path = detect_ic_stop_path(state)
+        # The IC stop path is classified independently of project_sync_warning
+        # (the sync warning is a primary/followup scoped check, not an IC stop path check)
+        # What matters: bridge_project_sync_warning_suffix still returns the warning,
+        # showing the two signals are independently readable and do not interfere.
+        warning = bridge_project_sync_warning_suffix(state)
+        self.assertIn("project_sync", warning)
+        self.assertIn("warning", warning)
+        # IC path and sync warning are in different vocabularies — they do not overwrite each other
+        self.assertNotEqual(ic_path, "project_state_sync_failed")
+
+    def test_project_sync_warning_and_hard_error_are_distinguishable(self) -> None:
+        """Vocabulary must clearly separate sync warning from hard error."""
+        from _bridge_common import bridge_project_sync_warning_suffix, present_bridge_status
+        state_warning = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        state_error = {
+            "error": True,
+            "error_message": "fatal",
+        }
+        warning_suffix = bridge_project_sync_warning_suffix(state_warning)
+        error_status = present_bridge_status(state_error)
+        # Warning: shows "warning" text
+        self.assertIn("warning", warning_suffix)
+        # Hard error: label is "異常", detail does not contain "warning"
+        self.assertEqual(error_status.label, "異常")
+        self.assertNotIn("warning", error_status.detail)
+
+    # ------------------------------------------------------------------
+    # Group 7: existing stop paths do not regress
+    # ------------------------------------------------------------------
+
+    def test_existing_lifecycle_sync_suffix_still_works_for_synced(self) -> None:
+        from _bridge_common import bridge_lifecycle_sync_suffix
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        suffix = bridge_lifecycle_sync_suffix(state)
+        self.assertIn("lifecycle_sync", suffix)
+        self.assertIn("signal=synced", suffix)
+
+    def test_existing_lifecycle_sync_suffix_still_works_for_sync_failed(self) -> None:
+        from _bridge_common import bridge_lifecycle_sync_suffix
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_sync_failed",
+            "last_issue_centric_lifecycle_sync_stage": "in_progress",
+        }
+        suffix = bridge_lifecycle_sync_suffix(state)
+        self.assertIn("lifecycle_sync", suffix)
+        self.assertIn("signal=sync_failed", suffix)
+        self.assertIn("reason=project_state_sync_failed", suffix)
+
+    def test_format_operator_stop_note_no_action_unaffected_by_project_sync_warning(self) -> None:
+        """project_sync_warning does NOT appear in no_action paths — those have different semantics."""
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_codex_run": True,
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        # no_action does not add project_sync warning suffix in current implementation
+        # (warning is only on "completed" path where main action succeeded)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_format_operator_stop_note_request_next_prompt_unaffected(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_chatgpt_prompt": True,
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_format_lifecycle_sync_state_note_still_works_not_recorded(self) -> None:
+        from _bridge_common import format_lifecycle_sync_state_note
+        self.assertEqual(format_lifecycle_sync_state_note({}), "not_recorded")
+
+    def test_format_lifecycle_sync_state_note_still_works_synced(self) -> None:
+        from _bridge_common import format_lifecycle_sync_state_note
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_synced",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        note = format_lifecycle_sync_state_note(state)
+        self.assertIn("signal=synced", note)
+        self.assertIn("stage=closing", note)
+
+
+
