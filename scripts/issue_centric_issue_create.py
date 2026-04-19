@@ -226,7 +226,7 @@ def execute_issue_create_draft(
                 created_project_item = item_creator(
                     resolved_project.project_id,
                     created_issue.node_id,
-                    token,
+                    token=token,
                 )
             except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
                 project_sync_status = "issue_created_project_item_failed"
