@@ -5509,6 +5509,37 @@ class IcNoActionIssueManagementSliceTests(unittest.TestCase):
     # Group 4: regression (2 tests)
     # ------------------------------------------------------------------
 
+    def test_no_action_plain_continuation_enables_next_cycle(self):
+        """Plain no_action with current issue sets mode=idle + need_chatgpt_next for continuation.
+
+        After plain no_action executes, the final state must have:
+          mode == "idle"
+          need_chatgpt_next == True
+        so that the next bridge_orchestrator call routes to request_prompt_from_report
+        instead of resolving to "no_action" (terminal).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#15",
+            )
+            result = self._dispatch(decision=decision, root=root)
+            self.assertEqual(result.matrix_path, "prepared_artifact_only")
+            final = result.final_state
+            self.assertEqual(
+                final.get("mode"), "idle",
+                "mode must be reset to idle so the next bridge call can proceed",
+            )
+            self.assertTrue(
+                bool(final.get("need_chatgpt_next")),
+                "need_chatgpt_next must be True so the bridge routes to request_prompt_from_report",
+            )
+            self.assertEqual(
+                final.get("last_issue_centric_next_request_hint"),
+                "continue_on_current_issue",
+            )
+
     def test_no_action_plain_does_not_call_any_executor(self):
         """Plain no_action must not invoke followup or close executors."""
         with tempfile.TemporaryDirectory() as tmp:
