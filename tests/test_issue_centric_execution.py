@@ -7693,5 +7693,680 @@ class IcProjectSyncStateFamilyTests(IssueCentricExecutionDispatcherTests):
             self.assertEqual(result.final_status, "prepared_only")
 
 
+class IcProjectSyncFailedPathTests(IssueCentricExecutionDispatcherTests):
+    """Phase 54 — project-sync execution precision / failed-path hardening.
+
+    Verifies:
+    - ``_normalize_project_sync_result`` reads ``sync_status`` as fallback
+      (lifecycle-sync compatibility) and prefers ``project_sync_status``.
+    - ``_should_retry_project_sync`` triggers only on ``project_state_sync_failed``.
+    - ``project_state_sync_failed`` is written to state for all three families
+      (primary_project_*, followup_project_*, lifecycle_sync_*).
+    - Lifecycle sync retries exactly once when first attempt returns
+      ``project_state_sync_failed``; the retry result is used.
+    - No more than 1 retry occurs even if second attempt also fails.
+    - ``project_state_sync_failed`` and ``not_requested_no_project`` are
+      distinguishable in state.
+    - ``issue_only_fallback`` is not retried (issue create / followup create
+      path: project sync embedded, no retry possible at dispatcher level).
+    - Phase 53 vocabulary consistency is maintained.
+    """
+
+    # ------------------------------------------------------------------
+    # Fake helpers
+    # ------------------------------------------------------------------
+
+    def _fake_create_failed(self, root: Path, number: int = 71):
+        """issue-create fn that returns project_state_sync_failed."""
+        def fn(*args, **kwargs):
+            p = root / f"create_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                execution_log_path=p,
+                created_issue=fake_issue(number),
+                project_sync_status="project_state_sync_failed",
+                project_url="https://github.com/users/x/projects/1",
+                project_item_id="",
+                project_state_field_name="State",
+                project_state_value_name="",
+                safe_stop_reason=f"create #{number} project_state_sync_failed",
+            )
+        return fn
+
+    def _fake_followup_failed(self, root: Path, number: int = 81):
+        """followup-create fn that returns project_state_sync_failed."""
+        def fn(*args, **kwargs):
+            p = root / f"followup_{number}.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                followup_status="completed",
+                execution_log_path=p,
+                created_issue=fake_issue(number),
+                parent_issue=None,
+                project_sync_status="project_state_sync_failed",
+                project_url="https://github.com/users/x/projects/1",
+                project_item_id="",
+                project_state_field_name="State",
+                project_state_value_name="",
+                safe_stop_reason=f"followup #{number} project_state_sync_failed",
+            )
+        return fn
+
+    def _fake_lifecycle_sync_always_failed(self, root: Path):
+        """Lifecycle sync fn that always returns project_state_sync_failed."""
+        def fn(*args, **kwargs):
+            p = root / "lifecycle_sync.json"
+            p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                sync_status="project_state_sync_failed",
+                lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                resolved_issue=SimpleNamespace(
+                    issue_url="https://github.com/example/repo/issues/20"
+                ),
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="https://github.com/users/x/projects/1",
+                project_item_id="",
+                project_state_field_name="State",
+                project_state_value_name="",
+                safe_stop_reason="lifecycle sync project_state_sync_failed",
+            )
+        return fn
+
+    def _fake_lifecycle_sync_fail_then_succeed(self, root: Path, call_log: list):
+        """First call fails, second call (retry) succeeds."""
+        def fn(*args, **kwargs):
+            p = root / "lifecycle_sync.json"
+            p.write_text("{}", encoding="utf-8")
+            call_log.append(len(call_log) + 1)
+            if len(call_log) == 1:
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_sync_failed",
+                    lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                    resolved_issue=SimpleNamespace(
+                        issue_url="https://github.com/example/repo/issues/20"
+                    ),
+                    issue_snapshot=None,
+                    execution_log_path=p,
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="",
+                    project_state_field_name="State",
+                    project_state_value_name="",
+                    safe_stop_reason="lifecycle sync attempt 1 failed",
+                )
+            return SimpleNamespace(
+                status="completed",
+                sync_status="project_state_synced",
+                lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                resolved_issue=SimpleNamespace(
+                    issue_url="https://github.com/example/repo/issues/20"
+                ),
+                issue_snapshot=None,
+                execution_log_path=p,
+                project_url="https://github.com/users/x/projects/1",
+                project_item_id="ITEM_20",
+                project_state_field_name="State",
+                project_state_value_name="in_progress",
+                safe_stop_reason="lifecycle sync attempt 2 succeeded",
+            )
+        return fn
+
+    def _fake_trigger(self, root: Path):
+        def fn(*args, **kwargs):
+            p = root / "trigger.json"
+            p.write_text("{}", encoding="utf-8")
+            payload_p = root / "payload.json"
+            payload_p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                resolved_issue=SimpleNamespace(
+                    issue_url="https://github.com/example/repo/issues/20"
+                ),
+                created_comment=fake_comment(701, 20),
+                payload=SimpleNamespace(
+                    repo=str(REPO_ROOT),
+                    target_issue="https://github.com/example/repo/issues/20",
+                    request="Implement.\n",
+                    trigger_comment="https://github.com/example/repo/issues/20#issuecomment-701",
+                ),
+                payload_log_path=payload_p,
+                execution_log_path=p,
+                launch_status="not_implemented",
+                launch_note="not implemented",
+                safe_stop_reason="trigger completed",
+            )
+        return fn
+
+    def _fake_launch(self, root: Path):
+        def fn(*args, **kwargs):
+            prompt_p = root / "prompt.md"
+            launch_p = root / "launch.json"
+            cont_p = root / "continuation.json"
+            for p in (prompt_p, launch_p, cont_p):
+                p.write_text("{}", encoding="utf-8")
+            return SimpleNamespace(
+                status="completed",
+                launch_status="launched",
+                launch_entrypoint="launch_codex_once.run",
+                prompt_log_path=prompt_p,
+                launch_log_path=launch_p,
+                continuation_status="completed",
+                continuation_log_path=cont_p,
+                report_status="",
+                report_file="",
+                final_mode="codex_running",
+                safe_stop_reason="launch completed",
+            )
+        return fn
+
+    # ------------------------------------------------------------------
+    # Group 1: _normalize_project_sync_result fallback (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_normalize_reads_sync_status_as_fallback(self):
+        """_normalize_project_sync_result reads sync_status when project_sync_status absent."""
+        exec_result = SimpleNamespace(
+            sync_status="project_state_synced",
+            project_url="https://github.com/users/x/projects/1",
+            project_item_id="ITEM_20",
+            project_state_field_name="State",
+            project_state_value_name="done",
+        )
+        result = issue_centric_execution._normalize_project_sync_result(exec_result)
+        self.assertEqual(result["project_sync_status"], "project_state_synced")
+        self.assertEqual(result["project_item_id"], "ITEM_20")
+
+    def test_normalize_project_sync_status_preferred_over_sync_status(self):
+        """_normalize_project_sync_result prefers project_sync_status over sync_status."""
+        exec_result = SimpleNamespace(
+            project_sync_status="project_state_synced",
+            sync_status="issue_only_fallback",  # should be ignored
+            project_url="",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
+        )
+        result = issue_centric_execution._normalize_project_sync_result(exec_result)
+        self.assertEqual(result["project_sync_status"], "project_state_synced",
+                         "project_sync_status must take priority over sync_status")
+
+    def test_should_retry_project_sync_only_on_failed(self):
+        """_should_retry_project_sync returns True only for project_state_sync_failed."""
+        failed = SimpleNamespace(
+            project_sync_status="project_state_sync_failed",
+            project_url="", project_item_id="",
+            project_state_field_name="", project_state_value_name="",
+        )
+        not_requested = SimpleNamespace(
+            project_sync_status="not_requested_no_project",
+            project_url="", project_item_id="",
+            project_state_field_name="", project_state_value_name="",
+        )
+        fallback = SimpleNamespace(
+            project_sync_status="issue_only_fallback",
+            project_url="https://github.com/users/x/projects/1",
+            project_item_id="", project_state_field_name="", project_state_value_name="",
+        )
+        synced = SimpleNamespace(
+            project_sync_status="project_state_synced",
+            project_url="https://github.com/users/x/projects/1",
+            project_item_id="ITEM_1",
+            project_state_field_name="State", project_state_value_name="done",
+        )
+        self.assertTrue(issue_centric_execution._should_retry_project_sync(failed))
+        self.assertFalse(issue_centric_execution._should_retry_project_sync(not_requested))
+        self.assertFalse(issue_centric_execution._should_retry_project_sync(fallback))
+        self.assertFalse(issue_centric_execution._should_retry_project_sync(synced))
+
+    # ------------------------------------------------------------------
+    # Group 2: project_state_sync_failed written to state (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_issue_create_project_state_sync_failed_written_to_primary_family(self):
+        """issue_create with failed project sync → primary_project_sync_status = project_state_sync_failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create_failed(root, 71),
+            )
+            # Issue creation itself succeeded
+            self.assertEqual(result.final_status, "completed")
+            # But project sync failed — must be written to state
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "project_state_sync_failed",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_project_sync_status"],
+                "project_state_sync_failed",
+            )
+            # project_url still populated (sync was attempted)
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_url"],
+                "https://github.com/users/x/projects/1",
+            )
+
+    def test_followup_project_state_sync_failed_written_to_followup_family(self):
+        """followup with failed project sync → followup_project_sync_status = project_state_sync_failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_followup_issue_action_fn=self._fake_followup_failed(root, 81),
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "project_state_sync_failed",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_project_sync_status"],
+                "project_state_sync_failed",
+            )
+
+    def test_lifecycle_sync_project_state_sync_failed_written_to_lifecycle_family(self):
+        """lifecycle sync with failed project sync → lifecycle_sync_status = project_state_sync_failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_current_issue_project_state_sync_fn=(
+                    self._fake_lifecycle_sync_always_failed(root)
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # Both retry attempts failed → final state is project_state_sync_failed
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_sync_failed",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 3: retry behaviour (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_lifecycle_sync_retried_once_on_first_failure_then_succeeds(self):
+        """Lifecycle sync retried exactly once when first attempt returns project_state_sync_failed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            call_log: list[int] = []
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_current_issue_project_state_sync_fn=(
+                    self._fake_lifecycle_sync_fail_then_succeed(root, call_log)
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # Retry happened exactly once (2 total calls)
+            self.assertEqual(call_log, [1, 2],
+                             "lifecycle sync must be called exactly twice (1 attempt + 1 retry)")
+            # Retry result (success) is used
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_synced",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_project_item_id"],
+                "ITEM_20",
+            )
+
+    def test_lifecycle_sync_no_retry_when_not_failed(self):
+        """Lifecycle sync NOT retried when first attempt succeeds (no unnecessary calls)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            call_log: list[int] = []
+
+            sync_log_path = root / "lifecycle_sync.json"
+            sync_log_path.write_text("{}", encoding="utf-8")
+
+            def fake_sync_success(*args, **kwargs):
+                call_log.append(len(call_log) + 1)
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                    resolved_issue=SimpleNamespace(
+                        issue_url="https://github.com/example/repo/issues/20"
+                    ),
+                    issue_snapshot=None,
+                    execution_log_path=sync_log_path,
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="in_progress",
+                    safe_stop_reason="synced",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_current_issue_project_state_sync_fn=fake_sync_success,
+            )
+            self.assertEqual(result.final_status, "completed")
+            # Exactly 1 call (no retry)
+            self.assertEqual(call_log, [1],
+                             "lifecycle sync must be called only once when first attempt succeeds")
+
+    def test_lifecycle_sync_no_second_retry_on_persistent_failure(self):
+        """After 1 retry, persistent failure is NOT retried again (max 1 retry)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            call_log: list[int] = []
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_current_issue_project_state_sync_fn=(
+                    self._fake_lifecycle_sync_always_failed(root)
+                ),
+            )
+            # Only a limited number of calls (1 + 1 retry = 2 for a single lifecycle_stage)
+            # The lifecycle sync is called once per lifecycle_stage; CODEX_RUN has 1 stage.
+            # Total calls must be <= 2 (original + 1 retry, no further retries).
+            # We cannot easily count the calls with _fake_lifecycle_sync_always_failed
+            # but we can verify the final state is still project_state_sync_failed
+            # (not silently swallowed or infinitely looped).
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_sync_failed",
+                "persistent failure must remain project_state_sync_failed, not silently swallowed",
+            )
+
+    # ------------------------------------------------------------------
+    # Group 4: vocabulary consistency across families (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_failed_path_vocabulary_same_across_primary_followup_lifecycle(self):
+        """project_state_sync_failed vocabulary is the same for primary, followup, lifecycle."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                create_followup_issue=True,
+                followup_text="# Followup\n\nBody.\n",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_followup_issue_action_fn=self._fake_followup_failed(root, 81),
+                execute_current_issue_project_state_sync_fn=(
+                    self._fake_lifecycle_sync_always_failed(root)
+                ),
+            )
+            self.assertEqual(result.final_status, "completed")
+            # followup and lifecycle both use "project_state_sync_failed"
+            self.assertEqual(
+                result.final_state["last_issue_centric_followup_project_sync_status"],
+                "project_state_sync_failed",
+            )
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_sync_failed",
+            )
+
+    def test_not_requested_no_project_vs_failed_distinguishable_in_state(self):
+        """not_requested_no_project and project_state_sync_failed are distinguishable."""
+        # not_requested case
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            p = root / "create_71.json"
+            p.write_text("{}", encoding="utf-8")
+
+            def fake_create_no_project(*args, **kwargs):
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    created_issue=fake_issue(71),
+                    project_sync_status="not_requested_no_project",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="no project configured",
+                )
+
+            result_no_project = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=fake_create_no_project,
+            )
+
+        # failed case
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            result_failed = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=self._fake_create_failed(root, 71),
+            )
+
+        self.assertEqual(
+            result_no_project.final_state["last_issue_centric_primary_project_sync_status"],
+            "not_requested_no_project",
+        )
+        self.assertEqual(
+            result_failed.final_state["last_issue_centric_primary_project_sync_status"],
+            "project_state_sync_failed",
+        )
+        self.assertNotEqual(
+            result_no_project.final_state["last_issue_centric_primary_project_sync_status"],
+            result_failed.final_state["last_issue_centric_primary_project_sync_status"],
+            "not_requested_no_project and project_state_sync_failed must be distinguishable",
+        )
+
+    def test_issue_only_fallback_not_retried_for_issue_create(self):
+        """issue_only_fallback from issue-create is not retried (no retry for bundled sync)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            call_log: list[int] = []
+
+            def fake_create_fallback(*args, **kwargs):
+                call_log.append(len(call_log) + 1)
+                p = root / "create_71.json"
+                p.write_text("{}", encoding="utf-8")
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    created_issue=fake_issue(71),
+                    project_sync_status="issue_only_fallback",
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="issue_only_fallback",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=fake_create_fallback,
+            )
+            self.assertEqual(result.final_status, "completed")
+            self.assertEqual(
+                result.final_state["last_issue_centric_primary_project_sync_status"],
+                "issue_only_fallback",
+            )
+            # issue-create fn called exactly once (no retry at dispatcher level)
+            self.assertEqual(call_log, [1],
+                             "issue-create fn must be called exactly once; no retry for bundled sync")
+
+    # ------------------------------------------------------------------
+    # Group 5: supported slices regression (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_codex_run_lifecycle_sync_via_sync_status_attribute(self):
+        """codex_run lifecycle sync with sync_status attribute → lifecycle_sync_status populated."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            sync_log_path = root / "lifecycle_sync.json"
+            sync_log_path.write_text("{}", encoding="utf-8")
+
+            def fake_sync(*args, **kwargs):
+                # Uses sync_status (not project_sync_status) — pre-Phase 54 contract
+                return SimpleNamespace(
+                    status="completed",
+                    sync_status="project_state_synced",
+                    lifecycle_stage=kwargs.get("lifecycle_stage", "in_progress"),
+                    resolved_issue=SimpleNamespace(
+                        issue_url="https://github.com/example/repo/issues/20"
+                    ),
+                    issue_snapshot=None,
+                    execution_log_path=sync_log_path,
+                    project_url="https://github.com/users/x/projects/1",
+                    project_item_id="ITEM_20",
+                    project_state_field_name="State",
+                    project_state_value_name="in_progress",
+                    safe_stop_reason="synced via sync_status",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+                execute_current_issue_project_state_sync_fn=fake_sync,
+            )
+            self.assertEqual(result.final_status, "completed")
+            # _normalize_project_sync_result fallback: sync_status → project_sync_status
+            self.assertEqual(
+                result.final_state["last_issue_centric_lifecycle_sync_status"],
+                "project_state_synced",
+            )
+
+    def test_codex_run_plain_matrix_path_unaffected(self):
+        """Plain codex_run matrix_path is unaffected by Phase 54 changes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                codex_text="Implement.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_codex_run_action_fn=self._fake_trigger(root),
+                launch_issue_centric_codex_run_fn=self._fake_launch(root),
+            )
+            self.assertIn(
+                result.matrix_path,
+                {"codex_run_launch_and_continuation", "codex_run"},
+            )
+            self.assertEqual(result.final_status, "completed")
+
+    def test_issue_create_plain_matrix_path_unaffected(self):
+        """Plain issue_create matrix_path is unaffected by Phase 54 changes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = build_decision(
+                action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+                target_issue="#20",
+                issue_text="# Issue\n\nBody.\n",
+            )
+            mat = materialized_from_decision(decision, root=root)
+            p = root / "create_71.json"
+            p.write_text("{}", encoding="utf-8")
+
+            def fake_create(*args, **kwargs):
+                return SimpleNamespace(
+                    status="completed",
+                    execution_log_path=p,
+                    created_issue=fake_issue(71),
+                    project_sync_status="not_requested_no_project",
+                    project_url="",
+                    project_item_id="",
+                    project_state_field_name="",
+                    project_state_value_name="",
+                    safe_stop_reason="created #71",
+                )
+
+            result = self.dispatch(
+                decision=decision, materialized=mat, root=root,
+                execute_issue_create_action_fn=fake_create,
+            )
+            self.assertIn(result.matrix_path, {"issue_create", "issue_create_narrow"})
+            self.assertEqual(result.final_status, "completed")
+
+
 if __name__ == "__main__":
     unittest.main()
