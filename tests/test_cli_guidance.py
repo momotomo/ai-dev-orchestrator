@@ -5089,3 +5089,423 @@ class ProjectSyncAlertWebhookDeliveryTests(unittest.TestCase):
         result = bc.deliver_project_sync_alert_if_pending(state, config)
         self.assertEqual(result, "skipped_already_delivered")
 
+
+# ---------------------------------------------------------------------------
+# Phase 60 — bounded multi-retry for project_state_sync_failed webhook delivery
+# ---------------------------------------------------------------------------
+
+
+class ProjectSyncAlertBoundedRetryTests(unittest.TestCase):
+    """Phase 60 — bounded multi-retry for webhook delivery.
+
+    Verifies:
+    - _deliver_project_sync_alert_with_retry: 1st attempt succeeds → attempts=1
+    - _deliver_project_sync_alert_with_retry: 1st fails, 2nd succeeds → attempts=2
+    - _deliver_project_sync_alert_with_retry: 1st+2nd fail, 3rd succeeds → attempts=3
+    - _deliver_project_sync_alert_with_retry: all 3 fail → delivery_failed, attempts=3
+    - retry only on delivery_failed, not on other return values
+    - not_requested_no_webhook / invalid_payload / skipped_already_delivered not retried
+    - attempt_count stored in state after delivery
+    - format_project_sync_alert_delivery_status includes attempts= suffix
+    - hard error not raised on all-attempts-failed
+    - Phase 59 dedupe / warning surface regression
+    - DEFAULT_STATE has attempt_count key
+    """
+
+    def setUp(self) -> None:
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+    def _make_pending_state(
+        self,
+        alert_file: str = "bridge/project_sync_alert.json",
+        alert_hash: str = "abc123",
+        delivered_hash: str = "",
+    ) -> dict:
+        return {
+            "last_project_sync_alert_status": "pending",
+            "last_project_sync_alert_file": alert_file,
+            "last_project_sync_alert_hash": alert_hash,
+            "last_project_sync_alert_delivery_hash": delivered_hash,
+            "last_project_sync_alert_delivery_status": "",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_url": "",
+            "last_project_sync_alert_delivery_attempted_at": "",
+            "last_project_sync_alert_delivery_attempt_count": 0,
+        }
+
+    def _make_config(self, webhook_url: str = "") -> dict:
+        return {"project_sync_alert_webhook_url": webhook_url}
+
+    # ------------------------------------------------------------------
+    # _deliver_project_sync_alert_with_retry unit tests
+    # ------------------------------------------------------------------
+
+    def test_retry_succeeds_on_first_attempt(self) -> None:
+        """If 1st attempt returns delivered, attempt_count=1."""
+        import _bridge_common as bc
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            return_value=("delivered", ""),
+        ) as mock_transport:
+            status, error, count = bc._deliver_project_sync_alert_with_retry(
+                {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(0, 0)
+            )
+        self.assertEqual(status, "delivered")
+        self.assertEqual(error, "")
+        self.assertEqual(count, 1)
+        self.assertEqual(mock_transport.call_count, 1)
+
+    def test_retry_succeeds_on_second_attempt(self) -> None:
+        """1st fails, 2nd succeeds → attempt_count=2."""
+        import _bridge_common as bc
+        side_effects = [("delivery_failed", "err1"), ("delivered", "")]
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            side_effect=side_effects,
+        ) as mock_transport:
+            with unittest.mock.patch("time.sleep"):
+                status, error, count = bc._deliver_project_sync_alert_with_retry(
+                    {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(0, 0)
+                )
+        self.assertEqual(status, "delivered")
+        self.assertEqual(error, "")
+        self.assertEqual(count, 2)
+        self.assertEqual(mock_transport.call_count, 2)
+
+    def test_retry_succeeds_on_third_attempt(self) -> None:
+        """1st+2nd fail, 3rd succeeds → attempt_count=3."""
+        import _bridge_common as bc
+        side_effects = [
+            ("delivery_failed", "err1"),
+            ("delivery_failed", "err2"),
+            ("delivered", ""),
+        ]
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            side_effect=side_effects,
+        ) as mock_transport:
+            with unittest.mock.patch("time.sleep"):
+                status, error, count = bc._deliver_project_sync_alert_with_retry(
+                    {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(0, 0)
+                )
+        self.assertEqual(status, "delivered")
+        self.assertEqual(error, "")
+        self.assertEqual(count, 3)
+        self.assertEqual(mock_transport.call_count, 3)
+
+    def test_retry_exhausted_all_three_attempts(self) -> None:
+        """All 3 attempts fail → delivery_failed, attempt_count=3."""
+        import _bridge_common as bc
+        side_effects = [
+            ("delivery_failed", "err1"),
+            ("delivery_failed", "err2"),
+            ("delivery_failed", "err3"),
+        ]
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            side_effect=side_effects,
+        ) as mock_transport:
+            with unittest.mock.patch("time.sleep"):
+                status, error, count = bc._deliver_project_sync_alert_with_retry(
+                    {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(0, 0)
+                )
+        self.assertEqual(status, "delivery_failed")
+        self.assertEqual(error, "err3")  # last error
+        self.assertEqual(count, 3)
+        self.assertEqual(mock_transport.call_count, 3)
+
+    def test_retry_does_not_exceed_max_attempts(self) -> None:
+        """Never calls transport more than max_attempts times."""
+        import _bridge_common as bc
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            return_value=("delivery_failed", "always_fail"),
+        ) as mock_transport:
+            with unittest.mock.patch("time.sleep"):
+                status, error, count = bc._deliver_project_sync_alert_with_retry(
+                    {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(0, 0)
+                )
+        self.assertEqual(count, 3)
+        self.assertEqual(mock_transport.call_count, 3)
+
+    def test_retry_delay_called_between_attempts(self) -> None:
+        """time.sleep is called with correct delays between attempts."""
+        import _bridge_common as bc
+        side_effects = [
+            ("delivery_failed", "e1"),
+            ("delivery_failed", "e2"),
+            ("delivered", ""),
+        ]
+        sleep_calls = []
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            side_effect=side_effects,
+        ):
+            with unittest.mock.patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                bc._deliver_project_sync_alert_with_retry(
+                    {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(1, 3)
+                )
+        # 3 attempts → 2 sleeps: 1s before 2nd, 3s before 3rd
+        self.assertEqual(sleep_calls, [1, 3])
+
+    def test_no_sleep_after_final_attempt(self) -> None:
+        """No sleep after the last (3rd) attempt even if still failing."""
+        import _bridge_common as bc
+        sleep_calls = []
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_to_webhook",
+            return_value=("delivery_failed", "e"),
+        ):
+            with unittest.mock.patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                bc._deliver_project_sync_alert_with_retry(
+                    {"k": "v"}, "http://example.invalid/", max_attempts=3, retry_delays=(1, 3)
+                )
+        # Only 2 sleeps (before 2nd and 3rd), none after 3rd
+        self.assertEqual(len(sleep_calls), 2)
+
+    # ------------------------------------------------------------------
+    # deliver_project_sync_alert_if_pending with retry: attempt_count in state
+    # ------------------------------------------------------------------
+
+    def test_attempt_count_stored_on_delivered(self) -> None:
+        """attempt_count saved in state when delivery succeeds."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "hh1"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(alert_file=tmp_path, alert_hash="hh1")
+            config = self._make_config(webhook_url="http://example.invalid/")
+            saved_state: dict = {}
+            with unittest.mock.patch.object(
+                bc,
+                "_deliver_project_sync_alert_with_retry",
+                return_value=("delivered", "", 2),
+            ):
+                with unittest.mock.patch.object(
+                    bc,
+                    "update_state",
+                    side_effect=lambda **kw: saved_state.update(kw),
+                ):
+                    result = bc.deliver_project_sync_alert_if_pending(state, config)
+            self.assertEqual(result, "delivered")
+            self.assertEqual(saved_state.get("last_project_sync_alert_delivery_attempt_count"), 2)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_attempt_count_stored_on_delivery_failed(self) -> None:
+        """attempt_count=3 saved in state when all attempts fail."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "hh2"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(alert_file=tmp_path, alert_hash="hh2")
+            config = self._make_config(webhook_url="http://example.invalid/")
+            saved_state: dict = {}
+            with unittest.mock.patch.object(
+                bc,
+                "_deliver_project_sync_alert_with_retry",
+                return_value=("delivery_failed", "timeout", 3),
+            ):
+                with unittest.mock.patch.object(
+                    bc,
+                    "update_state",
+                    side_effect=lambda **kw: saved_state.update(kw),
+                ):
+                    result = bc.deliver_project_sync_alert_if_pending(state, config)
+            self.assertEqual(result, "delivery_failed")
+            self.assertEqual(saved_state.get("last_project_sync_alert_delivery_attempt_count"), 3)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Non-retried paths: not_requested / invalid_payload / skipped
+    # ------------------------------------------------------------------
+
+    def test_not_requested_no_webhook_not_retried(self) -> None:
+        """not_requested_no_webhook path never calls the transport."""
+        import _bridge_common as bc
+        state = self._make_pending_state()
+        config = self._make_config(webhook_url="")
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_with_retry",
+        ) as mock_retry:
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "not_requested_no_webhook")
+        mock_retry.assert_not_called()
+
+    def test_invalid_payload_not_retried(self) -> None:
+        """invalid_payload path never calls retry transport."""
+        import _bridge_common as bc
+        state = self._make_pending_state(alert_file="bridge/does_not_exist_xyz.json")
+        config = self._make_config(webhook_url="http://example.invalid/")
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_with_retry",
+        ) as mock_retry:
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "invalid_payload")
+        mock_retry.assert_not_called()
+
+    def test_skipped_already_delivered_not_retried(self) -> None:
+        """skipped_already_delivered path never calls retry transport."""
+        import _bridge_common as bc
+        state = self._make_pending_state(alert_hash="sameHash", delivered_hash="sameHash")
+        config = self._make_config(webhook_url="http://example.invalid/")
+        with unittest.mock.patch.object(
+            bc,
+            "_deliver_project_sync_alert_with_retry",
+        ) as mock_retry:
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "skipped_already_delivered")
+        mock_retry.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # format_project_sync_alert_delivery_status — attempts suffix
+    # ------------------------------------------------------------------
+
+    def test_format_status_delivered_includes_attempts(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "delivered",
+            "last_project_sync_alert_delivery_hash": "abc123xyz789",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_attempt_count": 2,
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("delivered", result)
+        self.assertIn("attempts=2", result)
+
+    def test_format_status_delivery_failed_includes_attempts(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "delivery_failed",
+            "last_project_sync_alert_delivery_hash": "",
+            "last_project_sync_alert_delivery_error": "URLError: timed out",
+            "last_project_sync_alert_delivery_attempt_count": 3,
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("delivery_failed", result)
+        self.assertIn("attempts=3", result)
+        self.assertIn("URLError", result)
+
+    def test_format_status_no_attempts_suffix_when_zero(self) -> None:
+        """attempt_count=0 (default) → no attempts= suffix."""
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "delivered",
+            "last_project_sync_alert_delivery_hash": "abc123",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_attempt_count": 0,
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertNotIn("attempts=", result)
+
+    # ------------------------------------------------------------------
+    # hard error not raised on all-attempts-failed (integration)
+    # ------------------------------------------------------------------
+
+    def test_all_attempts_failed_does_not_raise(self) -> None:
+        """All retries exhausted must not raise any exception."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "test"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(alert_file=tmp_path, alert_hash="hfail")
+            config = self._make_config(webhook_url="http://127.0.0.1:1/")
+            with unittest.mock.patch("time.sleep"):
+                try:
+                    bc.deliver_project_sync_alert_if_pending(state, config)
+                except Exception as exc:
+                    self.fail(f"deliver_project_sync_alert_if_pending raised after all retries: {exc}")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # DEFAULT_STATE has attempt_count key
+    # ------------------------------------------------------------------
+
+    def test_default_state_has_attempt_count_key(self) -> None:
+        import _bridge_common as bc
+        self.assertIn("last_project_sync_alert_delivery_attempt_count", bc.DEFAULT_STATE)
+        self.assertEqual(bc.DEFAULT_STATE["last_project_sync_alert_delivery_attempt_count"], 0)
+
+    # ------------------------------------------------------------------
+    # Phase 59 regression: dedupe still works
+    # ------------------------------------------------------------------
+
+    def test_phase59_dedupe_regression(self) -> None:
+        """Same alert hash is still skipped after bounded retry is introduced."""
+        import _bridge_common as bc
+        state = self._make_pending_state(alert_hash="dedupeH", delivered_hash="dedupeH")
+        config = self._make_config(webhook_url="http://example.invalid/")
+        result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "skipped_already_delivered")
+
+    # ------------------------------------------------------------------
+    # Integration: 1st succeeds via real mock HTTP server (no retry needed)
+    # ------------------------------------------------------------------
+
+    def test_integration_delivered_first_attempt(self) -> None:
+        """Integration: HTTP 200 on 1st attempt → delivered, attempts=1."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, fmt, *args) -> None:  # type: ignore[override]
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "intH1"}, fp)
+            tmp_path = fp.name
+        saved_state: dict = {}
+        try:
+            state = self._make_pending_state(alert_file=tmp_path, alert_hash="intH1")
+            config = self._make_config(webhook_url=f"http://127.0.0.1:{port}/hook")
+            with unittest.mock.patch.object(
+                bc, "update_state", side_effect=lambda **kw: saved_state.update(kw)
+            ):
+                result = bc.deliver_project_sync_alert_if_pending(state, config)
+            thread.join(timeout=3.0)
+            server.server_close()
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+        self.assertEqual(result, "delivered")
+        self.assertEqual(saved_state.get("last_project_sync_alert_delivery_attempt_count"), 1)
+

@@ -38,7 +38,8 @@
     "summary": "project_state_sync_failed が発生したとき、alert payload を generic webhook へ POST します。",
     "usage": "project_sync_alert_webhook_url に POST 先 URL を設定すると有効になります。空文字列のままにすると webhook delivery はスキップされます。",
     "payload": "JSON body: family / sync_status / issue_ref / project_url / project_item_id / project_state_field / project_state_value / runtime_mode / runtime_action / detected_at / hash / source_note",
-    "delivery": "1 run につき 1 回まで。同じ alert hash は二重送信しません。delivery failure は hard error にはなりません。"
+    "delivery": "bounded retry: 最大 3 attempts (初回 + retry 2 回)。retry delay は固定 1秒→3秒。delivery_failed のときのみ retry。same hash 二重送信なし。delivery failure は hard error にはなりません。",
+    "retry_policy": "max_attempts=3, retry_delays=(1, 3) 秒固定。exponential backoff / jitter なし。1 run 内で完結。"
   },
   "project_sync_alert_webhook_url": ""
 }
