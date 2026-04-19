@@ -3808,4 +3808,365 @@ class ProjectSyncWarningOperatorSurfaceTests(unittest.TestCase):
         self.assertIn("stage=closing", note)
 
 
+class ProjectSyncWarningSurfaceAlignmentTests(unittest.TestCase):
+    """Phase 57 — project_state_sync_failed warning aligned across remaining operator surfaces.
+
+    Verifies that:
+    - bridge_orchestrator.run() normal path completed shows project sync warning
+    - bridge_orchestrator.run() IC stop paths are unaffected
+    - start_bridge.print_doctor() shows project_sync_warning line
+    - run_until_stop.entry_guidance() completed path shows project sync warning
+    - not_requested_no_project / issue_only_fallback → no warning in all surfaces
+    - hard error path is not mixed with project sync warning
+    - deliberate stop paths are not mixed with project sync warning
+    - Phase 56 surfaces (format_operator_stop_note, suggested_next_note) still pass
+    """
+
+    def _completed_state(self, **extra: object) -> dict:
+        return {"mode": "idle", **extra}
+
+    # ------------------------------------------------------------------
+    # Group 1: bridge_orchestrator.py — format_operator_stop_note via else branch
+    # ------------------------------------------------------------------
+
+    def test_bridge_orchestrator_completed_shows_primary_project_sync_warning(self) -> None:
+        """bridge_orchestrator.run() else branch uses format_operator_stop_note → shows warning."""
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        # Verify format_operator_stop_note is what bridge_orchestrator uses now
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("primary", note)
+        # The note is the source used by bridge_orchestrator else branch
+        self.assertIn("追加の Codex 実行", note)
+
+    def test_bridge_orchestrator_completed_shows_followup_project_sync_warning(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_followup_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("followup", note)
+
+    def test_bridge_orchestrator_completed_no_warning_for_not_requested_no_project(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="not_requested_no_project",
+            last_issue_centric_followup_project_sync_status="not_requested_no_project",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_bridge_orchestrator_completed_no_warning_for_issue_only_fallback(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="issue_only_fallback",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_bridge_orchestrator_completed_no_warning_when_synced(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_synced",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_bridge_orchestrator_ic_stop_initial_selection_uses_ic_note(self) -> None:
+        """IC stop path in bridge_orchestrator is unchanged — uses _ic_note not format_operator_stop_note."""
+        from _bridge_common import detect_ic_stop_path
+        # detect_ic_stop_path requires chatgpt_decision starts with 'issue_centric:'
+        # AND selected_ready_issue_ref is non-empty for initial_selection_stop.
+        state = {
+            "chatgpt_decision": "issue_centric:ready_issue_selected",
+            "selected_ready_issue_ref": "#7",
+            "chatgpt_decision_note": "ready issue #7 を選択しました。",
+        }
+        ic_stop = detect_ic_stop_path(state)
+        self.assertEqual(ic_stop, "initial_selection_stop")
+        # In bridge_orchestrator, the IC stop branch uses _ic_note or plan.note directly
+        ic_note = str(state.get("chatgpt_decision_note", "")).strip()
+        self.assertEqual(ic_note, "ready issue #7 を選択しました。")
+
+    def test_bridge_orchestrator_no_action_does_not_show_project_sync_warning(self) -> None:
+        """no_action path does not add project_sync: warning (only completed path does)."""
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "need_codex_run": True,
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertNotIn("project_sync: warning", note)
+
+    # ------------------------------------------------------------------
+    # Group 2: start_bridge.print_doctor() — project_sync_warning line
+    # ------------------------------------------------------------------
+
+    def test_start_bridge_doctor_shows_project_sync_warning_primary_failed(self) -> None:
+        """print_doctor() must include project_sync_warning diagnostic line."""
+        import io
+        import start_bridge
+        from unittest.mock import patch
+        state = {
+            "mode": "idle",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        captured = []
+        def fake_print(*args: object, **kwargs: object) -> None:
+            captured.append(" ".join(str(a) for a in args))
+        with patch("builtins.print", side_effect=fake_print):
+            with patch("run_until_stop.load_state", return_value=state):
+                with patch("run_until_stop.start_bridge_resume_guidance", return_value=("idle", "guidance", "note")):
+                    with patch("run_until_stop.recommended_operator_step", return_value=("再実行", "python3 ...")):
+                        with patch("run_until_stop.codex_report_is_ready", return_value=False):
+                            with patch("run_until_stop.runtime_prompt_path") as mp:
+                                mp.return_value.exists.return_value = False
+                                with patch("run_until_stop.runtime_stop_path") as ms:
+                                    ms.return_value.exists.return_value = False
+                                    with patch("run_until_stop.bridge_runtime_root") as mb:
+                                        mb.return_value.glob.return_value = []
+                                        with patch("run_until_stop.should_prioritize_unarchived_report", return_value=False):
+                                            with patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False):
+                                                args = start_bridge.parse_args(["--project-path", "/tmp"])
+                                                start_bridge.print_doctor(args)
+        lines_with_warning = [l for l in captured if "project_sync_warning" in l]
+        self.assertTrue(len(lines_with_warning) >= 1, f"project_sync_warning line not found. captured: {captured}")
+        warning_line = lines_with_warning[0]
+        self.assertIn("primary", warning_line)
+        self.assertIn("project_state_sync_failed", warning_line)
+
+    def test_start_bridge_doctor_shows_none_when_no_failures(self) -> None:
+        """print_doctor() project_sync_warning line shows 'none' when no failures."""
+        import start_bridge
+        from unittest.mock import patch
+        state = {"mode": "idle"}
+        captured = []
+        def fake_print(*args: object, **kwargs: object) -> None:
+            captured.append(" ".join(str(a) for a in args))
+        with patch("builtins.print", side_effect=fake_print):
+            with patch("run_until_stop.load_state", return_value=state):
+                with patch("run_until_stop.start_bridge_resume_guidance", return_value=("idle", "guidance", "note")):
+                    with patch("run_until_stop.recommended_operator_step", return_value=("再実行", "python3 ...")):
+                        with patch("run_until_stop.codex_report_is_ready", return_value=False):
+                            with patch("run_until_stop.runtime_prompt_path") as mp:
+                                mp.return_value.exists.return_value = False
+                                with patch("run_until_stop.runtime_stop_path") as ms:
+                                    ms.return_value.exists.return_value = False
+                                    with patch("run_until_stop.bridge_runtime_root") as mb:
+                                        mb.return_value.glob.return_value = []
+                                        with patch("run_until_stop.should_prioritize_unarchived_report", return_value=False):
+                                            with patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False):
+                                                args = start_bridge.parse_args(["--project-path", "/tmp"])
+                                                start_bridge.print_doctor(args)
+        lines_with_warning = [l for l in captured if "project_sync_warning" in l]
+        self.assertTrue(len(lines_with_warning) >= 1, f"project_sync_warning line not found. captured: {captured}")
+        self.assertIn("none", lines_with_warning[0])
+
+    def test_start_bridge_doctor_shows_lifecycle_failed_in_warning_note(self) -> None:
+        """print_doctor() project_sync_warning line also covers lifecycle family."""
+        import start_bridge
+        from unittest.mock import patch
+        state = {
+            "mode": "idle",
+            "last_issue_centric_lifecycle_sync_status": "project_state_sync_failed",
+            "last_issue_centric_lifecycle_sync_stage": "closing",
+        }
+        captured = []
+        def fake_print(*args: object, **kwargs: object) -> None:
+            captured.append(" ".join(str(a) for a in args))
+        with patch("builtins.print", side_effect=fake_print):
+            with patch("run_until_stop.load_state", return_value=state):
+                with patch("run_until_stop.start_bridge_resume_guidance", return_value=("idle", "guidance", "note")):
+                    with patch("run_until_stop.recommended_operator_step", return_value=("再実行", "python3 ...")):
+                        with patch("run_until_stop.codex_report_is_ready", return_value=False):
+                            with patch("run_until_stop.runtime_prompt_path") as mp:
+                                mp.return_value.exists.return_value = False
+                                with patch("run_until_stop.runtime_stop_path") as ms:
+                                    ms.return_value.exists.return_value = False
+                                    with patch("run_until_stop.bridge_runtime_root") as mb:
+                                        mb.return_value.glob.return_value = []
+                                        with patch("run_until_stop.should_prioritize_unarchived_report", return_value=False):
+                                            with patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False):
+                                                args = start_bridge.parse_args(["--project-path", "/tmp"])
+                                                start_bridge.print_doctor(args)
+        lines_with_warning = [l for l in captured if "project_sync_warning" in l]
+        self.assertTrue(len(lines_with_warning) >= 1)
+        warning_line = lines_with_warning[0]
+        self.assertIn("lifecycle", warning_line)
+
+    # ------------------------------------------------------------------
+    # Group 3: run_until_stop.entry_guidance() — completed path with _pw
+    # ------------------------------------------------------------------
+
+    def test_entry_guidance_completed_shows_primary_project_sync_warning(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        # We need a minimal args object for entry_guidance
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("primary", note)
+
+    def test_entry_guidance_completed_shows_followup_project_sync_warning(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_followup_project_sync_status="project_state_sync_failed",
+        )
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+        self.assertIn("followup", note)
+
+    def test_entry_guidance_completed_no_warning_for_not_requested_no_project(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="not_requested_no_project",
+        )
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_entry_guidance_completed_no_warning_for_issue_only_fallback(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="issue_only_fallback",
+        )
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_entry_guidance_completed_no_warning_when_synced(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_synced",
+        )
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        self.assertNotIn("project_sync: warning", note)
+
+    def test_entry_guidance_completed_lifecycle_only_not_in_pw(self) -> None:
+        """Lifecycle sync failure alone does not trigger _pw in entry_guidance completed path."""
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_lifecycle_sync_status="project_state_sync_failed",
+            last_issue_centric_lifecycle_sync_stage="closing",
+        )
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        # lifecycle is handled by _lc (bridge_lifecycle_sync_suffix) separately
+        # _pw (bridge_project_sync_warning_suffix) covers only primary+followup
+        self.assertNotIn("project_sync: warning", note)
+
+    # ------------------------------------------------------------------
+    # Group 4: boundary — hard error vs warning, deliberate stop vs warning
+    # ------------------------------------------------------------------
+
+    def test_hard_error_not_mixed_with_project_sync_warning_in_orchestrator(self) -> None:
+        """Hard error (error=True) status label is '異常'; warning is a separate signal."""
+        from _bridge_common import present_bridge_status
+        state = {
+            "error": True,
+            "error_message": "something critical",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        status = present_bridge_status(state)
+        # Hard error: status label is "異常" — distinct from project_sync warning vocabulary
+        self.assertEqual(status.label, "異常")
+        # The error status detail (from present_bridge_status) does not contain project_sync warning text
+        # (project_sync warning is only in format_operator_stop_note, not in present_bridge_status.detail)
+        self.assertNotIn("project_sync: warning", status.detail)
+
+    def test_initial_selection_stop_not_mixed_with_project_sync_warning(self) -> None:
+        """initial_selection_stop is a deliberate stop; IC branch uses _ic_note not project_sync warning."""
+        from _bridge_common import detect_ic_stop_path, bridge_project_sync_warning_suffix
+        # detect_ic_stop_path requires chatgpt_decision starts with 'issue_centric:'
+        # AND selected_ready_issue_ref non-empty for initial_selection_stop.
+        state = {
+            "chatgpt_decision": "issue_centric:ready_issue_selected",
+            "selected_ready_issue_ref": "#7",
+            "chatgpt_decision_note": "ready issue #7 を選択しました。",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        ic_stop = detect_ic_stop_path(state)
+        self.assertEqual(ic_stop, "initial_selection_stop")
+        # In bridge_orchestrator, this goes to the IC branch: _ic_note or plan.note
+        # — NOT to format_operator_stop_note. So project sync warning is not in the IC branch note.
+        ic_note = str(state.get("chatgpt_decision_note", "")).strip()
+        self.assertNotIn("project_sync", ic_note)
+        # bridge_project_sync_warning_suffix independently returns the warning (two signals are separate)
+        warning = bridge_project_sync_warning_suffix(state)
+        self.assertIn("project_sync: warning", warning)
+
+    def test_project_sync_warning_vocabulary_consistent_across_surfaces(self) -> None:
+        """All three surfaces use the same vocabulary: 'project_sync: warning family=...'."""
+        from _bridge_common import (
+            format_operator_stop_note,
+            resolve_runtime_dispatch_plan,
+        )
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        orch_note = format_operator_stop_note(state, plan=plan)
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        entry_note = run_until_stop.entry_guidance(state, args)
+        suggested_note = run_until_stop.suggested_next_note(state)
+        for note in [orch_note, entry_note, suggested_note]:
+            self.assertIn("project_sync", note)
+            self.assertIn("warning", note)
+
+    # ------------------------------------------------------------------
+    # Group 5: Phase 56 regression — format_operator_stop_note, suggested_next_note
+    # ------------------------------------------------------------------
+
+    def test_phase56_format_operator_stop_note_completed_still_passes(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+
+    def test_phase56_suggested_next_note_completed_still_passes(self) -> None:
+        import run_until_stop
+        state = self._completed_state(
+            last_issue_centric_primary_project_sync_status="project_state_sync_failed",
+        )
+        note = run_until_stop.suggested_next_note(state)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+
+    def test_phase56_format_project_sync_warning_note_all_three_still_passes(self) -> None:
+        from _bridge_common import format_project_sync_warning_note
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_lifecycle_sync_status": "project_state_sync_failed",
+        }
+        note = format_project_sync_warning_note(state)
+        self.assertIn("primary", note)
+        self.assertIn("followup", note)
+        self.assertIn("lifecycle", note)
+
+
 

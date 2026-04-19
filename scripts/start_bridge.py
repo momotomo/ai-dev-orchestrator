@@ -10,6 +10,7 @@ from _bridge_common import (
     clear_error_fields,
     clear_pending_request_fields,
     format_lifecycle_sync_state_note,
+    format_project_sync_warning_note,
     has_pending_issue_centric_codex_dispatch,
     is_initial_bridge_state,
     load_state,
@@ -182,6 +183,7 @@ def print_doctor(args: argparse.Namespace) -> None:
     print(f"  - bridge_error: {'あり' if bool(state.get('error')) else 'なし'}", flush=True)
     print(f"  - state_backups: {backup_count} (削除不要)", flush=True)
     print(f"  - lifecycle_sync_state: {format_lifecycle_sync_state_note(state)}", flush=True)
+    print(f"  - project_sync_warning: {format_project_sync_warning_note(state)}", flush=True)
     print(f"- clear_error: {clear_error_status}", flush=True)
     print("- clear-error は error だけを解除して resume に戻す操作です（state 全体の reset ではありません）。", flush=True)
     print("- reset が必要な場合は --reset を使ってください（state.json を完全初期化します）。", flush=True)

@@ -248,7 +248,8 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
         return format_next_action_note(state, next_action="request_prompt_from_report", route_choice=resolve_issue_centric_route_choice(state))
     if action == "completed":
         _lc = bridge_lifecycle_sync_suffix(state)
-        return f"追加の操作は不要です。{_lc}"
+        _pw = bridge_project_sync_warning_suffix(state)
+        return f"追加の操作は不要です。{_lc}{_pw}"
     return "summary と doctor を見て次の 1 手を判断してください。"
 
 
