@@ -4667,3 +4667,425 @@ class ProjectSyncAlertSignalPayloadTests(unittest.TestCase):
         self.assertIn("warning", note)
 
 
+# ---------------------------------------------------------------------------
+# Phase 59 — project_state_sync_failed generic webhook delivery tests
+# ---------------------------------------------------------------------------
+
+
+class ProjectSyncAlertWebhookDeliveryTests(unittest.TestCase):
+    """Phase 59 — project_state_sync_failed webhook delivery.
+
+    Verifies:
+    - deliver_project_sync_alert_if_pending returns "none" when no pending alert
+    - deliver_project_sync_alert_if_pending returns "not_requested_no_webhook" when URL blank
+    - deliver_project_sync_alert_if_pending returns "skipped_already_delivered" on same hash
+    - HTTP 2xx → "delivered"; state persisted
+    - HTTP non-2xx → "delivery_failed"; not a hard error
+    - Network error → "delivery_failed"; not a hard error
+    - Missing payload file → "invalid_payload"
+    - Invalid JSON payload → "invalid_payload"
+    - format_project_sync_alert_delivery_status returns expected strings
+    - DEFAULT_STATE has all 5 delivery keys
+    - DEFAULT_PROJECT_CONFIG has project_sync_alert_webhook_url
+    - doctor output includes project_sync_alert_delivery line
+    - Phase 58 regression: record_project_sync_alert_if_new still works
+    """
+
+    def setUp(self) -> None:
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+    def _make_pending_state(
+        self,
+        alert_file: str = "bridge/project_sync_alert.json",
+        alert_hash: str = "abc123",
+        delivered_hash: str = "",
+    ) -> dict:
+        return {
+            "last_project_sync_alert_status": "pending",
+            "last_project_sync_alert_file": alert_file,
+            "last_project_sync_alert_hash": alert_hash,
+            "last_project_sync_alert_delivery_hash": delivered_hash,
+            "last_project_sync_alert_delivery_status": "",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_url": "",
+            "last_project_sync_alert_delivery_attempted_at": "",
+        }
+
+    def _make_config(self, webhook_url: str = "") -> dict:
+        return {"project_sync_alert_webhook_url": webhook_url}
+
+    # ------------------------------------------------------------------
+    # Return value contract: no pending alert
+    # ------------------------------------------------------------------
+
+    def test_returns_none_when_no_pending_alert(self) -> None:
+        import _bridge_common as bc
+        state = {"last_project_sync_alert_status": ""}
+        result = bc.deliver_project_sync_alert_if_pending(state)
+        self.assertEqual(result, "none")
+
+    def test_returns_none_when_alert_status_is_not_pending(self) -> None:
+        import _bridge_common as bc
+        state = {"last_project_sync_alert_status": "recorded"}
+        result = bc.deliver_project_sync_alert_if_pending(state)
+        self.assertEqual(result, "none")
+
+    # ------------------------------------------------------------------
+    # Return value: no webhook configured
+    # ------------------------------------------------------------------
+
+    def test_returns_not_requested_when_webhook_url_blank(self) -> None:
+        import _bridge_common as bc
+        state = self._make_pending_state()
+        config = self._make_config(webhook_url="")
+        result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "not_requested_no_webhook")
+
+    def test_returns_not_requested_when_no_config(self) -> None:
+        import _bridge_common as bc
+        state = self._make_pending_state()
+        result = bc.deliver_project_sync_alert_if_pending(state, config=None)
+        self.assertEqual(result, "not_requested_no_webhook")
+
+    # ------------------------------------------------------------------
+    # Deduplication: same hash already delivered
+    # ------------------------------------------------------------------
+
+    def test_returns_skipped_when_same_hash_already_delivered(self) -> None:
+        import _bridge_common as bc
+        state = self._make_pending_state(alert_hash="abc123", delivered_hash="abc123")
+        config = self._make_config(webhook_url="https://example.invalid/hook")
+        result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "skipped_already_delivered")
+
+    def test_does_not_skip_when_hashes_differ(self) -> None:
+        """When alert hash differs from last delivered hash, delivery should be attempted."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "newHash"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(
+                alert_file=tmp_path,
+                alert_hash="newHash",
+                delivered_hash="oldHash",
+            )
+            config = self._make_config(webhook_url="https://127.0.0.1:0/will-fail")
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+            # delivery attempt was made (either delivered or delivery_failed)
+            self.assertIn(result, ("delivered", "delivery_failed"))
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Return value: invalid payload
+    # ------------------------------------------------------------------
+
+    def test_returns_invalid_payload_when_file_missing(self) -> None:
+        import _bridge_common as bc
+        state = self._make_pending_state(alert_file="bridge/this_file_does_not_exist.json")
+        config = self._make_config(webhook_url="https://example.invalid/hook")
+        result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "invalid_payload")
+
+    def test_returns_invalid_payload_when_json_broken(self) -> None:
+        import _bridge_common as bc
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            fp.write("not valid json !!!")
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(alert_file=tmp_path)
+            config = self._make_config(webhook_url="https://example.invalid/hook")
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+            self.assertEqual(result, "invalid_payload")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Return value: delivery_failed on network error
+    # ------------------------------------------------------------------
+
+    def test_returns_delivery_failed_on_unreachable_url(self) -> None:
+        """Delivery to an unreachable URL must return delivery_failed and must not raise."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "h1"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(
+                alert_file=tmp_path,
+                alert_hash="h1",
+                delivered_hash="",
+            )
+            config = self._make_config(webhook_url="http://127.0.0.1:1/")
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+            self.assertEqual(result, "delivery_failed")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_delivery_failed_does_not_raise(self) -> None:
+        """Delivery failure must be absorbed — no exception must propagate."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "test"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(alert_file=tmp_path, alert_hash="x1")
+            config = self._make_config(webhook_url="http://127.0.0.1:1/")
+            # Must not raise under any circumstances
+            try:
+                bc.deliver_project_sync_alert_if_pending(state, config)
+            except Exception as exc:
+                self.fail(f"deliver_project_sync_alert_if_pending raised: {exc}")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------
+    # Return value: delivered (mock HTTP server)
+    # ------------------------------------------------------------------
+
+    def test_returns_delivered_on_http_200(self) -> None:
+        """Delivery to an HTTP 200 endpoint returns 'delivered'."""
+        import _bridge_common as bc
+        import json
+        import tempfile
+        import pathlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        received_body: list[bytes] = []
+
+        class _MockHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                received_body.append(self.rfile.read(length))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, fmt, *args) -> None:  # type: ignore[override]
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _MockHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "hdeliver"}, fp)
+            tmp_path = fp.name
+        try:
+            state = self._make_pending_state(
+                alert_file=tmp_path,
+                alert_hash="hdeliver",
+                delivered_hash="",
+            )
+            config = self._make_config(webhook_url=f"http://127.0.0.1:{port}/hook")
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+            thread.join(timeout=3.0)
+            server.server_close()
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+        self.assertEqual(result, "delivered")
+        self.assertEqual(len(received_body), 1)
+        body = json.loads(received_body[0])
+        self.assertEqual(body["type"], "project_sync_alert")
+
+    # ------------------------------------------------------------------
+    # format_project_sync_alert_delivery_status
+    # ------------------------------------------------------------------
+
+    def test_format_delivery_status_none_when_no_status(self) -> None:
+        import _bridge_common as bc
+        state: dict = {}
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertEqual(result, "none")
+
+    def test_format_delivery_status_delivered_includes_short_hash(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "delivered",
+            "last_project_sync_alert_delivery_hash": "abc123xyz789",
+            "last_project_sync_alert_delivery_error": "",
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("delivered", result)
+        self.assertIn("abc123xyz7", result)  # first 10+ chars present
+
+    def test_format_delivery_status_delivery_failed_includes_error(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "delivery_failed",
+            "last_project_sync_alert_delivery_hash": "",
+            "last_project_sync_alert_delivery_error": "URLError: <urlopen error>",
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("delivery_failed", result)
+        self.assertIn("URLError", result)
+
+    def test_format_delivery_status_not_requested(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "not_requested_no_webhook",
+            "last_project_sync_alert_delivery_hash": "",
+            "last_project_sync_alert_delivery_error": "",
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertEqual(result, "not_requested_no_webhook")
+
+    def test_format_delivery_status_skipped(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "skipped_already_delivered",
+            "last_project_sync_alert_delivery_hash": "abc123xyz789",
+            "last_project_sync_alert_delivery_error": "",
+        }
+        result = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("skipped_already_delivered", result)
+
+    # ------------------------------------------------------------------
+    # DEFAULT_STATE delivery keys
+    # ------------------------------------------------------------------
+
+    def test_default_state_has_delivery_keys(self) -> None:
+        import _bridge_common as bc
+        for key in (
+            "last_project_sync_alert_delivery_status",
+            "last_project_sync_alert_delivery_hash",
+            "last_project_sync_alert_delivery_attempted_at",
+            "last_project_sync_alert_delivery_error",
+            "last_project_sync_alert_delivery_url",
+        ):
+            self.assertIn(key, bc.DEFAULT_STATE, f"DEFAULT_STATE missing key: {key}")
+
+    def test_default_project_config_has_webhook_url_key(self) -> None:
+        import _bridge_common as bc
+        self.assertIn(
+            "project_sync_alert_webhook_url",
+            bc.DEFAULT_PROJECT_CONFIG,
+        )
+        self.assertEqual(bc.DEFAULT_PROJECT_CONFIG["project_sync_alert_webhook_url"], "")
+
+    # ------------------------------------------------------------------
+    # doctor output includes delivery line
+    # ------------------------------------------------------------------
+
+    def test_doctor_output_includes_delivery_line(self) -> None:
+        """start_bridge.py source must include project_sync_alert_delivery print line."""
+        import os
+        script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "start_bridge.py")
+        with open(script_path, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn("project_sync_alert_delivery", source)
+
+    # ------------------------------------------------------------------
+    # Phase 58 regression: record_project_sync_alert_if_new still works
+    # ------------------------------------------------------------------
+
+    def test_phase58_record_alert_returns_none_without_trigger(self) -> None:
+        import _bridge_common as bc
+        state = {
+            "last_issue_centric_primary_project_sync_status": "synced",
+        }
+        with unittest.mock.patch.object(bc, "update_state"):
+            result = bc.record_project_sync_alert_if_new(state)
+        self.assertEqual(result, "none")
+
+    # ------------------------------------------------------------------
+    # _deliver_project_sync_alert_to_webhook unit tests (transport level)
+    # ------------------------------------------------------------------
+
+    def test_transport_returns_delivered_on_2xx(self) -> None:
+        """_deliver_project_sync_alert_to_webhook returns ('delivered', '') on 200."""
+        import _bridge_common as bc
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, fmt, *args) -> None:  # type: ignore[override]
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        status, err = bc._deliver_project_sync_alert_to_webhook(
+            {"key": "val"}, f"http://127.0.0.1:{port}/", timeout=5
+        )
+        thread.join(timeout=3.0)
+        server.server_close()
+        self.assertEqual(status, "delivered")
+        self.assertEqual(err, "")
+
+    def test_transport_returns_delivery_failed_on_non_2xx(self) -> None:
+        """_deliver_project_sync_alert_to_webhook returns ('delivery_failed', ...) on 500."""
+        import _bridge_common as bc
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(500)
+                self.end_headers()
+
+            def log_message(self, fmt, *args) -> None:  # type: ignore[override]
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        status, err = bc._deliver_project_sync_alert_to_webhook(
+            {"key": "val"}, f"http://127.0.0.1:{port}/", timeout=5
+        )
+        thread.join(timeout=3.0)
+        server.server_close()
+        self.assertEqual(status, "delivery_failed")
+        self.assertIn("500", err)
+
+    def test_transport_returns_delivery_failed_on_connection_refused(self) -> None:
+        """_deliver_project_sync_alert_to_webhook absorbs connection errors."""
+        import _bridge_common as bc
+        status, err = bc._deliver_project_sync_alert_to_webhook(
+            {"key": "val"}, "http://127.0.0.1:1/", timeout=3
+        )
+        self.assertEqual(status, "delivery_failed")
+        self.assertTrue(len(err) > 0)
+
+    # ------------------------------------------------------------------
+    # double-delivery prevention via state update
+    # ------------------------------------------------------------------
+
+    def test_double_delivery_prevented_after_delivered_state(self) -> None:
+        """After a successful delivery, calling again with same state returns skipped."""
+        import _bridge_common as bc
+        state = self._make_pending_state(
+            alert_hash="dupHash",
+            delivered_hash="dupHash",  # same → already delivered
+        )
+        config = self._make_config(webhook_url="https://example.invalid/hook")
+        result = bc.deliver_project_sync_alert_if_pending(state, config)
+        self.assertEqual(result, "skipped_already_delivered")
+

@@ -493,8 +493,66 @@ alert を一意に検出・記録・再送可能にする signal / payload / log
 - Phase 57 回帰なし ✓
 
 **未対応**:
-- `project_state_sync_failed` の実際の外部通知 delivery (Slack / Discord / email 等)
+- `project_state_sync_failed` の実際の外部通知 delivery (Slack / Discord / email 等) → Phase 59 で generic webhook delivery 実装済み
 - multi-retry (2 retry 以上) の設計
+
+### D8. project_state_sync_failed — generic webhook delivery (Phase 59)
+
+Phase 58 で記録した alert payload を generic webhook (JSON POST) で送信する 1-transport delivery を実装した。
+
+**追加した helpers (`_bridge_common.py`)**:
+
+| helper / 定数 | 役割 |
+|---|---|
+| `_WEBHOOK_SUCCESS_CODES` | HTTP 2xx range (frozenset) |
+| `_WEBHOOK_TIMEOUT_SECONDS` | HTTP タイムアウト (10 秒) |
+| `_deliver_project_sync_alert_to_webhook(payload, url)` | JSON POST 低レベル transport。tuple を返す |
+| `deliver_project_sync_alert_if_pending(state, config)` | 高レベル delivery gate (dedupe / guard 込み) |
+| `format_project_sync_alert_delivery_status(state)` | doctor 表示用 "delivered hash=..." / "delivery_failed error=..." / "none" |
+
+**DEFAULT_STATE 追加キー**:
+- `last_project_sync_alert_delivery_status` — "delivered" / "delivery_failed" / "not_requested_no_webhook" / "skipped_already_delivered" / "invalid_payload" / ""
+- `last_project_sync_alert_delivery_hash` — 成功時に保存する alert hash (dedupe キー)
+- `last_project_sync_alert_delivery_attempted_at` — 最後の試行 UTC タイムスタンプ
+- `last_project_sync_alert_delivery_error` — 失敗時エラー文字列 (最大 200 文字)
+- `last_project_sync_alert_delivery_url` — 試行した webhook URL
+
+**DEFAULT_PROJECT_CONFIG 追加キー**:
+- `project_sync_alert_webhook_url` — POST 先 URL (空文字列 = delivery 無効)
+
+**return value vocabulary**:
+- `"none"` — pending alert なし
+- `"not_requested_no_webhook"` — webhook URL 未設定
+- `"skipped_already_delivered"` — 同一 hash を既に deliver 済み
+- `"delivered"` — HTTP 2xx 成功
+- `"delivery_failed"` — HTTP エラー / ネットワークエラー (hard error にならない)
+- `"invalid_payload"` — payload ファイル未存在 / JSON 無効
+
+**design constraints**:
+- delivery failure は絶対に hard runtime error にしない (`mark_error()` を呼ばない)
+- 1 run 1 回まで (同じ alert hash → skipped_already_delivered)
+- HTTP タイムアウト 10 秒
+- 外部 transport: `urllib.request` + `urllib.error` のみ (標準ライブラリ)
+
+**operator-facing surface 追加**:
+- `start_bridge.print_doctor()` に `project_sync_alert_delivery:` 行追加
+- `run_until_stop.finish()` で `deliver_project_sync_alert_if_pending(final_state, config)` を呼び出し (alert 記録後に即座に delivery 試行)
+
+**coverage 確認 (ProjectSyncAlertWebhookDeliveryTests)**:
+- no pending alert → "none" ✓
+- webhook URL 未設定 / config=None → "not_requested_no_webhook" ✓
+- same hash already delivered → "skipped_already_delivered" ✓
+- file missing → "invalid_payload" ✓
+- JSON broken → "invalid_payload" ✓
+- unreachable URL → "delivery_failed" (non-raising) ✓
+- mock HTTP 200 → "delivered"; body correct ✓
+- mock HTTP 500 → "delivery_failed" ✓
+- format_project_sync_alert_delivery_status delivered / delivery_failed / not_requested / skipped ✓
+- DEFAULT_STATE has 5 delivery keys ✓
+- DEFAULT_PROJECT_CONFIG has webhook_url key ✓
+- doctor output includes delivery line ✓
+- Phase 58 regression: record_project_sync_alert_if_new still works ✓
+- double-delivery prevention ✓
 
 ### E. Operator-facing surface
 
@@ -556,7 +614,7 @@ alert を一意に検出・記録・再送可能にする signal / payload / log
   - Phase 56: `project_state_sync_failed` operator-facing warning surface (`_detect_project_sync_warning` / `_resolve_project_sync_warning_family` / `_build_project_sync_warning_note` / `bridge_project_sync_warning_suffix` / `format_project_sync_warning_note` helper 追加、`format_operator_stop_note` / `suggested_next_note` に warning 付加、stop summary に `project_sync_warning` 行追加、`ProjectSyncWarningOperatorSurfaceTests` 48 tests 追加)
   - Phase 57: project_state_sync_failed warning を残り operator-facing surface へ伝播 (`bridge_orchestrator` completed path に `format_operator_stop_note` 使用、`start_bridge.print_doctor` に `project_sync_warning:` 行追加、`entry_guidance` completed path に `bridge_project_sync_warning_suffix` 追加、`ProjectSyncWarningSurfaceAlignmentTests` 22 tests 追加)
   - Phase 58: project_state_sync_failed alert signal / payload / dedupe (`_ProjectSyncAlertCandidate` dataclass / `_detect_project_sync_alert_candidate` / `_build_project_sync_alert_candidate` / `_build_project_sync_alert_payload` / `record_project_sync_alert_if_new` / `format_project_sync_alert_status` helper 追加、DEFAULT_STATE に `last_project_sync_alert_status` / `_hash` / `_file` 追加、`start_bridge.print_doctor` に `project_sync_alert:` 行追加、`run_until_stop.finish` で alert 自動記録、`ProjectSyncAlertSignalPayloadTests` 35 tests 追加)
-  - 残: `project_state_sync_failed` の実際の外部通知 delivery (Slack / Discord / email 等)
+  - Phase 59: project_state_sync_failed generic webhook delivery (`_deliver_project_sync_alert_to_webhook` / `deliver_project_sync_alert_if_pending` / `format_project_sync_alert_delivery_status` helper 追加、DEFAULT_STATE に 5 delivery keys 追加、DEFAULT_PROJECT_CONFIG に `project_sync_alert_webhook_url` 追加、`start_bridge.print_doctor` に `project_sync_alert_delivery:` 行追加、`run_until_stop.finish` で delivery 試行、`bridge/project_config.example.json` に webhook URL key 追加、`ProjectSyncAlertWebhookDeliveryTests` tests 追加)
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上
