@@ -192,9 +192,9 @@ def execute_issue_create_draft(
             resolver = project_state_resolver or resolve_github_project_state
             resolved_project = resolver(
                 configured_project_url,
-                project_state_field_name,
-                project_default_issue_state,
-                token,
+                state_field_name=project_state_field_name,
+                state_option_name=project_default_issue_state,
+                token=token,
             )
 
         creator = issue_creator or create_github_issue
