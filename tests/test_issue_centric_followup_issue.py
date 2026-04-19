@@ -929,7 +929,7 @@ class FollowupIssueProjectSyncSignalTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "completed")
-        self.assertEqual(result.project_sync_status, "issue_only_fallback")
+        self.assertEqual(result.project_sync_status, "not_requested_no_project")
         self.assertIn("[project_sync: signal=skipped_no_project]", result.safe_stop_reason)
 
     def test_followup_safe_stop_reason_contains_sync_failed_when_project_item_fails(self) -> None:

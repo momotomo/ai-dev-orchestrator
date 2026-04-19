@@ -110,32 +110,21 @@ def execute_current_issue_project_state_sync(
             project_state_field_name = resolved_project.state_field_name
             project_state_value_name = resolved_project.state_option_name
 
-            cached_project_url = str(prior_state.get("last_issue_centric_current_project_url", "")).strip()
-            cached_project_item_id = str(prior_state.get("last_issue_centric_current_project_item_id", "")).strip()
-            if cached_project_url == project_url and cached_project_item_id:
-                resolved_project_item = ResolvedGitHubProjectItem(
-                    item_id=cached_project_item_id,
-                    project_id=resolved_project.project_id,
-                    issue_node_id=issue_snapshot.node_id,
-                    issue_number=issue_snapshot.number,
-                    repository=issue_snapshot.repository,
-                )
-            else:
-                item_resolver = project_item_resolver or resolve_github_project_item_for_issue
-                resolved_project_item = item_resolver(
-                    resolved_project.project_id,
-                    issue_snapshot.node_id,
-                    token,
-                )
+            resolved_project_item = _ensure_project_item_for_issue(
+                resolved_project=resolved_project,
+                issue_snapshot=issue_snapshot,
+                prior_state=prior_state,
+                project_url=project_url,
+                project_item_resolver=project_item_resolver,
+                token=token,
+            )
             project_item_id = resolved_project_item.item_id
 
-            state_setter = project_state_setter or set_github_project_item_state
-            state_setter(
-                resolved_project.project_id,
-                resolved_project_item.item_id,
-                resolved_project.state_field_id,
-                resolved_project.state_option_id,
-                token,
+            _sync_project_state_field(
+                resolved_project=resolved_project,
+                project_item_id=project_item_id,
+                project_state_setter=project_state_setter,
+                token=token,
             )
             sync_status = "project_state_synced"
             safe_stop_reason = (
@@ -144,11 +133,11 @@ def execute_current_issue_project_state_sync(
             )
             execution_status = "completed"
     except (IssueCentricCurrentIssueProjectStateError, IssueCentricGitHubError) as exc:
-        sync_status = "blocked_project_state_sync"
+        sync_status = "project_state_sync_failed"
         safe_stop_reason = f"current issue lifecycle Project State sync stopped before completion. {exc}"
         execution_status = "blocked"
     except Exception as exc:
-        sync_status = "failed_project_state_sync"
+        sync_status = "project_state_sync_failed"
         safe_stop_reason = f"current issue lifecycle Project State sync stopped after a GitHub mutation failure. {exc}"
         execution_status = "blocked"
 
@@ -250,6 +239,62 @@ def resolve_current_issue_for_project_state_sync(
                 "current issue lifecycle Project sync target does not match the current issue tracked by the bridge state."
             )
     return chosen
+
+
+def _ensure_project_item_for_issue(
+    *,
+    resolved_project: ResolvedGitHubProjectState,
+    issue_snapshot: GitHubIssueSnapshot,
+    prior_state: Mapping[str, Any],
+    project_url: str,
+    project_item_resolver: Callable[[str, str, str], ResolvedGitHubProjectItem] | None,
+    token: str,
+) -> ResolvedGitHubProjectItem:
+    """Return a project item for *issue_snapshot*, using the cached item_id when available.
+
+    Cache hit: if the state already holds a ``last_issue_centric_current_project_item_id``
+    for the same project URL, the cached id is promoted to a ``ResolvedGitHubProjectItem``
+    without hitting the GitHub API.
+
+    Cache miss: the resolver is called (default: ``resolve_github_project_item_for_issue``).
+    Raises ``IssueCentricGitHubError`` / ``IssueCentricCurrentIssueProjectStateError`` on
+    failure — the caller is responsible for mapping those to the appropriate sync_status.
+    """
+    cached_project_url = str(prior_state.get("last_issue_centric_current_project_url", "")).strip()
+    cached_project_item_id = str(prior_state.get("last_issue_centric_current_project_item_id", "")).strip()
+    if cached_project_url == project_url and cached_project_item_id:
+        return ResolvedGitHubProjectItem(
+            item_id=cached_project_item_id,
+            project_id=resolved_project.project_id,
+            issue_node_id=issue_snapshot.node_id,
+            issue_number=issue_snapshot.number,
+            repository=issue_snapshot.repository,
+        )
+    resolver = project_item_resolver or resolve_github_project_item_for_issue
+    return resolver(resolved_project.project_id, issue_snapshot.node_id, token)
+
+
+def _sync_project_state_field(
+    *,
+    resolved_project: ResolvedGitHubProjectState,
+    project_item_id: str,
+    project_state_setter: Callable[[str, str, str, str, str], None] | None,
+    token: str,
+) -> None:
+    """Update the project state field for *project_item_id*.
+
+    Calls ``set_github_project_item_state`` (or the injected *project_state_setter*).
+    Raises ``IssueCentricGitHubError`` on failure — the caller maps that to
+    ``project_state_sync_failed``.
+    """
+    setter = project_state_setter or set_github_project_item_state
+    setter(
+        resolved_project.project_id,
+        project_item_id,
+        resolved_project.state_field_id,
+        resolved_project.state_option_id,
+        token,
+    )
 
 
 def _resolve_lifecycle_state_value(project_config: Mapping[str, Any], lifecycle_stage: str) -> str:

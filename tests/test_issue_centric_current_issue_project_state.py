@@ -176,7 +176,7 @@ class CurrentIssueProjectStateSyncTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "blocked")
-            self.assertEqual(result.sync_status, "blocked_project_state_sync")
+            self.assertEqual(result.sync_status, "project_state_sync_failed")
             self.assertIn("github_project_review_state must not be empty", result.safe_stop_reason)
 
     def test_missing_project_item_is_recorded_as_blocked(self) -> None:
@@ -228,7 +228,7 @@ class CurrentIssueProjectStateSyncTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "blocked")
-            self.assertEqual(result.sync_status, "blocked_project_state_sync")
+            self.assertEqual(result.sync_status, "project_state_sync_failed")
             self.assertIn("project item was not found", result.safe_stop_reason)
 
     def test_state_mutation_failure_is_recorded_without_hiding_main_stage(self) -> None:
@@ -287,7 +287,7 @@ class CurrentIssueProjectStateSyncTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, "blocked")
-            self.assertEqual(result.sync_status, "blocked_project_state_sync")
+            self.assertEqual(result.sync_status, "project_state_sync_failed")
             self.assertIn("state mutation failed", result.safe_stop_reason)
             execution = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
             self.assertEqual(execution["lifecycle_stage"], "done")
