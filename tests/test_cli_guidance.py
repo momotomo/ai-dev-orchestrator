@@ -5509,3 +5509,355 @@ class ProjectSyncAlertBoundedRetryTests(unittest.TestCase):
         self.assertEqual(result, "delivered")
         self.assertEqual(saved_state.get("last_project_sync_alert_delivery_attempt_count"), 1)
 
+
+# ---------------------------------------------------------------------------
+# Phase 61: webhook config validation / doctor guidance
+# ---------------------------------------------------------------------------
+
+
+class ProjectSyncAlertWebhookConfigValidationTests(unittest.TestCase):
+    """Tests for validate_project_sync_alert_webhook_url and
+    format_project_sync_alert_webhook_config_note (Phase 61).
+    """
+
+    # ------------------------------------------------------------------
+    # validate_project_sync_alert_webhook_url
+    # ------------------------------------------------------------------
+
+    def test_empty_string_is_valid_delivery_disabled(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_whitespace_only_is_valid_delivery_disabled(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("   ")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_valid_https_url(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("https://example.com/hook")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_valid_http_url(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("http://192.168.1.1/hook")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_https_scheme_only_no_host_is_invalid(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("https://")
+        self.assertFalse(ok)
+        self.assertIn("no host", reason)
+
+    def test_http_scheme_only_no_host_is_invalid(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("http://")
+        self.assertFalse(ok)
+        self.assertIn("no host", reason)
+
+    def test_ftp_scheme_is_invalid(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("ftp://example.com/hook")
+        self.assertFalse(ok)
+        self.assertIn("ftp", reason)
+
+    def test_no_scheme_is_invalid(self) -> None:
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("example.com/hook")
+        self.assertFalse(ok)
+        self.assertTrue(len(reason) > 0)
+
+    def test_leading_trailing_whitespace_around_valid_url(self) -> None:
+        """URL with surrounding whitespace should be treated as valid after trim."""
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("  https://example.com/hook  ")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_leading_whitespace_around_invalid_scheme(self) -> None:
+        """URL with ftp:// scheme is invalid even with surrounding whitespace."""
+        import _bridge_common as bc
+        ok, reason = bc.validate_project_sync_alert_webhook_url("  ftp://bad.example.com  ")
+        self.assertFalse(ok)
+
+    def test_does_not_raise(self) -> None:
+        """validate_project_sync_alert_webhook_url must never raise."""
+        import _bridge_common as bc
+        for url in ["", "garbage", "://broken", "https://", "http://ok.com"]:
+            try:
+                bc.validate_project_sync_alert_webhook_url(url)
+            except Exception as exc:  # pragma: no cover
+                self.fail(f"validate raised for {url!r}: {exc}")
+
+    # ------------------------------------------------------------------
+    # format_project_sync_alert_webhook_config_note
+    # ------------------------------------------------------------------
+
+    def test_format_note_empty_url(self) -> None:
+        import _bridge_common as bc
+        note = bc.format_project_sync_alert_webhook_config_note(
+            {"project_sync_alert_webhook_url": ""}
+        )
+        self.assertIn("disabled", note)
+
+    def test_format_note_missing_key(self) -> None:
+        import _bridge_common as bc
+        note = bc.format_project_sync_alert_webhook_config_note({})
+        self.assertIn("disabled", note)
+
+    def test_format_note_valid_https_url(self) -> None:
+        import _bridge_common as bc
+        note = bc.format_project_sync_alert_webhook_config_note(
+            {"project_sync_alert_webhook_url": "https://hooks.example.com/abc"}
+        )
+        self.assertTrue(note.startswith("ok url="))
+        self.assertIn("https://hooks.example.com/abc", note)
+
+    def test_format_note_invalid_scheme(self) -> None:
+        import _bridge_common as bc
+        note = bc.format_project_sync_alert_webhook_config_note(
+            {"project_sync_alert_webhook_url": "ftp://bad.example.com"}
+        )
+        self.assertTrue(note.startswith("config_warning:"))
+
+    def test_format_note_scheme_only_no_host(self) -> None:
+        import _bridge_common as bc
+        note = bc.format_project_sync_alert_webhook_config_note(
+            {"project_sync_alert_webhook_url": "https://"}
+        )
+        self.assertTrue(note.startswith("config_warning:"))
+
+    def test_format_note_long_url_truncated(self) -> None:
+        import _bridge_common as bc
+        long_url = "https://" + "a" * 80 + ".example.com/hook"
+        note = bc.format_project_sync_alert_webhook_config_note(
+            {"project_sync_alert_webhook_url": long_url}
+        )
+        self.assertTrue(note.startswith("ok url="))
+        # Display must be truncated (original is > 60 chars)
+        self.assertNotIn(long_url, note)
+
+    # ------------------------------------------------------------------
+    # doctor output includes project_sync_alert_webhook_config
+    # ------------------------------------------------------------------
+
+    def test_doctor_output_includes_webhook_config_line(self) -> None:
+        """start_bridge doctor prints project_sync_alert_webhook_config line."""
+        import io
+        import unittest.mock
+        from contextlib import redirect_stdout
+
+        cfg = {"project_sync_alert_webhook_url": "https://hook.example.com/test"}
+        with (
+            unittest.mock.patch("run_until_stop.load_state", return_value={}),
+            unittest.mock.patch("run_until_stop.load_project_config", return_value=cfg),
+            unittest.mock.patch("run_until_stop.start_bridge_mode", return_value="resume"),
+            unittest.mock.patch(
+                "run_until_stop.start_bridge_resume_guidance",
+                return_value=("ok", "guidance", "note"),
+            ),
+            unittest.mock.patch(
+                "run_until_stop.recommended_operator_step",
+                return_value=("step", "cmd"),
+            ),
+            unittest.mock.patch("run_until_stop.codex_report_is_ready", return_value=False),
+            unittest.mock.patch("run_until_stop.runtime_report_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.runtime_prompt_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.runtime_stop_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.bridge_runtime_root", return_value=Path("/tmp")),
+            unittest.mock.patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False),
+            unittest.mock.patch("run_until_stop.should_prioritize_unarchived_report", return_value=False),
+        ):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                args = make_args()
+                start_bridge.print_doctor(args)
+            output = buf.getvalue()
+        self.assertIn("project_sync_alert_webhook_config:", output)
+        self.assertIn("ok url=https://hook.example.com/test", output)
+
+    def test_doctor_shows_disabled_when_url_empty(self) -> None:
+        import io
+        import unittest.mock
+        from contextlib import redirect_stdout
+
+        cfg = {"project_sync_alert_webhook_url": ""}
+        with (
+            unittest.mock.patch("run_until_stop.load_state", return_value={}),
+            unittest.mock.patch("run_until_stop.load_project_config", return_value=cfg),
+            unittest.mock.patch("run_until_stop.start_bridge_mode", return_value="resume"),
+            unittest.mock.patch(
+                "run_until_stop.start_bridge_resume_guidance",
+                return_value=("ok", "guidance", "note"),
+            ),
+            unittest.mock.patch(
+                "run_until_stop.recommended_operator_step",
+                return_value=("step", "cmd"),
+            ),
+            unittest.mock.patch("run_until_stop.codex_report_is_ready", return_value=False),
+            unittest.mock.patch("run_until_stop.runtime_report_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.runtime_prompt_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.runtime_stop_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.bridge_runtime_root", return_value=Path("/tmp")),
+            unittest.mock.patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False),
+            unittest.mock.patch("run_until_stop.should_prioritize_unarchived_report", return_value=False),
+        ):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                args = make_args()
+                start_bridge.print_doctor(args)
+            output = buf.getvalue()
+        self.assertIn("project_sync_alert_webhook_config:", output)
+        self.assertIn("disabled", output)
+
+    def test_doctor_shows_config_warning_for_invalid_scheme(self) -> None:
+        import io
+        import unittest.mock
+        from contextlib import redirect_stdout
+
+        cfg = {"project_sync_alert_webhook_url": "ftp://bad.example.com"}
+        with (
+            unittest.mock.patch("run_until_stop.load_state", return_value={}),
+            unittest.mock.patch("run_until_stop.load_project_config", return_value=cfg),
+            unittest.mock.patch("run_until_stop.start_bridge_mode", return_value="resume"),
+            unittest.mock.patch(
+                "run_until_stop.start_bridge_resume_guidance",
+                return_value=("ok", "guidance", "note"),
+            ),
+            unittest.mock.patch(
+                "run_until_stop.recommended_operator_step",
+                return_value=("step", "cmd"),
+            ),
+            unittest.mock.patch("run_until_stop.codex_report_is_ready", return_value=False),
+            unittest.mock.patch("run_until_stop.runtime_report_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.runtime_prompt_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.runtime_stop_path", return_value=Path("/tmp/nope")),
+            unittest.mock.patch("run_until_stop.bridge_runtime_root", return_value=Path("/tmp")),
+            unittest.mock.patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False),
+            unittest.mock.patch("run_until_stop.should_prioritize_unarchived_report", return_value=False),
+        ):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                args = make_args()
+                start_bridge.print_doctor(args)
+            output = buf.getvalue()
+        self.assertIn("config_warning", output)
+
+    # ------------------------------------------------------------------
+    # Boundary: delivery_failed ≠ config_invalid  /  skipped ≠ warning
+    # ------------------------------------------------------------------
+
+    def test_delivery_failed_state_does_not_become_config_invalid(self) -> None:
+        """delivery_failed state key is independent of config validation note."""
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "delivery_failed",
+            "last_project_sync_alert_delivery_hash": "abc",
+            "last_project_sync_alert_delivery_error": "URLError: timed out",
+            "last_project_sync_alert_delivery_attempted_at": "2026-04-19T00:00:00+00:00",
+            "last_project_sync_alert_delivery_attempt_count": 3,
+        }
+        delivery_note = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("delivery_failed", delivery_note)
+        # config note is independent and should not be affected by state
+        config_note = bc.format_project_sync_alert_webhook_config_note(
+            {"project_sync_alert_webhook_url": "https://ok.example.com"}
+        )
+        self.assertTrue(config_note.startswith("ok url="))
+
+    def test_skipped_already_delivered_is_not_warning(self) -> None:
+        """skipped_already_delivered is a normal dedupe result, not a warning."""
+        import _bridge_common as bc
+        state = {
+            "last_project_sync_alert_delivery_status": "skipped_already_delivered",
+            "last_project_sync_alert_delivery_hash": "abc",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_attempted_at": "",
+            "last_project_sync_alert_delivery_attempt_count": 0,
+        }
+        note = bc.format_project_sync_alert_delivery_status(state)
+        self.assertIn("skipped_already_delivered", note)
+        # must NOT contain "warning" or "error" to confirm boundary
+        self.assertNotIn("warning", note)
+        self.assertNotIn("error", note)
+
+    # ------------------------------------------------------------------
+    # Phase 59-60 regression: delivery / retry / dedupe still work
+    # ------------------------------------------------------------------
+
+    def test_deliver_pending_with_valid_url_calls_retry_helper(self) -> None:
+        """deliver_project_sync_alert_if_pending still calls retry helper (Phase 60 regression)."""
+        import _bridge_common as bc
+        import pathlib
+        import json
+        import tempfile
+        import unittest.mock
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "reg60"}, fp)
+            tmp_path = fp.name
+
+        state = {
+            "last_project_sync_alert_status": "pending",
+            "last_project_sync_alert_hash": "reg60",
+            "last_project_sync_alert_file": tmp_path,
+            "last_project_sync_alert_delivery_status": "",
+            "last_project_sync_alert_delivery_hash": "",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_attempted_at": "",
+            "last_project_sync_alert_delivery_url": "",
+            "last_project_sync_alert_delivery_attempt_count": 0,
+        }
+        config = {"project_sync_alert_webhook_url": "https://hook.example.com/reg"}
+
+        with (
+            unittest.mock.patch.object(
+                bc,
+                "_deliver_project_sync_alert_with_retry",
+                return_value=("delivered", "", 1),
+            ) as mock_retry,
+            unittest.mock.patch.object(bc, "update_state"),
+        ):
+            result = bc.deliver_project_sync_alert_if_pending(state, config)
+
+        pathlib.Path(tmp_path).unlink(missing_ok=True)
+        self.assertEqual(result, "delivered")
+        mock_retry.assert_called_once()
+
+    def test_dedupe_returns_skipped_already_delivered(self) -> None:
+        """dedupe: same hash → skipped_already_delivered (Phase 59 regression)."""
+        import _bridge_common as bc
+        import pathlib
+        import json
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as fp:
+            json.dump({"type": "project_sync_alert", "hash": "dup01"}, fp)
+            tmp_path = fp.name
+
+        state = {
+            "last_project_sync_alert_status": "pending",
+            "last_project_sync_alert_hash": "dup01",
+            "last_project_sync_alert_file": tmp_path,
+            "last_project_sync_alert_delivery_status": "delivered",
+            "last_project_sync_alert_delivery_hash": "dup01",
+            "last_project_sync_alert_delivery_error": "",
+            "last_project_sync_alert_delivery_attempted_at": "",
+            "last_project_sync_alert_delivery_url": "",
+            "last_project_sync_alert_delivery_attempt_count": 1,
+        }
+        config = {"project_sync_alert_webhook_url": "https://hook.example.com/reg"}
+
+        result = bc.deliver_project_sync_alert_if_pending(state, config)
+        pathlib.Path(tmp_path).unlink(missing_ok=True)
+        self.assertEqual(result, "skipped_already_delivered")
+

@@ -885,6 +885,60 @@ _WEBHOOK_MAX_ATTEMPTS = 3
 #: Element i is the wait before attempt i+2 (i.e., before the 2nd and 3rd attempts).
 _WEBHOOK_RETRY_DELAYS_SECONDS: tuple[int, ...] = (1, 3)
 
+#: Accepted URL schemes for webhook delivery.
+_WEBHOOK_VALID_SCHEMES = frozenset({"http", "https"})
+
+
+def validate_project_sync_alert_webhook_url(url: str) -> tuple[bool, str]:
+    """Statically validate a project_sync_alert_webhook_url value.
+
+    Returns:
+        (True, "")           — URL is acceptable for delivery attempts
+        (False, reason_str)  — URL is clearly invalid; reason describes the problem
+
+    Validation is intentionally narrow (static only, no network check):
+    - empty string → not an error (delivery simply disabled)
+    - leading/trailing whitespace → stripped before check
+    - must start with http:// or https://
+    - must be longer than the scheme prefix (not just "https://")
+
+    Never raises.
+    """
+    stripped = url.strip()
+    if not stripped:
+        return (True, "")  # empty = delivery disabled, not a config error
+    for scheme in _WEBHOOK_VALID_SCHEMES:
+        prefix = f"{scheme}://"
+        if stripped.lower().startswith(prefix):
+            remainder = stripped[len(prefix):]
+            if remainder:
+                return (True, "")
+            return (False, f"URL starts with '{prefix}' but has no host")
+    # scheme not recognised
+    scheme_part = stripped.split("://")[0] if "://" in stripped else stripped[:20]
+    return (False, f"unsupported scheme '{scheme_part}': must be http or https")
+
+
+def format_project_sync_alert_webhook_config_note(config: Mapping[str, Any]) -> str:
+    """Return a short config validation note for doctor display.
+
+    Returns:
+        "disabled (no URL set)"           — URL empty → delivery not requested
+        "ok url=https://..."              — URL valid
+        "config_warning: <reason>"        — URL present but invalid (static check)
+
+    This is a *config warning*, not a runtime error. It does NOT affect delivery results.
+    """
+    raw_url = str(config.get("project_sync_alert_webhook_url", "")).strip()
+    if not raw_url:
+        return "disabled (no URL set)"
+    ok, reason = validate_project_sync_alert_webhook_url(raw_url)
+    if ok:
+        # Show only the first 60 chars to avoid log bloat.
+        display = raw_url if len(raw_url) <= 60 else raw_url[:57] + "..."
+        return f"ok url={display}"
+    return f"config_warning: {reason}"
+
 
 def _deliver_project_sync_alert_to_webhook(
     payload: dict[str, Any],

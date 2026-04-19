@@ -12,6 +12,7 @@ from _bridge_common import (
     format_lifecycle_sync_state_note,
     format_project_sync_alert_delivery_status,
     format_project_sync_alert_status,
+    format_project_sync_alert_webhook_config_note,
     format_project_sync_warning_note,
     has_pending_issue_centric_codex_dispatch,
     is_initial_bridge_state,
@@ -188,6 +189,8 @@ def print_doctor(args: argparse.Namespace) -> None:
     print(f"  - project_sync_warning: {format_project_sync_warning_note(state)}", flush=True)
     print(f"  - project_sync_alert: {format_project_sync_alert_status(state)}", flush=True)
     print(f"  - project_sync_alert_delivery: {format_project_sync_alert_delivery_status(state)}", flush=True)
+    _cfg = run_until_stop.load_project_config()
+    print(f"  - project_sync_alert_webhook_config: {format_project_sync_alert_webhook_config_note(_cfg)}", flush=True)
     print(f"- clear_error: {clear_error_status}", flush=True)
     print("- clear-error は error だけを解除して resume に戻す操作です（state 全体の reset ではありません）。", flush=True)
     print("- reset が必要な場合は --reset を使ってください（state.json を完全初期化します）。", flush=True)
