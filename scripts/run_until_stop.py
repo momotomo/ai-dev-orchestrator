@@ -12,12 +12,14 @@ from typing import Any
 from _bridge_common import (
     BridgeStop,
     bridge_lifecycle_sync_suffix,
+    bridge_project_sync_warning_suffix,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
     bridge_runtime_root,
     check_stop_conditions,
     codex_report_is_ready,
     format_lifecycle_sync_state_note,
+    format_project_sync_warning_note,
     detect_ic_stop_path,
     format_operator_stop_note,
     has_pending_issue_centric_codex_dispatch,
@@ -526,7 +528,8 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         return f"{base}{route_note}{_lc}"
     if action == "completed":
         _lc = bridge_lifecycle_sync_suffix(final_state)
-        return f"追加の操作は不要です。{_lc}"
+        _pw = bridge_project_sync_warning_suffix(final_state)
+        return f"追加の操作は不要です。{_lc}{_pw}"
     if action == "no_action":
         # IC stop paths: surface chatgpt_decision_note rather than generic doctor text.
         _ic_path = detect_ic_stop_path(final_state)
@@ -1077,6 +1080,7 @@ def summarize_run(
         f"- is_fallback: {_summary_is_fallback}",
         f"- action_stop_note: {_summary_action_stop_note}",
         f"- lifecycle_sync_state: {format_lifecycle_sync_state_note(final_state)}",
+        f"- project_sync_warning: {format_project_sync_warning_note(final_state)}",
         "",
         "## run",
         f"- initial_user_status: {initial_status.label}",
