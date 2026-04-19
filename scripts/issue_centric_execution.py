@@ -150,14 +150,44 @@ def _normalize_project_sync_result(execution: object) -> dict[str, str]:
                                        but project-state field was not updated.
     * ``"project_state_synced"``     — Project state field updated successfully.
     * ``"project_state_sync_failed"``— Project update attempted but failed.
+
+    Compatibility note: lifecycle-sync execution results (returned by
+    ``execute_current_issue_project_state_sync_fn``) may carry the status in
+    a ``sync_status`` attribute instead of ``project_sync_status``.  This
+    function reads ``project_sync_status`` first and falls back to
+    ``sync_status`` so that all three state families share the same extractor.
     """
+    raw_status = (
+        getattr(execution, "project_sync_status", None)
+        or getattr(execution, "sync_status", None)
+        or ""
+    )
     return {
-        "project_sync_status": str(getattr(execution, "project_sync_status", "") or ""),
+        "project_sync_status": str(raw_status),
         "project_url": str(getattr(execution, "project_url", "") or ""),
         "project_item_id": str(getattr(execution, "project_item_id", "") or ""),
         "project_state_field_name": str(getattr(execution, "project_state_field_name", "") or ""),
         "project_state_value_name": str(getattr(execution, "project_state_value_name", "") or ""),
     }
+
+
+def _should_retry_project_sync(result: object) -> bool:
+    """Return True when a project state sync should be retried once.
+
+    Retry policy (narrow, Phase 54):
+    * Only ``"project_state_sync_failed"`` triggers a retry.
+    * The caller is responsible for performing at most *one* retry.
+    * ``"not_requested_no_project"`` and ``"issue_only_fallback"`` are not
+      retried — they are deliberate non-error outcomes.
+    * ``"project_state_synced"`` obviously needs no retry.
+    * For issue-create and followup-create paths the project sync is
+      performed inside the execution function; no retry is possible at this
+      level.  ``project_state_sync_failed`` from those functions is written
+      to state as-is.
+    * This helper is used only by ``_run_current_issue_project_state_sync``
+      where the sync step is a dedicated callable.
+    """
+    return _normalize_project_sync_result(result)["project_sync_status"] == "project_state_sync_failed"
 
 
 def dispatch_issue_centric_execution(
@@ -1725,6 +1755,7 @@ def _apply_issue_create_execution_state(
     by ``_finalize_dispatch``) as its primary target.  No ``resolved_issue`` is
     written here — that field is reserved for ``codex_run`` / review paths.
     """
+    _psr = _normalize_project_sync_result(execution)
     target_state.update(
         {
             "last_issue_centric_execution_status": execution.status,
@@ -1738,11 +1769,11 @@ def _apply_issue_create_execution_state(
             "last_issue_centric_created_issue_title": (
                 execution.created_issue.title if execution.created_issue is not None else ""
             ),
-            "last_issue_centric_project_sync_status": execution.project_sync_status,
-            "last_issue_centric_project_url": execution.project_url,
-            "last_issue_centric_project_item_id": execution.project_item_id,
-            "last_issue_centric_project_state_field": execution.project_state_field_name,
-            "last_issue_centric_project_state_value": execution.project_state_value_name,
+            "last_issue_centric_project_sync_status": _psr["project_sync_status"],
+            "last_issue_centric_project_url": _psr["project_url"],
+            "last_issue_centric_project_item_id": _psr["project_item_id"],
+            "last_issue_centric_project_state_field": _psr["project_state_field_name"],
+            "last_issue_centric_project_state_value": _psr["project_state_value_name"],
             "last_issue_centric_primary_issue_number": (
                 str(execution.created_issue.number) if execution.created_issue is not None else ""
             ),
@@ -1752,11 +1783,11 @@ def _apply_issue_create_execution_state(
             "last_issue_centric_primary_issue_title": (
                 execution.created_issue.title if execution.created_issue is not None else ""
             ),
-            "last_issue_centric_primary_project_sync_status": execution.project_sync_status,
-            "last_issue_centric_primary_project_url": execution.project_url,
-            "last_issue_centric_primary_project_item_id": execution.project_item_id,
-            "last_issue_centric_primary_project_state_field": execution.project_state_field_name,
-            "last_issue_centric_primary_project_state_value": execution.project_state_value_name,
+            "last_issue_centric_primary_project_sync_status": _psr["project_sync_status"],
+            "last_issue_centric_primary_project_url": _psr["project_url"],
+            "last_issue_centric_primary_project_item_id": _psr["project_item_id"],
+            "last_issue_centric_primary_project_state_field": _psr["project_state_field_name"],
+            "last_issue_centric_primary_project_state_value": _psr["project_state_value_name"],
             "last_issue_centric_stop_reason": execution.safe_stop_reason,
             "chatgpt_decision_note": execution.safe_stop_reason,
         }
@@ -1973,16 +2004,21 @@ def _apply_followup_execution_state(
                 if followup_execution.created_issue is not None
                 else ""
             ),
-            "last_issue_centric_project_sync_status": followup_execution.project_sync_status,
-            "last_issue_centric_project_url": followup_execution.project_url,
-            "last_issue_centric_project_item_id": followup_execution.project_item_id,
-            "last_issue_centric_project_state_field": followup_execution.project_state_field_name,
-            "last_issue_centric_project_state_value": followup_execution.project_state_value_name,
-            "last_issue_centric_followup_project_sync_status": followup_execution.project_sync_status,
-            "last_issue_centric_followup_project_url": followup_execution.project_url,
-            "last_issue_centric_followup_project_item_id": followup_execution.project_item_id,
-            "last_issue_centric_followup_project_state_field": followup_execution.project_state_field_name,
-            "last_issue_centric_followup_project_state_value": followup_execution.project_state_value_name,
+        }
+    )
+    _fsr = _normalize_project_sync_result(followup_execution)
+    target_state.update(
+        {
+            "last_issue_centric_project_sync_status": _fsr["project_sync_status"],
+            "last_issue_centric_project_url": _fsr["project_url"],
+            "last_issue_centric_project_item_id": _fsr["project_item_id"],
+            "last_issue_centric_project_state_field": _fsr["project_state_field_name"],
+            "last_issue_centric_project_state_value": _fsr["project_state_value_name"],
+            "last_issue_centric_followup_project_sync_status": _fsr["project_sync_status"],
+            "last_issue_centric_followup_project_url": _fsr["project_url"],
+            "last_issue_centric_followup_project_item_id": _fsr["project_item_id"],
+            "last_issue_centric_followup_project_state_field": _fsr["project_state_field_name"],
+            "last_issue_centric_followup_project_state_value": _fsr["project_state_value_name"],
             "last_issue_centric_stop_reason": followup_execution.safe_stop_reason,
             "chatgpt_decision_note": followup_execution.safe_stop_reason,
         }
@@ -1997,13 +2033,14 @@ def _apply_current_issue_project_state_sync_state(
 ) -> None:
     if sync_execution.status == "not_requested":
         return
+    _lsr = _normalize_project_sync_result(sync_execution)
     current_item_id = str(target_state.get("last_issue_centric_current_project_item_id", "")).strip()
     current_project_url = str(target_state.get("last_issue_centric_current_project_url", "")).strip()
     target_state.update(
         {
-            "last_issue_centric_current_project_item_id": sync_execution.project_item_id or current_item_id,
-            "last_issue_centric_current_project_url": sync_execution.project_url or current_project_url,
-            "last_issue_centric_lifecycle_sync_status": sync_execution.sync_status,
+            "last_issue_centric_current_project_item_id": _lsr["project_item_id"] or current_item_id,
+            "last_issue_centric_current_project_url": _lsr["project_url"] or current_project_url,
+            "last_issue_centric_lifecycle_sync_status": _lsr["project_sync_status"],
             "last_issue_centric_lifecycle_sync_log": repo_relative(sync_execution.execution_log_path),
             "last_issue_centric_lifecycle_sync_issue": (
                 sync_execution.resolved_issue.issue_url
@@ -2011,10 +2048,10 @@ def _apply_current_issue_project_state_sync_state(
                 else str(target_state.get("last_issue_centric_lifecycle_sync_issue", "")).strip()
             ),
             "last_issue_centric_lifecycle_sync_stage": sync_execution.lifecycle_stage,
-            "last_issue_centric_lifecycle_sync_project_url": sync_execution.project_url,
-            "last_issue_centric_lifecycle_sync_project_item_id": sync_execution.project_item_id,
-            "last_issue_centric_lifecycle_sync_state_field": sync_execution.project_state_field_name,
-            "last_issue_centric_lifecycle_sync_state_value": sync_execution.project_state_value_name,
+            "last_issue_centric_lifecycle_sync_project_url": _lsr["project_url"],
+            "last_issue_centric_lifecycle_sync_project_item_id": _lsr["project_item_id"],
+            "last_issue_centric_lifecycle_sync_state_field": _lsr["project_state_field_name"],
+            "last_issue_centric_lifecycle_sync_state_value": _lsr["project_state_value_name"],
             "last_issue_centric_stop_reason": sync_execution.safe_stop_reason,
             "chatgpt_decision_note": sync_execution.safe_stop_reason,
         }
@@ -2082,6 +2119,23 @@ def _run_current_issue_project_state_sync(
         log_writer=log_writer,
         repo_relative=repo_relative,
     )
+    # Narrow 1-retry: retry exactly once when project state sync failed.
+    # Only lifecycle sync (a dedicated sync callable) is retried here.
+    # Issue-create and followup-create project sync failures are not retried
+    # because the project sync is embedded in the execution function.
+    if _should_retry_project_sync(sync_execution):
+        sync_execution = execute_current_issue_project_state_sync_fn(
+            prepared,
+            lifecycle_stage=lifecycle_stage,
+            prior_state=target_state,
+            project_config=project_config,
+            repo_path=repo_path,
+            source_decision_log=source_decision_log,
+            source_metadata_log=source_metadata_log,
+            source_action_execution_log=source_action_execution_log,
+            log_writer=log_writer,
+            repo_relative=repo_relative,
+        )
     if sync_execution.status != "not_requested":
         _apply_current_issue_project_state_sync_state(
             target_state,
