@@ -271,7 +271,11 @@ def _ensure_project_item_for_issue(
             repository=issue_snapshot.repository,
         )
     resolver = project_item_resolver or resolve_github_project_item_for_issue
-    return resolver(resolved_project.project_id, issue_snapshot.node_id, token)
+    return resolver(
+        project_id=resolved_project.project_id,
+        issue_node_id=issue_snapshot.node_id,
+        token=token,
+    )
 
 
 def _sync_project_state_field(
@@ -289,11 +293,11 @@ def _sync_project_state_field(
     """
     setter = project_state_setter or set_github_project_item_state
     setter(
-        resolved_project.project_id,
-        project_item_id,
-        resolved_project.state_field_id,
-        resolved_project.state_option_id,
-        token,
+        project_id=resolved_project.project_id,
+        item_id=project_item_id,
+        field_id=resolved_project.state_field_id,
+        option_id=resolved_project.state_option_id,
+        token=token,
     )
 
 
