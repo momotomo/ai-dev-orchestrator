@@ -39,7 +39,17 @@
     "usage": "project_sync_alert_webhook_url に POST 先 URL を設定すると有効になります。空文字列のままにすると webhook delivery はスキップされます。",
     "payload": "JSON body: family / sync_status / issue_ref / project_url / project_item_id / project_state_field / project_state_value / runtime_mode / runtime_action / detected_at / hash / source_note",
     "delivery": "bounded retry: 最大 3 attempts (初回 + retry 2 回)。retry delay は固定 1秒→3秒。delivery_failed のときのみ retry。same hash 二重送信なし。delivery failure は hard error にはなりません。",
-    "retry_policy": "max_attempts=3, retry_delays=(1, 3) 秒固定。exponential backoff / jitter なし。1 run 内で完結。"
+    "retry_policy": "max_attempts=3, retry_delays=(1, 3) 秒固定。exponential backoff / jitter なし。1 run 内で完結。",
+    "timing": "payload が送られるのは run_until_stop.py の finish() ステップ内 (final_state 確定後) です。",
+    "config_validation": "URL は静的チェックのみ (疎通確認なし)。http:// または https:// で始まる必要があります。不正な URL は doctor の project_sync_alert_webhook_config 行に config_warning として表示されます。runtime hard error にはなりません。",
+    "troubleshooting_delivery_failed": {
+      "step1_url": "URL が正しいか確認してください (scheme が http/https、タイポなし)。",
+      "step2_permissions": "webhook endpoint が外部 POST を受け付けているか確認してください (認証トークン、IP 制限など)。",
+      "step3_endpoint": "受信側 endpoint が稼働しているか確認してください (応答コードが 2xx になっているか)。",
+      "step4_network": "bridge を実行しているマシンからそのホストへネットワーク疎通があるか確認してください。",
+      "step5_logs": "logs/ ディレクトリの最新ログで delivery error の詳細を確認してください。state.json の last_project_sync_alert_delivery_error も参照できます。"
+    },
+    "signal_boundary": "runtime_error / project_sync_warning / alert_delivery_failed / webhook_config_warning はそれぞれ独立した信号です。config_warning が出ていても runtime は継続します。"
   },
   "project_sync_alert_webhook_url": ""
 }
