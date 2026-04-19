@@ -51,6 +51,11 @@ _DEFAULT_GH_COMMAND = ["gh", "copilot", "suggest", "--target=shell", "-"]
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
 BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
 
+# Stub safety guard: identifiers used to detect the stub provider.
+# These prevent the stub from being mistaken for a real AI execution.
+_STUB_PROVIDER_MODULE = "github_copilot_provider_stub.py"
+_STUB_OUTPUT_MARKERS = ("provider: github_copilot_provider_stub", "stub 応答")
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -180,6 +185,19 @@ def run(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
+        # Stub guard (pre-execution): reject stub provider in --report-file mode.
+        # Checked before subprocess to avoid any side-effects from running the stub.
+        if _STUB_PROVIDER_MODULE in exec_cmd:
+            print(
+                f"[github_copilot_wrapper] STUB DETECTED: --exec に stub provider "
+                f"({_STUB_PROVIDER_MODULE}) が指定されています。\n"
+                "これは stub であり、実 AI 実行ではありません。"
+                "bridge report を生成せずに終了します。\n"
+                "実 provider に差し替えて再実行してください。",
+                file=sys.stderr,
+            )
+            return 1
+
         # stdout and stderr are echoed to our own streams so launch logs capture them.
         try:
             result = subprocess.run(
@@ -201,6 +219,17 @@ def run(argv: list[str] | None = None) -> int:
             if not provider_output:
                 print(
                     "[github_copilot_wrapper] ERROR: provider exited 0 but produced no output.",
+                    file=sys.stderr,
+                )
+                return 1
+            # Stub guard (post-execution): detect stub output even when --exec path
+            # did not contain the stub module name (e.g. symlink or renamed binary).
+            if any(marker in provider_output for marker in _STUB_OUTPUT_MARKERS):
+                print(
+                    "[github_copilot_wrapper] STUB DETECTED: provider の出力に stub 識別子が含まれています。\n"
+                    "これは stub であり、実 AI 実行ではありません。"
+                    "bridge report を生成せずに終了します。\n"
+                    "実 provider に差し替えて再実行してください。",
                     file=sys.stderr,
                 )
                 return 1
