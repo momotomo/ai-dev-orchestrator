@@ -51,6 +51,7 @@ from _bridge_common import (
     resolve_runtime_dispatch_plan,
     resolve_unified_next_action,
     record_project_sync_alert_if_new,
+    deliver_project_sync_alert_if_pending,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -1184,6 +1185,10 @@ def finish(
     # Record project sync alert candidate if new (writes payload + updates state.json).
     # Called before summarize_run so the state update is persisted before summary log.
     record_project_sync_alert_if_new(final_state)
+    # Deliver pending project sync alert to configured webhook (1 attempt per run).
+    # Delivery failure is NOT a hard error — it does not overwrite the main processing result.
+    _project_config = load_project_config()
+    deliver_project_sync_alert_if_pending(final_state, config=_project_config)
 
     summary = summarize_run(
         args=args,

@@ -33,5 +33,12 @@
   "codex_sandbox": "",
   "codex_timeout_seconds": 7200,
   "report_request_next_todo": "前回 report を踏まえて、対象 repo の次の 1 フェーズ分の Codex 用 prompt を作成してください。",
-  "report_request_open_questions": "未解決事項があれば安全側で補ってください。"
+  "report_request_open_questions": "未解決事項があれば安全側で補ってください。",
+  "_notes_project_sync_alert_webhook": {
+    "summary": "project_state_sync_failed が発生したとき、alert payload を generic webhook へ POST します。",
+    "usage": "project_sync_alert_webhook_url に POST 先 URL を設定すると有効になります。空文字列のままにすると webhook delivery はスキップされます。",
+    "payload": "JSON body: family / sync_status / issue_ref / project_url / project_item_id / project_state_field / project_state_value / runtime_mode / runtime_action / detected_at / hash / source_note",
+    "delivery": "1 run につき 1 回まで。同じ alert hash は二重送信しません。delivery failure は hard error にはなりません。"
+  },
+  "project_sync_alert_webhook_url": ""
 }

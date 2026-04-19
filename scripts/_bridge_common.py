@@ -8,6 +8,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -198,6 +200,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_project_sync_alert_status": "",
     "last_project_sync_alert_hash": "",
     "last_project_sync_alert_file": "",
+    "last_project_sync_alert_delivery_status": "",
+    "last_project_sync_alert_delivery_hash": "",
+    "last_project_sync_alert_delivery_attempted_at": "",
+    "last_project_sync_alert_delivery_error": "",
+    "last_project_sync_alert_delivery_url": "",
     "pause": False,
     "error": False,
     "error_message": "",
@@ -238,6 +245,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "codex_timeout_seconds": 7200,
     "report_request_next_todo": "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。",
     "report_request_open_questions": "未解決事項があれば安全側で補ってください。",
+    "project_sync_alert_webhook_url": "",
 }
 
 REPO_LIKE_MARKERS = [
@@ -833,6 +841,140 @@ def format_project_sync_alert_status(state: Mapping[str, Any]) -> str:
     if status == "pending" and alert_file:
         return f"pending file={alert_file}"
     return "none"
+
+
+def format_project_sync_alert_delivery_status(state: Mapping[str, Any]) -> str:
+    """Return a short delivery status string for doctor / summary display.
+
+    Returns e.g. 'delivered hash=...' / 'delivery_failed error=...' / 'not_requested_no_webhook' / 'none'.
+    """
+    delivery_status = str(state.get("last_project_sync_alert_delivery_status", "")).strip()
+    delivery_hash = str(state.get("last_project_sync_alert_delivery_hash", "")).strip()
+    delivery_error = str(state.get("last_project_sync_alert_delivery_error", "")).strip()
+    if not delivery_status:
+        return "none"
+    if delivery_status == "delivered" and delivery_hash:
+        return f"delivered hash={delivery_hash[:12]}"
+    if delivery_status == "delivery_failed":
+        error_summary = delivery_error[:80] if delivery_error else "unknown"
+        return f"delivery_failed error={error_summary}"
+    if delivery_status == "not_requested_no_webhook":
+        return "not_requested_no_webhook"
+    if delivery_status == "skipped_already_delivered" and delivery_hash:
+        return f"skipped_already_delivered hash={delivery_hash[:12]}"
+    return delivery_status
+
+
+# ---------------------------------------------------------------------------
+# project_state_sync_failed — generic webhook delivery (Phase 59)
+# ---------------------------------------------------------------------------
+
+#: delivery success return codes (HTTP 2xx).
+_WEBHOOK_SUCCESS_CODES = frozenset(range(200, 300))
+
+#: HTTP request timeout for webhook delivery (seconds).  Kept short so that a
+#: slow or unreachable webhook endpoint never blocks the normal operator flow.
+_WEBHOOK_TIMEOUT_SECONDS = 10
+
+
+def _deliver_project_sync_alert_to_webhook(
+    payload: dict[str, Any],
+    webhook_url: str,
+    *,
+    timeout: int = _WEBHOOK_TIMEOUT_SECONDS,
+) -> tuple[str, str]:
+    """POST the alert payload to webhook_url as JSON.
+
+    Returns:
+        ("delivered", "")               — HTTP 2xx response
+        ("delivery_failed", error_str)  — HTTP non-2xx or network error
+
+    This function never raises; all errors are caught and returned as the
+    second element of the tuple so callers can surface them without raising.
+    """
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status_code = resp.status
+            if status_code in _WEBHOOK_SUCCESS_CODES:
+                return ("delivered", "")
+            return ("delivery_failed", f"HTTP {status_code}")
+    except urllib.error.HTTPError as exc:
+        return ("delivery_failed", f"HTTPError {exc.code}: {exc.reason}")
+    except urllib.error.URLError as exc:
+        return ("delivery_failed", f"URLError: {exc.reason}")
+    except Exception as exc:  # noqa: BLE001
+        return ("delivery_failed", str(exc)[:200])
+
+
+def deliver_project_sync_alert_if_pending(
+    state: Mapping[str, Any],
+    config: Mapping[str, Any] | None = None,
+) -> str:
+    """Deliver a pending project sync alert to the configured webhook URL.
+
+    Deduplication: if last_project_sync_alert_delivery_hash equals the current
+    last_project_sync_alert_hash, delivery is skipped (already delivered).
+
+    Returns:
+        "none"                      — no pending alert (last_project_sync_alert_status != "pending")
+        "not_requested_no_webhook"  — alert pending but webhook URL not configured
+        "delivered"                 — payload posted successfully (HTTP 2xx)
+        "delivery_failed"           — HTTP error / network error (NOT a hard runtime error)
+        "skipped_already_delivered" — same alert hash was already delivered
+        "invalid_payload"           — payload file missing or not valid JSON
+
+    Side effects when returning "delivered" or "delivery_failed":
+        - Calls update_state() to persist delivery status, hash, timestamp, error.
+        - delivery failure does NOT set state["error"] = True.
+
+    Design constraint:
+        Webhook delivery failure is NOT a hard runtime error.
+        The operator learns of the failure via state / doctor output, but the main
+        processing result (success with warning) is preserved.
+    """
+    alert_status = str(state.get("last_project_sync_alert_status", "")).strip()
+    if alert_status != "pending":
+        return "none"
+
+    alert_hash = str(state.get("last_project_sync_alert_hash", "")).strip()
+    delivered_hash = str(state.get("last_project_sync_alert_delivery_hash", "")).strip()
+    if alert_hash and alert_hash == delivered_hash:
+        return "skipped_already_delivered"
+
+    _cfg = config or {}
+    webhook_url = str(_cfg.get("project_sync_alert_webhook_url", "")).strip()
+    if not webhook_url:
+        return "not_requested_no_webhook"
+
+    alert_file_rel = str(state.get("last_project_sync_alert_file", "")).strip()
+    alert_file = ROOT_DIR / alert_file_rel if alert_file_rel else ALERT_PAYLOAD_PATH
+    if not alert_file.exists():
+        return "invalid_payload"
+    try:
+        payload_text = alert_file.read_text(encoding="utf-8")
+        payload = json.loads(payload_text)
+    except (OSError, json.JSONDecodeError):
+        return "invalid_payload"
+    if not isinstance(payload, dict):
+        return "invalid_payload"
+
+    delivery_status, error_detail = _deliver_project_sync_alert_to_webhook(payload, webhook_url)
+    attempted_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    update_state(
+        last_project_sync_alert_delivery_status=delivery_status,
+        last_project_sync_alert_delivery_hash=alert_hash,
+        last_project_sync_alert_delivery_attempted_at=attempted_at,
+        last_project_sync_alert_delivery_error=error_detail,
+        last_project_sync_alert_delivery_url=webhook_url,
+    )
+    return delivery_status
 
 
 def format_lifecycle_sync_state_note(state: Mapping[str, Any]) -> str:
