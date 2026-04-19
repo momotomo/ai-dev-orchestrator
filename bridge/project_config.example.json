@@ -20,10 +20,17 @@
     "summary": "github_copilot execution_agent で model (例: sonnet-4.6) を指定するには custom wrapper を使います。",
     "gh_direct_limitation": "'github_copilot_bin': 'gh' の場合、gh copilot suggest は --model を受け付けないため agent_model は CLI 引数に含まれません。",
     "wrapper_usage": "scripts/github_copilot_wrapper.py を github_copilot_bin に指定すると --model <agent_model> が wrapper に渡ります。",
-    "example_config": {
+    "example_config_stub": {
+      "_note": "疎通確認専用。stub は --report-file モードで必ず失敗します (stub safety guard)。",
       "execution_agent": "github_copilot",
-      "agent_model": "sonnet-4.6",
+      "agent_model": "gpt-4o-mini",
       "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_stub.py"
+    },
+    "example_config_real": {
+      "_note": "実運用用。GitHub Models API (gpt-4o-mini) を使用。事前に 'gh auth login' が必要。",
+      "execution_agent": "github_copilot",
+      "agent_model": "gpt-4o-mini",
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_real.py"
     },
     "model_aware_provider": "wrapper が --exec オプションを受け取った場合、その provider に --model を転送します。例: github_copilot_wrapper.py --exec /usr/local/bin/my-provider",
     "note": "_notes_* キーは project_config_warnings には影響しません。このフィールドはドキュメント目的のみです。"
