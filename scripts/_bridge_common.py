@@ -195,6 +195,9 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_issue_centric_review_comment_url": "",
     "last_issue_centric_review_close_policy": "",
     "last_issue_centric_stop_reason": "",
+    "last_project_sync_alert_status": "",
+    "last_project_sync_alert_hash": "",
+    "last_project_sync_alert_file": "",
     "pause": False,
     "error": False,
     "error_message": "",
@@ -634,6 +637,202 @@ def format_project_sync_warning_note(state: Mapping[str, Any]) -> str:
         return "none"
     families_str = "+".join(failed_families)
     return f"family={families_str} failed={_PROJECT_SYNC_FAILED}"
+
+
+# ---------------------------------------------------------------------------
+# project_state_sync_failed — alert signal / payload / dedupe (Phase 58)
+# ---------------------------------------------------------------------------
+
+#: Alert payload artifact — single latest-wins file in bridge/ root.
+#: Operator can inspect this file to see the last undelivered alert candidate.
+ALERT_PAYLOAD_PATH = BRIDGE_DIR / "project_sync_alert.json"
+
+#: State-key map for each alert family (primary / followup / lifecycle).
+_ALERT_FAMILY_STATE_KEYS: dict[str, dict[str, str]] = {
+    "primary": {
+        "project_url": "last_issue_centric_primary_project_url",
+        "project_item_id": "last_issue_centric_primary_project_item_id",
+        "project_state_field": "last_issue_centric_primary_project_state_field",
+        "project_state_value": "last_issue_centric_primary_project_state_value",
+    },
+    "followup": {
+        "project_url": "last_issue_centric_followup_project_url",
+        "project_item_id": "last_issue_centric_followup_project_item_id",
+        "project_state_field": "last_issue_centric_followup_project_state_field",
+        "project_state_value": "last_issue_centric_followup_project_state_value",
+    },
+    "lifecycle": {
+        "project_url": "last_issue_centric_lifecycle_sync_project_url",
+        "project_item_id": "last_issue_centric_lifecycle_sync_project_item_id",
+        "project_state_field": "last_issue_centric_lifecycle_sync_state_field",
+        "project_state_value": "last_issue_centric_lifecycle_sync_state_value",
+    },
+}
+
+
+@dataclass
+class _ProjectSyncAlertCandidate:
+    """Internal representation of a project_state_sync_failed alert candidate.
+
+    Built by _build_project_sync_alert_candidate() when project sync failure is
+    detected.  Used to generate the alert payload artifact and dedupe hash.
+
+    Severity: 'success with warning' (NOT a hard runtime error).
+    Only project_state_sync_failed triggers an alert candidate.
+    not_requested_no_project / issue_only_fallback are excluded by the detection gate.
+    """
+
+    families: list[str]
+    sync_status: str
+    issue_ref: str
+    principal_issue_ref: str
+    next_request_target: str
+    project_url: str
+    project_item_id: str
+    project_state_field: str
+    project_state_value: str
+    runtime_mode: str
+    runtime_action: str
+    detected_at: str
+    alert_hash: str
+    source_note: str
+
+
+def _detect_project_sync_alert_candidate(state: Mapping[str, Any]) -> bool:
+    """Return True if any project sync family has project_state_sync_failed.
+
+    This is the sole gate for alert candidate detection.  Only
+    project_state_sync_failed qualifies; not_requested_no_project and
+    issue_only_fallback do not.  Hard errors (error=True) are a separate
+    signal and do not affect this gate.
+    """
+    return _detect_project_sync_warning(state)
+
+
+def _build_project_sync_alert_candidate(
+    state: Mapping[str, Any],
+) -> _ProjectSyncAlertCandidate | None:
+    """Build an alert candidate from state, or return None if no failure is detected.
+
+    Returns None when:
+    - No project sync family has project_state_sync_failed
+    - not_requested_no_project / issue_only_fallback are present (already excluded
+      by _detect_project_sync_alert_candidate which checks only project_state_sync_failed)
+    """
+    if not _detect_project_sync_alert_candidate(state):
+        return None
+
+    failed_families = _resolve_project_sync_warning_family(state)
+    first_family = failed_families[0] if failed_families else ""
+    family_keys = _ALERT_FAMILY_STATE_KEYS.get(first_family, {})
+    project_url = str(state.get(family_keys.get("project_url", ""), "")).strip()
+    project_item_id = str(state.get(family_keys.get("project_item_id", ""), "")).strip()
+    project_state_field = str(state.get(family_keys.get("project_state_field", ""), "")).strip()
+    project_state_value = str(state.get(family_keys.get("project_state_value", ""), "")).strip()
+    issue_ref = str(state.get("last_issue_centric_target_issue", "")).strip()
+    principal_issue_ref = str(state.get("last_issue_centric_principal_issue", "")).strip()
+    next_request_target = str(state.get("last_issue_centric_next_request_target", "")).strip()
+    runtime_mode = str(state.get("last_issue_centric_runtime_mode", "")).strip()
+    runtime_action = str(state.get("last_issue_centric_action", "")).strip()
+    detected_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Stable hash: key identity fields only (not detected_at) for reliable deduplication.
+    hash_parts = "|".join([
+        "+".join(sorted(failed_families)),
+        _PROJECT_SYNC_FAILED,
+        issue_ref,
+        project_url,
+        project_item_id,
+        project_state_value,
+    ])
+    alert_hash = hashlib.sha256(hash_parts.encode("utf-8")).hexdigest()
+    source_note = format_project_sync_warning_note(state)
+    return _ProjectSyncAlertCandidate(
+        families=failed_families,
+        sync_status=_PROJECT_SYNC_FAILED,
+        issue_ref=issue_ref,
+        principal_issue_ref=principal_issue_ref,
+        next_request_target=next_request_target,
+        project_url=project_url,
+        project_item_id=project_item_id,
+        project_state_field=project_state_field,
+        project_state_value=project_state_value,
+        runtime_mode=runtime_mode,
+        runtime_action=runtime_action,
+        detected_at=detected_at,
+        alert_hash=alert_hash,
+        source_note=source_note,
+    )
+
+
+def _build_project_sync_alert_payload(
+    candidate: _ProjectSyncAlertCandidate,
+) -> dict[str, Any]:
+    """Serialize an alert candidate to a JSON-serializable dict."""
+    return {
+        "family": "+".join(candidate.families),
+        "sync_status": candidate.sync_status,
+        "issue_ref": candidate.issue_ref,
+        "principal_issue_ref": candidate.principal_issue_ref,
+        "next_request_target": candidate.next_request_target,
+        "project_url": candidate.project_url,
+        "project_item_id": candidate.project_item_id,
+        "project_state_field": candidate.project_state_field,
+        "project_state_value": candidate.project_state_value,
+        "runtime_mode": candidate.runtime_mode,
+        "runtime_action": candidate.runtime_action,
+        "detected_at": candidate.detected_at,
+        "hash": candidate.alert_hash,
+        "source_note": candidate.source_note,
+    }
+
+
+def record_project_sync_alert_if_new(state: Mapping[str, Any]) -> str:
+    """Record a project sync alert payload if a new (non-duplicate) candidate is found.
+
+    Deduplication: if the current alert hash equals last_project_sync_alert_hash in
+    state, no new payload is written.  A new failed event (different issue / project /
+    state_value) produces a different hash and triggers a new payload.
+
+    Returns:
+        "recorded"          — new alert payload was saved; state updated
+        "skipped_duplicate" — same hash as last alert; no action taken
+        "none"              — no alert candidate detected (no project_state_sync_failed)
+
+    Side effects when returning "recorded":
+        - Writes JSON payload to ALERT_PAYLOAD_PATH (bridge/project_sync_alert.json)
+        - Calls update_state() to persist last_project_sync_alert_status="pending",
+          last_project_sync_alert_hash, and last_project_sync_alert_file in state.json
+    """
+    candidate = _build_project_sync_alert_candidate(state)
+    if candidate is None:
+        return "none"
+    last_hash = str(state.get("last_project_sync_alert_hash", "")).strip()
+    if last_hash == candidate.alert_hash:
+        return "skipped_duplicate"
+    payload = _build_project_sync_alert_payload(candidate)
+    ALERT_PAYLOAD_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    update_state(
+        last_project_sync_alert_status="pending",
+        last_project_sync_alert_hash=candidate.alert_hash,
+        last_project_sync_alert_file=str(ALERT_PAYLOAD_PATH.relative_to(ROOT_DIR)),
+    )
+    return "recorded"
+
+
+def format_project_sync_alert_status(state: Mapping[str, Any]) -> str:
+    """Return a short alert status string for doctor / summary display.
+
+    Returns 'pending file=bridge/project_sync_alert.json' when an undelivered
+    alert payload is present in state, or 'none' when no alert is pending.
+    """
+    status = str(state.get("last_project_sync_alert_status", "")).strip()
+    alert_file = str(state.get("last_project_sync_alert_file", "")).strip()
+    if status == "pending" and alert_file:
+        return f"pending file={alert_file}"
+    return "none"
 
 
 def format_lifecycle_sync_state_note(state: Mapping[str, Any]) -> str:

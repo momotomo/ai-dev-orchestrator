@@ -4169,4 +4169,501 @@ class ProjectSyncWarningSurfaceAlignmentTests(unittest.TestCase):
         self.assertIn("lifecycle", note)
 
 
+class ProjectSyncAlertSignalPayloadTests(unittest.TestCase):
+    """Phase 58 — project_state_sync_failed alert signal / payload / dedupe.
+
+    Verifies:
+    - primary / followup / lifecycle sync failed → alert candidate detected
+    - not_requested_no_project / issue_only_fallback → NOT alert candidate
+    - hard error / deliberate stop do not mix with alert candidate
+    - _build_project_sync_alert_candidate returns correct fields
+    - stable hash: same state → same hash; different event → different hash
+    - _build_project_sync_alert_payload contains expected fields
+    - record_project_sync_alert_if_new: "recorded" / "skipped_duplicate" / "none"
+    - format_project_sync_alert_status: "pending file=..." / "none"
+    - start_bridge.print_doctor() shows project_sync_alert line
+    - Phase 57 warning surfaces remain unaffected (regression)
+    """
+
+    # ------------------------------------------------------------------
+    # Group 1: alert candidate detection
+    # ------------------------------------------------------------------
+
+    def test_detect_primary_project_sync_failed_is_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_alert_candidate(state))
+
+    def test_detect_followup_project_sync_failed_is_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {"last_issue_centric_followup_project_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_alert_candidate(state))
+
+    def test_detect_lifecycle_project_sync_failed_is_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {"last_issue_centric_lifecycle_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_alert_candidate(state))
+
+    def test_not_requested_no_project_is_not_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_primary_project_sync_status": "not_requested_no_project",
+            "last_issue_centric_followup_project_sync_status": "not_requested_no_project",
+        }
+        self.assertFalse(_detect_project_sync_alert_candidate(state))
+
+    def test_issue_only_fallback_is_not_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_primary_project_sync_status": "issue_only_fallback",
+        }
+        self.assertFalse(_detect_project_sync_alert_candidate(state))
+
+    def test_synced_status_is_not_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_synced",
+        }
+        self.assertFalse(_detect_project_sync_alert_candidate(state))
+
+    def test_empty_state_is_not_alert_candidate(self) -> None:
+        from _bridge_common import _detect_project_sync_alert_candidate
+        self.assertFalse(_detect_project_sync_alert_candidate({}))
+
+    def test_hard_error_without_sync_failed_is_not_alert_candidate(self) -> None:
+        """Hard error alone (no project_state_sync_failed) does not produce alert candidate."""
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {
+            "error": True,
+            "error_message": "critical failure",
+        }
+        self.assertFalse(_detect_project_sync_alert_candidate(state))
+
+    # ------------------------------------------------------------------
+    # Group 2: build alert candidate fields
+    # ------------------------------------------------------------------
+
+    def test_build_alert_candidate_returns_none_when_no_failure(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        self.assertIsNone(_build_project_sync_alert_candidate({}))
+
+    def test_build_alert_candidate_primary_fields(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_primary_project_url": "https://github.com/orgs/x/projects/1",
+            "last_issue_centric_primary_project_item_id": "PVTI_abc",
+            "last_issue_centric_primary_project_state_field": "Status",
+            "last_issue_centric_primary_project_state_value": "In Progress",
+            "last_issue_centric_target_issue": "#5",
+            "last_issue_centric_principal_issue": "https://github.com/x/y/issues/5",
+            "last_issue_centric_next_request_target": "https://github.com/x/y/issues/5",
+            "last_issue_centric_runtime_mode": "issue_centric_ready",
+            "last_issue_centric_action": "issue_create",
+        }
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.families, ["primary"])
+        self.assertEqual(candidate.sync_status, "project_state_sync_failed")
+        self.assertEqual(candidate.issue_ref, "#5")
+        self.assertEqual(candidate.project_url, "https://github.com/orgs/x/projects/1")
+        self.assertEqual(candidate.project_item_id, "PVTI_abc")
+        self.assertEqual(candidate.project_state_field, "Status")
+        self.assertEqual(candidate.project_state_value, "In Progress")
+        self.assertEqual(candidate.runtime_mode, "issue_centric_ready")
+        self.assertEqual(candidate.runtime_action, "issue_create")
+        self.assertIsNotNone(candidate.detected_at)
+        self.assertTrue(len(candidate.alert_hash) == 64)  # sha256 hex
+
+    def test_build_alert_candidate_followup_fields(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_url": "https://github.com/orgs/x/projects/2",
+        }
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.families, ["followup"])
+        self.assertEqual(candidate.project_url, "https://github.com/orgs/x/projects/2")
+
+    def test_build_alert_candidate_lifecycle_fields(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_lifecycle_sync_status": "project_state_sync_failed",
+            "last_issue_centric_lifecycle_sync_project_url": "https://github.com/orgs/x/projects/3",
+            "last_issue_centric_lifecycle_sync_project_item_id": "PVTI_xyz",
+            "last_issue_centric_lifecycle_sync_state_field": "Status",
+            "last_issue_centric_lifecycle_sync_state_value": "Done",
+        }
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual(candidate.families, ["lifecycle"])
+        self.assertEqual(candidate.project_url, "https://github.com/orgs/x/projects/3")
+        self.assertEqual(candidate.project_state_value, "Done")
+
+    def test_build_alert_candidate_multi_family(self) -> None:
+        """primary + followup both failed → both appear in families."""
+        from _bridge_common import _build_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_followup_project_sync_status": "project_state_sync_failed",
+        }
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertIn("primary", candidate.families)
+        self.assertIn("followup", candidate.families)
+
+    # ------------------------------------------------------------------
+    # Group 3: stable hash / deduplication
+    # ------------------------------------------------------------------
+
+    def test_same_state_produces_same_hash(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_primary_project_url": "https://github.com/orgs/x/projects/1",
+            "last_issue_centric_primary_project_item_id": "PVTI_abc",
+            "last_issue_centric_primary_project_state_value": "In Progress",
+            "last_issue_centric_target_issue": "#5",
+        }
+        c1 = _build_project_sync_alert_candidate(state)
+        c2 = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(c1)
+        self.assertIsNotNone(c2)
+        assert c1 is not None
+        assert c2 is not None
+        self.assertEqual(c1.alert_hash, c2.alert_hash)
+
+    def test_different_issue_ref_produces_different_hash(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        state_a = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_target_issue": "#5",
+        }
+        state_b = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_target_issue": "#6",
+        }
+        c_a = _build_project_sync_alert_candidate(state_a)
+        c_b = _build_project_sync_alert_candidate(state_b)
+        self.assertIsNotNone(c_a)
+        self.assertIsNotNone(c_b)
+        assert c_a is not None
+        assert c_b is not None
+        self.assertNotEqual(c_a.alert_hash, c_b.alert_hash)
+
+    def test_different_project_state_value_produces_different_hash(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate
+        state_a = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_primary_project_state_value": "In Progress",
+        }
+        state_b = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_primary_project_state_value": "Done",
+        }
+        c_a = _build_project_sync_alert_candidate(state_a)
+        c_b = _build_project_sync_alert_candidate(state_b)
+        self.assertIsNotNone(c_a)
+        self.assertIsNotNone(c_b)
+        assert c_a is not None
+        assert c_b is not None
+        self.assertNotEqual(c_a.alert_hash, c_b.alert_hash)
+
+    # ------------------------------------------------------------------
+    # Group 4: alert payload fields
+    # ------------------------------------------------------------------
+
+    def test_build_alert_payload_contains_required_fields(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate, _build_project_sync_alert_payload
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_primary_project_url": "https://github.com/orgs/x/projects/1",
+            "last_issue_centric_primary_project_item_id": "PVTI_abc",
+            "last_issue_centric_primary_project_state_field": "Status",
+            "last_issue_centric_primary_project_state_value": "In Progress",
+            "last_issue_centric_target_issue": "#5",
+        }
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        payload = _build_project_sync_alert_payload(candidate)
+        required_keys = [
+            "family", "sync_status", "issue_ref", "principal_issue_ref",
+            "next_request_target", "project_url", "project_item_id",
+            "project_state_field", "project_state_value",
+            "runtime_mode", "runtime_action", "detected_at", "hash", "source_note",
+        ]
+        for key in required_keys:
+            self.assertIn(key, payload, f"missing key: {key}")
+        self.assertEqual(payload["family"], "primary")
+        self.assertEqual(payload["sync_status"], "project_state_sync_failed")
+        self.assertEqual(payload["project_url"], "https://github.com/orgs/x/projects/1")
+        self.assertEqual(payload["hash"], candidate.alert_hash)
+
+    def test_build_alert_payload_json_serializable(self) -> None:
+        """Payload must be JSON serializable."""
+        import json as json_mod
+        from _bridge_common import _build_project_sync_alert_candidate, _build_project_sync_alert_payload
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        payload = _build_project_sync_alert_payload(candidate)
+        serialized = json_mod.dumps(payload, ensure_ascii=False)
+        self.assertIsInstance(serialized, str)
+
+    # ------------------------------------------------------------------
+    # Group 5: record_project_sync_alert_if_new return values
+    # ------------------------------------------------------------------
+
+    def test_record_returns_none_when_no_failure(self) -> None:
+        from _bridge_common import record_project_sync_alert_if_new
+        result = record_project_sync_alert_if_new({})
+        self.assertEqual(result, "none")
+
+    def test_record_returns_none_for_not_requested_no_project(self) -> None:
+        from _bridge_common import record_project_sync_alert_if_new
+        state = {"last_issue_centric_primary_project_sync_status": "not_requested_no_project"}
+        self.assertEqual(record_project_sync_alert_if_new(state), "none")
+
+    def test_record_returns_none_for_issue_only_fallback(self) -> None:
+        from _bridge_common import record_project_sync_alert_if_new
+        state = {"last_issue_centric_primary_project_sync_status": "issue_only_fallback"}
+        self.assertEqual(record_project_sync_alert_if_new(state), "none")
+
+    def test_record_returns_skipped_duplicate_for_same_hash(self) -> None:
+        from _bridge_common import _build_project_sync_alert_candidate, record_project_sync_alert_if_new
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        candidate = _build_project_sync_alert_candidate(state)
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        state_with_hash: dict = dict(state)
+        state_with_hash["last_project_sync_alert_hash"] = candidate.alert_hash
+        result = record_project_sync_alert_if_new(state_with_hash)
+        self.assertEqual(result, "skipped_duplicate")
+
+    def test_record_payload_file_is_written_on_new_alert(self) -> None:
+        """record_project_sync_alert_if_new writes ALERT_PAYLOAD_PATH when candidate is new."""
+        import json as json_mod
+        from unittest.mock import patch, MagicMock
+        import _bridge_common
+        from _bridge_common import record_project_sync_alert_if_new
+        state = {
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+            "last_issue_centric_primary_project_url": "https://github.com/orgs/x/projects/1",
+        }
+        written_payloads: list[str] = []
+        state_updates: list[dict] = []
+
+        mock_path = MagicMock()
+        mock_path.relative_to.return_value = mock_path
+        mock_path.__str__ = MagicMock(return_value="bridge/project_sync_alert.json")
+
+        def fake_write_text(content: str, encoding: str = "utf-8") -> None:
+            written_payloads.append(content)
+
+        mock_path.write_text.side_effect = fake_write_text
+
+        def fake_update_state(**kwargs: object) -> dict:
+            state_updates.append(dict(kwargs))
+            return {}
+
+        with patch.object(_bridge_common, "ALERT_PAYLOAD_PATH", mock_path):
+            with patch("_bridge_common.update_state", side_effect=fake_update_state):
+                result = record_project_sync_alert_if_new(state)
+
+        self.assertEqual(result, "recorded")
+        self.assertEqual(len(written_payloads), 1)
+        payload = json_mod.loads(written_payloads[0])
+        self.assertEqual(payload["family"], "primary")
+        self.assertEqual(payload["sync_status"], "project_state_sync_failed")
+        self.assertEqual(len(state_updates), 1)
+        self.assertEqual(state_updates[0]["last_project_sync_alert_status"], "pending")
+        self.assertIn("last_project_sync_alert_hash", state_updates[0])
+        self.assertIn("last_project_sync_alert_file", state_updates[0])
+
+    def test_record_no_duplicate_payload_for_same_event(self) -> None:
+        """Second call with same hash returns skipped_duplicate without writing."""
+        from unittest.mock import patch
+        from _bridge_common import _build_project_sync_alert_candidate, record_project_sync_alert_if_new
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        candidate = _build_project_sync_alert_candidate(state)
+        assert candidate is not None
+        state_dup = dict(state)
+        state_dup["last_project_sync_alert_hash"] = candidate.alert_hash
+        write_calls: list = []
+        with patch("_bridge_common.update_state") as mock_update:
+            with patch("_bridge_common.ALERT_PAYLOAD_PATH") as mock_path:
+                mock_path.write_text.side_effect = lambda *a, **kw: write_calls.append(a)
+                result = record_project_sync_alert_if_new(state_dup)
+        self.assertEqual(result, "skipped_duplicate")
+        self.assertEqual(len(write_calls), 0)
+        mock_update.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Group 6: format_project_sync_alert_status
+    # ------------------------------------------------------------------
+
+    def test_format_alert_status_pending(self) -> None:
+        from _bridge_common import format_project_sync_alert_status
+        state = {
+            "last_project_sync_alert_status": "pending",
+            "last_project_sync_alert_file": "bridge/project_sync_alert.json",
+        }
+        result = format_project_sync_alert_status(state)
+        self.assertEqual(result, "pending file=bridge/project_sync_alert.json")
+
+    def test_format_alert_status_none_when_empty(self) -> None:
+        from _bridge_common import format_project_sync_alert_status
+        self.assertEqual(format_project_sync_alert_status({}), "none")
+
+    def test_format_alert_status_none_when_pending_but_no_file(self) -> None:
+        from _bridge_common import format_project_sync_alert_status
+        state = {"last_project_sync_alert_status": "pending", "last_project_sync_alert_file": ""}
+        self.assertEqual(format_project_sync_alert_status(state), "none")
+
+    # ------------------------------------------------------------------
+    # Group 7: start_bridge.print_doctor() shows project_sync_alert line
+    # ------------------------------------------------------------------
+
+    def test_start_bridge_doctor_shows_project_sync_alert_pending(self) -> None:
+        """print_doctor() must include project_sync_alert line when alert is pending."""
+        import start_bridge
+        from unittest.mock import patch
+        state = {
+            "mode": "idle",
+            "last_project_sync_alert_status": "pending",
+            "last_project_sync_alert_file": "bridge/project_sync_alert.json",
+        }
+        captured = []
+        def fake_print(*args: object, **kwargs: object) -> None:
+            captured.append(" ".join(str(a) for a in args))
+        with patch("builtins.print", side_effect=fake_print):
+            with patch("run_until_stop.load_state", return_value=state):
+                with patch("run_until_stop.start_bridge_resume_guidance", return_value=("idle", "g", "n")):
+                    with patch("run_until_stop.recommended_operator_step", return_value=("再実行", "cmd")):
+                        with patch("run_until_stop.codex_report_is_ready", return_value=False):
+                            with patch("run_until_stop.runtime_prompt_path") as mp:
+                                mp.return_value.exists.return_value = False
+                                with patch("run_until_stop.runtime_stop_path") as ms:
+                                    ms.return_value.exists.return_value = False
+                                    with patch("run_until_stop.bridge_runtime_root") as mb:
+                                        mb.return_value.glob.return_value = []
+                                        with patch("run_until_stop.should_prioritize_unarchived_report", return_value=False):
+                                            with patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False):
+                                                args = start_bridge.parse_args(["--project-path", "/tmp"])
+                                                start_bridge.print_doctor(args)
+        alert_lines = [l for l in captured if "project_sync_alert" in l]
+        self.assertTrue(len(alert_lines) >= 1, f"project_sync_alert line not found. captured={captured}")
+        self.assertIn("pending", alert_lines[0])
+        self.assertIn("bridge/project_sync_alert.json", alert_lines[0])
+
+    def test_start_bridge_doctor_shows_project_sync_alert_none(self) -> None:
+        """print_doctor() shows 'none' for project_sync_alert when no alert pending."""
+        import start_bridge
+        from unittest.mock import patch
+        state = {"mode": "idle"}
+        captured = []
+        def fake_print(*args: object, **kwargs: object) -> None:
+            captured.append(" ".join(str(a) for a in args))
+        with patch("builtins.print", side_effect=fake_print):
+            with patch("run_until_stop.load_state", return_value=state):
+                with patch("run_until_stop.start_bridge_resume_guidance", return_value=("idle", "g", "n")):
+                    with patch("run_until_stop.recommended_operator_step", return_value=("再実行", "cmd")):
+                        with patch("run_until_stop.codex_report_is_ready", return_value=False):
+                            with patch("run_until_stop.runtime_prompt_path") as mp:
+                                mp.return_value.exists.return_value = False
+                                with patch("run_until_stop.runtime_stop_path") as ms:
+                                    ms.return_value.exists.return_value = False
+                                    with patch("run_until_stop.bridge_runtime_root") as mb:
+                                        mb.return_value.glob.return_value = []
+                                        with patch("run_until_stop.should_prioritize_unarchived_report", return_value=False):
+                                            with patch("run_until_stop.should_rotate_before_next_chat_request", return_value=False):
+                                                args = start_bridge.parse_args(["--project-path", "/tmp"])
+                                                start_bridge.print_doctor(args)
+        alert_lines = [l for l in captured if "project_sync_alert" in l]
+        self.assertTrue(len(alert_lines) >= 1, f"project_sync_alert line not found. captured={captured}")
+        self.assertIn("none", alert_lines[0])
+
+    # ------------------------------------------------------------------
+    # Group 8: boundary — warning surface and alert candidate consistency
+    # ------------------------------------------------------------------
+
+    def test_warning_surface_and_alert_candidate_consistent_for_primary_failed(self) -> None:
+        """When primary failed, warning note contains 'project_sync: warning primary'
+        and alert candidate detects the same failure."""
+        from _bridge_common import (
+            _detect_project_sync_alert_candidate,
+            bridge_project_sync_warning_suffix,
+        )
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_sync_failed"}
+        self.assertTrue(_detect_project_sync_alert_candidate(state))
+        warning = bridge_project_sync_warning_suffix(state)
+        self.assertIn("project_sync: warning", warning)
+        self.assertIn("primary", warning)
+
+    def test_warning_surface_and_alert_candidate_consistent_for_synced(self) -> None:
+        """When primary is synced, no warning and no alert candidate."""
+        from _bridge_common import (
+            _detect_project_sync_alert_candidate,
+            bridge_project_sync_warning_suffix,
+        )
+        state = {"last_issue_centric_primary_project_sync_status": "project_state_synced"}
+        self.assertFalse(_detect_project_sync_alert_candidate(state))
+        self.assertEqual(bridge_project_sync_warning_suffix(state), "")
+
+    def test_hard_error_with_no_sync_failure_not_alert_candidate(self) -> None:
+        """Hard error (error=True) without project_state_sync_failed is not alert candidate."""
+        from _bridge_common import _detect_project_sync_alert_candidate
+        state = {
+            "error": True,
+            "error_message": "something went wrong",
+            "last_issue_centric_primary_project_sync_status": "issue_only_fallback",
+        }
+        self.assertFalse(_detect_project_sync_alert_candidate(state))
+
+    def test_hard_error_with_sync_failure_is_both_error_and_alert_candidate(self) -> None:
+        """Hard error + project sync failed: both signals are independent and separate."""
+        from _bridge_common import _detect_project_sync_alert_candidate, present_bridge_status
+        state = {
+            "error": True,
+            "error_message": "critical failure",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        # Hard error status is "異常"
+        self.assertEqual(present_bridge_status(state).label, "異常")
+        # Alert candidate is also detected (independent signal)
+        self.assertTrue(_detect_project_sync_alert_candidate(state))
+
+    # ------------------------------------------------------------------
+    # Group 9: Phase 57 regression
+    # ------------------------------------------------------------------
+
+    def test_phase57_bridge_orchestrator_completed_warning_still_passes(self) -> None:
+        from _bridge_common import format_operator_stop_note, resolve_runtime_dispatch_plan
+        state = {
+            "mode": "idle",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        plan = resolve_runtime_dispatch_plan(state)
+        note = format_operator_stop_note(state, plan=plan)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+
+    def test_phase57_entry_guidance_completed_warning_still_passes(self) -> None:
+        import run_until_stop
+        state = {
+            "mode": "idle",
+            "last_issue_centric_primary_project_sync_status": "project_state_sync_failed",
+        }
+        args = run_until_stop.parse_args(["--project-path", "/tmp", "--max-execution-count", "6"])
+        note = run_until_stop.entry_guidance(state, args)
+        self.assertIn("project_sync", note)
+        self.assertIn("warning", note)
+
 
