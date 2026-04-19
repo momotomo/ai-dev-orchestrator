@@ -201,7 +201,7 @@ def execute_issue_create_draft(
         created_issue = creator(repository, draft.title, draft.body, token)
 
         if resolved_project is None:
-            project_sync_status = "issue_only_fallback"
+            project_sync_status = "not_requested_no_project"
             project_sync_note = "Created the issue without Project placement because no GitHub Project was configured."
             if allow_followup_combo:
                 safe_stop_reason = (
@@ -408,6 +408,33 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _map_project_mutation_result_to_sync_status(internal_status: str) -> str:
+    """Map the fine-grained internal project sync status to the standard 4-value vocabulary.
+
+    Internal statuses produced by ``execute_issue_create_draft`` / ``execute_followup_issue``:
+
+    * ``"not_requested_no_project"`` / ``"not_requested"``
+      → ``"not_requested_no_project"``  (no project URL configured, nothing attempted)
+    * ``"issue_only_fallback"``
+      → ``"issue_only_fallback"``  (project configured, deliberately skipped field update)
+    * ``"project_state_synced"``
+      → ``"project_state_synced"``  (item created + state field updated)
+    * anything else (``"issue_created_project_item_failed"``,
+      ``"issue_created_project_state_failed"``, ``"blocked_project_preflight"``,
+      ``"issue_create_failed_before_project_item"``, …)
+      → ``"project_state_sync_failed"``  (update attempted but failed)
+
+    The returned value is always one of the 4 standard Phase 53 vocabulary tokens.
+    """
+    if internal_status in ("not_requested_no_project", "not_requested"):
+        return "not_requested_no_project"
+    if internal_status == "issue_only_fallback":
+        return "issue_only_fallback"
+    if internal_status == "project_state_synced":
+        return "project_state_synced"
+    return "project_state_sync_failed"
+
+
 def issue_create_project_sync_signal(project_sync_status: str) -> str:
     """Map issue_create project_sync_status to the standard three-signal vocabulary.
 
@@ -417,7 +444,7 @@ def issue_create_project_sync_signal(project_sync_status: str) -> str:
     """
     if project_sync_status == "project_state_synced":
         return "synced"
-    if project_sync_status in ("issue_only_fallback", "not_requested"):
+    if project_sync_status in ("not_requested_no_project", "issue_only_fallback", "not_requested"):
         return "skipped_no_project"
     return "sync_failed"
 

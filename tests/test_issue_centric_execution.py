@@ -8368,5 +8368,703 @@ class IcProjectSyncFailedPathTests(IssueCentricExecutionDispatcherTests):
             self.assertEqual(result.final_status, "completed")
 
 
+class IcProjectSyncGitHubMutationTests(unittest.TestCase):
+    """Phase 55 — project-sync external GitHub mutation precision.
+
+    Tests the actual execution functions (``execute_issue_create_draft``,
+    ``execute_current_issue_project_state_sync``) with mock GitHub API callables.
+    Verifies the standard 4-value vocabulary in execution results:
+
+      * ``not_requested_no_project`` — no project URL configured
+      * ``issue_only_fallback``      — project configured, field update deliberately skipped
+      * ``project_state_synced``     — item created + state field updated
+      * ``project_state_sync_failed``— update attempted but failed
+
+    Also verifies:
+      * ``_map_project_mutation_result_to_sync_status`` maps fine-grained → standard
+      * ``_ensure_project_item_for_issue`` uses cache when available
+      * ``_sync_project_state_field`` raises → caller maps to sync_failed
+      * lifecycle sync uses same vocabulary (via sync_status)
+      * Phase 54 retry: 1-retry after sync_failed
+      * supported slices regression
+    """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _make_log_writer(self, root: Path) -> "TempLogWriter":
+        return TempLogWriter(root)
+
+    def _repo_relative(self, root: Path):
+        return lambda p: str(Path(p).relative_to(root))
+
+    def _fake_created_issue(self, number: int = 71):
+        from issue_centric_github import CreatedGitHubIssue  # noqa: PLC0415
+        return CreatedGitHubIssue(
+            number=number,
+            url=f"https://github.com/example/repo/issues/{number}",
+            title=f"Issue {number}",
+            repository="example/repo",
+            node_id=f"ISSUE_{number}",
+        )
+
+    def _fake_resolved_project(
+        self,
+        project_id: str = "PVT_1",
+        project_url: str = "https://github.com/users/x/projects/1",
+        field_id: str = "FIELD_STATE",
+        option_id: str = "OPT_READY",
+        field_name: str = "State",
+        option_name: str = "ready",
+    ):
+        from issue_centric_github import ResolvedGitHubProjectState  # noqa: PLC0415
+        return ResolvedGitHubProjectState(
+            project_id=project_id,
+            project_url=project_url,
+            project_title="Test Project",
+            owner_login="x",
+            owner_kind="user",
+            state_field_id=field_id,
+            state_field_name=field_name,
+            state_option_id=option_id,
+            state_option_name=option_name,
+        )
+
+    def _fake_created_project_item(self, item_id: str = "ITEM_71", project_id: str = "PVT_1"):
+        from issue_centric_github import CreatedGitHubProjectItem  # noqa: PLC0415
+        return CreatedGitHubProjectItem(item_id=item_id, project_id=project_id)
+
+    def _fake_issue_snapshot(self, number: int = 20):
+        from issue_centric_github import GitHubIssueSnapshot  # noqa: PLC0415
+        return GitHubIssueSnapshot(
+            number=number,
+            url=f"https://github.com/example/repo/issues/{number}",
+            title=f"Issue {number}",
+            repository="example/repo",
+            state="open",
+            node_id=f"ISSUE_{number}",
+        )
+
+    def _fake_resolved_project_item(self, item_id: str = "ITEM_20", issue_number: int = 20):
+        from issue_centric_github import ResolvedGitHubProjectItem  # noqa: PLC0415
+        return ResolvedGitHubProjectItem(
+            item_id=item_id,
+            project_id="PVT_1",
+            issue_node_id=f"ISSUE_{issue_number}",
+            issue_number=issue_number,
+            repository="example/repo",
+        )
+
+    def _make_issue_create_draft(self, title: str = "Issue Title", body: str = "Body."):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        return ic_create.IssueCreateDraft(
+            title=title,
+            body=body,
+            title_line=f"# {title}",
+            source_artifact_path="artifact.md",
+        )
+
+    def _make_prepared(self, root: Path, number: int = 20) -> object:
+        """Return a PreparedIssueCentricDecision suitable for lifecycle sync tests."""
+        decision = build_decision(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue=f"https://github.com/example/repo/issues/{number}",
+            codex_text="Implement.\n",
+        )
+        return issue_centric_transport.decode_issue_centric_decision(decision)
+
+    # ------------------------------------------------------------------
+    # Group 1: _map_project_mutation_result_to_sync_status (6 tests)
+    # ------------------------------------------------------------------
+
+    def test_map_not_requested_no_project(self):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        self.assertEqual(
+            ic_create._map_project_mutation_result_to_sync_status("not_requested_no_project"),
+            "not_requested_no_project",
+        )
+
+    def test_map_legacy_not_requested(self):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        self.assertEqual(
+            ic_create._map_project_mutation_result_to_sync_status("not_requested"),
+            "not_requested_no_project",
+        )
+
+    def test_map_issue_only_fallback(self):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        self.assertEqual(
+            ic_create._map_project_mutation_result_to_sync_status("issue_only_fallback"),
+            "issue_only_fallback",
+        )
+
+    def test_map_project_state_synced(self):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        self.assertEqual(
+            ic_create._map_project_mutation_result_to_sync_status("project_state_synced"),
+            "project_state_synced",
+        )
+
+    def test_map_internal_item_failed_to_sync_failed(self):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        for internal in (
+            "issue_created_project_item_failed",
+            "issue_created_project_state_failed",
+            "blocked_project_preflight",
+            "issue_create_failed_before_project_item",
+        ):
+            with self.subTest(internal=internal):
+                self.assertEqual(
+                    ic_create._map_project_mutation_result_to_sync_status(internal),
+                    "project_state_sync_failed",
+                )
+
+    def test_map_unknown_internal_to_sync_failed(self):
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        self.assertEqual(
+            ic_create._map_project_mutation_result_to_sync_status("some_future_internal_error"),
+            "project_state_sync_failed",
+        )
+
+    # ------------------------------------------------------------------
+    # Group 2: execute_issue_create_draft vocabulary (5 tests)
+    # ------------------------------------------------------------------
+
+    def test_issue_create_no_project_url_returns_not_requested_no_project(self):
+        """No project URL → project_sync_status = not_requested_no_project."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft = self._make_issue_create_draft()
+            writer = self._make_log_writer(root)
+            result = ic_create.execute_issue_create_draft(
+                draft,
+                action_label="issue_create",
+                close_current_issue=False,
+                create_followup_issue=False,
+                project_config={"github_repository": "example/repo"},
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            self.assertEqual(result.project_sync_status, "not_requested_no_project")
+            self.assertEqual(result.project_url, "")
+            self.assertEqual(result.project_item_id, "")
+
+    def test_issue_create_with_project_item_and_state_synced(self):
+        """Project configured, item created + state updated → project_state_synced."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft = self._make_issue_create_draft()
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+            created_item = self._fake_created_project_item()
+
+            result = ic_create.execute_issue_create_draft(
+                draft,
+                action_label="issue_create",
+                close_current_issue=False,
+                create_followup_issue=False,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_creator=lambda proj_id, node_id, token: created_item,
+                project_state_setter=lambda *args, **kwargs: None,
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            self.assertEqual(result.project_sync_status, "project_state_synced")
+            self.assertEqual(result.project_item_id, "ITEM_71")
+            self.assertEqual(result.project_state_field_name, "State")
+            self.assertEqual(result.project_state_value_name, "ready")
+
+    def test_issue_create_item_create_fails_returns_project_state_sync_failed(self):
+        """Project configured, item create fails → project_state_sync_failed."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        from issue_centric_github import IssueCentricGitHubError  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft = self._make_issue_create_draft()
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+
+            def failing_item_creator(proj_id, node_id, token):
+                raise IssueCentricGitHubError("project item create API error")
+
+            result = ic_create.execute_issue_create_draft(
+                draft,
+                action_label="issue_create",
+                close_current_issue=False,
+                create_followup_issue=False,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_creator=failing_item_creator,
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            # issue was created but project item failed
+            self.assertIsNotNone(result.created_issue)
+            self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
+            # must map to project_state_sync_failed via _map helper
+            self.assertEqual(
+                ic_create._map_project_mutation_result_to_sync_status(result.project_sync_status),
+                "project_state_sync_failed",
+            )
+
+    def test_issue_create_state_field_update_fails_returns_project_state_sync_failed(self):
+        """Project item created, state field update fails → issue_created_project_state_failed → sync_failed."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        from issue_centric_github import IssueCentricGitHubError  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft = self._make_issue_create_draft()
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+            created_item = self._fake_created_project_item()
+
+            def failing_state_setter(*args, **kwargs):
+                raise IssueCentricGitHubError("state field update API error")
+
+            result = ic_create.execute_issue_create_draft(
+                draft,
+                action_label="issue_create",
+                close_current_issue=False,
+                create_followup_issue=False,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_creator=lambda proj_id, node_id, token: created_item,
+                project_state_setter=failing_state_setter,
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            # item created, but state update failed
+            self.assertEqual(result.project_item_id, "ITEM_71")
+            self.assertEqual(result.project_sync_status, "issue_created_project_state_failed")
+            self.assertEqual(
+                ic_create._map_project_mutation_result_to_sync_status(result.project_sync_status),
+                "project_state_sync_failed",
+            )
+
+    def test_issue_create_item_fail_vs_no_project_distinguishable(self):
+        """item_failed and not_requested_no_project must produce different mapped statuses."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        mapped_no_project = ic_create._map_project_mutation_result_to_sync_status(
+            "not_requested_no_project"
+        )
+        mapped_item_failed = ic_create._map_project_mutation_result_to_sync_status(
+            "issue_created_project_item_failed"
+        )
+        self.assertNotEqual(mapped_no_project, mapped_item_failed)
+        self.assertEqual(mapped_no_project, "not_requested_no_project")
+        self.assertEqual(mapped_item_failed, "project_state_sync_failed")
+
+    # ------------------------------------------------------------------
+    # Group 3: _ensure_project_item_for_issue / _sync_project_state_field (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_ensure_project_item_uses_cache_when_available(self):
+        """_ensure_project_item_for_issue returns cached item without calling resolver."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            project_url = "https://github.com/users/x/projects/1"
+            prior_state = {
+                "last_issue_centric_current_project_url": project_url,
+                "last_issue_centric_current_project_item_id": "CACHED_ITEM_42",
+            }
+            issue_snapshot = self._fake_issue_snapshot(20)
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+            resolver_called: list[bool] = []
+
+            def resolver(proj_id, node_id, token):
+                resolver_called.append(True)
+                return self._fake_resolved_project_item()
+
+            result = ic_state._ensure_project_item_for_issue(
+                resolved_project=resolved_project,
+                issue_snapshot=issue_snapshot,
+                prior_state=prior_state,
+                project_url=project_url,
+                project_item_resolver=resolver,
+                token="fake-token",
+            )
+            # cache was used, resolver not called
+            self.assertEqual(result.item_id, "CACHED_ITEM_42")
+            self.assertEqual(resolver_called, [],
+                             "_ensure_project_item_for_issue must use cache without calling resolver")
+
+    def test_ensure_project_item_calls_resolver_when_no_cache(self):
+        """_ensure_project_item_for_issue calls resolver when no cache."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        issue_snapshot = self._fake_issue_snapshot(20)
+        resolved_project = self._fake_resolved_project()
+        resolver_called: list[bool] = []
+
+        def resolver(proj_id, node_id, token):
+            resolver_called.append(True)
+            return self._fake_resolved_project_item(item_id="RESOLVED_ITEM_20")
+
+        result = ic_state._ensure_project_item_for_issue(
+            resolved_project=resolved_project,
+            issue_snapshot=issue_snapshot,
+            prior_state={},  # no cache
+            project_url="https://github.com/users/x/projects/1",
+            project_item_resolver=resolver,
+            token="fake-token",
+        )
+        self.assertEqual(result.item_id, "RESOLVED_ITEM_20")
+        self.assertEqual(resolver_called, [True], "resolver must be called when no cache")
+
+    def test_sync_project_state_field_calls_setter(self):
+        """_sync_project_state_field calls the state setter with correct args."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        resolved_project = self._fake_resolved_project(
+            project_id="PVT_1",
+            field_id="FIELD_STATE",
+            option_id="OPT_DONE",
+        )
+        calls: list[tuple] = []
+
+        def fake_setter(proj_id, item_id, field_id, option_id, token):
+            calls.append((proj_id, item_id, field_id, option_id))
+
+        ic_state._sync_project_state_field(
+            resolved_project=resolved_project,
+            project_item_id="ITEM_20",
+            project_state_setter=fake_setter,
+            token="fake-token",
+        )
+        self.assertEqual(calls, [("PVT_1", "ITEM_20", "FIELD_STATE", "OPT_DONE")])
+
+    # ------------------------------------------------------------------
+    # Group 4: execute_current_issue_project_state_sync vocabulary (4 tests)
+    # ------------------------------------------------------------------
+
+    def test_lifecycle_sync_no_project_returns_not_requested_no_project(self):
+        """No project URL → sync_status = not_requested_no_project, status = not_requested."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._make_prepared(root, 20)
+            writer = self._make_log_writer(root)
+
+            result = ic_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={},
+                project_config={},  # no project URL
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                source_action_execution_log="action.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+            )
+            self.assertEqual(result.status, "not_requested")
+            self.assertEqual(result.sync_status, "not_requested_no_project")
+
+    def test_lifecycle_sync_state_field_updated_returns_project_state_synced(self):
+        """Project configured, item resolved + state updated → sync_status = project_state_synced."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._make_prepared(root, 20)
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+            issue_snapshot = self._fake_issue_snapshot(20)
+            resolved_item = self._fake_resolved_project_item()
+
+            result = ic_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={
+                    "last_issue_centric_target_issue": "https://github.com/example/repo/issues/20",
+                },
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_in_progress_state": "in_progress",
+                },
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                source_action_execution_log="action.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_fetcher=lambda repo, number, token: issue_snapshot,
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_resolver=lambda proj_id, node_id, token: resolved_item,
+                project_state_setter=lambda *args, **kwargs: None,
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            self.assertEqual(result.sync_status, "project_state_synced")
+            self.assertEqual(result.project_item_id, "ITEM_20")
+            self.assertEqual(result.lifecycle_stage, "in_progress")
+
+    def test_lifecycle_sync_item_resolver_fails_returns_project_state_sync_failed(self):
+        """Item resolver failure → sync_status = project_state_sync_failed (not blocked_*)."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        from issue_centric_github import IssueCentricGitHubError  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._make_prepared(root, 20)
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+            issue_snapshot = self._fake_issue_snapshot(20)
+
+            def failing_resolver(proj_id, node_id, token):
+                raise IssueCentricGitHubError("project item resolve failed")
+
+            result = ic_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={
+                    "last_issue_centric_target_issue": "https://github.com/example/repo/issues/20",
+                },
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_in_progress_state": "in_progress",
+                },
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                source_action_execution_log="action.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_fetcher=lambda repo, number, token: issue_snapshot,
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_resolver=failing_resolver,
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            # Must be the standard vocabulary, NOT "blocked_project_state_sync"
+            self.assertEqual(result.sync_status, "project_state_sync_failed",
+                             "item resolver failure must map to project_state_sync_failed")
+
+    def test_lifecycle_sync_state_setter_fails_returns_project_state_sync_failed(self):
+        """State setter failure → sync_status = project_state_sync_failed (not failed_*)."""
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        from issue_centric_github import IssueCentricGitHubError  # noqa: PLC0415
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._make_prepared(root, 20)
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+            issue_snapshot = self._fake_issue_snapshot(20)
+            resolved_item = self._fake_resolved_project_item()
+
+            def failing_setter(*args, **kwargs):
+                raise IssueCentricGitHubError("state setter API error")
+
+            result = ic_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={
+                    "last_issue_centric_target_issue": "https://github.com/example/repo/issues/20",
+                },
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_in_progress_state": "in_progress",
+                },
+                repo_path=root,
+                source_decision_log="decision.json",
+                source_metadata_log="metadata.json",
+                source_action_execution_log="action.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_fetcher=lambda repo, number, token: issue_snapshot,
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_resolver=lambda proj_id, node_id, token: resolved_item,
+                project_state_setter=failing_setter,
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+            # Must be the standard vocabulary, NOT "failed_project_state_sync"
+            self.assertEqual(result.sync_status, "project_state_sync_failed",
+                             "state setter failure must map to project_state_sync_failed")
+
+    # ------------------------------------------------------------------
+    # Group 5: vocabulary consistency across families (3 tests)
+    # ------------------------------------------------------------------
+
+    def test_issue_create_no_project_maps_to_same_vocab_as_lifecycle_no_project(self):
+        """no-project vocabulary is the same for issue_create and lifecycle sync."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        # issue_create no-project
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft = self._make_issue_create_draft()
+            writer = self._make_log_writer(root)
+            create_result = ic_create.execute_issue_create_draft(
+                draft,
+                action_label="issue_create",
+                close_current_issue=False,
+                create_followup_issue=False,
+                project_config={"github_repository": "example/repo"},
+                repo_path=root,
+                source_decision_log="d.json",
+                source_metadata_log="m.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+        # lifecycle sync no-project
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._make_prepared(root, 20)
+            writer = self._make_log_writer(root)
+            lifecycle_result = ic_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={},
+                project_config={},
+                repo_path=root,
+                source_decision_log="d.json",
+                source_metadata_log="m.json",
+                source_action_execution_log="a.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+            )
+        # Both report "no project" in normalized form
+        normalized_create = ic_create._map_project_mutation_result_to_sync_status(
+            create_result.project_sync_status
+        )
+        from issue_centric_execution import _normalize_project_sync_result  # noqa: PLC0415
+        normalized_lifecycle = _normalize_project_sync_result(lifecycle_result)["project_sync_status"]
+        self.assertEqual(normalized_create, "not_requested_no_project")
+        self.assertEqual(normalized_lifecycle, "not_requested_no_project")
+
+    def test_issue_create_sync_failed_maps_to_same_vocab_as_lifecycle_sync_failed(self):
+        """project_state_sync_failed vocabulary is the same for issue_create and lifecycle."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        import issue_centric_current_issue_project_state as ic_state  # noqa: PLC0415
+        from issue_centric_github import IssueCentricGitHubError  # noqa: PLC0415
+        from issue_centric_execution import _normalize_project_sync_result  # noqa: PLC0415
+        # issue_create with item failure
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            draft = self._make_issue_create_draft()
+            writer = self._make_log_writer(root)
+            project_url = "https://github.com/users/x/projects/1"
+            resolved_project = self._fake_resolved_project(project_url=project_url)
+
+            create_result = ic_create.execute_issue_create_draft(
+                draft,
+                action_label="issue_create",
+                close_current_issue=False,
+                create_followup_issue=False,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=root,
+                source_decision_log="d.json",
+                source_metadata_log="m.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_creator=lambda repo, title, body, token: self._fake_created_issue(71),
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_creator=lambda *a, **kw: (_ for _ in ()).throw(
+                    IssueCentricGitHubError("item create failed")
+                ),
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+        # lifecycle with setter failure
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self._make_prepared(root, 20)
+            writer = self._make_log_writer(root)
+            lifecycle_result = ic_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={
+                    "last_issue_centric_target_issue": "https://github.com/example/repo/issues/20",
+                },
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": project_url,
+                    "github_project_state_field_name": "State",
+                    "github_project_in_progress_state": "in_progress",
+                },
+                repo_path=root,
+                source_decision_log="d.json",
+                source_metadata_log="m.json",
+                source_action_execution_log="a.json",
+                log_writer=writer,
+                repo_relative=self._repo_relative(root),
+                issue_fetcher=lambda repo, number, token: self._fake_issue_snapshot(20),
+                project_state_resolver=lambda url, field, value, token: resolved_project,
+                project_item_resolver=lambda proj_id, node_id, token: self._fake_resolved_project_item(),
+                project_state_setter=lambda *a, **kw: (_ for _ in ()).throw(
+                    IssueCentricGitHubError("state setter failed")
+                ),
+                env={"GITHUB_TOKEN": "fake-token"},
+            )
+        # Both must normalize to project_state_sync_failed
+        mapped_create = ic_create._map_project_mutation_result_to_sync_status(
+            create_result.project_sync_status
+        )
+        mapped_lifecycle = _normalize_project_sync_result(lifecycle_result)["project_sync_status"]
+        self.assertEqual(mapped_create, "project_state_sync_failed")
+        self.assertEqual(mapped_lifecycle, "project_state_sync_failed")
+
+    def test_issue_create_signal_handles_all_standard_vocab(self):
+        """issue_create_project_sync_signal maps all Phase 53 vocabulary correctly."""
+        import issue_centric_issue_create as ic_create  # noqa: PLC0415
+        self.assertEqual(ic_create.issue_create_project_sync_signal("project_state_synced"), "synced")
+        self.assertEqual(ic_create.issue_create_project_sync_signal("not_requested_no_project"), "skipped_no_project")
+        self.assertEqual(ic_create.issue_create_project_sync_signal("issue_only_fallback"), "skipped_no_project")
+        self.assertEqual(ic_create.issue_create_project_sync_signal("not_requested"), "skipped_no_project")
+        self.assertEqual(ic_create.issue_create_project_sync_signal("project_state_sync_failed"), "sync_failed")
+        self.assertEqual(ic_create.issue_create_project_sync_signal("issue_created_project_item_failed"), "sync_failed")
+
+
 if __name__ == "__main__":
     unittest.main()

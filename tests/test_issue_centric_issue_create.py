@@ -170,7 +170,7 @@ class IssueCreateExecutionTests(unittest.TestCase):
 
             self.assertEqual(result.status, "completed")
             self.assertEqual(result.created_issue.number, 51)
-            self.assertEqual(result.project_sync_status, "issue_only_fallback")
+            self.assertEqual(result.project_sync_status, "not_requested_no_project")
             self.assertEqual(created_calls[0], ("example/repo", "Ready: title", "Body paragraph.\n", "token-123"))
             self.assertTrue(result.execution_log_path.exists())
             execution = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
@@ -988,7 +988,7 @@ class IssueCreateProjectSyncSignalTests(unittest.TestCase):
                 env={"GITHUB_TOKEN": "token-x"},
             )
 
-        self.assertEqual(result.project_sync_status, "issue_only_fallback")
+        self.assertEqual(result.project_sync_status, "not_requested_no_project")
         self.assertIn("[project_sync: signal=skipped_no_project]", result.safe_stop_reason)
 
     def test_safe_stop_reason_contains_sync_failed_when_project_item_create_fails(self) -> None:
