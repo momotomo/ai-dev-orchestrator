@@ -1072,32 +1072,32 @@ class ProviderStubTests(unittest.TestCase):
             self.stub.run([])
         self.assertIn("(none)", buf.getvalue())
 
-    def test_wrapper_integration_stub_produces_report(self) -> None:
-        """End-to-end: wrapper + stub produce a bridge report via --report-file + --exec.
+    def test_wrapper_integration_stub_rejected_in_report_file_mode(self) -> None:
+        """End-to-end: wrapper + stub in --report-file mode is rejected by stub safety guard.
 
-        This is the key疎通 test: wrapper calls stub via --exec, stub returns
-        non-empty stdout, wrapper writes bridge report with BRIDGE_SUMMARY block.
+        Since github_copilot_provider_stub.py is疎通確認専用で実 AI 応答を返さない,
+        the wrapper must NOT write a success bridge report.  This prevents the stub
+        from being mistaken for a real AI execution (completed / live_ready: confirmed).
         """
         import tempfile, io as _io
         import github_copilot_wrapper
         stub_path = str(
             Path(__file__).parent.parent / "scripts" / "github_copilot_provider_stub.py"
         )
+        captured_stderr = _io.StringIO()
         with tempfile.TemporaryDirectory() as tmpdir:
             report_path = Path(tmpdir) / "codex_report.md"
             with patch("sys.stdin", _io.StringIO("test prompt content")):
-                rc = github_copilot_wrapper.run([
-                    "--model", "sonnet-4.6",
-                    "--exec", stub_path,
-                    "--report-file", str(report_path),
-                ])
-            # Assertions must be inside the tmpdir context.
-            self.assertEqual(rc, 0)
-            self.assertTrue(report_path.exists(), "report file should have been written")
-            report_text = report_path.read_text(encoding="utf-8")
-            self.assertIn("===BRIDGE_SUMMARY===", report_text)
-            self.assertIn("===END_BRIDGE_SUMMARY===", report_text)
-            self.assertIn("github_copilot_provider_stub", report_text)
+                with patch("sys.stderr", captured_stderr):
+                    rc = github_copilot_wrapper.run([
+                        "--model", "sonnet-4.6",
+                        "--exec", stub_path,
+                        "--report-file", str(report_path),
+                    ])
+            # Stub guard: must fail (non-zero) and not write any report.
+            self.assertNotEqual(rc, 0, "stub must not exit 0 in --report-file mode")
+            self.assertFalse(report_path.exists(), "stub must not produce a bridge report")
+        self.assertIn("STUB DETECTED", captured_stderr.getvalue())
 
 
 if __name__ == "__main__":
