@@ -205,6 +205,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_project_sync_alert_delivery_attempted_at": "",
     "last_project_sync_alert_delivery_error": "",
     "last_project_sync_alert_delivery_url": "",
+    "last_project_sync_alert_delivery_attempt_count": 0,
     "pause": False,
     "error": False,
     "error_message": "",
@@ -846,18 +847,20 @@ def format_project_sync_alert_status(state: Mapping[str, Any]) -> str:
 def format_project_sync_alert_delivery_status(state: Mapping[str, Any]) -> str:
     """Return a short delivery status string for doctor / summary display.
 
-    Returns e.g. 'delivered hash=...' / 'delivery_failed error=...' / 'not_requested_no_webhook' / 'none'.
+    Returns e.g. 'delivered hash=... attempts=1' / 'delivery_failed attempts=3 error=...' / 'none'.
     """
     delivery_status = str(state.get("last_project_sync_alert_delivery_status", "")).strip()
     delivery_hash = str(state.get("last_project_sync_alert_delivery_hash", "")).strip()
     delivery_error = str(state.get("last_project_sync_alert_delivery_error", "")).strip()
+    attempt_count = state.get("last_project_sync_alert_delivery_attempt_count", 0)
+    attempts_suffix = f" attempts={attempt_count}" if attempt_count else ""
     if not delivery_status:
         return "none"
     if delivery_status == "delivered" and delivery_hash:
-        return f"delivered hash={delivery_hash[:12]}"
+        return f"delivered hash={delivery_hash[:12]}{attempts_suffix}"
     if delivery_status == "delivery_failed":
         error_summary = delivery_error[:80] if delivery_error else "unknown"
-        return f"delivery_failed error={error_summary}"
+        return f"delivery_failed{attempts_suffix} error={error_summary}"
     if delivery_status == "not_requested_no_webhook":
         return "not_requested_no_webhook"
     if delivery_status == "skipped_already_delivered" and delivery_hash:
@@ -866,15 +869,21 @@ def format_project_sync_alert_delivery_status(state: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# project_state_sync_failed — generic webhook delivery (Phase 59)
+# project_state_sync_failed — generic webhook delivery (Phase 59 / 60)
 # ---------------------------------------------------------------------------
 
 #: delivery success return codes (HTTP 2xx).
 _WEBHOOK_SUCCESS_CODES = frozenset(range(200, 300))
 
-#: HTTP request timeout for webhook delivery (seconds).  Kept short so that a
-#: slow or unreachable webhook endpoint never blocks the normal operator flow.
+#: HTTP request timeout for webhook delivery (seconds).
 _WEBHOOK_TIMEOUT_SECONDS = 10
+
+#: Maximum number of delivery attempts (initial attempt + retries).
+_WEBHOOK_MAX_ATTEMPTS = 3
+
+#: Delay (seconds) between consecutive delivery attempts.
+#: Element i is the wait before attempt i+2 (i.e., before the 2nd and 3rd attempts).
+_WEBHOOK_RETRY_DELAYS_SECONDS: tuple[int, ...] = (1, 3)
 
 
 def _deliver_project_sync_alert_to_webhook(
@@ -913,6 +922,43 @@ def _deliver_project_sync_alert_to_webhook(
         return ("delivery_failed", str(exc)[:200])
 
 
+def _deliver_project_sync_alert_with_retry(
+    payload: dict[str, Any],
+    webhook_url: str,
+    *,
+    max_attempts: int = _WEBHOOK_MAX_ATTEMPTS,
+    retry_delays: tuple[int, ...] = _WEBHOOK_RETRY_DELAYS_SECONDS,
+    timeout: int = _WEBHOOK_TIMEOUT_SECONDS,
+) -> tuple[str, str, int]:
+    """Attempt delivery up to max_attempts times, retrying only on delivery_failed.
+
+    Returns:
+        (final_status, last_error, attempt_count)
+        final_status: "delivered" | "delivery_failed"
+        last_error: error string from the last failed attempt (empty on success)
+        attempt_count: how many attempts were made (1..max_attempts)
+
+    Retry logic:
+    - Only retries when the previous attempt returned "delivery_failed".
+    - Waits retry_delays[i] seconds before attempt i+2.
+    - Stops immediately on "delivered" (no more retries needed).
+    - Never raises; all transport errors are absorbed.
+    """
+    last_error = ""
+    for attempt in range(1, max_attempts + 1):
+        status, error = _deliver_project_sync_alert_to_webhook(
+            payload, webhook_url, timeout=timeout
+        )
+        if status == "delivered":
+            return ("delivered", "", attempt)
+        last_error = error
+        # Sleep before next attempt (if any attempts remain).
+        delay_index = attempt - 1  # delays[0] before attempt 2, delays[1] before attempt 3
+        if attempt < max_attempts and delay_index < len(retry_delays):
+            time.sleep(retry_delays[delay_index])
+    return ("delivery_failed", last_error, max_attempts)
+
+
 def deliver_project_sync_alert_if_pending(
     state: Mapping[str, Any],
     config: Mapping[str, Any] | None = None,
@@ -922,16 +968,21 @@ def deliver_project_sync_alert_if_pending(
     Deduplication: if last_project_sync_alert_delivery_hash equals the current
     last_project_sync_alert_hash, delivery is skipped (already delivered).
 
+    Retry policy (bounded):
+        Up to _WEBHOOK_MAX_ATTEMPTS attempts total.
+        Only retries on delivery_failed (network / HTTP error).
+        Does NOT retry: none / not_requested_no_webhook / skipped_already_delivered / invalid_payload.
+
     Returns:
         "none"                      — no pending alert (last_project_sync_alert_status != "pending")
         "not_requested_no_webhook"  — alert pending but webhook URL not configured
-        "delivered"                 — payload posted successfully (HTTP 2xx)
-        "delivery_failed"           — HTTP error / network error (NOT a hard runtime error)
+        "delivered"                 — payload posted successfully (HTTP 2xx, any attempt)
+        "delivery_failed"           — all attempts failed (NOT a hard runtime error)
         "skipped_already_delivered" — same alert hash was already delivered
         "invalid_payload"           — payload file missing or not valid JSON
 
     Side effects when returning "delivered" or "delivery_failed":
-        - Calls update_state() to persist delivery status, hash, timestamp, error.
+        - Calls update_state() to persist delivery status, hash, timestamp, error, attempt_count.
         - delivery failure does NOT set state["error"] = True.
 
     Design constraint:
@@ -965,7 +1016,9 @@ def deliver_project_sync_alert_if_pending(
     if not isinstance(payload, dict):
         return "invalid_payload"
 
-    delivery_status, error_detail = _deliver_project_sync_alert_to_webhook(payload, webhook_url)
+    delivery_status, error_detail, attempt_count = _deliver_project_sync_alert_with_retry(
+        payload, webhook_url
+    )
     attempted_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     update_state(
         last_project_sync_alert_delivery_status=delivery_status,
@@ -973,6 +1026,7 @@ def deliver_project_sync_alert_if_pending(
         last_project_sync_alert_delivery_attempted_at=attempted_at,
         last_project_sync_alert_delivery_error=error_detail,
         last_project_sync_alert_delivery_url=webhook_url,
+        last_project_sync_alert_delivery_attempt_count=attempt_count,
     )
     return delivery_status
 

@@ -499,6 +499,7 @@ alert を一意に検出・記録・再送可能にする signal / payload / log
 ### D8. project_state_sync_failed — generic webhook delivery (Phase 59)
 
 Phase 58 で記録した alert payload を generic webhook (JSON POST) で送信する 1-transport delivery を実装した。
+Phase 60 でこれを bounded multi-retry に拡張した（D9 参照）。
 
 **追加した helpers (`_bridge_common.py`)**:
 
@@ -506,11 +507,11 @@ Phase 58 で記録した alert payload を generic webhook (JSON POST) で送信
 |---|---|
 | `_WEBHOOK_SUCCESS_CODES` | HTTP 2xx range (frozenset) |
 | `_WEBHOOK_TIMEOUT_SECONDS` | HTTP タイムアウト (10 秒) |
-| `_deliver_project_sync_alert_to_webhook(payload, url)` | JSON POST 低レベル transport。tuple を返す |
-| `deliver_project_sync_alert_if_pending(state, config)` | 高レベル delivery gate (dedupe / guard 込み) |
-| `format_project_sync_alert_delivery_status(state)` | doctor 表示用 "delivered hash=..." / "delivery_failed error=..." / "none" |
+| `_deliver_project_sync_alert_to_webhook(payload, url)` | JSON POST 低レベル transport (1 attempt)。tuple を返す |
+| `deliver_project_sync_alert_if_pending(state, config)` | 高レベル delivery gate (dedupe / guard / retry 込み) |
+| `format_project_sync_alert_delivery_status(state)` | doctor 表示用 "delivered hash=... attempts=N" / "delivery_failed attempts=N error=..." / "none" |
 
-**DEFAULT_STATE 追加キー**:
+**DEFAULT_STATE 追加キー (Phase 59)**:
 - `last_project_sync_alert_delivery_status` — "delivered" / "delivery_failed" / "not_requested_no_webhook" / "skipped_already_delivered" / "invalid_payload" / ""
 - `last_project_sync_alert_delivery_hash` — 成功時に保存する alert hash (dedupe キー)
 - `last_project_sync_alert_delivery_attempted_at` — 最後の試行 UTC タイムスタンプ
@@ -524,8 +525,8 @@ Phase 58 で記録した alert payload を generic webhook (JSON POST) で送信
 - `"none"` — pending alert なし
 - `"not_requested_no_webhook"` — webhook URL 未設定
 - `"skipped_already_delivered"` — 同一 hash を既に deliver 済み
-- `"delivered"` — HTTP 2xx 成功
-- `"delivery_failed"` — HTTP エラー / ネットワークエラー (hard error にならない)
+- `"delivered"` — HTTP 2xx 成功 (任意の attempt で成功)
+- `"delivery_failed"` — 全 attempt 失敗 (hard error にならない)
 - `"invalid_payload"` — payload ファイル未存在 / JSON 無効
 
 **design constraints**:
@@ -553,6 +554,54 @@ Phase 58 で記録した alert payload を generic webhook (JSON POST) で送信
 - doctor output includes delivery line ✓
 - Phase 58 regression: record_project_sync_alert_if_new still works ✓
 - double-delivery prevention ✓
+
+### D9. project_state_sync_failed — bounded multi-retry for webhook delivery (Phase 60)
+
+Phase 59 の 1-attempt delivery を **最大 3 attempts の bounded retry** に拡張した。
+
+**追加した helpers / constants (`_bridge_common.py`)**:
+
+| helper / 定数 | 役割 |
+|---|---|
+| `_WEBHOOK_MAX_ATTEMPTS = 3` | 最大試行回数 (初回 + retry 2 回) |
+| `_WEBHOOK_RETRY_DELAYS_SECONDS = (1, 3)` | attempt 間の固定待機秒数 |
+| `_deliver_project_sync_alert_with_retry(payload, url, ...)` | retry policy を回す中間層 (1~3 attempt, tuple を返す) |
+
+**retry 設計**:
+- `_deliver_project_sync_alert_to_webhook` (1 attempt) は変更なし
+- `_deliver_project_sync_alert_with_retry` が retry loop を担う
+- `deliver_project_sync_alert_if_pending` が gate + dedupe + state 更新を担う
+- retry 対象: `delivery_failed` のみ
+- retry しない: `none` / `not_requested_no_webhook` / `skipped_already_delivered` / `invalid_payload`
+- 遅延: 1 秒 → 3 秒 (固定。exponential backoff / jitter なし)
+- 無限 retry 禁止。1 run 内で完結
+
+**state 追加キー (Phase 60)**:
+- `last_project_sync_alert_delivery_attempt_count` (int, default 0) — 今回の run で何回試みたか
+
+**return value vocabulary**:
+- 変更なし。`delivered` / `delivery_failed` で最終結果を表す (retry したことは attempt_count で追える)
+
+**doctor 表示更新**:
+- `format_project_sync_alert_delivery_status` に `attempts=N` suffix を追加
+  - 例: `delivered hash=abc123xyz789 attempts=1`
+  - 例: `delivery_failed attempts=3 error=URLError: ...`
+
+**coverage 確認 (ProjectSyncAlertBoundedRetryTests)**:
+- 1 回目成功 → "delivered" attempts=1 ✓
+- 1 回目失敗 / 2 回目成功 → "delivered" attempts=2 ✓
+- 1・2 回目失敗 / 3 回目成功 → "delivered" attempts=3 ✓
+- 3 回とも失敗 → "delivery_failed" attempts=3 ✓
+- max_attempts を超えてトランスポートを呼ばない ✓
+- sleep 回数 / 秒数が仕様どおり ✓
+- 最終 attempt 後に不要な sleep を呼ばない ✓
+- attempt_count が state に保存される ✓
+- not_requested_no_webhook / invalid_payload / skipped_already_delivered は retry しない ✓
+- format_status に attempts= suffix ✓
+- all-attempts-failed でも例外なし (hard error にならない) ✓
+- DEFAULT_STATE に attempt_count key ✓
+- Phase 59 dedupe 回帰なし ✓
+- integration: HTTP 200 → delivered attempts=1 ✓
 
 ### E. Operator-facing surface
 
@@ -615,6 +664,7 @@ Phase 58 で記録した alert payload を generic webhook (JSON POST) で送信
   - Phase 57: project_state_sync_failed warning を残り operator-facing surface へ伝播 (`bridge_orchestrator` completed path に `format_operator_stop_note` 使用、`start_bridge.print_doctor` に `project_sync_warning:` 行追加、`entry_guidance` completed path に `bridge_project_sync_warning_suffix` 追加、`ProjectSyncWarningSurfaceAlignmentTests` 22 tests 追加)
   - Phase 58: project_state_sync_failed alert signal / payload / dedupe (`_ProjectSyncAlertCandidate` dataclass / `_detect_project_sync_alert_candidate` / `_build_project_sync_alert_candidate` / `_build_project_sync_alert_payload` / `record_project_sync_alert_if_new` / `format_project_sync_alert_status` helper 追加、DEFAULT_STATE に `last_project_sync_alert_status` / `_hash` / `_file` 追加、`start_bridge.print_doctor` に `project_sync_alert:` 行追加、`run_until_stop.finish` で alert 自動記録、`ProjectSyncAlertSignalPayloadTests` 35 tests 追加)
   - Phase 59: project_state_sync_failed generic webhook delivery (`_deliver_project_sync_alert_to_webhook` / `deliver_project_sync_alert_if_pending` / `format_project_sync_alert_delivery_status` helper 追加、DEFAULT_STATE に 5 delivery keys 追加、DEFAULT_PROJECT_CONFIG に `project_sync_alert_webhook_url` 追加、`start_bridge.print_doctor` に `project_sync_alert_delivery:` 行追加、`run_until_stop.finish` で delivery 試行、`bridge/project_config.example.json` に webhook URL key 追加、`ProjectSyncAlertWebhookDeliveryTests` tests 追加)
+  - Phase 60: project_state_sync_failed webhook delivery を bounded multi-retry に拡張 (`_WEBHOOK_MAX_ATTEMPTS=3` / `_WEBHOOK_RETRY_DELAYS_SECONDS=(1,3)` 追加、`_deliver_project_sync_alert_with_retry` retry layer 追加、`deliver_project_sync_alert_if_pending` を retry 経由に更新、DEFAULT_STATE に `last_project_sync_alert_delivery_attempt_count` 追加、`format_project_sync_alert_delivery_status` に `attempts=N` suffix 追加、`bridge/project_config.example.json` notes 更新、`ProjectSyncAlertBoundedRetryTests` tests 追加)
 - [ ] 大規模 state machine rewrite / full contract cutover
 - [ ] Safari automation 以外のフロントエンド対応 (API / CLI 直結等)
 - [ ] issue close / project sync の自動化精度向上
