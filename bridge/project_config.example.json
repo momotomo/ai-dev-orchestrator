@@ -32,6 +32,14 @@
       "agent_model": "gpt-4o-mini",
       "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_real.py"
     },
+    "example_config_copilot_cli": {
+      "_note": "実運用用 — copilot CLI 直呼び。PATH に 'copilot' コマンドが必要。wrapper 不要。",
+      "execution_agent": "github_copilot",
+      "agent_model": "claude-sonnet-4.6",
+      "github_copilot_bin": "copilot",
+      "github_copilot_autopilot": false,
+      "github_copilot_reasoning_effort": "high"
+    },
     "model_aware_provider": "wrapper が --exec オプションを受け取った場合、その provider に --model を転送します。例: github_copilot_wrapper.py --exec /usr/local/bin/my-provider",
     "note": "_notes_* キーは project_config_warnings には影響しません。このフィールドはドキュメント目的のみです。"
   },

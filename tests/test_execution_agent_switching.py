@@ -981,6 +981,185 @@ class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# copilot CLI new syntax tests (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+class CopilotCliNewSyntaxTests(unittest.TestCase):
+    """'copilot' bin 新構文 (copilot -p <prompt> -s --allow-all-tools) のテスト群。"""
+
+    def _minimal_config(self) -> dict[str, object]:
+        return {
+            "execution_agent": "github_copilot",
+            "agent_model": "claude-sonnet-4.6",
+            "github_copilot_bin": "copilot",
+            "codex_timeout_seconds": 60,
+            "worker_repo_path": "/tmp",
+            "bridge_runtime_root": ".",
+        }
+
+    def _make_args(
+        self,
+        config_overrides: dict | None = None,
+        argv_extra: list[str] | None = None,
+    ):
+        config = {**self._minimal_config(), **(config_overrides or {})}
+        argv = ["--prompt-file", "/tmp/p.md", "--report-file", "/tmp/r.md"] + (argv_extra or [])
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            return launch_github_copilot.parse_args(argv, config)
+
+    # ------------------------------------------------------------------
+    # build_github_copilot_command: copilot bin structure
+    # ------------------------------------------------------------------
+
+    def test_build_command_copilot_bin_starts_with_copilot(self) -> None:
+        """'copilot' bin のコマンドは 'copilot' で始まる必要がある。"""
+        args = self._make_args()
+        cmd = launch_github_copilot.build_github_copilot_command(args, "test prompt")
+        self.assertEqual(cmd[0], "copilot")
+
+    def test_build_command_copilot_bin_includes_model(self) -> None:
+        """'copilot' bin では --model が転送される。"""
+        args = self._make_args({"agent_model": "claude-sonnet-4.6"})
+        cmd = launch_github_copilot.build_github_copilot_command(args, "test prompt")
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "claude-sonnet-4.6")
+
+    def test_build_command_copilot_bin_prompt_via_p_flag(self) -> None:
+        """'copilot' bin ではプロンプトが -p フラグ経由で渡される。"""
+        args = self._make_args()
+        prompt = "Do something important."
+        cmd = launch_github_copilot.build_github_copilot_command(args, prompt)
+        self.assertIn("-p", cmd)
+        self.assertEqual(cmd[cmd.index("-p") + 1], prompt)
+
+    def test_build_command_copilot_bin_has_s_flag(self) -> None:
+        """'copilot' bin には非インタラクティブ用 -s フラグが含まれる。"""
+        args = self._make_args()
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertIn("-s", cmd)
+
+    def test_build_command_copilot_bin_has_allow_all_tools(self) -> None:
+        """'copilot' bin には --allow-all-tools フラグが含まれる。"""
+        args = self._make_args()
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertIn("--allow-all-tools", cmd)
+
+    def test_build_command_copilot_bin_with_reasoning_effort_high(self) -> None:
+        """github_copilot_reasoning_effort=high → --reasoning-effort high がコマンドに含まれる。"""
+        args = self._make_args({"github_copilot_reasoning_effort": "high"})
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertIn("--reasoning-effort", cmd)
+        self.assertEqual(cmd[cmd.index("--reasoning-effort") + 1], "high")
+
+    def test_build_command_copilot_bin_with_reasoning_effort_low(self) -> None:
+        """github_copilot_reasoning_effort=low → --reasoning-effort low がコマンドに含まれる。"""
+        args = self._make_args({"github_copilot_reasoning_effort": "low"})
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertIn("--reasoning-effort", cmd)
+        self.assertEqual(cmd[cmd.index("--reasoning-effort") + 1], "low")
+
+    def test_build_command_copilot_bin_no_reasoning_effort_when_empty(self) -> None:
+        """github_copilot_reasoning_effort が空のとき --reasoning-effort はコマンドに含まれない。"""
+        args = self._make_args({"github_copilot_reasoning_effort": ""})
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertNotIn("--reasoning-effort", cmd)
+
+    def test_build_command_copilot_bin_with_autopilot_true(self) -> None:
+        """github_copilot_autopilot=True → --autopilot がコマンドに含まれる。"""
+        args = self._make_args({"github_copilot_autopilot": True})
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertIn("--autopilot", cmd)
+
+    def test_build_command_copilot_bin_no_autopilot_when_false(self) -> None:
+        """github_copilot_autopilot=False のとき --autopilot はコマンドに含まれない。"""
+        args = self._make_args({"github_copilot_autopilot": False})
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertNotIn("--autopilot", cmd)
+
+    def test_build_command_copilot_bin_does_not_include_report_file(self) -> None:
+        """'copilot' bin のコマンドには --report-file が含まれない (copilot CLI の概念でない)。"""
+        args = self._make_args()
+        cmd = launch_github_copilot.build_github_copilot_command(args, "prompt")
+        self.assertNotIn("--report-file", cmd)
+
+    # ------------------------------------------------------------------
+    # validate_github_copilot_args
+    # ------------------------------------------------------------------
+
+    def test_validate_invalid_reasoning_effort_raises(self) -> None:
+        """不正な reasoning_effort 値 → BridgeError が発生する。"""
+        args = self._make_args({"github_copilot_reasoning_effort": "extreme"})
+        with self.assertRaises(BridgeError) as ctx:
+            launch_github_copilot.validate_github_copilot_args(args)
+        self.assertIn("extreme", str(ctx.exception))
+
+    def test_validate_valid_reasoning_efforts_do_not_raise(self) -> None:
+        """有効な reasoning_effort 値 (low/medium/high) はエラーにならない。"""
+        for effort in ("low", "medium", "high"):
+            with self.subTest(effort=effort):
+                args = self._make_args({"github_copilot_reasoning_effort": effort})
+                launch_github_copilot.validate_github_copilot_args(args)  # must not raise
+
+    def test_validate_empty_reasoning_effort_passes(self) -> None:
+        """空の reasoning_effort はバリデーションを通過する。"""
+        args = self._make_args({"github_copilot_reasoning_effort": ""})
+        launch_github_copilot.validate_github_copilot_args(args)  # must not raise
+
+    def test_validate_unset_reasoning_effort_passes(self) -> None:
+        """github_copilot_reasoning_effort が config にない場合もバリデーション通過。"""
+        config = self._minimal_config()
+        config.pop("github_copilot_reasoning_effort", None)
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
+                ["--prompt-file", "/tmp/p.md", "--report-file", "/tmp/r.md"], config
+            )
+        launch_github_copilot.validate_github_copilot_args(args)  # must not raise
+
+    # ------------------------------------------------------------------
+    # parse_args: 新 config キーの伝播
+    # ------------------------------------------------------------------
+
+    def test_parse_args_reads_autopilot_true_from_config(self) -> None:
+        """github_copilot_autopilot: true が config にある → args.autopilot が True になる。"""
+        args = self._make_args({"github_copilot_autopilot": True})
+        self.assertTrue(args.autopilot)
+
+    def test_parse_args_reads_autopilot_false_from_config(self) -> None:
+        """github_copilot_autopilot: false (デフォルト) → args.autopilot が False になる。"""
+        args = self._make_args({"github_copilot_autopilot": False})
+        self.assertFalse(args.autopilot)
+
+    def test_parse_args_reads_reasoning_effort_from_config(self) -> None:
+        """github_copilot_reasoning_effort が config にある → args.reasoning_effort に反映される。"""
+        args = self._make_args({"github_copilot_reasoning_effort": "high"})
+        self.assertEqual(args.reasoning_effort, "high")
+
+    def test_parse_args_reasoning_effort_defaults_to_empty(self) -> None:
+        """github_copilot_reasoning_effort が config にないとき args.reasoning_effort は ''。"""
+        config = self._minimal_config()
+        config.pop("github_copilot_reasoning_effort", None)
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
+                ["--prompt-file", "/tmp/p.md", "--report-file", "/tmp/r.md"], config
+            )
+        self.assertEqual(args.reasoning_effort, "")
+
+    def test_parse_args_autopilot_override_via_argv(self) -> None:
+        """argv に --autopilot を渡すと config が False でも args.autopilot が True になる。"""
+        args = self._make_args({"github_copilot_autopilot": False}, ["--autopilot"])
+        self.assertTrue(args.autopilot)
+
+    def test_parse_args_reasoning_effort_override_via_argv(self) -> None:
+        """argv の --reasoning-effort は config の値を上書きする。"""
+        args = self._make_args(
+            {"github_copilot_reasoning_effort": "low"},
+            ["--reasoning-effort", "medium"],
+        )
+        self.assertEqual(args.reasoning_effort, "medium")
+
+
+# ---------------------------------------------------------------------------
 # github_copilot_provider_stub unit tests
 # ---------------------------------------------------------------------------
 

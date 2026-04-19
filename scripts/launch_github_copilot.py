@@ -51,7 +51,9 @@ from _bridge_common import (
     write_text,
 )
 
-DEFAULT_GITHUB_COPILOT_BIN = "gh"
+DEFAULT_GITHUB_COPILOT_BIN = "copilot"
+COPILOT_CLI_BIN = "copilot"
+REASONING_EFFORT_ALLOWED = frozenset({"low", "medium", "high"})
 DEFAULT_TIMEOUT_SECONDS = 7200
 PROGRESS_POLL_SECONDS = 1.0
 
@@ -104,6 +106,19 @@ def parse_args(
         help="実行結果 report 出力先",
     )
     parser.add_argument(
+        "--autopilot",
+        action="store_true",
+        default=bool(project_config.get("github_copilot_autopilot", False)),
+        help="--autopilot を copilot CLI に付与する (github_copilot_autopilot から設定)",
+    )
+    _reasoning_effort = str(project_config.get("github_copilot_reasoning_effort", "")).strip()
+    parser.add_argument(
+        "--reasoning-effort",
+        default=_reasoning_effort,
+        metavar="EFFORT",
+        help="reasoning effort (low/medium/high)。空または未設定なら付与しない (github_copilot_reasoning_effort から設定)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="GitHub Copilot は起動せず、実行内容だけ確認する",
@@ -111,41 +126,62 @@ def parse_args(
     return parser.parse_args(argv)
 
 
-def build_github_copilot_command(args: argparse.Namespace) -> list[str]:
+def build_github_copilot_command(args: argparse.Namespace, prompt_text: str = "") -> list[str]:
     """Build the subprocess command for GitHub Copilot.
 
-    Default: ``gh copilot suggest --target=shell -``
-    The trailing ``-`` tells ``gh copilot suggest`` to read from stdin.
+    ``copilot`` bin (new default):
+        ``copilot [--model M] [--reasoning-effort R] [--autopilot] -p <prompt> -s --allow-all-tools``
+        Prompt is passed via ``-p``; stdin is not used.
 
-    Model handling:
-    - For the default ``gh`` bin: ``gh copilot suggest`` does not yet expose a stable
-      ``--model`` flag, so the model stored in ``args.model`` is *not* appended to the
-      command.  Set ``github_copilot_bin`` to a custom wrapper script if you need to
-      forward the model value to a non-default CLI.
-    - For a custom wrapper bin: ``--model <value>`` is appended when ``args.model`` is
-      non-empty, so wrapper scripts receive the active agent_model value.
+    ``gh`` bin (legacy):
+        ``gh copilot suggest --target=shell -``
+        Prompt is passed via stdin (backward compat).
 
-    Operators can replace ``github_copilot_bin`` with a wrapper script that
-    accepts the same stdin contract and produces ``codex_report.md``.
+    Custom wrapper bin (e.g. ``github_copilot_wrapper.py --exec provider``):
+        ``<bin> [--model M] [--report-file R]``
+        Prompt is passed via stdin.
     """
     bin_path = args.github_copilot_bin.strip()
     model = str(getattr(args, "model", "")).strip()
     report_file = str(getattr(args, "report_file", "")).strip()
+    reasoning_effort = str(getattr(args, "reasoning_effort", "") or "").strip()
+    autopilot = bool(getattr(args, "autopilot", False))
+
+    if bin_path == COPILOT_CLI_BIN:
+        # New copilot CLI direct invocation: prompt via -p, non-interactive.
+        cmd = [COPILOT_CLI_BIN]
+        if model:
+            cmd.extend(["--model", model])
+        if reasoning_effort:
+            cmd.extend(["--reasoning-effort", reasoning_effort])
+        if autopilot:
+            cmd.append("--autopilot")
+        cmd.extend(["-p", prompt_text])
+        cmd.extend(["-s", "--allow-all-tools"])
+        return cmd
+
     if bin_path == "gh":
-        # Use the gh CLI Copilot extension in shell-suggestion mode.
-        # Prompt is piped via stdin.
-        # Note: model is not forwarded here because gh copilot suggest has no stable
-        # --model flag yet.  Use a custom wrapper to forward the model when needed.
+        # Legacy gh copilot suggest path: prompt via stdin.
         return ["gh", "copilot", "suggest", "--target=shell", "-"]
-    # Custom wrapper: call it with --model / --report-file when set; prompt via stdin.
-    # github_copilot_bin may contain inline args (e.g. "wrapper.py --exec /provider").
-    # Use shlex.split so those args are forwarded correctly to the wrapper.
+
+    # Custom wrapper (e.g. github_copilot_wrapper.py --exec /path/to/provider).
+    # github_copilot_bin may contain inline args — use shlex.split to separate them.
     cmd = shlex.split(bin_path)
     if model:
         cmd.extend(["--model", model])
     if report_file:
         cmd.extend(["--report-file", report_file])
     return cmd
+
+
+def validate_github_copilot_args(args: argparse.Namespace) -> None:
+    """Validate GitHub Copilot 起動引数。不正値の場合 ``BridgeError`` を送出する。"""
+    reasoning_effort = str(getattr(args, "reasoning_effort", "") or "").strip()
+    if reasoning_effort and reasoning_effort not in REASONING_EFFORT_ALLOWED:
+        raise BridgeError(
+            f"github_copilot_reasoning_effort の値が不正です: '{reasoning_effort}'. "
+            f"許可値: {sorted(REASONING_EFFORT_ALLOWED)}"
+        )
 
 
 def mark_launch_failure(state: dict[str, object], message: str) -> None:
@@ -178,6 +214,7 @@ def mark_launch_done(state: dict[str, object], prompt_path: Path) -> None:
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     project_config = load_project_config()
     args = parse_args(argv, project_config)
+    validate_github_copilot_args(args)
     print_project_config_warnings(project_config)
 
     prompt_path = Path(args.prompt_file)
@@ -231,7 +268,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
 
     write_text(prompt_log_path, prompt_text)
 
-    command = build_github_copilot_command(args)
+    command = build_github_copilot_command(args, prompt_text=prompt_text)
     if args.dry_run:
         print("dry-run command:", " ".join(command))
         print(f"worker repo path: {worker_path}")
@@ -261,15 +298,16 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             stdout_log_path.open("w", encoding="utf-8") as stdout_handle,
             stderr_log_path.open("w", encoding="utf-8") as stderr_handle,
         ):
+            is_copilot_cli = (args.github_copilot_bin.strip() == COPILOT_CLI_BIN)
             process = subprocess.Popen(
                 command,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL if is_copilot_cli else subprocess.PIPE,
                 stdout=stdout_handle,
                 stderr=stderr_handle,
                 text=True,
                 cwd=worker_path,
             )
-            if process.stdin is not None:
+            if not is_copilot_cli and process.stdin is not None:
                 process.stdin.write(prompt_text)
                 process.stdin.close()
 
