@@ -3154,6 +3154,39 @@ class WaitingPromptReplyFetchTransitionTests(unittest.TestCase):
         }
         self.assertEqual(resolve_next_generation_transition(state), "request_prompt_from_report")
 
+    def test_no_action_continuation_state_routes_to_request_prompt_from_report(self) -> None:
+        """After plain no_action, mode=idle + need_chatgpt_next routes to request_prompt_from_report.
+
+        The no_action continuation fix in _finalize_dispatch sets these fields so
+        the next bridge_orchestrator call proceeds to request_prompt_from_report
+        instead of resolving to 'no_action' (terminal).
+        """
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "idle",
+            "need_chatgpt_next": True,
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_next_request_hint": "continue_on_current_issue",
+            "last_issue_centric_next_request_target": "#15",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "request_prompt_from_report")
+
+    def test_no_action_awaiting_user_without_chatgpt_decision_routes_to_no_action(self) -> None:
+        """awaiting_user + chatgpt_decision=issue_centric:no_action (old unfixed state) → no_action.
+
+        Documents the original stopping condition that the no_action continuation fix resolves:
+        before the fix, mode stayed 'awaiting_user' and chatgpt_decision was 'issue_centric:no_action',
+        which is not in {'human_review', 'need_info'}, so the transition returned 'no_action'.
+        The fix resets mode to 'idle' + need_chatgpt_next=True so this path is no longer taken.
+        """
+        from _bridge_common import resolve_next_generation_transition
+        state: dict[str, object] = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:no_action",
+            "pending_request_hash": "",
+        }
+        self.assertEqual(resolve_next_generation_transition(state), "no_action")
+
 
 class ContractCorrectionHelperTests(unittest.TestCase):
     """Unit-tests for the retryable-contract detection and correction helpers in fetch_next_prompt."""
