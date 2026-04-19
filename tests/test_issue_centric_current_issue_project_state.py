@@ -179,7 +179,8 @@ class CurrentIssueProjectStateSyncTests(unittest.TestCase):
             self.assertEqual(result.sync_status, "project_state_sync_failed")
             self.assertIn("github_project_review_state must not be empty", result.safe_stop_reason)
 
-    def test_missing_project_item_is_recorded_as_blocked(self) -> None:
+    def test_missing_project_item_attach_fails_is_recorded_as_blocked(self) -> None:
+        """resolver fails AND attach also fails → blocked with attach failure in safe_stop_reason."""
         prepared = self.prepared(
             action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
             codex_text="Implement the issue.\n",
@@ -224,12 +225,85 @@ class CurrentIssueProjectStateSyncTests(unittest.TestCase):
                 project_item_resolver=lambda project_id, issue_node_id, token: (_ for _ in ()).throw(
                     issue_centric_github.IssueCentricGitHubError("project item was not found")
                 ),
+                project_item_adder=lambda project_id, issue_node_id, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("project item attach failed")
+                ),
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
             self.assertEqual(result.status, "blocked")
             self.assertEqual(result.sync_status, "project_state_sync_failed")
-            self.assertIn("project item was not found", result.safe_stop_reason)
+            self.assertIn("project item attach failed", result.safe_stop_reason)
+
+    def test_missing_project_item_attach_succeeds_then_state_sync(self) -> None:
+        """resolver fails but attach succeeds → item_id from attach, state sync completes."""
+        prepared = self.prepared(
+            action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+            target_issue="#15",
+            codex_text="Implement the issue.\n",
+        )
+        state_calls: list[tuple] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_current_issue_project_state.execute_current_issue_project_state_sync(
+                prepared,
+                lifecycle_stage="in_progress",
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/15"},
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/7",
+                    "github_project_state_field_name": "Status",
+                    "github_project_in_progress_state": "in_progress",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="logs/codex.json",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Add docs-first foundation note",
+                    repository=repository,
+                    state="open",
+                    node_id="ISSUE_node_15",
+                ),
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_7",
+                    project_url=project_url,
+                    project_title="PromptWeave Tasks",
+                    owner_login="momotomo",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_status_7",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_in_progress_7",
+                    state_option_name=state_option_name,
+                ),
+                # resolver: issue #15 not yet in Project 7 → raises
+                project_item_resolver=lambda project_id, issue_node_id, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError(
+                        "GitHub Project item for the current issue could not be resolved from the configured Project."
+                    )
+                ),
+                # adder: attach succeeds → returns new item
+                project_item_adder=lambda project_id, issue_node_id, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="NEW_ITEM_15",
+                    project_id=project_id,
+                ),
+                project_state_setter=lambda project_id, item_id, field_id, option_id, token: state_calls.append(
+                    (project_id, item_id, field_id, option_id, token)
+                ),
+                env={"GITHUB_TOKEN": "token-xyz"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.sync_status, "project_state_synced")
+            # item_id comes from the attach result
+            self.assertEqual(result.project_item_id, "NEW_ITEM_15")
+            # state setter was called with the attached item_id
+            self.assertEqual(len(state_calls), 1)
+            self.assertEqual(state_calls[0][1], "NEW_ITEM_15")
 
     def test_state_mutation_failure_is_recorded_without_hiding_main_stage(self) -> None:
         prepared = self.prepared(

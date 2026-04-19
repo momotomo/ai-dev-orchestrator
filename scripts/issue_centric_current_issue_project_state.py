@@ -13,6 +13,7 @@ from issue_centric_github import (
     ResolvedGitHubIssue,
     ResolvedGitHubProjectItem,
     ResolvedGitHubProjectState,
+    add_issue_to_github_project,
     fetch_github_issue,
     resolve_github_project_item_for_issue,
     resolve_github_project_state,
@@ -58,6 +59,7 @@ def execute_current_issue_project_state_sync(
     issue_fetcher: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
     project_state_resolver: Callable[[str, str, str, str], ResolvedGitHubProjectState] | None = None,
     project_item_resolver: Callable[[str, str, str], ResolvedGitHubProjectItem] | None = None,
+    project_item_adder: Callable[..., Any] | None = None,
     project_state_setter: Callable[[str, str, str, str, str], None] | None = None,
     env: Mapping[str, str] | None = None,
     now_fn: Callable[[], datetime] | None = None,
@@ -116,6 +118,7 @@ def execute_current_issue_project_state_sync(
                 prior_state=prior_state,
                 project_url=project_url,
                 project_item_resolver=project_item_resolver,
+                project_item_adder=project_item_adder,
                 token=token,
             )
             project_item_id = resolved_project_item.item_id
@@ -248,6 +251,7 @@ def _ensure_project_item_for_issue(
     prior_state: Mapping[str, Any],
     project_url: str,
     project_item_resolver: Callable[[str, str, str], ResolvedGitHubProjectItem] | None,
+    project_item_adder: Callable[..., Any] | None = None,
     token: str,
 ) -> ResolvedGitHubProjectItem:
     """Return a project item for *issue_snapshot*, using the cached item_id when available.
@@ -257,6 +261,12 @@ def _ensure_project_item_for_issue(
     without hitting the GitHub API.
 
     Cache miss: the resolver is called (default: ``resolve_github_project_item_for_issue``).
+    If the resolver raises ``IssueCentricGitHubError`` (issue not yet registered in the
+    Project), the adder is called (default: ``add_issue_to_github_project``) to attach
+    the issue to the Project first, then the attached item_id is used directly.  This
+    handles the case where an existing ready issue has not yet been added to the GitHub
+    Project (e.g. PromptWeave #15 before its first lifecycle sync).
+
     Raises ``IssueCentricGitHubError`` / ``IssueCentricCurrentIssueProjectStateError`` on
     failure — the caller is responsible for mapping those to the appropriate sync_status.
     """
@@ -271,10 +281,28 @@ def _ensure_project_item_for_issue(
             repository=issue_snapshot.repository,
         )
     resolver = project_item_resolver or resolve_github_project_item_for_issue
-    return resolver(
-        project_id=resolved_project.project_id,
-        issue_node_id=issue_snapshot.node_id,
+    try:
+        return resolver(
+            project_id=resolved_project.project_id,
+            issue_node_id=issue_snapshot.node_id,
+            token=token,
+        )
+    except IssueCentricGitHubError:
+        pass  # item not found in the project; try to attach it first
+
+    # Attach fallback: issue is not yet registered in the Project — add it now.
+    adder = project_item_adder or add_issue_to_github_project
+    attached = adder(
+        resolved_project.project_id,
+        issue_snapshot.node_id,
         token=token,
+    )
+    return ResolvedGitHubProjectItem(
+        item_id=attached.item_id,
+        project_id=attached.project_id,
+        issue_node_id=issue_snapshot.node_id,
+        issue_number=issue_snapshot.number,
+        repository=issue_snapshot.repository,
     )
 
 
