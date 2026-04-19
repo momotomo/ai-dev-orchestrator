@@ -13,7 +13,7 @@ import launch_codex_once
 import launch_github_copilot
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_codex_launch import launch_issue_centric_codex_run
@@ -403,6 +403,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if _ic_stop in {"initial_selection_stop", "human_review_needed"}:
         _ic_note = str(state.get("chatgpt_decision_note", "")).strip()
         _stop_note = _ic_note or plan.note
+        print(f"{status.label}です。{_stop_note}")
+    elif plan.next_action == "completed":
+        # Use format_operator_stop_note on the completed path to surface project sync warning.
+        _stop_note = format_operator_stop_note(state, plan=plan)
         print(f"{status.label}です。{_stop_note}")
     else:
         print(f"{status.label}です。{plan.note}")
