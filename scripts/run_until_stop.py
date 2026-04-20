@@ -308,6 +308,29 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _should_passthrough_ic_close(state: dict[str, Any]) -> bool:
+    """Return True when the no_action stop should be bypassed for IC close auto-continuation.
+
+    When issue-centric close just succeeded and no human intervention is required,
+    bridge_orchestrator.run() handles the auto-next-selection internally
+    (via _is_ic_close_completed_for_auto_continuation).  run_until_stop must not
+    stop here; instead it should let bridge_orchestrator run so it can proceed to
+    request_next_prompt with --select-issue.
+
+    Conditions that must ALL hold:
+      - last_issue_centric_close_status is "closed" or "already_closed"
+      - chatgpt_decision is an issue_centric: value (confirms IC context)
+      - detect_ic_stop_path returns "" (no initial_selection_stop / human_review_needed)
+    """
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    if close_status not in {"closed", "already_closed"}:
+        return False
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return False
+    return detect_ic_stop_path(state) == ""
+
+
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
     command = [sys.executable, "scripts/bridge_orchestrator.py"]
     command.extend(["--codex-bin", args.codex_bin])
@@ -1368,21 +1391,27 @@ def run(argv: list[str] | None = None) -> int:
                     history=history,
                 )
             if action == "no_action":
-                history.append(
-                    f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"
-                )
-                reason = "bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。"
-                if is_no_codex_decision_state(before):
-                    reason = no_codex_decision_reason(before)
-                return finish(
-                    args=args,
-                    reason=reason,
-                    steps=steps,
-                    warnings=warnings,
-                    initial_state=initial_state,
-                    final_state=before,
-                    history=history,
-                )
+                # IC close passthrough: when IC close just completed and no human
+                # intervention is required, bridge_orchestrator.run() handles the
+                # auto-next-selection.  Let it run instead of stopping here.
+                if _should_passthrough_ic_close(before):
+                    pass  # fall through to run_command_with_heartbeat
+                else:
+                    history.append(
+                        f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"
+                    )
+                    reason = "bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。"
+                    if is_no_codex_decision_state(before):
+                        reason = no_codex_decision_reason(before)
+                    return finish(
+                        args=args,
+                        reason=reason,
+                        steps=steps,
+                        warnings=warnings,
+                        initial_state=initial_state,
+                        final_state=before,
+                        history=history,
+                    )
 
             if action == "wait_for_codex_report":
                 before_status = present_bridge_status(before)
