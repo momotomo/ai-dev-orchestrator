@@ -33,7 +33,15 @@
       "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_real.py"
     },
     "example_config_copilot_cli": {
-      "_note": "実運用用 — copilot CLI 直呼び。PATH に 'copilot' コマンドが必要。wrapper 不要。",
+      "_note": "推奨: wrapper 経由で copilot CLI を使用。wrapper が bridge report 契約を担保します。PATH に 'copilot' コマンドが必要。",
+      "execution_agent": "github_copilot",
+      "agent_model": "claude-sonnet-4.6",
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py",
+      "github_copilot_autopilot": false,
+      "github_copilot_reasoning_effort": "high"
+    },
+    "example_config_copilot_direct": {
+      "_note": "直接 copilot CLI 呼び出し (後方互換)。stdout extractor が fallback で動作しますが、planning notes のみの場合に bridge report が生成されない可能性があります。",
       "execution_agent": "github_copilot",
       "agent_model": "claude-sonnet-4.6",
       "github_copilot_bin": "copilot",

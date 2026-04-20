@@ -51,6 +51,11 @@ _DEFAULT_GH_COMMAND = ["gh", "copilot", "suggest", "--target=shell", "-"]
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
 BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
 
+# Direct copilot CLI binary name (new-style, non-gh path).
+COPILOT_CLI_BIN = "copilot"
+
+REASONING_EFFORT_ALLOWED = frozenset({"low", "medium", "high"})
+
 # Stub safety guard: identifiers used to detect the stub provider.
 # These prevent the stub from being mistaken for a real AI execution.
 _STUB_PROVIDER_MODULE = "github_copilot_provider_stub.py"
@@ -89,6 +94,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "bridge report の書き込み先パス。"
             "指定時は provider の stdout を bridge 形式 report に変換してここに書き出します。"
             "未指定時は従来どおり stdout/stderr を透過させます。"
+        ),
+    )
+    parser.add_argument(
+        "--autopilot",
+        action="store_true",
+        default=False,
+        help=(
+            "--autopilot を copilot CLI に付与する。"
+            "--report-file + no --exec 経路 (copilot CLI 直接呼び出し) でのみ有効。"
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default="",
+        metavar="EFFORT",
+        help=(
+            "reasoning effort (low/medium/high)。"
+            "--report-file + no --exec 経路 (copilot CLI 直接呼び出し) でのみ有効。"
+            "空または未設定なら付与しない。"
         ),
     )
     return parser.parse_args(argv)
@@ -143,6 +167,25 @@ def build_bridge_report(provider_output: str, *, model: str = "", exec_cmd: str 
     return "\n".join(lines) + "\n"
 
 
+def build_copilot_cli_command(prompt_text: str, args: argparse.Namespace) -> list[str]:
+    """Build the direct copilot CLI command used in --report-file mode without --exec.
+
+    Produces: ``copilot [--model M] [--reasoning-effort R] [--autopilot] -p <prompt> -s --allow-all-tools``
+    """
+    cmd = [COPILOT_CLI_BIN]
+    model = args.model.strip()
+    if model:
+        cmd.extend(["--model", model])
+    reasoning_effort = getattr(args, "reasoning_effort", "").strip()
+    if reasoning_effort:
+        cmd.extend(["--reasoning-effort", reasoning_effort])
+    if getattr(args, "autopilot", False):
+        cmd.append("--autopilot")
+    cmd.extend(["-p", prompt_text])
+    cmd.extend(["-s", "--allow-all-tools"])
+    return cmd
+
+
 def run(argv: list[str] | None = None) -> int:
     """Main entry point. Reads prompt from stdin, runs provider command, returns exit code."""
     args = parse_args(argv)
@@ -157,8 +200,10 @@ def run(argv: list[str] | None = None) -> int:
     env = dict(os.environ)
     if model:
         env["COPILOT_MODEL"] = model
-        if not exec_cmd:
+        if not exec_cmd and not report_file:
             # gh copilot suggest does not support --model; emit a notice to stderr.
+            # (In --report-file mode without --exec, copilot CLI is used directly and
+            # does accept --model, so the notice is suppressed there.)
             print(
                 f"[github_copilot_wrapper] NOTE: --model '{model}' requested but "
                 "gh copilot suggest does not accept --model. "
@@ -170,74 +215,96 @@ def run(argv: list[str] | None = None) -> int:
     prompt = sys.stdin.read()
 
     if report_file:
-        # Report-file mode: capture provider stdout and write as bridge report on success.
-        if not exec_cmd:
-            # gh copilot suggest outputs interactive shell suggestions, not structured text.
-            # It also requires the gh copilot extension to be installed.
-            # Without --exec, we cannot write a meaningful bridge report.
-            print(
-                "[github_copilot_wrapper] ERROR: --report-file requires --exec "
-                "(a model-aware provider binary). "
-                "gh copilot suggest cannot produce a bridge report without an explicit --exec. "
-                "Either install the gh copilot extension and omit --report-file "
-                "(use github_copilot_bin=gh without the wrapper), or specify "
-                "--exec /path/to/provider in the wrapper call.",
-                file=sys.stderr,
-            )
-            return 1
-        # Stub guard (pre-execution): reject stub provider in --report-file mode.
-        # Checked before subprocess to avoid any side-effects from running the stub.
-        if _STUB_PROVIDER_MODULE in exec_cmd:
-            print(
-                f"[github_copilot_wrapper] STUB DETECTED: --exec に stub provider "
-                f"({_STUB_PROVIDER_MODULE}) が指定されています。\n"
-                "これは stub であり、実 AI 実行ではありません。"
-                "bridge report を生成せずに終了します。\n"
-                "実 provider に差し替えて再実行してください。",
-                file=sys.stderr,
-            )
-            return 1
-
-        # stdout and stderr are echoed to our own streams so launch logs capture them.
-        try:
-            result = subprocess.run(
-                command,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-        except FileNotFoundError as exc:
-            print(f"[github_copilot_wrapper] ERROR: command not found: {exc}", file=sys.stderr)
-            return 127
-        if result.stdout:
-            sys.stdout.write(result.stdout)
-        if result.stderr:
-            sys.stderr.write(result.stderr)
-        if result.returncode == 0:
-            provider_output = result.stdout.strip()
-            if not provider_output:
+        if exec_cmd:
+            # --exec path: run custom provider, capture stdout, synthesize bridge report.
+            # Stub guard (pre-execution): reject stub provider in --report-file mode.
+            # Checked before subprocess to avoid any side-effects from running the stub.
+            if _STUB_PROVIDER_MODULE in exec_cmd:
                 print(
-                    "[github_copilot_wrapper] ERROR: provider exited 0 but produced no output.",
-                    file=sys.stderr,
-                )
-                return 1
-            # Stub guard (post-execution): detect stub output even when --exec path
-            # did not contain the stub module name (e.g. symlink or renamed binary).
-            if any(marker in provider_output for marker in _STUB_OUTPUT_MARKERS):
-                print(
-                    "[github_copilot_wrapper] STUB DETECTED: provider の出力に stub 識別子が含まれています。\n"
+                    f"[github_copilot_wrapper] STUB DETECTED: --exec に stub provider "
+                    f"({_STUB_PROVIDER_MODULE}) が指定されています。\n"
                     "これは stub であり、実 AI 実行ではありません。"
                     "bridge report を生成せずに終了します。\n"
                     "実 provider に差し替えて再実行してください。",
                     file=sys.stderr,
                 )
                 return 1
-            report_text = build_bridge_report(provider_output, model=model, exec_cmd=exec_cmd)
-            out_path = Path(report_file)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(report_text, encoding="utf-8")
-        return result.returncode
+
+            # stdout and stderr are echoed to our own streams so launch logs capture them.
+            try:
+                result = subprocess.run(
+                    command,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+            except FileNotFoundError as exc:
+                print(f"[github_copilot_wrapper] ERROR: command not found: {exc}", file=sys.stderr)
+                return 127
+            if result.stdout:
+                sys.stdout.write(result.stdout)
+            if result.stderr:
+                sys.stderr.write(result.stderr)
+            if result.returncode == 0:
+                provider_output = result.stdout.strip()
+                if not provider_output:
+                    print(
+                        "[github_copilot_wrapper] ERROR: provider exited 0 but produced no output.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                # Stub guard (post-execution): detect stub output even when --exec path
+                # did not contain the stub module name (e.g. symlink or renamed binary).
+                if any(marker in provider_output for marker in _STUB_OUTPUT_MARKERS):
+                    print(
+                        "[github_copilot_wrapper] STUB DETECTED: provider の出力に stub 識別子が含まれています。\n"
+                        "これは stub であり、実 AI 実行ではありません。"
+                        "bridge report を生成せずに終了します。\n"
+                        "実 provider に差し替えて再実行してください。",
+                        file=sys.stderr,
+                    )
+                    return 1
+                report_text = build_bridge_report(provider_output, model=model, exec_cmd=exec_cmd)
+                out_path = Path(report_file)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(report_text, encoding="utf-8")
+            return result.returncode
+
+        else:
+            # no --exec path: call copilot CLI directly with new syntax.
+            # Prompt is embedded via -p <prompt>; stdin is not used.
+            copilot_cmd = build_copilot_cli_command(prompt, args)
+            try:
+                result = subprocess.run(
+                    copilot_cmd,
+                    input=None,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+            except FileNotFoundError as exc:
+                print(f"[github_copilot_wrapper] ERROR: command not found: {exc}", file=sys.stderr)
+                return 127
+            if result.stdout:
+                sys.stdout.write(result.stdout)
+            if result.stderr:
+                sys.stderr.write(result.stderr)
+            if result.returncode == 0:
+                provider_output = result.stdout.strip()
+                if not provider_output:
+                    print(
+                        "[github_copilot_wrapper] ERROR: copilot exited 0 but produced no output.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                report_text = build_bridge_report(
+                    provider_output, model=model, exec_cmd=COPILOT_CLI_BIN
+                )
+                out_path = Path(report_file)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(report_text, encoding="utf-8")
+            return result.returncode
 
     # Transparent passthrough mode (no --report-file): existing behavior.
     try:

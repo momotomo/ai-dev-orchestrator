@@ -516,6 +516,22 @@ class GithubCopilotWrapperTests(unittest.TestCase):
         self.assertEqual(args.model, "")
         self.assertEqual(args.exec, "")
 
+    def test_parse_args_autopilot_default_is_false(self) -> None:
+        args = self.wrapper.parse_args([])
+        self.assertFalse(args.autopilot)
+
+    def test_parse_args_accepts_autopilot(self) -> None:
+        args = self.wrapper.parse_args(["--autopilot"])
+        self.assertTrue(args.autopilot)
+
+    def test_parse_args_accepts_reasoning_effort(self) -> None:
+        args = self.wrapper.parse_args(["--reasoning-effort", "high"])
+        self.assertEqual(args.reasoning_effort, "high")
+
+    def test_parse_args_reasoning_effort_default_is_empty(self) -> None:
+        args = self.wrapper.parse_args([])
+        self.assertEqual(args.reasoning_effort, "")
+
     def test_parse_args_accepts_model(self) -> None:
         args = self.wrapper.parse_args(["--model", "sonnet-4.6"])
         self.assertEqual(args.model, "sonnet-4.6")
@@ -565,6 +581,46 @@ class GithubCopilotWrapperTests(unittest.TestCase):
         cmd = self.wrapper.build_command(args)
         self.assertEqual(cmd[0], "/usr/local/bin/my-provider")
         self.assertNotIn("--model", cmd)
+
+    # ------------------------------------------------------------------
+    # build_copilot_cli_command
+    # ------------------------------------------------------------------
+
+    def test_build_copilot_cli_command_basic(self) -> None:
+        """build_copilot_cli_command() produces copilot ... -p <prompt> -s --allow-all-tools."""
+        args = self.wrapper.parse_args([])
+        cmd = self.wrapper.build_copilot_cli_command("Do something.", args)
+        self.assertEqual(cmd[0], "copilot")
+        self.assertIn("-p", cmd)
+        self.assertEqual(cmd[cmd.index("-p") + 1], "Do something.")
+        self.assertIn("-s", cmd)
+        self.assertIn("--allow-all-tools", cmd)
+
+    def test_build_copilot_cli_command_with_model(self) -> None:
+        """build_copilot_cli_command() forwards --model."""
+        args = self.wrapper.parse_args(["--model", "claude-sonnet-4.6"])
+        cmd = self.wrapper.build_copilot_cli_command("prompt", args)
+        self.assertIn("--model", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "claude-sonnet-4.6")
+
+    def test_build_copilot_cli_command_with_autopilot(self) -> None:
+        """build_copilot_cli_command() includes --autopilot when set."""
+        args = self.wrapper.parse_args(["--autopilot"])
+        cmd = self.wrapper.build_copilot_cli_command("prompt", args)
+        self.assertIn("--autopilot", cmd)
+
+    def test_build_copilot_cli_command_without_autopilot_no_flag(self) -> None:
+        """build_copilot_cli_command() omits --autopilot by default."""
+        args = self.wrapper.parse_args([])
+        cmd = self.wrapper.build_copilot_cli_command("prompt", args)
+        self.assertNotIn("--autopilot", cmd)
+
+    def test_build_copilot_cli_command_with_reasoning_effort(self) -> None:
+        """build_copilot_cli_command() forwards --reasoning-effort."""
+        args = self.wrapper.parse_args(["--reasoning-effort", "high"])
+        cmd = self.wrapper.build_copilot_cli_command("prompt", args)
+        self.assertIn("--reasoning-effort", cmd)
+        self.assertEqual(cmd[cmd.index("--reasoning-effort") + 1], "high")
 
     # ------------------------------------------------------------------
     # run() integration: subprocess is mocked
@@ -716,34 +772,123 @@ class GithubCopilotWrapperTests(unittest.TestCase):
     # (not try gh copilot suggest, which requires extension + produces no report)
     # ------------------------------------------------------------------
 
-    def test_run_with_report_file_but_no_exec_fails_immediately(self) -> None:
-        """--report-file + no --exec → exit 1 immediately without calling any subprocess.
+    # ------------------------------------------------------------------
+    # Regression removed: --report-file without --exec now uses copilot CLI directly
+    # (old: "requires --exec"; new: copilot binary is called with -p <prompt>)
+    # ------------------------------------------------------------------
 
-        Root cause of '#7 gh copilot not installed' failure:
-        wrapper was called with --report-file but no --exec, so it fell through to
-        gh copilot suggest, which requires the gh-copilot extension.
-        This test ensures the wrapper fails fast with a clear error message instead.
-        """
+    def test_run_with_report_file_no_exec_calls_copilot_cli_and_writes_report(self) -> None:
+        """--report-file + no --exec → copilot CLI called directly, bridge report written."""
         import tempfile, io as _io
         with tempfile.TemporaryDirectory() as tmpdir:
             report_path = Path(tmpdir) / "codex_report.md"
-            stderr_buf = _io.StringIO()
+            mock_result = MagicMock(returncode=0, stdout="Issue #15 was completed.\nNow updating docs.\n", stderr="")
+            stdout_buf = _io.StringIO()
             with (
-                patch.object(self.wrapper.subprocess, "run") as mock_run,
-                patch("sys.stdin", _io.StringIO("prompt")),
-                patch("sys.stderr", stderr_buf),
+                unittest.mock.patch("sys.stdin", _io.StringIO("test prompt")),
+                unittest.mock.patch("sys.stdout", stdout_buf),
+                unittest.mock.patch.object(self.wrapper.subprocess, "run", return_value=mock_result) as mock_run,
             ):
                 ret = self.wrapper.run([
-                    "--model", "sonnet-4.6",
+                    "--model", "claude-sonnet-4.6",
                     "--report-file", str(report_path),
-                    # NOTE: no --exec
+                    # NOTE: no --exec → copilot CLI path
                 ])
-            mock_run.assert_not_called()
-            self.assertEqual(ret, 1)
+            self.assertEqual(ret, 0)
+            self.assertTrue(report_path.exists(), "bridge report が生成されるべき")
+            text = report_path.read_text(encoding="utf-8")
+            self.assertIn("===BRIDGE_SUMMARY===", text)
+            self.assertIn("===END_BRIDGE_SUMMARY===", text)
+            self.assertIn("result: completed", text)
+            # command starts with "copilot"
+            cmd_used = mock_run.call_args.args[0]
+            self.assertEqual(cmd_used[0], "copilot")
+            self.assertIn("--model", cmd_used)
+            self.assertIn("-p", cmd_used)
+            self.assertIn("-s", cmd_used)
+            self.assertIn("--allow-all-tools", cmd_used)
+
+    def test_run_with_report_file_no_exec_planning_notes_synthesize_report(self) -> None:
+        """--report-file + no --exec + planning-notes-only stdout → report synthesized."""
+        import tempfile, io as _io
+        planning_notes = (
+            "Issue #15 was previously completed. Let me check the current state.\n"
+            "Now let me check foundation-note.md...\n"
+            "Now update foundation-note.md with the current progress.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            mock_result = MagicMock(returncode=0, stdout=planning_notes, stderr="")
+            with (
+                unittest.mock.patch("sys.stdin", _io.StringIO("test prompt")),
+                unittest.mock.patch("sys.stdout", _io.StringIO()),
+                unittest.mock.patch.object(self.wrapper.subprocess, "run", return_value=mock_result),
+            ):
+                ret = self.wrapper.run([
+                    "--report-file", str(report_path),
+                ])
+            self.assertEqual(ret, 0)
+            self.assertTrue(report_path.exists())
+            text = report_path.read_text(encoding="utf-8")
+            self.assertIn("===BRIDGE_SUMMARY===", text)
+            # planning notes included in Provider Output section
+            self.assertIn("Issue #15 was previously completed", text)
+
+    def test_run_with_report_file_no_exec_copilot_failure_no_report(self) -> None:
+        """--report-file + no --exec + copilot exit non-0 → no report written, returns non-0."""
+        import tempfile, io as _io
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            mock_result = MagicMock(returncode=1, stdout="", stderr="copilot error")
+            with (
+                unittest.mock.patch("sys.stdin", _io.StringIO("test prompt")),
+                unittest.mock.patch("sys.stdout", _io.StringIO()),
+                unittest.mock.patch.object(self.wrapper.subprocess, "run", return_value=mock_result),
+            ):
+                ret = self.wrapper.run([
+                    "--report-file", str(report_path),
+                ])
+            self.assertNotEqual(ret, 0)
             self.assertFalse(report_path.exists())
-            err = stderr_buf.getvalue()
-            self.assertIn("ERROR", err)
-            self.assertIn("--report-file requires --exec", err)
+
+    def test_run_with_report_file_no_exec_autopilot_forwarded(self) -> None:
+        """--autopilot is forwarded to the copilot CLI command."""
+        import tempfile, io as _io
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            mock_result = MagicMock(returncode=0, stdout="Done.\n", stderr="")
+            with (
+                unittest.mock.patch("sys.stdin", _io.StringIO("prompt")),
+                unittest.mock.patch("sys.stdout", _io.StringIO()),
+                unittest.mock.patch.object(self.wrapper.subprocess, "run", return_value=mock_result) as mock_run,
+            ):
+                ret = self.wrapper.run([
+                    "--autopilot",
+                    "--report-file", str(report_path),
+                ])
+            self.assertEqual(ret, 0)
+            cmd_used = mock_run.call_args.args[0]
+            self.assertIn("--autopilot", cmd_used)
+
+    def test_run_with_report_file_no_exec_reasoning_effort_forwarded(self) -> None:
+        """--reasoning-effort is forwarded to the copilot CLI command."""
+        import tempfile, io as _io
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "codex_report.md"
+            mock_result = MagicMock(returncode=0, stdout="Done.\n", stderr="")
+            with (
+                unittest.mock.patch("sys.stdin", _io.StringIO("prompt")),
+                unittest.mock.patch("sys.stdout", _io.StringIO()),
+                unittest.mock.patch.object(self.wrapper.subprocess, "run", return_value=mock_result) as mock_run,
+            ):
+                ret = self.wrapper.run([
+                    "--reasoning-effort", "high",
+                    "--report-file", str(report_path),
+                ])
+            self.assertEqual(ret, 0)
+            cmd_used = mock_run.call_args.args[0]
+            self.assertIn("--reasoning-effort", cmd_used)
+            self.assertEqual(cmd_used[cmd_used.index("--reasoning-effort") + 1], "high")
 
     def test_run_without_report_file_no_exec_still_uses_gh_default(self) -> None:
         """Without --report-file, no --exec still calls gh copilot suggest (unchanged)."""
@@ -811,6 +956,38 @@ class LaunchGithubCopilotReportGenerationTests(unittest.TestCase):
         cmd = launch_github_copilot.build_github_copilot_command(args)
         self.assertIn("--report-file", cmd)
         self.assertEqual(cmd[cmd.index("--report-file") + 1], str(self.report_path))
+
+    def test_build_command_passes_autopilot_to_wrapper(self) -> None:
+        """For custom wrapper bin, --autopilot is forwarded."""
+        config = {**self._minimal_config(), "github_copilot_autopilot": True}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
+                [
+                    "--github-copilot-bin", "/scripts/github_copilot_wrapper.py",
+                    "--prompt-file", str(self.prompt_path),
+                    "--report-file", str(self.report_path),
+                    "--autopilot",
+                ],
+                config,
+            )
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertIn("--autopilot", cmd)
+
+    def test_build_command_passes_reasoning_effort_to_wrapper(self) -> None:
+        """For custom wrapper bin, --reasoning-effort is forwarded."""
+        config = {**self._minimal_config(), "github_copilot_reasoning_effort": "high"}
+        with patch("launch_github_copilot.load_project_config", return_value=config):
+            args = launch_github_copilot.parse_args(
+                [
+                    "--github-copilot-bin", "/scripts/github_copilot_wrapper.py",
+                    "--prompt-file", str(self.prompt_path),
+                    "--report-file", str(self.report_path),
+                ],
+                config,
+            )
+        cmd = launch_github_copilot.build_github_copilot_command(args)
+        self.assertIn("--reasoning-effort", cmd)
+        self.assertEqual(cmd[cmd.index("--reasoning-effort") + 1], "high")
 
     def test_build_command_does_not_add_report_file_for_gh_bin(self) -> None:
         """The default 'gh' bin must NOT receive --report-file."""

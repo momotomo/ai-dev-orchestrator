@@ -54,7 +54,7 @@ from _bridge_common import (
     write_text,
 )
 
-DEFAULT_GITHUB_COPILOT_BIN = "copilot"
+DEFAULT_GITHUB_COPILOT_BIN = str(Path(__file__).parent / "github_copilot_wrapper.py")
 COPILOT_CLI_BIN = "copilot"
 REASONING_EFFORT_ALLOWED = frozenset({"low", "medium", "high"})
 DEFAULT_TIMEOUT_SECONDS = 7200
@@ -227,6 +227,10 @@ def build_github_copilot_command(args: argparse.Namespace, prompt_text: str = ""
         cmd.extend(["--model", model])
     if report_file:
         cmd.extend(["--report-file", report_file])
+    if reasoning_effort:
+        cmd.extend(["--reasoning-effort", reasoning_effort])
+    if autopilot:
+        cmd.append("--autopilot")
     return cmd
 
 
