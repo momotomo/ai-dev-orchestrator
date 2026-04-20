@@ -10,12 +10,15 @@ from typing import Any, Callable, Mapping
 from issue_centric_contract import IssueCentricAction
 from issue_centric_github import (
     GitHubIssueSnapshot,
+    GitHubPullRequestDetail,
     GitHubPullRequestSnapshot,
     IssueCentricGitHubError,
     ResolvedGitHubIssue,
     close_github_issue,
     fetch_github_issue,
     fetch_open_prs_for_issue,
+    fetch_pr_detail,
+    merge_github_pr,
     resolve_github_repository,
     resolve_github_token,
     resolve_target_issue,
@@ -37,6 +40,7 @@ class IssueCloseExecutionResult:
     issue_after: GitHubIssueSnapshot | None
     execution_log_path: Path
     safe_stop_reason: str
+    auto_merged_pr_number: int | None = None
 
 
 def execute_close_current_issue(
@@ -53,6 +57,10 @@ def execute_close_current_issue(
     issue_fetcher: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
     issue_closer: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
     pr_fetcher: Callable[[str, int, str], list[GitHubPullRequestSnapshot]] | None = None,
+    auto_merge_pr: bool = False,
+    pr_detail_fetcher: Callable[[str, int, str], GitHubPullRequestDetail] | None = None,
+    pr_merger: Callable[[str, int, str], None] | None = None,
+    default_branch: str = "main",
     allow_human_review_close: bool = False,
     allow_human_review_followup_close: bool = False,
     allow_issue_create_followup_close: bool = False,
@@ -70,6 +78,7 @@ def execute_close_current_issue(
     issue_after: GitHubIssueSnapshot | None = None
     repository = ""
     token_source = ""
+    auto_merged_pr_number: int | None = None
     close_order = _determine_close_order(
         prepared.decision.action,
         allow_human_review_close=allow_human_review_close,
@@ -101,19 +110,47 @@ def execute_close_current_issue(
         fetcher = issue_fetcher or fetch_github_issue
         closer = issue_closer or close_github_issue
         pr_fetch = pr_fetcher or fetch_open_prs_for_issue
+        _detail_fetcher = pr_detail_fetcher or fetch_pr_detail
+        _pr_merger = pr_merger or merge_github_pr
 
         # PR merge guard: block close if any open / unmerged PR references this issue.
+        # When auto_merge_pr=True and exactly one blocking PR exists, attempt to
+        # merge it before closing — provided the PR is safe to auto-merge
+        # (non-draft, mergeable, base == default_branch).
         blocking_prs = pr_fetch(resolved_issue.repository, resolved_issue.issue_number, token)
         if blocking_prs:
-            pr_list = ", ".join(
-                f"PR #{pr.number} ({pr.state}{'merged' if pr.merged else ', not merged'})"
-                for pr in blocking_prs[:5]  # cap display to 5
-            )
-            raise IssueCentricCloseCurrentIssueError(
-                f"close_current_issue blocked: issue #{resolved_issue.issue_number} has related PR(s)"
-                f" that are still open or unmerged: {pr_list}."
-                " Merge or close the PR(s) before closing the issue."
-            )
+            if auto_merge_pr and len(blocking_prs) == 1:
+                pr_snap = blocking_prs[0]
+                detail = _detail_fetcher(resolved_issue.repository, pr_snap.number, token)
+                block_reason = _check_pr_auto_merge_conditions(detail, default_branch=default_branch)
+                if block_reason:
+                    raise IssueCentricCloseCurrentIssueError(
+                        f"close_current_issue auto-merge blocked: {block_reason}"
+                    )
+                try:
+                    _pr_merger(resolved_issue.repository, detail.number, token)
+                except IssueCentricGitHubError as exc:
+                    raise IssueCentricCloseCurrentIssueError(
+                        f"close_current_issue auto-merge failed for PR #{detail.number}: {exc}"
+                    ) from exc
+                auto_merged_pr_number = detail.number
+            elif auto_merge_pr and len(blocking_prs) > 1:
+                pr_nums = ", ".join(f"PR #{pr.number}" for pr in blocking_prs[:5])
+                raise IssueCentricCloseCurrentIssueError(
+                    f"close_current_issue blocked: related PRs are ambiguous"
+                    f" (found {len(blocking_prs)} blocking PRs: {pr_nums})."
+                    " Auto-merge only applies when there is exactly one related open PR."
+                )
+            else:
+                pr_list = ", ".join(
+                    f"PR #{pr.number} ({pr.state}{'merged' if pr.merged else ', not merged'})"
+                    for pr in blocking_prs[:5]  # cap display to 5
+                )
+                raise IssueCentricCloseCurrentIssueError(
+                    f"close_current_issue blocked: issue #{resolved_issue.issue_number} has related PR(s)"
+                    f" that are still open or unmerged: {pr_list}."
+                    " Merge or close the PR(s) before closing the issue."
+                )
 
         issue_before = fetcher(resolved_issue.repository, resolved_issue.issue_number, token)
         if issue_before.state.lower() == "closed":
@@ -168,9 +205,15 @@ def execute_close_current_issue(
                     f"close_current_issue closed issue #{issue_after.number} after the issue-centric Codex launch / continuation path succeeded."
                 )
             else:
-                safe_stop_reason = (
-                    f"close_current_issue closed issue #{issue_after.number} after the primary action completed."
-                )
+                if auto_merged_pr_number is not None:
+                    safe_stop_reason = (
+                        f"close_current_issue auto-merged PR #{auto_merged_pr_number} and"
+                        f" closed issue #{issue_after.number} after the primary action completed."
+                    )
+                else:
+                    safe_stop_reason = (
+                        f"close_current_issue closed issue #{issue_after.number} after the primary action completed."
+                    )
             execution_status = "completed"
     except (IssueCentricCloseCurrentIssueError, IssueCentricGitHubError) as exc:
         close_status = "blocked"
@@ -230,6 +273,7 @@ def execute_close_current_issue(
         ),
         "decision_target_issue": prepared.decision.target_issue or "none",
         "prior_state_issue": str(prior_state.get("last_issue_centric_resolved_issue", "")).strip(),
+        "auto_merged_pr_number": auto_merged_pr_number,
         "safe_stop_reason": safe_stop_reason,
     }
     execution_log_path = log_writer(
@@ -246,6 +290,7 @@ def execute_close_current_issue(
         issue_after=issue_after,
         execution_log_path=execution_log_path,
         safe_stop_reason=safe_stop_reason,
+        auto_merged_pr_number=auto_merged_pr_number,
     )
 
 
@@ -348,3 +393,35 @@ def _determine_close_order(
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _check_pr_auto_merge_conditions(
+    detail: GitHubPullRequestDetail,
+    *,
+    default_branch: str,
+) -> str:
+    """Return a human-readable block reason if the PR cannot be auto-merged safely.
+
+    Returns an empty string when all conditions are satisfied and the PR is
+    safe to auto-merge.
+
+    Conditions checked (in order):
+    1. PR must not be a draft.
+    2. PR mergeability must be determined (not None) and must be True.
+    3. PR base branch must match *default_branch*.
+    """
+    if detail.draft:
+        return f"related PR #{detail.number} is draft"
+    if detail.mergeable is None:
+        return (
+            f"related PR #{detail.number} mergeable state is not yet determined;"
+            " retry later"
+        )
+    if not detail.mergeable:
+        return f"related PR #{detail.number} is not mergeable"
+    if detail.base_ref != default_branch:
+        return (
+            f"related PR #{detail.number} base is not default branch"
+            f" ({detail.base_ref!r} != {default_branch!r})"
+        )
+    return ""

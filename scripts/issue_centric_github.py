@@ -376,6 +376,101 @@ def fetch_open_prs_for_issue(
     return blocking
 
 
+@dataclass(frozen=True)
+class GitHubPullRequestDetail:
+    """Full PR detail fetched via GET /repos/{repo}/pulls/{pr_number}.
+
+    Used for the auto-merge safety check: the search API snapshot
+    (GitHubPullRequestSnapshot) does not expose draft / mergeable / base_ref.
+    """
+
+    number: int
+    url: str
+    title: str
+    state: str          # "open" or "closed"
+    merged: bool
+    draft: bool
+    mergeable: bool | None  # None = GitHub hasn't finished calculating yet
+    base_ref: str           # base branch name, e.g. "main"
+
+
+def fetch_pr_detail(
+    repository: str,
+    pr_number: int,
+    token: str,
+) -> GitHubPullRequestDetail:
+    """Fetch full PR detail including draft, mergeable, and base_ref.
+
+    Raises :class:`IssueCentricGitHubError` on API failures.
+    """
+    payload_obj = _github_api_request(
+        method="GET",
+        url=f"https://api.github.com/repos/{repository}/pulls/{pr_number}",
+        token=token,
+        payload=None,
+        context=f"GitHub PR detail fetch #{pr_number}",
+    )
+    number = payload_obj.get("number")
+    html_url = payload_obj.get("html_url")
+    title = payload_obj.get("title")
+    state = payload_obj.get("state")
+    merged_at = payload_obj.get("merged_at")
+    draft = payload_obj.get("draft")
+    mergeable_raw = payload_obj.get("mergeable")
+    base_obj = payload_obj.get("base")
+    base_ref = (base_obj.get("ref") if isinstance(base_obj, dict) else None)
+    if (
+        not isinstance(number, int)
+        or not isinstance(html_url, str)
+        or not isinstance(title, str)
+        or not isinstance(state, str)
+        or not isinstance(base_ref, str)
+    ):
+        raise IssueCentricGitHubError(
+            f"GitHub PR detail fetch #{pr_number} response is missing number / html_url / title / state / base.ref."
+        )
+    # mergeable is bool | null in GitHub API; null means still computing.
+    if mergeable_raw is None:
+        mergeable: bool | None = None
+    elif isinstance(mergeable_raw, bool):
+        mergeable = mergeable_raw
+    else:
+        raise IssueCentricGitHubError(
+            f"GitHub PR detail fetch #{pr_number} returned unexpected mergeable value: {mergeable_raw!r}"
+        )
+    return GitHubPullRequestDetail(
+        number=number,
+        url=str(html_url),
+        title=str(title),
+        state=str(state).lower(),
+        merged=merged_at is not None,
+        draft=bool(draft),
+        mergeable=mergeable,
+        base_ref=str(base_ref),
+    )
+
+
+def merge_github_pr(
+    repository: str,
+    pr_number: int,
+    token: str,
+    *,
+    merge_method: str = "merge",
+) -> None:
+    """Merge a pull request via PUT /repos/{repo}/pulls/{pr_number}/merge.
+
+    Raises :class:`IssueCentricGitHubError` on API failures (including
+    HTTP 405 Method Not Allowed when the PR is not in a mergeable state).
+    """
+    _github_api_request(
+        method="PUT",
+        url=f"https://api.github.com/repos/{repository}/pulls/{pr_number}/merge",
+        token=token,
+        payload={"merge_method": merge_method},
+        context=f"GitHub PR merge #{pr_number}",
+    )
+
+
 def resolve_github_project_state(
     project_url: str,
     *,
