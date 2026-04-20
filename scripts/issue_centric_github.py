@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -50,6 +51,17 @@ class GitHubIssueSnapshot:
     state: str
     node_id: str = ""
     body: str = ""
+
+
+@dataclass(frozen=True)
+class GitHubPullRequestSnapshot:
+    """Minimal snapshot of a GitHub PR used for the close guard check."""
+
+    number: int
+    url: str
+    title: str
+    state: str  # "open" or "closed"
+    merged: bool  # True when the PR has been merged
 
 
 @dataclass(frozen=True)
@@ -287,6 +299,81 @@ def close_github_issue(
         repository=repository,
         context="GitHub issue close",
     )
+
+
+def fetch_open_prs_for_issue(
+    repository: str,
+    issue_number: int,
+    token: str,
+    *,
+    page_limit: int = 5,
+) -> list[GitHubPullRequestSnapshot]:
+    """Return open (unmerged) PRs that reference `issue_number` in their title or body.
+
+    Uses the GitHub REST search API to find PRs mentioning ``#<issue_number>``
+    in the given repository.  Only PRs with ``state=open`` *or* ``state=closed``
+    *and* ``merged_at=None`` (closed without merge) are considered "blocking"; fully
+    merged PRs are excluded.
+
+    Returns a list of :class:`GitHubPullRequestSnapshot`.  Returns an empty list
+    when no relevant PRs are found.
+
+    Raises :class:`IssueCentricGitHubError` on API failures.
+    """
+    # GitHub search API: issues/PRs that mention the issue number in the repo.
+    # "is:pr" restricts to pull requests; "#{n}" matches mentions in title/body.
+    # We use pagination with a small page_limit to bound API calls.
+    query_string = f"repo:{repository} is:pr #{issue_number}"
+    encoded_query = urllib.parse.quote(query_string, safe="")
+    blocking: list[GitHubPullRequestSnapshot] = []
+    page = 1
+    while page <= page_limit:
+        url = (
+            f"https://api.github.com/search/issues"
+            f"?q={encoded_query}&per_page=30&page={page}"
+        )
+        payload_obj = _github_api_request(
+            method="GET",
+            url=url,
+            token=token,
+            payload=None,
+            context=f"GitHub PR search for issue #{issue_number}",
+        )
+        items = payload_obj.get("items")
+        if not isinstance(items, list):
+            break
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            # The search API returns issues and PRs; filter to PRs only
+            # by checking for the "pull_request" key.
+            if "pull_request" not in item:
+                continue
+            pr_number = item.get("number")
+            pr_url = item.get("html_url", "")
+            pr_title = item.get("title", "")
+            pr_state = str(item.get("state", "")).lower()
+            # merged_at is nested under "pull_request" sub-object in search results
+            pr_sub = item.get("pull_request") or {}
+            merged_at = pr_sub.get("merged_at")
+            merged = merged_at is not None
+            if not isinstance(pr_number, int):
+                continue
+            snapshot = GitHubPullRequestSnapshot(
+                number=pr_number,
+                url=str(pr_url),
+                title=str(pr_title),
+                state=pr_state,
+                merged=merged,
+            )
+            # Only collect PRs that are blocking (open, or closed but not merged).
+            if pr_state == "open" or (pr_state == "closed" and not merged):
+                blocking.append(snapshot)
+        if len(items) < 30:
+            # Last page reached.
+            break
+        page += 1
+    return blocking
 
 
 def resolve_github_project_state(
