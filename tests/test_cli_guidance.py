@@ -3247,6 +3247,101 @@ class WaitingPromptReplyFetchTransitionTests(unittest.TestCase):
         self.assertEqual(resolve_next_generation_transition(state), "no_action")
 
 
+class IcClosePassthroughTests(unittest.TestCase):
+    """_should_passthrough_ic_close() — IC close auto-continuation passthrough guard.
+
+    Root cause (Phase 16):
+      After IC no_action + close_current_issue=true executes close successfully,
+      state has last_issue_centric_close_status="closed" / "already_closed" but
+      mode is reset to idle and need_chatgpt_prompt is not set.  This makes
+      resolve_unified_next_action() return "no_action", causing run_until_stop
+      to stop BEFORE bridge_orchestrator can run its close auto-continuation logic
+      (which calls request_next_prompt with --select-issue).
+
+    Fix: _should_passthrough_ic_close() returns True for this observed case so
+      run_until_stop lets bridge_orchestrator run instead of stopping.
+    """
+
+    def _ic_close_state(self, close_status: str = "closed") -> dict:
+        return {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": close_status,
+            "mode": "idle",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+        }
+
+    def test_passthrough_when_close_status_closed(self) -> None:
+        """close_status=closed + IC decision + no human stop → passthrough True."""
+        self.assertTrue(run_until_stop._should_passthrough_ic_close(self._ic_close_state("closed")))
+
+    def test_passthrough_when_close_status_already_closed(self) -> None:
+        """close_status=already_closed (idempotent) → passthrough True."""
+        self.assertTrue(run_until_stop._should_passthrough_ic_close(self._ic_close_state("already_closed")))
+
+    def test_no_passthrough_for_genuine_no_action_empty_close_status(self) -> None:
+        """Genuine no_action with no close (close_status='') → passthrough False."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "",
+            "mode": "idle",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_close(state))
+
+    def test_no_passthrough_when_close_status_blocked(self) -> None:
+        """close_status=blocked (error path) → passthrough False."""
+        state = self._ic_close_state("blocked")
+        self.assertFalse(run_until_stop._should_passthrough_ic_close(state))
+
+    def test_no_passthrough_when_close_status_failed(self) -> None:
+        """close_status=failed_after_mutation_attempt → passthrough False."""
+        state = self._ic_close_state("failed_after_mutation_attempt")
+        self.assertFalse(run_until_stop._should_passthrough_ic_close(state))
+
+    def test_no_passthrough_for_non_ic_chatgpt_decision(self) -> None:
+        """Non-IC chatgpt_decision with closed state → passthrough False (not IC context)."""
+        state = {
+            "chatgpt_decision": "legacy_contract_detected",
+            "last_issue_centric_close_status": "closed",
+            "mode": "idle",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_close(state))
+
+    def test_no_passthrough_when_human_review_needed(self) -> None:
+        """IC human_review_needed stop path → passthrough False (human intervention required)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "closed",
+            "mode": "awaiting_user",
+            # human_review_needed is detected when mode=awaiting_user + chatgpt_decision=human_review
+            # Simulate that detect_ic_stop_path would return human_review_needed
+            # by using the actual detection condition.
+        }
+        # With mode=awaiting_user and chatgpt_decision not in {human_review, need_info},
+        # detect_ic_stop_path returns "" — so this specific combo is not human_review_needed.
+        # Use the canonical human_review trigger:
+        state["chatgpt_decision"] = "human_review"
+        state["last_issue_centric_close_status"] = "closed"
+        # chatgpt_decision no longer starts with "issue_centric:", so passthrough is False
+        self.assertFalse(run_until_stop._should_passthrough_ic_close(state))
+
+    def test_no_passthrough_for_completed_value(self) -> None:
+        """close_status=completed (legacy, never written) → passthrough False."""
+        state = self._ic_close_state("completed")
+        self.assertFalse(run_until_stop._should_passthrough_ic_close(state))
+
+    def test_passthrough_with_various_ic_decision_prefixes(self) -> None:
+        """Any issue_centric: prefix qualifies, not just no_action."""
+        for decision in ("issue_centric:no_action", "issue_centric:codex_run", "issue_centric:create_issue"):
+            with self.subTest(decision=decision):
+                state = {
+                    "chatgpt_decision": decision,
+                    "last_issue_centric_close_status": "closed",
+                    "mode": "idle",
+                }
+                self.assertTrue(run_until_stop._should_passthrough_ic_close(state))
+
+
 class ContractCorrectionHelperTests(unittest.TestCase):
     """Unit-tests for the retryable-contract detection and correction helpers in fetch_next_prompt."""
 
