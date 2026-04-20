@@ -13,7 +13,7 @@ import launch_codex_once
 import launch_github_copilot
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_codex_launch import launch_issue_centric_codex_run
@@ -305,6 +305,42 @@ def dispatch_pending_issue_centric_codex_run(
     return 0
 
 
+def _resolve_post_fetch_initial_selection_ref(post_fetch_state: dict[str, object]) -> str:
+    """After fetch_next_prompt raises BridgeStop, return the ready issue ref for auto-continue.
+
+    Called when bridge_orchestrator catches a BridgeStop from fetch_next_prompt.run().
+    Returns the selected ready issue ref when the stop was an initial_selection_stop and
+    auto-continuation is appropriate; otherwise returns empty string.
+
+    Two sources are checked in order:
+
+    1. ``selected_ready_issue_ref`` — written by ``_apply_ic_fetch_stop_state()`` for
+       ``initial_selection_stop`` paths.  This is the primary and normal path.
+    2. ``last_issue_centric_target_issue`` fallback — used when ``selected_ready_issue_ref``
+       is absent despite an initial-selection context.  Requires ``chatgpt_decision_note``
+       to contain '選定' (the selection confirmation wording) as a safe discriminator,
+       since ``pending_request_source`` is cleared by ``clear_pending_request_fields``
+       before the state is saved in ``fetch_next_prompt.run()``.
+
+    Returns empty string for all other BridgeStop paths (codex_run_stop, human_review,
+    error, pause, STOP-file) so the caller can safely re-raise.
+    """
+    chatgpt_decision = str(post_fetch_state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return ""
+    # Primary: selected_ready_issue_ref written by _apply_ic_fetch_stop_state.
+    sel = str(post_fetch_state.get("selected_ready_issue_ref", "")).strip()
+    if sel:
+        return sel
+    # Fallback: selected_ready_issue_ref absent (edge case).  Use target_issue when
+    # chatgpt_decision_note confirms this was an initial-selection result.
+    decision_note = str(post_fetch_state.get("chatgpt_decision_note", "")).strip()
+    target = str(post_fetch_state.get("last_issue_centric_target_issue", "")).strip()
+    if target and target != "none" and "選定" in decision_note:
+        return target
+    return ""
+
+
 def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bool:
     """Return True when the last IC execution closed the current issue successfully.
 
@@ -496,7 +532,29 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if plan.next_action == "request_prompt_from_report":
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
     if plan.next_action == "fetch_next_prompt":
-        return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
+        # Wrap in a BridgeStop catch so that initial_selection_stop from fetch_next_prompt
+        # can be handled as an in-run auto-continuation rather than propagating to
+        # guarded_main() and printing a [stop] message.
+        try:
+            return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
+        except BridgeStop:
+            # fetch_next_prompt saved updated state before raising.  Reload it and check
+            # whether this was an initial_selection_stop that can be auto-continued.
+            _post_fetch_state = load_state()
+            _is_ref = _resolve_post_fetch_initial_selection_ref(_post_fetch_state)
+            if _is_ref:
+                print(
+                    f"{status.label}です。initial selection 完了: ready issue {_is_ref} が選定されました。"
+                    " 自動で次 issue の実装へ継続します。"
+                )
+                _is_auto = dict(_post_fetch_state)
+                _is_auto["selected_ready_issue_ref"] = ""
+                _is_argv: list[str] = []
+                if args.worker_repo_path:
+                    _is_argv.extend(["--project-path", args.worker_repo_path])
+                _is_argv.extend(["--ready-issue-ref", _is_ref])
+                return request_next_prompt.run(_is_auto, _is_argv)
+            raise
 
     # IC close auto-continuation: when the last IC execution closed the current
     # issue and no IC stop path requires human intervention, proceed directly to
