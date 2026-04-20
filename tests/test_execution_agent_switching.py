@@ -1160,6 +1160,256 @@ class CopilotCliNewSyntaxTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# extract_codex_report_from_stdout unit tests
+# ---------------------------------------------------------------------------
+
+
+class StdoutReportExtractionTests(unittest.TestCase):
+    """launch_github_copilot.extract_codex_report_from_stdout() のテスト群。
+
+    copilot CLI は report を stdout に直接出力する。
+    有効なレポート本文を抽出できること、雑多なログを誤検出しないことを確認する。
+    """
+
+    _VALID_REPORT = (
+        "===BRIDGE_SUMMARY===\n"
+        "- summary: テスト実施\n"
+        "- result: completed\n"
+        "===END_BRIDGE_SUMMARY===\n"
+        "\n"
+        "1. 実施概要\n"
+        "- テストを実行した。\n"
+    )
+
+    # ------------------------------------------------------------------
+    # 有効ケース
+    # ------------------------------------------------------------------
+
+    def test_valid_report_with_heading_is_extracted(self) -> None:
+        """# Codex Report 見出し付きの有効 report が抽出される。"""
+        text = f"# Codex Report\n\n{self._VALID_REPORT}"
+        result = launch_github_copilot.extract_codex_report_from_stdout(text)
+        self.assertIn("===BRIDGE_SUMMARY===", result)
+        self.assertIn("===END_BRIDGE_SUMMARY===", result)
+        self.assertTrue(result.startswith("# Codex Report"))
+
+    def test_valid_report_with_h2_heading_is_extracted(self) -> None:
+        """## Codex Report 見出しでも抽出される。"""
+        text = f"## Codex Report\n\n{self._VALID_REPORT}"
+        result = launch_github_copilot.extract_codex_report_from_stdout(text)
+        self.assertTrue(result.startswith("## Codex Report"))
+        self.assertIn("===BRIDGE_SUMMARY===", result)
+
+    def test_valid_report_without_heading_extracted_from_bridge_summary(self) -> None:
+        """見出しなし・BRIDGE_SUMMARY のみでも抽出される。"""
+        result = launch_github_copilot.extract_codex_report_from_stdout(self._VALID_REPORT)
+        self.assertTrue(result.startswith("===BRIDGE_SUMMARY==="))
+        self.assertIn("===END_BRIDGE_SUMMARY===", result)
+
+    def test_leading_chatter_is_stripped(self) -> None:
+        """見出し前の雑多なログが削ぎ落とされる。"""
+        text = "Starting copilot...\nSome debug line\n# Codex Report\n\n" + self._VALID_REPORT
+        result = launch_github_copilot.extract_codex_report_from_stdout(text)
+        self.assertTrue(result.startswith("# Codex Report"))
+        self.assertNotIn("Starting copilot", result)
+
+    def test_extracted_result_is_stripped(self) -> None:
+        """抽出結果の前後の空白が除去される。"""
+        text = "  \n\n# Codex Report\n\n" + self._VALID_REPORT + "\n\n  "
+        result = launch_github_copilot.extract_codex_report_from_stdout(text)
+        self.assertEqual(result, result.strip())
+
+    # ------------------------------------------------------------------
+    # 無効ケース (誤検出防止)
+    # ------------------------------------------------------------------
+
+    def test_empty_text_returns_empty(self) -> None:
+        """空文字列は空を返す。"""
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(""), "")
+
+    def test_no_bridge_summary_returns_empty(self) -> None:
+        """BRIDGE_SUMMARY マーカーがない場合は空を返す。"""
+        text = "# Codex Report\n\n1. 実施概要\n- テストした\n"
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
+
+    def test_only_bridge_summary_start_returns_empty(self) -> None:
+        """===BRIDGE_SUMMARY=== のみで END がない場合は空を返す (不完全)。"""
+        text = "===BRIDGE_SUMMARY===\n- summary: テスト\n"
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
+
+    def test_only_end_marker_returns_empty(self) -> None:
+        """END マーカーのみで START がない場合は空を返す。"""
+        text = "===END_BRIDGE_SUMMARY===\nsome text\n"
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
+
+    def test_random_log_output_returns_empty(self) -> None:
+        """無関係なログは誤検出しない。"""
+        text = "INFO: running copilot\nDone.\nExit code 0\n"
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
+
+    # ------------------------------------------------------------------
+    # run() integration: stdout から report が回収されること
+    # ------------------------------------------------------------------
+
+    def test_run_extracts_report_from_stdout(self) -> None:
+        """run(): copilot stdout に有効 report がある場合に outbox へ保存して 0 を返す。"""
+        import tempfile
+        report_content = "# Codex Report\n\n" + self._VALID_REPORT
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            prompt_path = tmpdir_path / "codex_prompt.md"
+            report_path = tmpdir_path / "codex_report.md"
+            prompt_path.write_text("# GitHub Copilot Prompt\n\nDo something.\n", encoding="utf-8")
+
+            config = {
+                "github_copilot_bin": "copilot",
+                "codex_timeout_seconds": 60,
+                "worker_repo_path": str(tmpdir_path),
+                "bridge_runtime_root": str(tmpdir_path),
+            }
+            state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+            def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+                # Simulate copilot writing report content to stdout (no file written).
+                stdout.write(report_content)
+                proc = MagicMock()
+                proc.stdin = MagicMock()
+                proc.poll.return_value = 0
+                return proc
+
+            with (
+                patch("launch_github_copilot.load_project_config", return_value=config),
+                patch("launch_github_copilot.print_project_config_warnings"),
+                patch("launch_github_copilot.worker_repo_path", return_value=tmpdir_path),
+                patch("launch_github_copilot.save_state"),
+                patch("launch_github_copilot.runtime_logs_dir", return_value=tmpdir_path),
+                patch("launch_github_copilot.recover_codex_report", return_value=None),
+                patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+            ):
+                rc = launch_github_copilot.run(
+                    dict(state),
+                    [
+                        "--prompt-file", str(prompt_path),
+                        "--report-file", str(report_path),
+                        "--worker-repo-path", str(tmpdir_path),
+                    ],
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(report_path.exists(), "codex_report.md が生成されるべき")
+            saved = report_path.read_text(encoding="utf-8")
+            self.assertIn("===BRIDGE_SUMMARY===", saved)
+
+    def test_run_raises_when_stdout_has_no_report(self) -> None:
+        """run(): stdout に有効 report がない場合は従来どおり BridgeError を上げる。"""
+        import tempfile
+        from _bridge_common import BridgeError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            prompt_path = tmpdir_path / "codex_prompt.md"
+            report_path = tmpdir_path / "codex_report.md"
+            prompt_path.write_text("# GitHub Copilot Prompt\n\nDo something.\n", encoding="utf-8")
+
+            config = {
+                "github_copilot_bin": "copilot",
+                "codex_timeout_seconds": 60,
+                "worker_repo_path": str(tmpdir_path),
+                "bridge_runtime_root": str(tmpdir_path),
+            }
+            state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+            def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+                # Only debug chatter — no report markers.
+                stdout.write("INFO: copilot started\nDone.\n")
+                proc = MagicMock()
+                proc.stdin = MagicMock()
+                proc.poll.return_value = 0
+                return proc
+
+            with (
+                patch("launch_github_copilot.load_project_config", return_value=config),
+                patch("launch_github_copilot.print_project_config_warnings"),
+                patch("launch_github_copilot.worker_repo_path", return_value=tmpdir_path),
+                patch("launch_github_copilot.save_state"),
+                patch("launch_github_copilot.runtime_logs_dir", return_value=tmpdir_path),
+                patch("launch_github_copilot.recover_codex_report", return_value=None),
+                patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+            ):
+                with self.assertRaises(BridgeError):
+                    launch_github_copilot.run(
+                        dict(state),
+                        [
+                            "--prompt-file", str(prompt_path),
+                            "--report-file", str(report_path),
+                            "--worker-repo-path", str(tmpdir_path),
+                        ],
+                    )
+            self.assertFalse(report_path.exists(), "report が存在してはならない")
+
+    def test_existing_report_file_not_overwritten_by_stdout(self) -> None:
+        """wrapper が subprocess 内で直接 report を書いた場合、stdout extraction で上書きされない。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            prompt_path = tmpdir_path / "codex_prompt.md"
+            report_path = tmpdir_path / "codex_report.md"
+            prompt_path.write_text("# Prompt\n\nDo it.\n", encoding="utf-8")
+
+            direct_report = (
+                "===BRIDGE_SUMMARY===\n- summary: direct write\n===END_BRIDGE_SUMMARY===\nDirect.\n"
+            )
+
+            config = {
+                "github_copilot_bin": "/scripts/github_copilot_wrapper.py",
+                "codex_timeout_seconds": 60,
+                "worker_repo_path": str(tmpdir_path),
+                "bridge_runtime_root": str(tmpdir_path),
+            }
+            state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+            def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+                # Wrapper writes report directly to --report-file.
+                report_path.write_text(direct_report, encoding="utf-8")
+                # Stdout also contains a (different) report-like payload.
+                stdout.write(
+                    "## Codex Report\n===BRIDGE_SUMMARY===\n"
+                    "- summary: stdout version\n===END_BRIDGE_SUMMARY===\nStdout.\n"
+                )
+                proc = MagicMock()
+                proc.stdin = MagicMock()
+                proc.poll.return_value = 0
+                return proc
+
+            with (
+                patch("launch_github_copilot.load_project_config", return_value=config),
+                patch("launch_github_copilot.print_project_config_warnings"),
+                patch("launch_github_copilot.worker_repo_path", return_value=tmpdir_path),
+                patch("launch_github_copilot.save_state"),
+                patch("launch_github_copilot.runtime_logs_dir", return_value=tmpdir_path),
+                patch("launch_github_copilot.recover_codex_report", return_value=None),
+                patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+            ):
+                rc = launch_github_copilot.run(
+                    dict(state),
+                    [
+                        "--prompt-file", str(prompt_path),
+                        "--report-file", str(report_path),
+                        "--worker-repo-path", str(tmpdir_path),
+                    ],
+                )
+
+            self.assertEqual(rc, 0)
+            saved = report_path.read_text(encoding="utf-8")
+            # Directly-written content is preserved; extraction skipped because
+            # codex_report_is_ready() already returns True after subprocess.
+            self.assertIn("direct write", saved, "wrapper が書いた内容が保持されるべき")
+            self.assertNotIn("stdout version", saved, "stdout による上書きがないこと")
+
+
+# ---------------------------------------------------------------------------
 # github_copilot_provider_stub unit tests
 # ---------------------------------------------------------------------------
 

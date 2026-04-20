@@ -24,6 +24,7 @@ report 検証ロジックを合わせて調整してください。
 from __future__ import annotations
 
 import argparse
+import re
 import shlex
 import subprocess
 import sys
@@ -32,6 +33,8 @@ from pathlib import Path
 
 from _bridge_common import (
     BRIDGE_DIR,
+    BRIDGE_SUMMARY_END,
+    BRIDGE_SUMMARY_START,
     ROOT_DIR,
     BridgeError,
     clear_error_fields,
@@ -56,6 +59,35 @@ COPILOT_CLI_BIN = "copilot"
 REASONING_EFFORT_ALLOWED = frozenset({"low", "medium", "high"})
 DEFAULT_TIMEOUT_SECONDS = 7200
 PROGRESS_POLL_SECONDS = 1.0
+
+# Regex to find a Codex Report heading in stdout (e.g. "# Codex Report", "## Codex Report").
+_CODEX_REPORT_HEADING_RE = re.compile(
+    r"^#{1,3}\s+Codex Report",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def extract_codex_report_from_stdout(text: str) -> str:
+    """stdout テキストに有効な Codex Report 本文が含まれていれば抽出して返す。
+
+    有効条件:
+    - ``===BRIDGE_SUMMARY===`` と ``===END_BRIDGE_SUMMARY===`` が両方存在すること
+
+    抽出開始点:
+    - ``# Codex Report`` / ``## Codex Report`` 見出しがあればそこから
+    - なければ ``===BRIDGE_SUMMARY===`` の位置から
+
+    雑多なログや無関係な stdout は空文字列を返す。
+    """
+    if BRIDGE_SUMMARY_START not in text or BRIDGE_SUMMARY_END not in text:
+        return ""
+    # Prefer extracting from the Codex Report heading to preserve full context.
+    m = _CODEX_REPORT_HEADING_RE.search(text)
+    if m:
+        return text[m.start():].strip()
+    # Fallback: start from the BRIDGE_SUMMARY block.
+    idx = text.find(BRIDGE_SUMMARY_START)
+    return text[idx:].strip()
 
 
 def parse_args(
@@ -358,6 +390,19 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         report_path,
         log_paths=[stdout_log_path, stderr_log_path],
     )
+
+    # Fallback: extract Codex Report content directly from copilot stdout.
+    # The copilot CLI writes the report to stdout rather than to a file.
+    # recover_codex_report() only handles file-path recovery, so we supplement
+    # it here by detecting and saving valid report text found in stdout.
+    if not codex_report_is_ready(report_path):
+        stdout_text = read_text(stdout_log_path)
+        extracted = extract_codex_report_from_stdout(stdout_text)
+        if extracted:
+            write_text(report_path, extracted.rstrip() + "\n")
+            print(
+                f"report extracted from copilot stdout: {repo_relative(stdout_log_path)}"
+            )
 
     if codex_report_is_ready(report_path):
         mark_launch_done(state, prompt_path)
