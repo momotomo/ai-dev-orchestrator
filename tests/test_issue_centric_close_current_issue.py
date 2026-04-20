@@ -149,6 +149,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     repository=repository,
                     state="closed",
                 ),
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -216,6 +217,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     state="closed",
                 ),
                 issue_closer=fake_closer,
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -251,6 +253,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                 issue_closer=lambda repository, issue_number, token: (_ for _ in ()).throw(
                     issue_centric_github.IssueCentricGitHubError("close failed")
                 ),
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -316,6 +319,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     state="closed",
                 ),
                 allow_human_review_close=True,
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -369,6 +373,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                 ),
                 allow_human_review_close=True,
                 allow_human_review_followup_close=True,
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -421,6 +426,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     state="closed",
                 ),
                 allow_issue_create_followup_close=True,
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -473,6 +479,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     state="closed",
                 ),
                 allow_codex_run_followup_close=True,
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -555,6 +562,7 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     repository=repository,
                     state="closed",
                 ),
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
@@ -599,11 +607,236 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
                     repository=repository,
                     state="closed",
                 ),
+                pr_fetcher=lambda *_: [],
                 env={"GITHUB_TOKEN": "token-123"},
             )
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.close_status, "closed")
+
+
+
+class PrMergeGuardTests(unittest.TestCase):
+    """execute_close_current_issue() PR merge guard.
+
+    Observed case (Phase 17):
+      Issue #2 was closed even though PR #19 (feat(#2): ...) was still open/unmerged.
+      The guard now fetches open/unmerged PRs that reference the issue before executing
+      the close mutation.  If any such PR exists, close_status="blocked" is returned.
+    """
+
+    def _prepared(
+        self,
+        *,
+        target_issue: str = "#20",
+    ) -> issue_centric_transport.PreparedIssueCentricDecision:
+        return issue_centric_transport.decode_issue_centric_decision(
+            issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue=target_issue,
+                close_current_issue=True,
+                create_followup_issue=False,
+                summary="Done.",
+                issue_body_base64=None,
+                codex_body_base64=None,
+                review_base64=None,
+                followup_issue_body_base64=None,
+                raw_json="{}",
+                raw_segment="segment",
+            )
+        )
+
+    def _open_pr(self, number: int = 19) -> issue_centric_github.GitHubPullRequestSnapshot:
+        return issue_centric_github.GitHubPullRequestSnapshot(
+            number=number,
+            url=f"https://github.com/example/repo/pull/{number}",
+            title=f"feat(#20): implement issue #{number}",
+            state="open",
+            merged=False,
+        )
+
+    def _merged_pr(self, number: int = 19) -> issue_centric_github.GitHubPullRequestSnapshot:
+        return issue_centric_github.GitHubPullRequestSnapshot(
+            number=number,
+            url=f"https://github.com/example/repo/pull/{number}",
+            title=f"feat(#20): implement issue #{number}",
+            state="closed",
+            merged=True,
+        )
+
+    def _run(
+        self,
+        *,
+        pr_fetcher,
+        issue_state: str = "open",
+    ) -> issue_centric_close_current_issue.IssueCloseExecutionResult:
+        prepared = self._prepared()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            return issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state=issue_state,
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="closed",
+                ),
+                pr_fetcher=pr_fetcher,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+    def test_close_blocked_when_open_pr_exists(self) -> None:
+        """An open PR referencing the issue blocks close_current_issue."""
+        result = self._run(pr_fetcher=lambda *_: [self._open_pr()])
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.close_status, "blocked")
+        self.assertIn("PR", result.safe_stop_reason)
+        self.assertIn("open or unmerged", result.safe_stop_reason)
+
+    def test_close_blocked_includes_pr_number_in_reason(self) -> None:
+        """The safe_stop_reason mentions the blocking PR number."""
+        result = self._run(pr_fetcher=lambda *_: [self._open_pr(19)])
+        self.assertIn("PR #19", result.safe_stop_reason)
+
+    def test_close_blocked_when_closed_unmerged_pr_exists(self) -> None:
+        """A closed-but-not-merged PR (abandoned) also blocks the close."""
+        abandoned_pr = issue_centric_github.GitHubPullRequestSnapshot(
+            number=42,
+            url="https://github.com/example/repo/pull/42",
+            title="feat(#20): abandoned branch",
+            state="closed",
+            merged=False,
+        )
+        result = self._run(pr_fetcher=lambda *_: [abandoned_pr])
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.close_status, "blocked")
+
+    def test_close_allowed_when_all_prs_merged(self) -> None:
+        """All related PRs are merged → fetch_open_prs_for_issue returns [] → close proceeds.
+
+        fetch_open_prs_for_issue already filters out merged PRs.  The pr_fetcher
+        mock therefore returns an empty list (no blocking PRs), and close is allowed.
+        """
+        result = self._run(pr_fetcher=lambda *_: [])  # no blocking PRs (all merged = filtered out)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+
+    def test_close_allowed_when_no_prs(self) -> None:
+        """No related PRs → close proceeds normally."""
+        result = self._run(pr_fetcher=lambda *_: [])
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+
+    def test_close_blocked_when_multiple_prs_some_open(self) -> None:
+        """Multiple PRs, at least one open → blocked."""
+        prs = [self._merged_pr(10), self._open_pr(11), self._merged_pr(12)]
+        result = self._run(pr_fetcher=lambda *_: prs)
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.close_status, "blocked")
+
+    def test_close_allowed_when_multiple_prs_all_merged(self) -> None:
+        """Multiple PRs, all merged → fetch returns [] → close proceeds.
+
+        fetch_open_prs_for_issue returns [] when all PRs are merged, so
+        the guard sees no blocking PRs and allows close.
+        """
+        result = self._run(pr_fetcher=lambda *_: [])  # all merged = filtered out
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+
+    def test_execution_log_records_blocked_status(self) -> None:
+        """Execution log JSON records status=blocked and close_status=blocked."""
+        prepared = self._prepared()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: (_ for _ in ()).throw(AssertionError("should not close")),
+                pr_fetcher=lambda *_: [self._open_pr()],
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+            log = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(log["status"], "blocked")
+        self.assertEqual(log["close_status"], "blocked")
+        self.assertIn("open or unmerged", log["safe_stop_reason"])
+
+    def test_pr_fetcher_not_called_when_resolve_fails(self) -> None:
+        """PR fetcher is not called when issue resolution fails before token is obtained."""
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue="#20",
+                close_current_issue=True,
+                create_followup_issue=False,
+                summary="Done.",
+                issue_body_base64=None,
+                codex_body_base64=None,
+                review_base64=None,
+                followup_issue_body_base64=None,
+                raw_json="{}",
+                raw_segment="segment",
+            )
+        )
+        pr_calls: list[int] = []
+
+        def tracking_pr_fetcher(repository: str, issue_number: int, token: str):
+            pr_calls.append(issue_number)
+            return []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={
+                    # mismatch: decision says #20 but state says #21
+                    "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/21",
+                },
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                pr_fetcher=tracking_pr_fetcher,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+        self.assertEqual(result.status, "blocked")
+        # PR fetcher was not called because resolve_close_target_issue raised first
+        self.assertEqual(pr_calls, [])
 
 
 class FetchNextPromptCloseIntegrationTests(unittest.TestCase):

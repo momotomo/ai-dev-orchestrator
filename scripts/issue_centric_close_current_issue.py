@@ -10,10 +10,12 @@ from typing import Any, Callable, Mapping
 from issue_centric_contract import IssueCentricAction
 from issue_centric_github import (
     GitHubIssueSnapshot,
+    GitHubPullRequestSnapshot,
     IssueCentricGitHubError,
     ResolvedGitHubIssue,
     close_github_issue,
     fetch_github_issue,
+    fetch_open_prs_for_issue,
     resolve_github_repository,
     resolve_github_token,
     resolve_target_issue,
@@ -50,6 +52,7 @@ def execute_close_current_issue(
     repo_relative: Callable[[Path], str],
     issue_fetcher: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
     issue_closer: Callable[[str, int, str], GitHubIssueSnapshot] | None = None,
+    pr_fetcher: Callable[[str, int, str], list[GitHubPullRequestSnapshot]] | None = None,
     allow_human_review_close: bool = False,
     allow_human_review_followup_close: bool = False,
     allow_issue_create_followup_close: bool = False,
@@ -97,6 +100,21 @@ def execute_close_current_issue(
         token, token_source = resolve_github_token(env=env)
         fetcher = issue_fetcher or fetch_github_issue
         closer = issue_closer or close_github_issue
+        pr_fetch = pr_fetcher or fetch_open_prs_for_issue
+
+        # PR merge guard: block close if any open / unmerged PR references this issue.
+        blocking_prs = pr_fetch(resolved_issue.repository, resolved_issue.issue_number, token)
+        if blocking_prs:
+            pr_list = ", ".join(
+                f"PR #{pr.number} ({pr.state}{'merged' if pr.merged else ', not merged'})"
+                for pr in blocking_prs[:5]  # cap display to 5
+            )
+            raise IssueCentricCloseCurrentIssueError(
+                f"close_current_issue blocked: issue #{resolved_issue.issue_number} has related PR(s)"
+                f" that are still open or unmerged: {pr_list}."
+                " Merge or close the PR(s) before closing the issue."
+            )
+
         issue_before = fetcher(resolved_issue.repository, resolved_issue.issue_number, token)
         if issue_before.state.lower() == "closed":
             close_status = "already_closed"
