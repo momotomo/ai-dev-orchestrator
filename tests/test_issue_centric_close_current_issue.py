@@ -839,6 +839,283 @@ class PrMergeGuardTests(unittest.TestCase):
         self.assertEqual(pr_calls, [])
 
 
+class AutoMergePrTests(unittest.TestCase):
+    """execute_close_current_issue() auto-merge path (Phase 18).
+
+    When auto_merge_pr=True and exactly one blocking PR exists, the function
+    tries to auto-merge the PR before closing the issue.
+
+    Safety conditions for auto-merge:
+      - exactly 1 blocking PR (others → blocked: ambiguous)
+      - PR state == "open" (draft=False, mergeable=True)
+      - base_ref == default_branch ("main")
+      - merge API call succeeds
+    """
+
+    def _prepared(
+        self,
+        *,
+        target_issue: str = "#8",
+    ) -> issue_centric_transport.PreparedIssueCentricDecision:
+        return issue_centric_transport.decode_issue_centric_decision(
+            issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+                target_issue=target_issue,
+                close_current_issue=True,
+                create_followup_issue=False,
+                summary="Done.",
+                issue_body_base64=None,
+                codex_body_base64=None,
+                review_base64=None,
+                followup_issue_body_base64=None,
+                raw_json="{}",
+                raw_segment="segment",
+            )
+        )
+
+    def _detail(
+        self,
+        *,
+        number: int = 23,
+        draft: bool = False,
+        mergeable: bool | None = True,
+        base_ref: str = "main",
+    ) -> issue_centric_github.GitHubPullRequestDetail:
+        return issue_centric_github.GitHubPullRequestDetail(
+            number=number,
+            url=f"https://github.com/example/repo/pull/{number}",
+            title=f"feat(#8): implement #{number}",
+            state="open",
+            merged=False,
+            draft=draft,
+            mergeable=mergeable,
+            base_ref=base_ref,
+        )
+
+    def _open_snap(self, number: int = 23) -> issue_centric_github.GitHubPullRequestSnapshot:
+        return issue_centric_github.GitHubPullRequestSnapshot(
+            number=number,
+            url=f"https://github.com/example/repo/pull/{number}",
+            title=f"feat(#8): implement #{number}",
+            state="open",
+            merged=False,
+        )
+
+    def _run(
+        self,
+        *,
+        blocking_prs: list[issue_centric_github.GitHubPullRequestSnapshot],
+        detail: issue_centric_github.GitHubPullRequestDetail | None = None,
+        merge_raises: Exception | None = None,
+        auto_merge_pr: bool = True,
+        default_branch: str = "main",
+    ) -> issue_centric_close_current_issue.IssueCloseExecutionResult:
+        prepared = self._prepared()
+        merge_calls: list[int] = []
+
+        def fake_detail_fetcher(
+            repository: str, pr_number: int, token: str
+        ) -> issue_centric_github.GitHubPullRequestDetail:
+            if detail is None:
+                raise AssertionError("detail fetcher called but no detail provided")
+            return detail
+
+        def fake_merger(repository: str, pr_number: int, token: str) -> None:
+            if merge_raises is not None:
+                raise merge_raises
+            merge_calls.append(pr_number)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/8"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="closed",
+                ),
+                pr_fetcher=lambda *_: blocking_prs,
+                auto_merge_pr=auto_merge_pr,
+                pr_detail_fetcher=fake_detail_fetcher,
+                pr_merger=fake_merger,
+                default_branch=default_branch,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+        return result
+
+    # --- happy path ---
+
+    def test_single_open_mergeable_pr_on_default_branch_merges_then_closes(self) -> None:
+        """Happy path: single open mergeable PR on main → auto-merge then close."""
+        detail = self._detail(number=23, draft=False, mergeable=True, base_ref="main")
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+        self.assertEqual(result.auto_merged_pr_number, 23)
+        self.assertIn("auto-merged PR #23", result.safe_stop_reason)
+
+    def test_execution_log_records_auto_merged_pr_number(self) -> None:
+        """Execution log JSON records auto_merged_pr_number."""
+        prepared = self._prepared()
+        detail = self._detail(number=23)
+        merge_calls: list[int] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/8"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Current issue",
+                    repository=repository,
+                    state="closed",
+                ),
+                pr_fetcher=lambda *_: [self._open_snap(23)],
+                auto_merge_pr=True,
+                pr_detail_fetcher=lambda repo, pr_num, token: detail,
+                pr_merger=lambda repo, pr_num, token: merge_calls.append(pr_num),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+            log = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(log["auto_merged_pr_number"], 23)
+        self.assertEqual(log["status"], "completed")
+        self.assertEqual(merge_calls, [23])
+
+    def test_auto_merge_safe_stop_reason_contains_issue_number(self) -> None:
+        """safe_stop_reason mentions the closed issue number."""
+        detail = self._detail(number=23)
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+        self.assertIn("closed issue #8", result.safe_stop_reason)
+
+    # --- blocked: ambiguous (multiple PRs) ---
+
+    def test_multiple_blocking_prs_are_blocked_with_ambiguous_reason(self) -> None:
+        """Two blocking PRs → blocked, reason mentions 'ambiguous'."""
+        result = self._run(
+            blocking_prs=[self._open_snap(23), self._open_snap(24)],
+            detail=self._detail(),
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.close_status, "blocked")
+        self.assertIn("ambiguous", result.safe_stop_reason)
+
+    def test_multiple_blocking_prs_reason_lists_pr_numbers(self) -> None:
+        """Blocked reason lists at least one PR number."""
+        result = self._run(
+            blocking_prs=[self._open_snap(23), self._open_snap(24)],
+            detail=self._detail(),
+        )
+        self.assertIn("PR #23", result.safe_stop_reason)
+
+    # --- blocked: draft PR ---
+
+    def test_draft_pr_is_blocked(self) -> None:
+        """Draft PR → blocked, reason mentions 'draft'."""
+        detail = self._detail(number=23, draft=True)
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("draft", result.safe_stop_reason)
+
+    # --- blocked: non-mergeable PR ---
+
+    def test_non_mergeable_pr_is_blocked(self) -> None:
+        """mergeable=False → blocked, reason mentions 'not mergeable'."""
+        detail = self._detail(number=23, mergeable=False)
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("not mergeable", result.safe_stop_reason)
+
+    def test_mergeable_none_is_blocked(self) -> None:
+        """mergeable=None (still calculating) → blocked, reason mentions 'not yet determined'."""
+        detail = self._detail(number=23, mergeable=None)
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("not yet determined", result.safe_stop_reason)
+
+    # --- blocked: non-default-base PR ---
+
+    def test_non_default_base_pr_is_blocked(self) -> None:
+        """base_ref != main → blocked, reason mentions 'not default branch'."""
+        detail = self._detail(number=23, base_ref="feature/stacked")
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("not default branch", result.safe_stop_reason)
+
+    def test_non_default_base_pr_reason_shows_branch_names(self) -> None:
+        """Block reason shows the actual base_ref value."""
+        detail = self._detail(number=23, base_ref="feat/parent-branch")
+        result = self._run(blocking_prs=[self._open_snap(23)], detail=detail)
+        self.assertIn("feat/parent-branch", result.safe_stop_reason)
+
+    # --- blocked: merge API failure ---
+
+    def test_merge_api_failure_is_blocked(self) -> None:
+        """Merge API raises IssueCentricGitHubError → blocked."""
+        detail = self._detail(number=23)
+        result = self._run(
+            blocking_prs=[self._open_snap(23)],
+            detail=detail,
+            merge_raises=issue_centric_github.IssueCentricGitHubError("merge conflict"),
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("auto-merge failed", result.safe_stop_reason)
+        self.assertIn("merge conflict", result.safe_stop_reason)
+
+    # --- auto_merge_pr=False still uses the existing guard ---
+
+    def test_auto_merge_disabled_open_pr_still_blocked(self) -> None:
+        """When auto_merge_pr=False, a single open PR is still blocked (guard unchanged)."""
+        result = self._run(
+            blocking_prs=[self._open_snap(23)],
+            detail=self._detail(),
+            auto_merge_pr=False,
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("open or unmerged", result.safe_stop_reason)
+
+    def test_auto_merge_disabled_no_prs_still_closes(self) -> None:
+        """When auto_merge_pr=False and no blocking PRs, close proceeds normally."""
+        result = self._run(blocking_prs=[], auto_merge_pr=False)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+        self.assertIsNone(result.auto_merged_pr_number)
+
+
 class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
     def test_issue_create_can_close_current_issue_after_creation(self) -> None:
         state = {

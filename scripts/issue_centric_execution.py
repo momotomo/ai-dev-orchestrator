@@ -1625,6 +1625,7 @@ def dispatch_issue_centric_execution(
             source_action_execution_log="",
             log_writer=log_writer,
             repo_relative=repo_relative,
+            auto_merge_pr=True,
         )
         _apply_close_execution_state(
             mutable_state,
