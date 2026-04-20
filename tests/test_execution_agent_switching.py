@@ -1692,6 +1692,197 @@ class StdoutReportExtractionTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _is_ic_close_completed_for_auto_continuation unit tests
+# ---------------------------------------------------------------------------
+
+
+class IsIcCloseCompletedForAutoContinuationTests(unittest.TestCase):
+    """Tests for bridge_orchestrator._is_ic_close_completed_for_auto_continuation."""
+
+    def _call(self, state: dict) -> bool:
+        return bridge_orchestrator._is_ic_close_completed_for_auto_continuation(state)
+
+    def test_returns_true_when_close_completed_and_ic_decision(self) -> None:
+        """close_status=completed + issue_centric: decision → True."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "completed",
+        }
+        self.assertTrue(self._call(state))
+
+    def test_returns_false_when_close_status_not_completed(self) -> None:
+        """close_status not 'completed' → False even with IC decision."""
+        for status in ("", "blocked", "partial", "not_requested"):
+            with self.subTest(status=status):
+                state = {
+                    "chatgpt_decision": "issue_centric:no_action",
+                    "last_issue_centric_close_status": status,
+                }
+                self.assertFalse(self._call(state))
+
+    def test_returns_false_when_chatgpt_decision_not_ic(self) -> None:
+        """Non-IC chatgpt_decision → False even with close_status=completed."""
+        for decision in ("", "human_review", "need_info", "legacy_contract_detected"):
+            with self.subTest(decision=decision):
+                state = {
+                    "chatgpt_decision": decision,
+                    "last_issue_centric_close_status": "completed",
+                }
+                self.assertFalse(self._call(state))
+
+    def test_returns_false_when_state_is_empty(self) -> None:
+        """Empty state → False."""
+        self.assertFalse(self._call({}))
+
+    def test_returns_true_with_codex_run_action_and_close_completed(self) -> None:
+        """issue_centric:codex_run + close_status=completed → True."""
+        state = {
+            "chatgpt_decision": "issue_centric:codex_run",
+            "last_issue_centric_close_status": "completed",
+        }
+        self.assertTrue(self._call(state))
+
+
+# ---------------------------------------------------------------------------
+# bridge_orchestrator.run() IC close auto-continuation integration tests
+# ---------------------------------------------------------------------------
+
+
+class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
+    """Integration tests for Phase 9 auto-continuation after IC close."""
+
+    def _make_ic_close_completed_state(self) -> dict:
+        """Return a state that represents a successfully closed IC issue."""
+        return {
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "issue_centric:no_action",
+            "chatgpt_decision_note": "issue closed",
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_close_status": "completed",
+            "last_issue_centric_close_order": "close_current_issue",
+            "last_issue_centric_closed_issue_number": "42",
+        }
+
+    def test_auto_continuation_calls_request_next_prompt_with_select_issue(self) -> None:
+        """After IC close, bridge dispatches request_next_prompt with --select-issue."""
+        state = self._make_ic_close_completed_state()
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_request_next_prompt_run(s, argv):
+            captured.append(argv)
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_request_next_prompt_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, ["--worker-repo-path", "/tmp/test-repo"])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured), 1, "request_next_prompt.run should be called once")
+        argv = captured[0]
+        self.assertIn("--select-issue", argv)
+        self.assertNotIn("--ready-issue-ref", argv)
+        self.assertNotIn("--request-body", argv)
+
+    def test_auto_continuation_includes_project_path_when_worker_repo_path_set(self) -> None:
+        """--project-path is passed from worker_repo_path when set."""
+        state = self._make_ic_close_completed_state()
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_run(s, argv):
+            captured.append(argv)
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(state, ["--worker-repo-path", "/tmp/proj"])
+
+        argv = captured[0]
+        self.assertIn("--project-path", argv)
+        idx = argv.index("--project-path")
+        self.assertEqual(argv[idx + 1], "/tmp/proj")
+
+    def test_auto_continuation_does_not_fire_for_initial_selection_stop(self) -> None:
+        """initial_selection_stop blocks auto-continuation even with close_status=completed."""
+        state = self._make_ic_close_completed_state()
+        # initial_selection_stop requires selected_ready_issue_ref to be set
+        state["selected_ready_issue_ref"] = "#42 some issue"
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        mock_rnp.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_auto_continuation_does_not_fire_when_close_status_not_completed(self) -> None:
+        """No auto-continuation when last_issue_centric_close_status != 'completed'."""
+        state = self._make_ic_close_completed_state()
+        state["last_issue_centric_close_status"] = ""
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        mock_rnp.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_auto_continuation_does_not_fire_for_non_ic_state(self) -> None:
+        """Non-IC chatgpt_decision: no auto-continuation even if close_status=completed."""
+        state = self._make_ic_close_completed_state()
+        # Use a decision value that is NOT "human_review" / "need_info" to avoid routing
+        # to request_prompt_from_report, and NOT an issue_centric: prefix.
+        state["chatgpt_decision"] = "legacy_contract_detected"
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        mock_rnp.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_auto_continuation_prints_close_detected_message(self) -> None:
+        """Auto-continuation prints the close-detected message to stdout."""
+        state = self._make_ic_close_completed_state()
+        config = _make_minimal_project_config("codex")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", return_value=0),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            bridge_orchestrator.run(state, [])
+
+        output = buf.getvalue()
+        self.assertIn("クローズを検出", output)
+        self.assertIn("選定", output)
+
+
+# ---------------------------------------------------------------------------
 # github_copilot_provider_stub unit tests
 # ---------------------------------------------------------------------------
 

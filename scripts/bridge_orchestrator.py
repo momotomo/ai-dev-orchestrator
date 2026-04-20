@@ -305,6 +305,31 @@ def dispatch_pending_issue_centric_codex_run(
     return 0
 
 
+def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bool:
+    """Return True when the last IC execution closed the current issue successfully.
+
+    Used by bridge_orchestrator.run() to detect when auto-continuation to the
+    next ready issue selection is appropriate.  Both conditions must hold:
+
+      1. chatgpt_decision starts with "issue_centric:" — the current state is
+         from an issue-centric dispatch cycle, not a legacy / override cycle.
+      2. last_issue_centric_close_status == "completed" — the close execution
+         succeeded.  This field is set by _apply_close_execution_state() and
+         cleared by _apply_ic_continuation_reset() at the start of the next
+         fetch cycle, so a stale "completed" value from a prior cycle cannot
+         trigger a false positive after the state has been refreshed by a new
+         ChatGPT reply.
+
+    The caller is responsible for guarding IC stop paths (initial_selection_stop
+    / human_review_needed) via detect_ic_stop_path() before calling this helper.
+    """
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return False
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    return close_status == "completed"
+
+
 def maybe_promote_codex_done(state: dict[str, object]) -> bool:
     updated_state, recovered_report = recover_report_ready_state(state, prompt_path=runtime_prompt_path())
     if not codex_report_is_ready():
@@ -418,6 +443,22 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
     if plan.next_action == "fetch_next_prompt":
         return fetch_next_prompt.run(dict(state), build_fetch_argv(args))
+
+    # IC close auto-continuation: when the last IC execution closed the current
+    # issue and no IC stop path requires human intervention, proceed directly to
+    # the next ready issue selection instead of stopping and waiting for restart.
+    # _ic_stop == "" guards initial_selection_stop / human_review_needed paths.
+    if _ic_stop == "" and _is_ic_close_completed_for_auto_continuation(state):
+        print(
+            f"{status.label}です。current issue のクローズを検出しました。"
+            " 次の ready issue 選定へ自動で進みます。"
+        )
+        select_argv: list[str] = []
+        if args.worker_repo_path:
+            select_argv.extend(["--project-path", args.worker_repo_path])
+        select_argv.append("--select-issue")
+        return request_next_prompt.run(dict(state), select_argv)
+
     return 0
 
 
