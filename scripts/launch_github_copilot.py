@@ -66,12 +66,24 @@ _CODEX_REPORT_HEADING_RE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
+# Regex to find a markdown-style "### BRIDGE_SUMMARY" heading (actual copilot CLI format).
+_BRIDGE_SUMMARY_MD_RE = re.compile(
+    r"^#{1,3}\s+BRIDGE_SUMMARY",
+    re.MULTILINE | re.IGNORECASE,
+)
+
 
 def extract_codex_report_from_stdout(text: str) -> str:
     """stdout テキストに有効な Codex Report 本文が含まれていれば抽出して返す。
 
-    有効条件:
-    - ``===BRIDGE_SUMMARY===`` と ``===END_BRIDGE_SUMMARY===`` が両方存在すること
+    有効判定は以下の **いずれか** で行う:
+
+    1. ブロックマーカー形式 (既存互換):
+       ``===BRIDGE_SUMMARY===`` と ``===END_BRIDGE_SUMMARY===`` が両方存在する
+
+    2. マークダウン形式 (実際の copilot CLI stdout):
+       ``# Codex Report`` または ``## Codex Report`` と
+       ``### BRIDGE_SUMMARY`` が共存する
 
     抽出開始点:
     - ``# Codex Report`` / ``## Codex Report`` 見出しがあればそこから
@@ -79,13 +91,25 @@ def extract_codex_report_from_stdout(text: str) -> str:
 
     雑多なログや無関係な stdout は空文字列を返す。
     """
-    if BRIDGE_SUMMARY_START not in text or BRIDGE_SUMMARY_END not in text:
+    if not text:
         return ""
+
+    # Pattern 1: block marker format.
+    has_block_markers = (BRIDGE_SUMMARY_START in text and BRIDGE_SUMMARY_END in text)
+
+    # Pattern 2: markdown format (actual copilot CLI output).
+    has_report_heading = bool(_CODEX_REPORT_HEADING_RE.search(text))
+    has_md_bridge_summary = bool(_BRIDGE_SUMMARY_MD_RE.search(text))
+    is_markdown_format = has_report_heading and has_md_bridge_summary
+
+    if not has_block_markers and not is_markdown_format:
+        return ""
+
     # Prefer extracting from the Codex Report heading to preserve full context.
     m = _CODEX_REPORT_HEADING_RE.search(text)
     if m:
         return text[m.start():].strip()
-    # Fallback: start from the BRIDGE_SUMMARY block.
+    # Fallback: start from the block BRIDGE_SUMMARY marker.
     idx = text.find(BRIDGE_SUMMARY_START)
     return text[idx:].strip()
 
