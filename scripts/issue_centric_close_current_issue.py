@@ -78,11 +78,6 @@ def execute_close_current_issue(
 
     try:
         repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
-        configured_project_url = str(project_config.get("github_project_url", "")).strip()
-        if configured_project_url:
-            raise IssueCentricCloseCurrentIssueError(
-                "github_project_url is configured, but Project state sync for close_current_issue is not implemented in this slice."
-            )
 
         resolved_issue = resolve_close_target_issue(
             prepared,
