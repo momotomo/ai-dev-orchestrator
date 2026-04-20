@@ -1251,6 +1251,65 @@ class DispatchPlanOperatorHelpersTest(unittest.TestCase):
         self.assertIsInstance(sig_a, tuple)
         self.assertIsInstance(sig_b, tuple)
 
+    def test_state_signature_detects_new_pending_request_hash(self) -> None:
+        """pending_request_hash change is detected even when mode stays the same.
+
+        Observed failure case: initial_selection_stop auto-continue sends a new
+        ready-issue request within the same run; mode remains 'waiting_prompt_reply'
+        but pending_request_hash changes.  Without this fix, run_until_stop would
+        see state_signature(before) == state_signature(after) and stop early.
+        """
+        base = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "old_hash",
+            "pending_request_source": "initial_selection:abc",
+        }
+        after = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "new_hash",
+            "pending_request_source": "ready_issue:def",
+        }
+        self.assertNotEqual(
+            run_until_stop.state_signature(base),
+            run_until_stop.state_signature(after),
+        )
+
+    def test_state_signature_detects_pending_source_change_only(self) -> None:
+        """pending_request_source change alone is detected as a state change."""
+        before = {"mode": "waiting_prompt_reply", "pending_request_source": "initial_selection:x"}
+        after = {"mode": "waiting_prompt_reply", "pending_request_source": "ready_issue:y"}
+        self.assertNotEqual(
+            run_until_stop.state_signature(before),
+            run_until_stop.state_signature(after),
+        )
+
+    def test_state_signature_detects_last_processed_request_hash_change(self) -> None:
+        """last_processed_request_hash change is detected."""
+        before = {"mode": "waiting_prompt_reply", "last_processed_request_hash": ""}
+        after = {"mode": "waiting_prompt_reply", "last_processed_request_hash": "hash999"}
+        self.assertNotEqual(
+            run_until_stop.state_signature(before),
+            run_until_stop.state_signature(after),
+        )
+
+    def test_state_signature_unchanged_when_no_meaningful_diff(self) -> None:
+        """Truly unchanged state (all tracked fields equal) still returns equal signatures.
+
+        This ensures the real no-progress stop is still triggered for states
+        that have genuinely not advanced.
+        """
+        state = {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "pending_request_hash": "abc",
+            "pending_request_source": "ready_issue:x",
+            "last_processed_request_hash": "prev",
+        }
+        self.assertEqual(
+            run_until_stop.state_signature(dict(state)),
+            run_until_stop.state_signature(dict(state)),
+        )
+
     def test_resolve_route_choice_returns_preferred_loop_action_and_reason(self) -> None:
         """resolve_issue_centric_route_choice() exposes preferred_loop_action and
         preferred_loop_reason directly.  The thin wrapper that used to re-expose

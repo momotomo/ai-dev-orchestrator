@@ -284,6 +284,11 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
     # they are NOT used for routing decisions.  Routing authority is
     # resolve_runtime_dispatch_plan().  These fields survive until mode demotion
     # phase fully removes them from the written state.
+    #
+    # pending_request_* and last_processed_* are included so that a new request
+    # sent during an auto-continue (e.g. initial_selection_stop → ready-issue
+    # request within the same run) is detected as a state change even when mode
+    # stays "waiting_prompt_reply".
     return (
         state.get("mode"),
         bool(state.get("need_chatgpt_prompt")),
@@ -294,6 +299,12 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
         str(state.get("last_prompt_file", "")),
         str(state.get("last_report_file", "")),
         int(state.get("cycle", 0)),
+        str(state.get("pending_request_hash", "")),
+        str(state.get("pending_request_source", "")),
+        str(state.get("pending_request_log", "")),
+        str(state.get("pending_request_signal", "")),
+        str(state.get("last_processed_request_hash", "")),
+        str(state.get("last_processed_reply_hash", "")),
     )
 
 
