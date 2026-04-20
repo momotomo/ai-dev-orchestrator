@@ -1983,6 +1983,263 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _is_ic_issue_create_completed_for_auto_continuation unit tests
+# ---------------------------------------------------------------------------
+
+
+class IsIcIssueCreateCompletedForAutoContinuationTests(unittest.TestCase):
+    """Tests for bridge_orchestrator._is_ic_issue_create_completed_for_auto_continuation."""
+
+    def _call(self, state: dict) -> bool:
+        return bridge_orchestrator._is_ic_issue_create_completed_for_auto_continuation(state)
+
+    def test_returns_true_when_issue_created_no_close(self) -> None:
+        """created_issue_number set + no close + IC decision → True."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "42",
+            "last_issue_centric_close_status": "",
+        }
+        self.assertTrue(self._call(state))
+
+    def test_returns_false_when_close_completed(self) -> None:
+        """close_status=completed → False (issue_create_then_close handled elsewhere)."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "42",
+            "last_issue_centric_close_status": "completed",
+        }
+        self.assertFalse(self._call(state))
+
+    def test_returns_false_when_created_issue_number_empty(self) -> None:
+        """Empty created_issue_number → False regardless of IC decision."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_close_status": "",
+        }
+        self.assertFalse(self._call(state))
+
+    def test_returns_false_when_chatgpt_decision_not_ic(self) -> None:
+        """Non-IC chatgpt_decision → False even with created_issue_number set."""
+        for decision in ("", "human_review", "need_info", "legacy_contract_detected"):
+            with self.subTest(decision=decision):
+                state = {
+                    "chatgpt_decision": decision,
+                    "last_issue_centric_created_issue_number": "42",
+                    "last_issue_centric_close_status": "",
+                }
+                self.assertFalse(self._call(state))
+
+    def test_returns_false_when_state_is_empty(self) -> None:
+        """Empty state → False."""
+        self.assertFalse(self._call({}))
+
+    def test_returns_true_for_partial_close_status(self) -> None:
+        """Non-completed close_status (e.g. 'blocked') with created issue → True."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "55",
+            "last_issue_centric_close_status": "blocked",
+        }
+        self.assertTrue(self._call(state))
+
+
+# ---------------------------------------------------------------------------
+# bridge_orchestrator.run() issue_create auto-continuation integration tests
+# ---------------------------------------------------------------------------
+
+
+class BridgeOrchestratorIssueCreateAutoContinueTests(unittest.TestCase):
+    """Integration tests for issue_create auto-continuation after IC issue creation."""
+
+    def _make_ic_issue_create_state(
+        self,
+        number: str = "42",
+        title: str = "my new feature",
+        close_status: str = "",
+    ) -> dict:
+        """Return a state representing a successful issue_create without close."""
+        return {
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "issue_centric:issue_create",
+            "chatgpt_decision_note": "issue created",
+            "last_issue_centric_action": "issue_create",
+            "last_issue_centric_created_issue_number": number,
+            "last_issue_centric_created_issue_title": title,
+            "last_issue_centric_created_issue_url": f"https://github.com/org/repo/issues/{number}",
+            "last_issue_centric_close_status": close_status,
+        }
+
+    def test_auto_continue_calls_request_next_prompt_with_ready_issue_ref(self) -> None:
+        """After issue_create, bridge dispatches request_next_prompt with --ready-issue-ref."""
+        state = self._make_ic_issue_create_state()
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_run(s, argv):
+            captured.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured), 1)
+        argv = captured[0]
+        self.assertIn("--ready-issue-ref", argv)
+        idx = argv.index("--ready-issue-ref")
+        ref = argv[idx + 1]
+        self.assertIn("42", ref)
+        self.assertNotIn("--select-issue", argv)
+
+    def test_auto_continue_ref_includes_title(self) -> None:
+        """--ready-issue-ref contains both issue number and title."""
+        state = self._make_ic_issue_create_state(number="7", title="add login flow")
+        config = _make_minimal_project_config("codex")
+        captured_argv = []
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run",
+                  side_effect=lambda s, argv: captured_argv.extend([list(argv)]) or 0),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(state, [])
+
+        argv = captured_argv[0]
+        idx = argv.index("--ready-issue-ref")
+        ref = argv[idx + 1]
+        self.assertIn("#7", ref)
+        self.assertIn("add login flow", ref)
+
+    def test_auto_continue_clears_created_issue_fields_in_forwarded_state(self) -> None:
+        """Forwarded state has last_issue_centric_created_issue_* cleared."""
+        state = self._make_ic_issue_create_state()
+        config = _make_minimal_project_config("codex")
+        forwarded_states = []
+
+        def capture_state(s, argv):
+            forwarded_states.append(dict(s))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=capture_state),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(state, [])
+
+        self.assertEqual(len(forwarded_states), 1)
+        fwd = forwarded_states[0]
+        self.assertEqual(fwd.get("last_issue_centric_created_issue_number"), "")
+        self.assertEqual(fwd.get("last_issue_centric_created_issue_url"), "")
+        self.assertEqual(fwd.get("last_issue_centric_created_issue_title"), "")
+
+    def test_auto_continue_prints_issue_number_in_message(self) -> None:
+        """Auto-continue message includes the created issue number."""
+        state = self._make_ic_issue_create_state(number="99", title="fix cache bug")
+        config = _make_minimal_project_config("codex")
+        buf = io.StringIO()
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", return_value=0),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            bridge_orchestrator.run(state, [])
+
+        output = buf.getvalue()
+        self.assertIn("#99", output)
+        self.assertIn("作成", output)
+
+    def test_auto_continue_does_not_fire_when_close_completed(self) -> None:
+        """When issue_create_then_close (close_status=completed): no issue_create auto-continue."""
+        state = self._make_ic_issue_create_state(close_status="completed")
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_run(s, argv):
+            captured.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        # Only close auto-continuation (--select-issue) should fire, not --ready-issue-ref.
+        for argv in captured:
+            self.assertNotIn("--ready-issue-ref", argv)
+
+    def test_auto_continue_does_not_fire_when_no_created_issue(self) -> None:
+        """No auto-continue when last_issue_centric_created_issue_number is empty."""
+        state = self._make_ic_issue_create_state()
+        state["last_issue_centric_created_issue_number"] = ""
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        mock_rnp.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_auto_continue_does_not_fire_for_non_ic_state(self) -> None:
+        """Non-IC chatgpt_decision: no auto-continue even with created_issue_number set."""
+        state = self._make_ic_issue_create_state()
+        state["chatgpt_decision"] = "legacy_contract_detected"
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        mock_rnp.assert_not_called()
+        self.assertEqual(rc, 0)
+
+    def test_auto_continue_includes_project_path_when_set(self) -> None:
+        """--project-path is passed when worker_repo_path is given."""
+        state = self._make_ic_issue_create_state()
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_run(s, argv):
+            captured.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(state, ["--worker-repo-path", "/tmp/project"])
+
+        self.assertEqual(len(captured), 1)
+        argv = captured[0]
+        self.assertIn("--project-path", argv)
+        idx = argv.index("--project-path")
+        self.assertEqual(argv[idx + 1], "/tmp/project")
+
+
+# ---------------------------------------------------------------------------
 # github_copilot_provider_stub unit tests
 # ---------------------------------------------------------------------------
 

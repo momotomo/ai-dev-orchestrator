@@ -330,6 +330,37 @@ def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bo
     return close_status == "completed"
 
 
+def _is_ic_issue_create_completed_for_auto_continuation(state: dict[str, object]) -> bool:
+    """Return True when the last IC execution created an issue without closing the current issue.
+
+    Used by bridge_orchestrator.run() to detect when auto-continuation to the
+    created issue's implementation cycle is appropriate.  All three conditions must hold:
+
+      1. chatgpt_decision starts with "issue_centric:" — the current state is
+         from an issue-centric dispatch cycle, not a legacy / override cycle.
+      2. last_issue_centric_created_issue_number is non-empty — a created issue
+         is clearly identified.  This field is set by _apply_issue_create_execution_state()
+         and cleared by _apply_ic_continuation_reset() at the start of the next
+         fetch cycle, so a stale value from a prior cycle cannot trigger a false
+         positive after the state has been refreshed by a new ChatGPT reply.
+      3. last_issue_centric_close_status != "completed" — not a close path.
+         issue_create_then_close and similar close paths are already handled by
+         _is_ic_close_completed_for_auto_continuation(); this guard prevents double
+         triggering on those paths.
+
+    The caller is responsible for guarding IC stop paths (initial_selection_stop
+    / human_review_needed) via detect_ic_stop_path() before calling this helper.
+    """
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return False
+    created_number = str(state.get("last_issue_centric_created_issue_number", "")).strip()
+    if not created_number:
+        return False
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    return close_status != "completed"
+
+
 def maybe_promote_codex_done(state: dict[str, object]) -> bool:
     updated_state, recovered_report = recover_report_ready_state(state, prompt_path=runtime_prompt_path())
     if not codex_report_is_ready():
@@ -481,6 +512,38 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             select_argv.extend(["--project-path", args.worker_repo_path])
         select_argv.append("--select-issue")
         return request_next_prompt.run(dict(state), select_argv)
+
+    # IC issue_create auto-continuation: when the last IC execution created an issue
+    # without closing the current issue, proceed directly to the created issue's
+    # implementation cycle instead of stopping and waiting for operator --ready-issue-ref.
+    # _ic_stop == "" guards initial_selection_stop / human_review_needed paths.
+    # _is_ic_close_completed_for_auto_continuation() is False here (guarded above),
+    # so issue_create_then_close paths (which trigger the close block above) never reach
+    # this point.
+    if _ic_stop == "" and _is_ic_issue_create_completed_for_auto_continuation(state):
+        _created_number = str(state.get("last_issue_centric_created_issue_number", "")).strip()
+        _created_title = str(state.get("last_issue_centric_created_issue_title", "")).strip()
+        _created_ref = (
+            f"#{_created_number} {_created_title}".strip() if _created_title else f"#{_created_number}"
+        )
+        print(
+            f"{status.label}です。issue #{_created_number} を作成しました。"
+            f" 作成された issue {_created_ref} を current として次の実装へ自動で進みます。"
+        )
+        issue_create_state = dict(state)
+        # Clear created-issue fields so the next cycle's detect_ic_stop_path()
+        # and _is_ic_issue_create_completed_for_auto_continuation() do not see
+        # stale values.  _apply_ic_continuation_reset() will also clear these
+        # at the start of the next fetch cycle, but clearing here prevents
+        # false positives in any intermediate bridge invocations.
+        issue_create_state["last_issue_centric_created_issue_number"] = ""
+        issue_create_state["last_issue_centric_created_issue_url"] = ""
+        issue_create_state["last_issue_centric_created_issue_title"] = ""
+        issue_create_argv: list[str] = []
+        if args.worker_repo_path:
+            issue_create_argv.extend(["--project-path", args.worker_repo_path])
+        issue_create_argv.extend(["--ready-issue-ref", _created_ref])
+        return request_next_prompt.run(issue_create_state, issue_create_argv)
 
     return 0
 
