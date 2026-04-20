@@ -2240,6 +2240,313 @@ class BridgeOrchestratorIssueCreateAutoContinueTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _resolve_post_fetch_initial_selection_ref unit tests
+# ---------------------------------------------------------------------------
+
+
+class ResolvePostFetchInitialSelectionRefTests(unittest.TestCase):
+    """Tests for bridge_orchestrator._resolve_post_fetch_initial_selection_ref."""
+
+    def _call(self, state: dict) -> str:
+        return bridge_orchestrator._resolve_post_fetch_initial_selection_ref(state)
+
+    def test_returns_selected_ready_issue_ref_when_set(self) -> None:
+        """Primary path: selected_ready_issue_ref non-empty → return it."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "#2 implement auth",
+        }
+        self.assertEqual(self._call(state), "#2 implement auth")
+
+    def test_returns_target_issue_when_selected_ref_empty_and_note_has_sentei(self) -> None:
+        """Fallback path: selected_ready_issue_ref empty, note has 選定 → use target_issue."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "",
+            "last_issue_centric_target_issue": "#2",
+            "chatgpt_decision_note": "ChatGPT が ready issue #2 を選定しました。 --ready-issue-ref で指定してください。",
+        }
+        self.assertEqual(self._call(state), "#2")
+
+    def test_returns_empty_when_chatgpt_decision_not_ic(self) -> None:
+        """Non-IC chatgpt_decision → empty string."""
+        state = {
+            "chatgpt_decision": "human_review",
+            "selected_ready_issue_ref": "#2",
+        }
+        self.assertEqual(self._call(state), "")
+
+    def test_returns_empty_when_state_empty(self) -> None:
+        """Empty state → empty string."""
+        self.assertEqual(self._call({}), "")
+
+    def test_returns_empty_when_selected_ref_empty_and_no_sentei_in_note(self) -> None:
+        """Fallback path: note does not contain 選定 → empty string (not auto-continue)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "",
+            "last_issue_centric_target_issue": "#2",
+            "chatgpt_decision_note": "dispatch を継続します。",
+        }
+        self.assertEqual(self._call(state), "")
+
+    def test_returns_empty_for_codex_run_stop_state(self) -> None:
+        """codex_run_stop: selected_ready_issue_ref empty and no 選定 note → empty string."""
+        state = {
+            "chatgpt_decision": "issue_centric:codex_run",
+            "selected_ready_issue_ref": "",
+            "last_issue_centric_target_issue": "#2",
+            "chatgpt_decision_note": "prepared Codex body は保存済みです。",
+        }
+        self.assertEqual(self._call(state), "")
+
+    def test_returns_empty_when_target_issue_is_none_string(self) -> None:
+        """target_issue == 'none' → empty string (guard for unresolved targets)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "selected_ready_issue_ref": "",
+            "last_issue_centric_target_issue": "none",
+            "chatgpt_decision_note": "ChatGPT が ready issue を選定しました。",
+        }
+        self.assertEqual(self._call(state), "")
+
+
+# ---------------------------------------------------------------------------
+# bridge_orchestrator.run() fallback-legacy initial selection auto-continue tests
+# ---------------------------------------------------------------------------
+
+
+class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase):
+    """Tests for in-run auto-continue when fetch_next_prompt raises BridgeStop
+    with initial_selection_stop (fallback-legacy or issue-centric path)."""
+
+    def _make_pre_fetch_state(self) -> dict:
+        """State when bridge is about to call fetch_next_prompt (waiting_prompt_reply)."""
+        return {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "",
+            "pending_request_hash": "abc123",
+            "pending_request_source": "initial_selection:hash456",
+        }
+
+    def _make_post_fetch_state(
+        self,
+        selected_ref: str = "#2 implement auth",
+        target_issue: str = "#2",
+        decision_note: str = "ChatGPT が ready issue #2 を選定しました。 --ready-issue-ref で指定してください。",
+    ) -> dict:
+        """State saved by fetch_next_prompt after initial_selection_stop."""
+        return {
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "issue_centric:no_action",
+            "chatgpt_decision_note": decision_note,
+            "selected_ready_issue_ref": selected_ref,
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_target_issue": target_issue,
+            "pending_request_source": "",  # cleared by clear_pending_request_fields
+            "pending_request_hash": "",
+        }
+
+    def test_auto_continue_on_fetch_initial_selection_stop(self) -> None:
+        """fetch raises BridgeStop for initial_selection_stop → auto-continue with --ready-issue-ref."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state()
+        config = _make_minimal_project_config("codex")
+        captured_rnp = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ChatGPT が ready issue を選定しました: #2. ...")
+
+        def fake_rnp_run(s, argv):
+            captured_rnp.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_rnp_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured_rnp), 1)
+        argv = captured_rnp[0]
+        self.assertIn("--ready-issue-ref", argv)
+        idx = argv.index("--ready-issue-ref")
+        self.assertEqual(argv[idx + 1], "#2 implement auth")
+        self.assertNotIn("--select-issue", argv)
+
+    def test_auto_continue_clears_selected_ready_issue_ref_in_forwarded_state(self) -> None:
+        """Forwarded state to request_next_prompt has selected_ready_issue_ref cleared."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state()
+        config = _make_minimal_project_config("codex")
+        forwarded = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        def capture_state(s, argv):
+            forwarded.append(dict(s))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=capture_state),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(forwarded[0].get("selected_ready_issue_ref"), "")
+
+    def test_auto_continue_prints_selected_ref_in_message(self) -> None:
+        """Auto-continue message includes the selected issue ref."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state(selected_ref="#99 fix cache")
+        config = _make_minimal_project_config("codex")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run",
+                  side_effect=lambda s, a: (_ for _ in ()).throw(bridge_orchestrator.BridgeStop("..."))),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run", return_value=0),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        output = buf.getvalue()
+        self.assertIn("#99", output)
+        self.assertIn("選定", output)
+
+    def test_non_initial_selection_bridge_stop_is_reraised(self) -> None:
+        """BridgeStop for codex_run_stop (not initial_selection) is re-raised."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:codex_run",
+            "chatgpt_decision_note": "prepared Codex body は保存済みです。",
+            "selected_ready_issue_ref": "",
+            "last_issue_centric_target_issue": "#2",
+            "pending_request_source": "",
+        }
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run",
+                  side_effect=lambda s, a: (_ for _ in ()).throw(bridge_orchestrator.BridgeStop("codex_run: ..."))),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            with self.assertRaises(bridge_orchestrator.BridgeStop):
+                bridge_orchestrator.run(pre_state, [])
+
+        mock_rnp.assert_not_called()
+
+    def test_auto_continue_fallback_uses_target_issue_with_sentei_note(self) -> None:
+        """Fallback path: selected_ready_issue_ref empty but note has 選定 → use target_issue."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state(
+            selected_ref="",  # Not set (edge case)
+            target_issue="#3 edge case issue",
+            decision_note="ChatGPT が ready issue #3 edge case issue を選定しました。 --ready-issue-ref で指定してください。",
+        )
+        config = _make_minimal_project_config("codex")
+        captured_rnp = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        def fake_rnp_run(s, argv):
+            captured_rnp.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_rnp_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured_rnp), 1)
+        argv = captured_rnp[0]
+        self.assertIn("--ready-issue-ref", argv)
+        idx = argv.index("--ready-issue-ref")
+        self.assertEqual(argv[idx + 1], "#3 edge case issue")
+
+    def test_auto_continue_includes_project_path_when_set(self) -> None:
+        """--project-path is passed when worker_repo_path is given."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state()
+        config = _make_minimal_project_config("codex")
+        captured_rnp = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("...")
+
+        def fake_rnp_run(s, argv):
+            captured_rnp.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_rnp_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, ["--worker-repo-path", "/tmp/proj"])
+
+        self.assertEqual(len(captured_rnp), 1)
+        argv = captured_rnp[0]
+        self.assertIn("--project-path", argv)
+        idx = argv.index("--project-path")
+        self.assertEqual(argv[idx + 1], "/tmp/proj")
+
+    def test_non_ic_bridge_stop_is_reraised(self) -> None:
+        """BridgeStop with non-IC post-fetch state is re-raised (e.g. STOP-file, pause)."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "",  # non-IC
+            "selected_ready_issue_ref": "",
+            "pending_request_source": "",
+        }
+        config = _make_minimal_project_config("codex")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run",
+                  side_effect=lambda s, a: (_ for _ in ()).throw(bridge_orchestrator.BridgeStop("bridge/STOP が存在するため停止しました。"))),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            with self.assertRaises(bridge_orchestrator.BridgeStop):
+                bridge_orchestrator.run(pre_state, [])
+
+        mock_rnp.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # github_copilot_provider_stub unit tests
 # ---------------------------------------------------------------------------
 
