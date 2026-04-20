@@ -425,7 +425,30 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     plan = resolve_runtime_dispatch_plan(state)
     # IC stop paths: surface chatgpt_decision_note rather than the generic plan note.
     _ic_stop = detect_ic_stop_path(state)
-    if _ic_stop in {"initial_selection_stop", "human_review_needed"}:
+    if _ic_stop == "initial_selection_stop":
+        _selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
+        if _selected_ref:
+            # Auto-continue: ChatGPT clearly selected ONE ready issue.
+            # Proceed directly to next issue implementation without operator re-run.
+            # Clear selected_ready_issue_ref in the forwarded state so it is not
+            # carried into the next cycle's detect_ic_stop_path() evaluation.
+            print(
+                f"{status.label}です。ready issue {_selected_ref} が選定されました。"
+                " 自動で次 issue の実装へ継続します。"
+            )
+            auto_state = dict(state)
+            auto_state["selected_ready_issue_ref"] = ""
+            next_argv: list[str] = []
+            if args.worker_repo_path:
+                next_argv.extend(["--project-path", args.worker_repo_path])
+            next_argv.extend(["--ready-issue-ref", _selected_ref])
+            return request_next_prompt.run(auto_state, next_argv)
+        # Fallback: selected_ready_issue_ref absent despite initial_selection_stop
+        # (should not happen in normal flow but guard against inconsistent state).
+        _ic_note = str(state.get("chatgpt_decision_note", "")).strip()
+        _stop_note = _ic_note or plan.note
+        print(f"{status.label}です。{_stop_note}")
+    elif _ic_stop == "human_review_needed":
         _ic_note = str(state.get("chatgpt_decision_note", "")).strip()
         _stop_note = _ic_note or plan.note
         print(f"{status.label}です。{_stop_note}")

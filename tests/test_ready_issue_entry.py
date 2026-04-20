@@ -7771,10 +7771,12 @@ class IcOrchestratorDoctorStatusSurfaceTests(unittest.TestCase):
                                     with patch.object(bo, "parse_args", return_value=MagicMock(
                                         execution_agent="codex",
                                         dry_run_codex=False,
+                                        worker_repo_path="",
                                     )):
                                         with patch.object(bo, "resolve_execution_agent", return_value="codex"):
                                             with patch.object(bo, "print_project_config_warnings"):
-                                                bo.run(state, argv=[])
+                                                with patch.object(bo.request_next_prompt, "run", return_value=0):
+                                                    bo.run(state, argv=[])
         return buf.getvalue()
 
     # ------------------------------------------------------------------
@@ -7782,15 +7784,20 @@ class IcOrchestratorDoctorStatusSurfaceTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_run_initial_selection_stop_prints_ic_note(self):
-        """initial_selection_stop: run() prints chatgpt_decision_note, not generic note."""
+        """initial_selection_stop: run() prints auto-continue message with issue ref."""
         output = self._run_and_capture(self._initial_selection_stop_state(with_note=True))
-        self.assertIn("--ready-issue-ref", output)
+        # New behavior: auto-continue message is printed, not the stop note.
+        self.assertIn("#7", output)
+        self.assertIn("選定", output)
         self.assertNotIn("今回の 1 手はありません", output)
 
     def test_run_initial_selection_stop_no_note_falls_back_to_plan_note(self):
-        """initial_selection_stop without chatgpt_decision_note: falls back to plan.note."""
+        """initial_selection_stop: even without chatgpt_decision_note, auto-continue fires."""
         output = self._run_and_capture(self._initial_selection_stop_state(with_note=False))
-        self.assertIn("今回の 1 手はありません", output)
+        # New behavior: auto-continue regardless of chatgpt_decision_note presence.
+        self.assertIn("#7", output)
+        self.assertIn("選定", output)
+        self.assertNotIn("今回の 1 手はありません", output)
 
     # ------------------------------------------------------------------
     # Group 2: human_review_needed IC (2 tests)
