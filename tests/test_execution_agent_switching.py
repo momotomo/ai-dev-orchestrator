@@ -1812,11 +1812,111 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         idx = argv.index("--project-path")
         self.assertEqual(argv[idx + 1], "/tmp/proj")
 
-    def test_auto_continuation_does_not_fire_for_initial_selection_stop(self) -> None:
-        """initial_selection_stop blocks auto-continuation even with close_status=completed."""
+    def test_initial_selection_stop_auto_continues_with_ready_issue_ref(self) -> None:
+        """initial_selection_stop: bridge auto-continues with --ready-issue-ref when selected_ref is set."""
         state = self._make_ic_close_completed_state()
-        # initial_selection_stop requires selected_ready_issue_ref to be set
         state["selected_ready_issue_ref"] = "#42 some issue"
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_run(s, argv):
+            captured.append(argv)
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(captured), 1)
+        argv = captured[0]
+        self.assertIn("--ready-issue-ref", argv)
+        idx = argv.index("--ready-issue-ref")
+        self.assertEqual(argv[idx + 1], "#42 some issue")
+        self.assertNotIn("--select-issue", argv)
+
+    def test_initial_selection_stop_clears_selected_ref_in_forwarded_state(self) -> None:
+        """initial_selection_stop: selected_ready_issue_ref is cleared in the forwarded state."""
+        state = self._make_ic_close_completed_state()
+        state["selected_ready_issue_ref"] = "#42 some issue"
+        config = _make_minimal_project_config("codex")
+        forwarded_states = []
+
+        def capture_state(s, argv):
+            forwarded_states.append(dict(s))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=capture_state),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(state, [])
+
+        self.assertEqual(len(forwarded_states), 1)
+        self.assertEqual(forwarded_states[0].get("selected_ready_issue_ref"), "")
+
+    def test_initial_selection_stop_fallback_stops_when_no_selected_ref(self) -> None:
+        """When selected_ready_issue_ref is empty, no --ready-issue-ref dispatch occurs.
+
+        In normal flow detect_ic_stop_path requires selected_ready_issue_ref to be
+        non-empty to return "initial_selection_stop", so this state (_ic_stop == "")
+        falls through to IC close auto-continuation (--select-issue), not --ready-issue-ref.
+        """
+        state = self._make_ic_close_completed_state()
+        state["selected_ready_issue_ref"] = ""
+        config = _make_minimal_project_config("codex")
+        captured = []
+
+        def fake_run(s, argv):
+            captured.append(list(argv))
+            return 0
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        # --ready-issue-ref must NOT appear in any call (--select-issue may appear
+        # via IC close auto-continuation, but that's a different path).
+        for argv in captured:
+            self.assertNotIn("--ready-issue-ref", argv)
+
+    def test_initial_selection_stop_prints_selected_ref_in_auto_continue_message(self) -> None:
+        """initial_selection_stop auto-continue: prints the selected issue ref."""
+        state = self._make_ic_close_completed_state()
+        state["selected_ready_issue_ref"] = "#99 target issue"
+        config = _make_minimal_project_config("codex")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run", return_value=0),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            bridge_orchestrator.run(state, [])
+
+        output = buf.getvalue()
+        self.assertIn("#99", output)
+        self.assertIn("選定", output)
+
+    def test_human_review_needed_still_stops(self) -> None:
+        """human_review_needed IC stop path: bridge does NOT auto-continue."""
+        state = {
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "issue_centric:human_review_needed",
+            "chatgpt_decision_note": "人レビューが必要です。",
+        }
         config = _make_minimal_project_config("codex")
 
         with (
