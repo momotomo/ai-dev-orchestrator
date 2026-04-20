@@ -341,6 +341,15 @@ def _resolve_post_fetch_initial_selection_ref(post_fetch_state: dict[str, object
     return ""
 
 
+# close_status values that mean the GitHub issue close mutation completed
+# successfully (set by issue_centric_close_current_issue.execute_close_current_issue):
+#   "closed"        — issue was open and was just closed
+#   "already_closed" — issue was already closed before the mutation ran
+# ("completed" is NOT written by that function; it was the old expected value
+# that caused auto-continuation to silently never fire.)
+_IC_CLOSE_COMPLETE_STATUSES: frozenset[str] = frozenset({"closed", "already_closed"})
+
+
 def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bool:
     """Return True when the last IC execution closed the current issue successfully.
 
@@ -349,12 +358,12 @@ def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bo
 
       1. chatgpt_decision starts with "issue_centric:" — the current state is
          from an issue-centric dispatch cycle, not a legacy / override cycle.
-      2. last_issue_centric_close_status == "completed" — the close execution
-         succeeded.  This field is set by _apply_close_execution_state() and
-         cleared by _apply_ic_continuation_reset() at the start of the next
-         fetch cycle, so a stale "completed" value from a prior cycle cannot
-         trigger a false positive after the state has been refreshed by a new
-         ChatGPT reply.
+      2. last_issue_centric_close_status is in _IC_CLOSE_COMPLETE_STATUSES
+         ("closed" or "already_closed") — the close execution succeeded.
+         This field is set by _apply_close_execution_state() and cleared by
+         _apply_ic_continuation_reset() at the start of the next fetch cycle,
+         so a stale value from a prior cycle cannot trigger a false positive
+         after the state has been refreshed by a new ChatGPT reply.
 
     The caller is responsible for guarding IC stop paths (initial_selection_stop
     / human_review_needed) via detect_ic_stop_path() before calling this helper.
@@ -363,7 +372,7 @@ def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bo
     if not chatgpt_decision.startswith("issue_centric:"):
         return False
     close_status = str(state.get("last_issue_centric_close_status", "")).strip()
-    return close_status == "completed"
+    return close_status in _IC_CLOSE_COMPLETE_STATUSES
 
 
 def _is_ic_issue_create_completed_for_auto_continuation(state: dict[str, object]) -> bool:
@@ -394,7 +403,7 @@ def _is_ic_issue_create_completed_for_auto_continuation(state: dict[str, object]
     if not created_number:
         return False
     close_status = str(state.get("last_issue_centric_close_status", "")).strip()
-    return close_status != "completed"
+    return close_status not in _IC_CLOSE_COMPLETE_STATUSES
 
 
 def maybe_promote_codex_done(state: dict[str, object]) -> bool:

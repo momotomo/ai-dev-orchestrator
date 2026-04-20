@@ -1702,17 +1702,25 @@ class IsIcCloseCompletedForAutoContinuationTests(unittest.TestCase):
     def _call(self, state: dict) -> bool:
         return bridge_orchestrator._is_ic_close_completed_for_auto_continuation(state)
 
-    def test_returns_true_when_close_completed_and_ic_decision(self) -> None:
-        """close_status=completed + issue_centric: decision → True."""
+    def test_returns_true_when_close_status_closed_and_ic_decision(self) -> None:
+        """close_status=closed + issue_centric: decision → True."""
         state = {
             "chatgpt_decision": "issue_centric:no_action",
-            "last_issue_centric_close_status": "completed",
+            "last_issue_centric_close_status": "closed",
         }
         self.assertTrue(self._call(state))
 
-    def test_returns_false_when_close_status_not_completed(self) -> None:
-        """close_status not 'completed' → False even with IC decision."""
-        for status in ("", "blocked", "partial", "not_requested"):
+    def test_returns_true_when_close_status_already_closed_and_ic_decision(self) -> None:
+        """close_status=already_closed + issue_centric: decision → True."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "already_closed",
+        }
+        self.assertTrue(self._call(state))
+
+    def test_returns_false_when_close_status_not_a_complete_value(self) -> None:
+        """close_status not in {closed, already_closed} → False even with IC decision."""
+        for status in ("", "blocked", "partial", "not_requested", "completed", "failed_after_mutation_attempt"):
             with self.subTest(status=status):
                 state = {
                     "chatgpt_decision": "issue_centric:no_action",
@@ -1721,12 +1729,12 @@ class IsIcCloseCompletedForAutoContinuationTests(unittest.TestCase):
                 self.assertFalse(self._call(state))
 
     def test_returns_false_when_chatgpt_decision_not_ic(self) -> None:
-        """Non-IC chatgpt_decision → False even with close_status=completed."""
+        """Non-IC chatgpt_decision → False even with close_status=closed."""
         for decision in ("", "human_review", "need_info", "legacy_contract_detected"):
             with self.subTest(decision=decision):
                 state = {
                     "chatgpt_decision": decision,
-                    "last_issue_centric_close_status": "completed",
+                    "last_issue_centric_close_status": "closed",
                 }
                 self.assertFalse(self._call(state))
 
@@ -1734,11 +1742,11 @@ class IsIcCloseCompletedForAutoContinuationTests(unittest.TestCase):
         """Empty state → False."""
         self.assertFalse(self._call({}))
 
-    def test_returns_true_with_codex_run_action_and_close_completed(self) -> None:
-        """issue_centric:codex_run + close_status=completed → True."""
+    def test_returns_true_with_codex_run_action_and_close_status_closed(self) -> None:
+        """issue_centric:codex_run + close_status=closed → True."""
         state = {
             "chatgpt_decision": "issue_centric:codex_run",
-            "last_issue_centric_close_status": "completed",
+            "last_issue_centric_close_status": "closed",
         }
         self.assertTrue(self._call(state))
 
@@ -1752,7 +1760,13 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
     """Integration tests for Phase 9 auto-continuation after IC close."""
 
     def _make_ic_close_completed_state(self) -> dict:
-        """Return a state that represents a successfully closed IC issue."""
+        """Return a state that represents a successfully closed IC issue.
+
+        close_status is 'closed' — the value written by
+        issue_centric_close_current_issue.execute_close_current_issue() for the
+        normal close path.  ('completed' was the old expected value that caused
+        the auto-continuation judgment to silently never fire.)
+        """
         return {
             "mode": "awaiting_user",
             "need_chatgpt_prompt": False,
@@ -1761,8 +1775,8 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
             "chatgpt_decision": "issue_centric:no_action",
             "chatgpt_decision_note": "issue closed",
             "last_issue_centric_action": "no_action",
-            "last_issue_centric_close_status": "completed",
-            "last_issue_centric_close_order": "close_current_issue",
+            "last_issue_centric_close_status": "closed",
+            "last_issue_centric_close_order": "after_no_action",
             "last_issue_centric_closed_issue_number": "42",
         }
 
@@ -1929,8 +1943,8 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         mock_rnp.assert_not_called()
         self.assertEqual(rc, 0)
 
-    def test_auto_continuation_does_not_fire_when_close_status_not_completed(self) -> None:
-        """No auto-continuation when last_issue_centric_close_status != 'completed'."""
+    def test_auto_continuation_does_not_fire_when_close_status_not_complete_value(self) -> None:
+        """No auto-continuation when last_issue_centric_close_status is not a complete value."""
         state = self._make_ic_close_completed_state()
         state["last_issue_centric_close_status"] = ""
         config = _make_minimal_project_config("codex")
@@ -1946,7 +1960,7 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         self.assertEqual(rc, 0)
 
     def test_auto_continuation_does_not_fire_for_non_ic_state(self) -> None:
-        """Non-IC chatgpt_decision: no auto-continuation even if close_status=completed."""
+        """Non-IC chatgpt_decision: no auto-continuation even if close_status=closed."""
         state = self._make_ic_close_completed_state()
         # Use a decision value that is NOT "human_review" / "need_info" to avoid routing
         # to request_prompt_from_report, and NOT an issue_centric: prefix.
@@ -2003,13 +2017,15 @@ class IsIcIssueCreateCompletedForAutoContinuationTests(unittest.TestCase):
         self.assertTrue(self._call(state))
 
     def test_returns_false_when_close_completed(self) -> None:
-        """close_status=completed → False (issue_create_then_close handled elsewhere)."""
-        state = {
-            "chatgpt_decision": "issue_centric:issue_create",
-            "last_issue_centric_created_issue_number": "42",
-            "last_issue_centric_close_status": "completed",
-        }
-        self.assertFalse(self._call(state))
+        """close_status in {closed, already_closed} → False (issue_create_then_close handled elsewhere)."""
+        for close_status in ("closed", "already_closed"):
+            with self.subTest(close_status=close_status):
+                state = {
+                    "chatgpt_decision": "issue_centric:issue_create",
+                    "last_issue_centric_created_issue_number": "42",
+                    "last_issue_centric_close_status": close_status,
+                }
+                self.assertFalse(self._call(state))
 
     def test_returns_false_when_created_issue_number_empty(self) -> None:
         """Empty created_issue_number → False regardless of IC decision."""
@@ -2162,8 +2178,8 @@ class BridgeOrchestratorIssueCreateAutoContinueTests(unittest.TestCase):
         self.assertIn("作成", output)
 
     def test_auto_continue_does_not_fire_when_close_completed(self) -> None:
-        """When issue_create_then_close (close_status=completed): no issue_create auto-continue."""
-        state = self._make_ic_issue_create_state(close_status="completed")
+        """When issue_create_then_close (close_status=closed): no issue_create auto-continue."""
+        state = self._make_ic_issue_create_state(close_status="closed")
         config = _make_minimal_project_config("codex")
         captured = []
 
