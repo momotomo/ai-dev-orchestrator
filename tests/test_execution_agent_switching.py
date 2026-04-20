@@ -1171,6 +1171,7 @@ class StdoutReportExtractionTests(unittest.TestCase):
     有効なレポート本文を抽出できること、雑多なログを誤検出しないことを確認する。
     """
 
+    # Block marker format (existing compatibility).
     _VALID_REPORT = (
         "===BRIDGE_SUMMARY===\n"
         "- summary: テスト実施\n"
@@ -1181,8 +1182,23 @@ class StdoutReportExtractionTests(unittest.TestCase):
         "- テストを実行した。\n"
     )
 
+    # Actual copilot CLI markdown format.
+    _MARKDOWN_REPORT = (
+        "## Codex Report\n"
+        "\n"
+        "### BRIDGE_SUMMARY\n"
+        "- summary: テスト実施\n"
+        "- result: completed\n"
+        "\n"
+        "### 変更ファイル\n"
+        "- scripts/test.py\n"
+        "\n"
+        "### 実行した確認\n"
+        "- pytest 実行\n"
+    )
+
     # ------------------------------------------------------------------
-    # 有効ケース
+    # 有効ケース: block marker 形式 (既存互換)
     # ------------------------------------------------------------------
 
     def test_valid_report_with_heading_is_extracted(self) -> None:
@@ -1220,6 +1236,36 @@ class StdoutReportExtractionTests(unittest.TestCase):
         self.assertEqual(result, result.strip())
 
     # ------------------------------------------------------------------
+    # 有効ケース: markdown 形式 (実際の copilot CLI stdout)
+    # ------------------------------------------------------------------
+
+    def test_markdown_format_is_extracted(self) -> None:
+        """実際の copilot CLI 形式 (## Codex Report + ### BRIDGE_SUMMARY) が抽出される。"""
+        result = launch_github_copilot.extract_codex_report_from_stdout(self._MARKDOWN_REPORT)
+        self.assertTrue(result.startswith("## Codex Report"))
+        self.assertIn("### BRIDGE_SUMMARY", result)
+
+    def test_markdown_format_with_leading_chatter_is_extracted(self) -> None:
+        """markdown 形式でも前置ログが除去される。"""
+        text = "INFO: copilot started\nLoading tools...\n\n" + self._MARKDOWN_REPORT
+        result = launch_github_copilot.extract_codex_report_from_stdout(text)
+        self.assertTrue(result.startswith("## Codex Report"))
+        self.assertNotIn("copilot started", result)
+
+    def test_markdown_format_h1_heading_is_extracted(self) -> None:
+        """# Codex Report (h1) + ### BRIDGE_SUMMARY の markdown 形式も抽出される。"""
+        text = self._MARKDOWN_REPORT.replace("## Codex Report", "# Codex Report", 1)
+        result = launch_github_copilot.extract_codex_report_from_stdout(text)
+        self.assertTrue(result.startswith("# Codex Report"))
+        self.assertIn("### BRIDGE_SUMMARY", result)
+
+    def test_markdown_format_result_contains_sections(self) -> None:
+        """markdown 形式の抽出結果に各セクションが含まれる。"""
+        result = launch_github_copilot.extract_codex_report_from_stdout(self._MARKDOWN_REPORT)
+        self.assertIn("### 変更ファイル", result)
+        self.assertIn("### 実行した確認", result)
+
+    # ------------------------------------------------------------------
     # 無効ケース (誤検出防止)
     # ------------------------------------------------------------------
 
@@ -1228,7 +1274,7 @@ class StdoutReportExtractionTests(unittest.TestCase):
         self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(""), "")
 
     def test_no_bridge_summary_returns_empty(self) -> None:
-        """BRIDGE_SUMMARY マーカーがない場合は空を返す。"""
+        """Codex Report 見出しだけで BRIDGE_SUMMARY が存在しない場合は空を返す。"""
         text = "# Codex Report\n\n1. 実施概要\n- テストした\n"
         self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
 
@@ -1245,6 +1291,16 @@ class StdoutReportExtractionTests(unittest.TestCase):
     def test_random_log_output_returns_empty(self) -> None:
         """無関係なログは誤検出しない。"""
         text = "INFO: running copilot\nDone.\nExit code 0\n"
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
+
+    def test_codex_report_heading_only_no_bridge_summary_returns_empty(self) -> None:
+        """# Codex Report 見出しがあっても ### BRIDGE_SUMMARY も === も ない → 空を返す。"""
+        text = "## Codex Report\n\n### 変更ファイル\n- scripts/foo.py\n"
+        self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
+
+    def test_bridge_summary_md_only_no_report_heading_returns_empty(self) -> None:
+        """### BRIDGE_SUMMARY だけで Codex Report 見出しも === マーカーもない → 空を返す。"""
+        text = "### BRIDGE_SUMMARY\n- summary: テスト\n"
         self.assertEqual(launch_github_copilot.extract_codex_report_from_stdout(text), "")
 
     # ------------------------------------------------------------------
@@ -1300,6 +1356,55 @@ class StdoutReportExtractionTests(unittest.TestCase):
             self.assertTrue(report_path.exists(), "codex_report.md が生成されるべき")
             saved = report_path.read_text(encoding="utf-8")
             self.assertIn("===BRIDGE_SUMMARY===", saved)
+
+    def test_run_extracts_report_from_stdout_markdown_format(self) -> None:
+        """run(): 実際の copilot CLI 形式 (## Codex Report + ### BRIDGE_SUMMARY) でも回収される。"""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            prompt_path = tmpdir_path / "codex_prompt.md"
+            report_path = tmpdir_path / "codex_report.md"
+            prompt_path.write_text("# GitHub Copilot Prompt\n\nDo something.\n", encoding="utf-8")
+
+            config = {
+                "github_copilot_bin": "copilot",
+                "codex_timeout_seconds": 60,
+                "worker_repo_path": str(tmpdir_path),
+                "bridge_runtime_root": str(tmpdir_path),
+            }
+            state = {"mode": "ready_for_codex", "need_codex_run": True}
+
+            def fake_popen(cmd, *, stdin, stdout, stderr, text, cwd):
+                stdout.write(self._MARKDOWN_REPORT)
+                proc = MagicMock()
+                proc.stdin = MagicMock()
+                proc.poll.return_value = 0
+                return proc
+
+            with (
+                patch("launch_github_copilot.load_project_config", return_value=config),
+                patch("launch_github_copilot.print_project_config_warnings"),
+                patch("launch_github_copilot.worker_repo_path", return_value=tmpdir_path),
+                patch("launch_github_copilot.save_state"),
+                patch("launch_github_copilot.runtime_logs_dir", return_value=tmpdir_path),
+                patch("launch_github_copilot.recover_codex_report", return_value=None),
+                patch("launch_github_copilot.subprocess.Popen", side_effect=fake_popen),
+            ):
+                rc = launch_github_copilot.run(
+                    dict(state),
+                    [
+                        "--prompt-file", str(prompt_path),
+                        "--report-file", str(report_path),
+                        "--worker-repo-path", str(tmpdir_path),
+                    ],
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(report_path.exists(), "codex_report.md が生成されるべき")
+            saved = report_path.read_text(encoding="utf-8")
+            self.assertIn("### BRIDGE_SUMMARY", saved)
+            self.assertTrue(saved.startswith("## Codex Report"))
 
     def test_run_raises_when_stdout_has_no_report(self) -> None:
         """run(): stdout に有効 report がない場合は従来どおり BridgeError を上げる。"""
