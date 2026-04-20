@@ -510,6 +510,101 @@ class CloseCurrentIssueExecutionTests(unittest.TestCase):
         self.assertEqual(result.close_status, "blocked")
         self.assertIn("could not resolve", result.safe_stop_reason)
 
+    def test_close_current_issue_with_project_url_configured_still_closes_issue(self) -> None:
+        """github_project_url configured must NOT block the issue close mutation.
+
+        Previously, execute_close_current_issue() raised an error when
+        github_project_url was set ('not implemented in this slice').
+        Project state sync for 'done' is handled by issue_centric_execution.py
+        separately after the close completes; the close function itself only
+        needs to perform the GitHub issue close.
+        """
+        prepared = self.prepared(
+            action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            target_issue="#2",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/2"},
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/orgs/example/projects/1",
+                    "github_project_state_field_name": "Status",
+                    "github_project_done_state": "Done",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="PromptDraft normalized update flow",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="PromptDraft normalized update flow",
+                    repository=repository,
+                    state="closed",
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+        # The close must complete successfully even with github_project_url configured.
+        # Project 'done' sync is handled by issue_centric_execution.py after this returns.
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+        self.assertEqual(result.close_order, "after_no_action")
+        self.assertIsNotNone(result.issue_after)
+        self.assertEqual(result.issue_after.state, "closed")
+
+    def test_close_current_issue_without_project_url_still_succeeds(self) -> None:
+        """Regression: github_project_url empty still results in completed close."""
+        prepared = self.prepared(
+            action=issue_centric_contract.IssueCentricAction.NO_ACTION,
+            target_issue="#5",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_close_current_issue.execute_close_current_issue(
+                prepared,
+                prior_state={"last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/5"},
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_action_execution_log="",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_fetcher=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Some issue",
+                    repository=repository,
+                    state="open",
+                ),
+                issue_closer=lambda repository, issue_number, token: issue_centric_github.GitHubIssueSnapshot(
+                    number=issue_number,
+                    url=f"https://github.com/{repository}/issues/{issue_number}",
+                    title="Some issue",
+                    repository=repository,
+                    state="closed",
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.close_status, "closed")
+
 
 class FetchNextPromptCloseIntegrationTests(unittest.TestCase):
     def test_issue_create_can_close_current_issue_after_creation(self) -> None:
