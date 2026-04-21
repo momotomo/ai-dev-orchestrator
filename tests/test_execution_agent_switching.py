@@ -1838,11 +1838,13 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         with (
             patch("bridge_orchestrator.load_project_config", return_value=config),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_request_next_prompt_run),
+            patch("bridge_orchestrator.validate_selected_ready_issue_for_auto_continue") as validate_mock,
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             rc = bridge_orchestrator.run(state, ["--worker-repo-path", "/tmp/test-repo"])
 
         self.assertEqual(rc, 0)
+        validate_mock.assert_not_called()
         self.assertEqual(len(captured), 1, "request_next_prompt.run should be called once")
         argv = captured[0]
         self.assertIn("--select-issue", argv)
@@ -1885,6 +1887,10 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         with (
             patch("bridge_orchestrator.load_project_config", return_value=config),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_run),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             rc = bridge_orchestrator.run(state, [])
@@ -1911,6 +1917,10 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         with (
             patch("bridge_orchestrator.load_project_config", return_value=config),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=capture_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             bridge_orchestrator.run(state, [])
@@ -1957,6 +1967,10 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         with (
             patch("bridge_orchestrator.load_project_config", return_value=config),
             patch("bridge_orchestrator.request_next_prompt.run", return_value=0),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
             redirect_stdout(buf),
         ):
@@ -1965,6 +1979,29 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         output = buf.getvalue()
         self.assertIn("#99", output)
         self.assertIn("選定", output)
+
+    def test_initial_selection_stop_does_not_send_when_validation_fails(self) -> None:
+        """initial_selection_stop: stale / closed selected issue stops before ready_issue send."""
+        state = self._make_ic_close_completed_state()
+        state["selected_ready_issue_ref"] = "#42 closed issue"
+        config = _make_minimal_project_config("codex")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(False, "closed"),
+            ),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        mock_rnp.assert_not_called()
+        self.assertIn("送信しません", buf.getvalue())
 
     def test_human_review_needed_still_stops(self) -> None:
         """human_review_needed IC stop path: bridge does NOT auto-continue."""
@@ -2373,6 +2410,81 @@ class ResolvePostFetchInitialSelectionRefTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# selected ready issue auto-continue validation tests
+# ---------------------------------------------------------------------------
+
+
+class SelectedReadyIssueAutoContinueValidationTests(unittest.TestCase):
+    """Tests for the live guard before initial-selection auto-continue."""
+
+    def _config(self) -> dict[str, object]:
+        config = _make_minimal_project_config("codex")
+        config["github_repository"] = "example/repo"
+        return config
+
+    def _issue(self, state: str) -> MagicMock:
+        issue = MagicMock()
+        issue.state = state
+        issue.url = "https://github.com/example/repo/issues/42"
+        return issue
+
+    def test_invalid_zero_ref_fails_without_live_fetch(self) -> None:
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=self._config()),
+            patch("bridge_orchestrator.resolve_github_token") as token_mock,
+            patch("bridge_orchestrator.fetch_github_issue") as fetch_mock,
+        ):
+            result = bridge_orchestrator.validate_selected_ready_issue_for_auto_continue("#0", {})
+
+        self.assertFalse(result.ok)
+        self.assertIn("無効", result.reason)
+        token_mock.assert_not_called()
+        fetch_mock.assert_not_called()
+
+    def test_recently_closed_issue_fails_without_live_fetch(self) -> None:
+        prior_state = {
+            "last_issue_centric_closed_issue_number": "42",
+            "last_issue_centric_closed_issue_url": "https://github.com/example/repo/issues/42",
+        }
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=self._config()),
+            patch("bridge_orchestrator.resolve_github_token") as token_mock,
+            patch("bridge_orchestrator.fetch_github_issue") as fetch_mock,
+        ):
+            result = bridge_orchestrator.validate_selected_ready_issue_for_auto_continue(
+                "#42 stale issue",
+                {},
+                prior_state=prior_state,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertIn("直前に close", result.reason)
+        token_mock.assert_not_called()
+        fetch_mock.assert_not_called()
+
+    def test_closed_live_issue_fails(self) -> None:
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=self._config()),
+            patch("bridge_orchestrator.resolve_github_token", return_value=("token", "test")),
+            patch("bridge_orchestrator.fetch_github_issue", return_value=self._issue("closed")),
+        ):
+            result = bridge_orchestrator.validate_selected_ready_issue_for_auto_continue("#42 stale issue", {})
+
+        self.assertFalse(result.ok)
+        self.assertIn("open issue", result.reason)
+
+    def test_open_live_issue_passes(self) -> None:
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=self._config()),
+            patch("bridge_orchestrator.resolve_github_token", return_value=("token", "test")),
+            patch("bridge_orchestrator.fetch_github_issue", return_value=self._issue("open")),
+        ):
+            result = bridge_orchestrator.validate_selected_ready_issue_for_auto_continue("#42 valid issue", {})
+
+        self.assertTrue(result.ok)
+
+
+# ---------------------------------------------------------------------------
 # bridge_orchestrator.run() fallback-legacy initial selection auto-continue tests
 # ---------------------------------------------------------------------------
 
@@ -2433,6 +2545,10 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
             patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
             patch("bridge_orchestrator.load_state", return_value=post_state),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_rnp_run),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             rc = bridge_orchestrator.run(pre_state, [])
@@ -2444,6 +2560,34 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
         idx = argv.index("--ready-issue-ref")
         self.assertEqual(argv[idx + 1], "#2 implement auth")
         self.assertNotIn("--select-issue", argv)
+
+    def test_fetch_initial_selection_stop_does_not_send_when_validation_fails(self) -> None:
+        """fetch initial_selection_stop: stale selected issue stops before ready_issue send."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state(selected_ref="#0")
+        config = _make_minimal_project_config("codex")
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(False, "invalid"),
+            ),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            rc = bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(rc, 0)
+        mock_rnp.assert_not_called()
+        self.assertIn("送信しません", buf.getvalue())
 
     def test_auto_continue_clears_selected_ready_issue_ref_in_forwarded_state(self) -> None:
         """Forwarded state to request_next_prompt has selected_ready_issue_ref cleared."""
@@ -2464,6 +2608,10 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
             patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
             patch("bridge_orchestrator.load_state", return_value=post_state),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=capture_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             bridge_orchestrator.run(pre_state, [])
@@ -2484,6 +2632,10 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
                   side_effect=lambda s, a: (_ for _ in ()).throw(bridge_orchestrator.BridgeStop("..."))),
             patch("bridge_orchestrator.load_state", return_value=post_state),
             patch("bridge_orchestrator.request_next_prompt.run", return_value=0),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
             redirect_stdout(buf),
         ):
@@ -2542,6 +2694,10 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
             patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
             patch("bridge_orchestrator.load_state", return_value=post_state),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_rnp_run),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             rc = bridge_orchestrator.run(pre_state, [])
@@ -2572,6 +2728,10 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
             patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
             patch("bridge_orchestrator.load_state", return_value=post_state),
             patch("bridge_orchestrator.request_next_prompt.run", side_effect=fake_rnp_run),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(True),
+            ),
             patch("bridge_orchestrator.print_project_config_warnings"),
         ):
             bridge_orchestrator.run(pre_state, ["--worker-repo-path", "/tmp/proj"])

@@ -7775,8 +7775,13 @@ class IcOrchestratorDoctorStatusSurfaceTests(unittest.TestCase):
                                     )):
                                         with patch.object(bo, "resolve_execution_agent", return_value="codex"):
                                             with patch.object(bo, "print_project_config_warnings"):
-                                                with patch.object(bo.request_next_prompt, "run", return_value=0):
-                                                    bo.run(state, argv=[])
+                                                with patch.object(
+                                                    bo,
+                                                    "validate_selected_ready_issue_for_auto_continue",
+                                                    return_value=bo.ReadyIssueAutoContinueValidation(True),
+                                                ):
+                                                    with patch.object(bo.request_next_prompt, "run", return_value=0):
+                                                        bo.run(state, argv=[])
         return buf.getvalue()
 
     # ------------------------------------------------------------------

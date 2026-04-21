@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import archive_codex_report
@@ -22,9 +23,16 @@ from issue_centric_contract import IssueCentricAction, IssueCentricDecision, may
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
+from issue_centric_github import IssueCentricGitHubError, fetch_github_issue, resolve_github_token, resolve_target_issue
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import MaterializedIssueCentricDecision, decode_issue_centric_decision
+
+
+@dataclass(frozen=True)
+class ReadyIssueAutoContinueValidation:
+    ok: bool
+    reason: str = ""
 
 
 def parse_args(argv: list[str] | None = None, project_config: dict[str, object] | None = None) -> argparse.Namespace:
@@ -341,6 +349,98 @@ def _resolve_post_fetch_initial_selection_ref(post_fetch_state: dict[str, object
     return ""
 
 
+def _extract_ready_issue_ref_token(raw_ref: str) -> str:
+    normalized = request_next_prompt.normalize_ready_issue_ref(raw_ref)
+    if not normalized:
+        return ""
+    return normalized.split(maxsplit=1)[0].strip()
+
+
+def _selected_issue_matches_recently_closed(
+    *,
+    repository: str,
+    issue_number: int,
+    state: dict[str, object],
+) -> bool:
+    closed_number = str(state.get("last_issue_centric_closed_issue_number", "")).strip()
+    if not closed_number:
+        return False
+    try:
+        if int(closed_number) != issue_number:
+            return False
+    except ValueError:
+        return False
+
+    closed_url = str(state.get("last_issue_centric_closed_issue_url", "")).strip()
+    if not closed_url:
+        return True
+    return closed_url == f"https://github.com/{repository}/issues/{issue_number}"
+
+
+def validate_selected_ready_issue_for_auto_continue(
+    selected_ready_issue_ref: str,
+    state: dict[str, object],
+    *,
+    prior_state: dict[str, object] | None = None,
+) -> ReadyIssueAutoContinueValidation:
+    """Validate a selected ready issue immediately before auto-continuing.
+
+    This is intentionally narrow: it protects the initial-selection →
+    ``request_next_prompt --ready-issue-ref`` handoff from stale / closed issue
+    selections without changing pending reply retry or correction retry paths.
+    """
+    selected_token = _extract_ready_issue_ref_token(selected_ready_issue_ref)
+    if not selected_token:
+        return ReadyIssueAutoContinueValidation(False, "selected_ready_issue_ref から issue ref を抽出できませんでした。")
+
+    project_config = load_project_config()
+    default_repository = str(project_config.get("github_repository", "")).strip()
+    try:
+        resolved = resolve_target_issue(selected_token, default_repository=default_repository)
+    except IssueCentricGitHubError as exc:
+        return ReadyIssueAutoContinueValidation(False, f"selected ready issue ref を解決できませんでした: {exc}")
+
+    if resolved.issue_number <= 0:
+        return ReadyIssueAutoContinueValidation(False, f"selected ready issue ref が無効です: {selected_token}")
+
+    state_candidates = [state]
+    if prior_state is not None:
+        state_candidates.append(prior_state)
+    for candidate_state in state_candidates:
+        if _selected_issue_matches_recently_closed(
+            repository=resolved.repository,
+            issue_number=resolved.issue_number,
+            state=candidate_state,
+        ):
+            return ReadyIssueAutoContinueValidation(
+                False,
+                f"selected ready issue {selected_token} は current run で直前に close 済みです。",
+            )
+
+    try:
+        token, _ = resolve_github_token()
+        issue = fetch_github_issue(resolved.repository, resolved.issue_number, token)
+    except IssueCentricGitHubError as exc:
+        return ReadyIssueAutoContinueValidation(False, f"selected ready issue の live validation に失敗しました: {exc}")
+
+    if issue.state.lower() != "open":
+        return ReadyIssueAutoContinueValidation(
+            False,
+            f"selected ready issue {issue.url} は {issue.state} です。open issue だけ auto-continue します。",
+        )
+
+    return ReadyIssueAutoContinueValidation(True)
+
+
+def _print_selected_ready_issue_validation_stop(selected_ref: str, validation: ReadyIssueAutoContinueValidation) -> None:
+    print(
+        "initial selection の selected ready issue を live validation で止めました。"
+        f" selected={selected_ref}"
+        f" reason={validation.reason}"
+        " stale / closed issue への ready issue request は送信しません。"
+    )
+
+
 # close_status values that mean the GitHub issue close mutation completed
 # successfully (set by issue_centric_close_current_issue.execute_close_current_issue):
 #   "closed"        — issue was open and was just closed
@@ -519,6 +619,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if _ic_stop == "initial_selection_stop":
         _selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
         if _selected_ref:
+            _validation = validate_selected_ready_issue_for_auto_continue(_selected_ref, state)
+            if not _validation.ok:
+                _print_selected_ready_issue_validation_stop(_selected_ref, _validation)
+                return 0
             # Auto-continue: ChatGPT clearly selected ONE ready issue.
             # Proceed directly to next issue implementation without operator re-run.
             # Clear selected_ready_issue_ref in the forwarded state so it is not
@@ -567,6 +671,14 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             _post_fetch_state = load_state()
             _is_ref = _resolve_post_fetch_initial_selection_ref(_post_fetch_state)
             if _is_ref:
+                _validation = validate_selected_ready_issue_for_auto_continue(
+                    _is_ref,
+                    _post_fetch_state,
+                    prior_state=state,
+                )
+                if not _validation.ok:
+                    _print_selected_ready_issue_validation_stop(_is_ref, _validation)
+                    return 0
                 print(
                     f"{status.label}です。initial selection 完了: ready issue {_is_ref} が選定されました。"
                     " 自動で次 issue の実装へ継続します。"
