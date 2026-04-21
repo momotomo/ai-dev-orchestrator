@@ -2030,6 +2030,142 @@ class IssueCentricLifecycleSyncNextRequestContextTests(unittest.TestCase):
         self.assertIn("stage=followup_created", next_req_rendered)
 
 
+# ---------------------------------------------------------------------------
+# Phase 20 Fix A — ready_issue_pending route tests
+# ---------------------------------------------------------------------------
+
+
+class ReadyIssuePendingRouteTests(unittest.TestCase):
+    """Tests for the ready_issue_pending IC route path (Fix A, Phase 20).
+
+    When a ready-issue request has been sent and we are waiting for the execution
+    reply, no normalized summary exists yet.  The route should prefer the IC path
+    (issue_centric) rather than falling through to the cosmetically-noisy
+    fallback_legacy path.
+    """
+
+    def test_route_selector_is_issue_centric_when_ready_issue_pending(self) -> None:
+        """pending_request_source=ready_issue: + known target → IC route, not fallback."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "last_issue_centric_target_issue": "#7 Implement feature X",
+        }
+        route = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+            state, repo_root=REPO_ROOT
+        )
+        self.assertEqual(route.route_selected, "issue_centric")
+        self.assertEqual(route.target_issue_source, "ready_issue_pending")
+        self.assertEqual(route.next_request_hint, "ready_issue_active")
+        self.assertEqual(route.fallback_reason, "")
+
+    def test_route_selector_uses_current_ready_issue_ref_when_target_absent(self) -> None:
+        """current_ready_issue_ref is used when last_issue_centric_target_issue is empty."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "last_issue_centric_target_issue": "",
+            "current_ready_issue_ref": "#12 Another issue",
+        }
+        route = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+            state, repo_root=REPO_ROOT
+        )
+        self.assertEqual(route.route_selected, "issue_centric")
+        self.assertEqual(route.target_issue, "#12 Another issue")
+        self.assertEqual(route.target_issue_source, "ready_issue_pending")
+
+    def test_route_selector_falls_back_when_ready_issue_but_no_target(self) -> None:
+        """pending=ready_issue: but no known target → still falls back (cannot resolve)."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "last_issue_centric_target_issue": "",
+            "current_ready_issue_ref": "",
+        }
+        route = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+            state, repo_root=REPO_ROOT
+        )
+        self.assertNotEqual(route.target_issue_source, "ready_issue_pending")
+
+    def test_route_selector_falls_back_for_initial_selection_pending(self) -> None:
+        """initial_selection: source does not get the ready_issue_pending upgrade."""
+        state = {
+            "pending_request_source": "initial_selection:abc123",
+            "last_issue_centric_target_issue": "#7 Implement feature X",
+        }
+        route = issue_centric_normalized_summary.select_issue_centric_next_request_route(
+            state, repo_root=REPO_ROOT
+        )
+        self.assertNotEqual(route.target_issue_source, "ready_issue_pending")
+
+    def test_recover_context_returns_issue_centric_recovered_for_ready_issue_pending(self) -> None:
+        """recover returns issue_centric_recovered when route is ready_issue_pending."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "last_issue_centric_target_issue": "#7 Implement feature X",
+            "last_issue_centric_action": "no_action",
+        }
+        ctx = issue_centric_normalized_summary.recover_issue_centric_next_request_context(
+            state, repo_root=REPO_ROOT
+        )
+        self.assertIsNotNone(ctx)
+        assert ctx is not None
+        self.assertEqual(ctx.recovery_status, "issue_centric_recovered")
+        self.assertEqual(ctx.recovery_source, "ready_issue_pending_state")
+        self.assertEqual(ctx.route_selected, "issue_centric")
+        self.assertEqual(ctx.fallback_reason, "")
+        self.assertEqual(ctx.target_issue, "#7 Implement feature X")
+
+    def test_context_next_request_hint_is_ready_issue_active(self) -> None:
+        """resolve_issue_centric_next_request_context returns ready_issue_active hint."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "last_issue_centric_target_issue": "#7 Implement feature X",
+        }
+        ctx = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
+            state, repo_root=REPO_ROOT
+        )
+        self.assertIsNotNone(ctx)
+        assert ctx is not None
+        self.assertEqual(ctx.target_issue_source, "ready_issue_pending")
+        self.assertEqual(ctx.next_request_hint, "ready_issue_active")
+        self.assertEqual(ctx.principal_issue_kind, "current_issue")
+        self.assertEqual(ctx.fallback_reason, "")
+
+    def test_normalized_summary_path_takes_priority_over_ready_issue_pending(self) -> None:
+        """A valid normalized summary still takes priority over the ready_issue_pending path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary_path = root / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "action": "codex_run",
+                        "final_status": "completed",
+                        "principal_issue_kind": "current_issue",
+                        "principal_issue_candidate": {
+                            "number": "7",
+                            "url": "https://github.com/example/repo/issues/7",
+                            "title": "Implement feature X",
+                            "ref": "#7",
+                        },
+                        "next_request_hint": "continue_on_current_issue",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state = {
+                "pending_request_source": "ready_issue:abc123",
+                "last_issue_centric_normalized_summary": str(summary_path),
+                "last_issue_centric_target_issue": "#7 Implement feature X",
+                "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/7",
+            }
+            ctx = issue_centric_normalized_summary.resolve_issue_centric_next_request_context(
+                state, repo_root=root
+            )
+            self.assertIsNotNone(ctx)
+            assert ctx is not None
+            # Summary is present and matches → normalized_summary source takes priority
+            self.assertEqual(ctx.target_issue_source, "normalized_summary")
+
+
 if __name__ == "__main__":
     unittest.main()
 

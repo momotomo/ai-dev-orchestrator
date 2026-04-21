@@ -365,6 +365,11 @@ def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bo
          so a stale value from a prior cycle cannot trigger a false positive
          after the state has been refreshed by a new ChatGPT reply.
 
+    Returns False when a pending or prepared request with an IC-transition source
+    (initial_selection or ready_issue) is already in flight, preventing duplicate
+    auto-continuation triggers if the main loop re-enters this path before the
+    reply is collected.
+
     The caller is responsible for guarding IC stop paths (initial_selection_stop
     / human_review_needed) via detect_ic_stop_path() before calling this helper.
     """
@@ -372,7 +377,17 @@ def _is_ic_close_completed_for_auto_continuation(state: dict[str, object]) -> bo
     if not chatgpt_decision.startswith("issue_centric:"):
         return False
     close_status = str(state.get("last_issue_centric_close_status", "")).strip()
-    return close_status in _IC_CLOSE_COMPLETE_STATUSES
+    if close_status not in _IC_CLOSE_COMPLETE_STATUSES:
+        return False
+    # Guard: if a selection or ready-issue request is already in flight (pending or
+    # staged-but-not-yet-promoted), the auto-continuation has already been triggered.
+    # Returning False prevents a duplicate --select-issue send.
+    pending_source = str(state.get("pending_request_source", "")).strip()
+    prepared_source = str(state.get("prepared_request_source", "")).strip()
+    active_source = pending_source or prepared_source
+    if active_source.startswith(("initial_selection:", "ready_issue:")):
+        return False
+    return True
 
 
 def _is_ic_issue_create_completed_for_auto_continuation(state: dict[str, object]) -> bool:

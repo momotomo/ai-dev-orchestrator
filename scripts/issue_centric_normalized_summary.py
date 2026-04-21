@@ -374,6 +374,27 @@ def resolve_issue_centric_next_request_context(
                     summary_path=summary_path,
                 )
 
+    # ready_issue_pending: a ready-issue request was sent and we are waiting for the
+    # execution reply.  No normalized summary exists yet (it will be written by the
+    # dispatch step after the reply arrives), but the target issue is already known
+    # from the request context.  Treat this as an IC-preferred context so the
+    # preferred route is used instead of the cosmetically-noisy fallback_legacy path.
+    pending_source = str(state.get("pending_request_source", "")).strip()
+    if pending_source.startswith("ready_issue:"):
+        ready_issue_target = str(state.get("last_issue_centric_target_issue", "")).strip() or str(
+            state.get("current_ready_issue_ref", "")
+        ).strip()
+        if ready_issue_target:
+            return IssueCentricNextRequestContext(
+                target_issue=ready_issue_target,
+                target_issue_source="ready_issue_pending",
+                next_request_hint="ready_issue_active",
+                principal_issue_kind="current_issue",
+                used_normalized_summary=False,
+                fallback_reason="",
+                summary_path=summary_path,
+            )
+
     fallback_target = _resolve_next_request_target_from_state(state)
     if fallback_target:
         return IssueCentricNextRequestContext(
@@ -464,6 +485,26 @@ def recover_issue_centric_next_request_context(
     dispatch_result = load_issue_centric_dispatch_result(state, repo_root=repo_root)
     route = select_issue_centric_next_request_route(state, repo_root=repo_root)
     principal_issue = _recover_principal_issue(summary, state)
+
+    # ready_issue_pending: a ready-issue request is in flight and we are waiting for
+    # the execution reply.  summary/dispatch_result do not exist yet, but the target
+    # issue is already known from the pending request context.  Return a recovered
+    # context directly so the preferred IC route is preserved during the wait phase.
+    if route.target_issue_source == "ready_issue_pending":
+        return IssueCentricRecoveryContext(
+            recovery_status="issue_centric_recovered",
+            recovery_source="ready_issue_pending_state",
+            route_selected=route.route_selected,
+            target_issue=route.target_issue,
+            target_issue_source=route.target_issue_source,
+            next_request_hint=route.next_request_hint,
+            principal_issue=route.target_issue,
+            principal_issue_kind=route.principal_issue_kind,
+            used_normalized_summary=False,
+            fallback_reason="",
+            summary_path=summary_path,
+            dispatch_result_path=dispatch_result_path,
+        )
 
     if dispatch_result_path and dispatch_result is None:
         return IssueCentricRecoveryContext(
@@ -1410,6 +1451,12 @@ def _should_prefer_issue_centric_route(
     summary: Mapping[str, Any] | None,
     context: IssueCentricNextRequestContext,
 ) -> bool:
+    # ready_issue_pending: we are waiting for the execution reply of a ready-issue
+    # request.  No normalized summary exists yet, but the target issue is already
+    # known.  Prefer the IC route so that fetch_next_prompt is called via the
+    # issue-centric path rather than the cosmetically-noisy fallback_legacy path.
+    if context.target_issue_source == "ready_issue_pending":
+        return not context.fallback_reason and context.next_request_hint != "issue_resolution_unclear"
     if summary is None:
         return False
     if context.target_issue_source != "normalized_summary":
