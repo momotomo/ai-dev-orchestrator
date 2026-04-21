@@ -331,6 +331,38 @@ def _should_passthrough_ic_close(state: dict[str, Any]) -> bool:
     return detect_ic_stop_path(state) == ""
 
 
+def _should_passthrough_fetch_pending_reply(state: dict[str, Any]) -> bool:
+    """Return True when a fetch_next_prompt state-unchanged cycle should continue.
+
+    When bridge_orchestrator runs fetch_next_prompt and the reply is not yet
+    collected (e.g. correction retry: BridgeStop exits rc=0 with state preserved),
+    state_signature() does not change because pending_request_hash / source / log
+    are intentionally preserved for the next fetch attempt.  Without this guard,
+    run_until_stop would treat the unchanged state as a stuck loop and stop.
+
+    This passthrough allows the loop to re-enter bridge_orchestrator so that
+    fetch_next_prompt can poll for the reply again.
+
+    Conditions that must ALL hold:
+      - mode is waiting_prompt_reply, extended_wait, or await_late_completion
+        (any mode where fetch_next_prompt is the expected action)
+      - pending_request_hash is non-empty (a request has been sent)
+      - pending_request_source is non-empty (request origin is recorded)
+      - no error and no pause flag (would require human intervention)
+      - detect_ic_stop_path returns "" (no initial_selection_stop / human_review_needed)
+    """
+    mode = str(state.get("mode", "")).strip()
+    if mode not in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+        return False
+    if not str(state.get("pending_request_hash", "")).strip():
+        return False
+    if not str(state.get("pending_request_source", "")).strip():
+        return False
+    if state.get("error") or state.get("pause"):
+        return False
+    return detect_ic_stop_path(state) == ""
+
+
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
     command = [sys.executable, "scripts/bridge_orchestrator.py"]
     command.extend(["--codex-bin", args.codex_bin])
@@ -1503,30 +1535,37 @@ def run(argv: list[str] | None = None) -> int:
                 )
 
             if state_signature(before) == state_signature(after):
-                if action == "wait_for_codex_report":
-                    reason = (
-                        "Codex report 待ちのため停止しました。"
-                        " bridge/outbox/codex_report.md が生成されたら再実行してください。"
-                    )
-                elif action == "request_prompt_from_report" and is_awaiting_user_supplement(before):
-                    reason = (
-                        "再開用の補足入力が空のため送信せず停止しました。"
-                        " 必要な補足を入力して再実行してください。"
-                    )
+                if action == "fetch_next_prompt" and _should_passthrough_fetch_pending_reply(after):
+                    # Reply-pending passthrough: bridge exited rc=0 without collecting the
+                    # reply (e.g. correction retry BridgeStop preserves pending_request_*
+                    # fields intentionally).  Let the loop re-enter bridge_orchestrator
+                    # to poll for the reply again instead of treating this as a stuck loop.
+                    pass  # fall through to next iteration
                 else:
-                    reason = (
-                        "state が変化しなかったため停止しました。"
-                        f" mode={after.get('mode', '')} next_action={resolve_unified_next_action(after)}"
+                    if action == "wait_for_codex_report":
+                        reason = (
+                            "Codex report 待ちのため停止しました。"
+                            " bridge/outbox/codex_report.md が生成されたら再実行してください。"
+                        )
+                    elif action == "request_prompt_from_report" and is_awaiting_user_supplement(before):
+                        reason = (
+                            "再開用の補足入力が空のため送信せず停止しました。"
+                            " 必要な補足を入力して再実行してください。"
+                        )
+                    else:
+                        reason = (
+                            "state が変化しなかったため停止しました。"
+                            f" mode={after.get('mode', '')} next_action={resolve_unified_next_action(after)}"
+                        )
+                    return finish(
+                        args=args,
+                        reason=reason,
+                        steps=steps,
+                        warnings=warnings,
+                        initial_state=initial_state,
+                        final_state=after,
+                        history=history,
                     )
-                return finish(
-                    args=args,
-                    reason=reason,
-                    steps=steps,
-                    warnings=warnings,
-                    initial_state=initial_state,
-                    final_state=after,
-                    history=history,
-                )
 
             if args.sleep_seconds > 0 and steps < args.max_steps:
                 time.sleep(args.sleep_seconds)

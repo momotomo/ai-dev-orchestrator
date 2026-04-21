@@ -3342,6 +3342,129 @@ class IcClosePassthroughTests(unittest.TestCase):
                 self.assertTrue(run_until_stop._should_passthrough_ic_close(state))
 
 
+class IcReplyPendingPassthroughTests(unittest.TestCase):
+    """_should_passthrough_fetch_pending_reply() — fetch reply-pending passthrough guard.
+
+    Root cause (Phase 19):
+      When bridge_orchestrator runs fetch_next_prompt and the reply is not yet
+      available (e.g. correction retry: BridgeStop raised with rc=0, preserving
+      pending_request_hash / source / log so the next fetch picks up the same
+      pending request), state_signature(before) == state_signature(after) because
+      the pending_request_* fields stay identical.  run_until_stop would treat this
+      as a stuck loop and stop with "state が変化しなかったため停止しました".
+
+    Fix: _should_passthrough_fetch_pending_reply() returns True when the state
+      indicates an active reply-wait cycle, so the loop continues polling instead
+      of stopping prematurely.
+    """
+
+    def _pending_reply_state(
+        self,
+        mode: str = "waiting_prompt_reply",
+        *,
+        pending_hash: str = "abc123",
+        pending_source: str = "initial_selection:some_request",
+        error: bool = False,
+        pause: bool = False,
+    ) -> dict:
+        return {
+            "mode": mode,
+            "pending_request_hash": pending_hash,
+            "pending_request_source": pending_source,
+            "pending_request_log": "logs/some_request.md",
+            "error": error,
+            "pause": pause,
+        }
+
+    def test_passthrough_when_waiting_prompt_reply(self) -> None:
+        """mode=waiting_prompt_reply + pending hash/source → passthrough True."""
+        self.assertTrue(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state("waiting_prompt_reply")
+            )
+        )
+
+    def test_passthrough_when_extended_wait(self) -> None:
+        """mode=extended_wait (timeout_first passed) → passthrough True."""
+        self.assertTrue(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state("extended_wait")
+            )
+        )
+
+    def test_passthrough_when_await_late_completion(self) -> None:
+        """mode=await_late_completion (late_completion_mode) → passthrough True."""
+        self.assertTrue(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state("await_late_completion")
+            )
+        )
+
+    def test_no_passthrough_when_mode_idle(self) -> None:
+        """mode=idle is not a reply-wait mode → passthrough False."""
+        self.assertFalse(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state("idle")
+            )
+        )
+
+    def test_no_passthrough_when_mode_awaiting_user(self) -> None:
+        """mode=awaiting_user is not a reply-wait mode → passthrough False."""
+        self.assertFalse(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state("awaiting_user")
+            )
+        )
+
+    def test_no_passthrough_when_pending_hash_empty(self) -> None:
+        """Empty pending_request_hash means no request is pending → passthrough False."""
+        state = self._pending_reply_state()
+        state["pending_request_hash"] = ""
+        self.assertFalse(run_until_stop._should_passthrough_fetch_pending_reply(state))
+
+    def test_no_passthrough_when_pending_source_empty(self) -> None:
+        """Empty pending_request_source means origin unknown → passthrough False."""
+        state = self._pending_reply_state()
+        state["pending_request_source"] = ""
+        self.assertFalse(run_until_stop._should_passthrough_fetch_pending_reply(state))
+
+    def test_no_passthrough_when_error_set(self) -> None:
+        """error=True requires human intervention, not auto-retry → passthrough False."""
+        self.assertFalse(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state(error=True)
+            )
+        )
+
+    def test_no_passthrough_when_pause_set(self) -> None:
+        """pause=True requires human intervention, not auto-retry → passthrough False."""
+        self.assertFalse(
+            run_until_stop._should_passthrough_fetch_pending_reply(
+                self._pending_reply_state(pause=True)
+            )
+        )
+
+    def test_passthrough_with_correction_retry_state(self) -> None:
+        """Correction retry preserves pending_request_* but mode stays waiting_prompt_reply.
+
+        This is the primary scenario for Phase 19 Fix B: fetch_next_prompt sends a
+        contract correction request and raises BridgeStop (rc=0) with state unchanged
+        (pending_request_hash, source, log preserved).  The passthrough allows the
+        loop to re-enter bridge_orchestrator for the next fetch attempt.
+        """
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "abc123",
+            "pending_request_source": "issue_centric:initial_selection",
+            "pending_request_log": "logs/request.md",
+            "last_issue_centric_contract_correction_count": 1,
+            "last_issue_centric_contract_correction_reason": "missing_contract_markers",
+            "error": False,
+            "pause": False,
+        }
+        self.assertTrue(run_until_stop._should_passthrough_fetch_pending_reply(state))
+
+
 class ContractCorrectionHelperTests(unittest.TestCase):
     """Unit-tests for the retryable-contract detection and correction helpers in fetch_next_prompt."""
 
