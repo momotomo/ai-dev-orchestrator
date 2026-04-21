@@ -1750,6 +1750,51 @@ class IsIcCloseCompletedForAutoContinuationTests(unittest.TestCase):
         }
         self.assertTrue(self._call(state))
 
+    def test_returns_false_when_pending_request_is_initial_selection(self) -> None:
+        """pending_request_source=initial_selection: → False (transition already in flight)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "closed",
+            "pending_request_source": "initial_selection:abc123",
+        }
+        self.assertFalse(self._call(state))
+
+    def test_returns_false_when_pending_request_is_ready_issue(self) -> None:
+        """pending_request_source=ready_issue: → False (ready-issue request already sent)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "closed",
+            "pending_request_source": "ready_issue:def456",
+        }
+        self.assertFalse(self._call(state))
+
+    def test_returns_false_when_prepared_request_is_initial_selection(self) -> None:
+        """prepared_request_source=initial_selection: → False (staged but not yet promoted)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "closed",
+            "prepared_request_source": "initial_selection:abc123",
+        }
+        self.assertFalse(self._call(state))
+
+    def test_returns_false_when_prepared_request_is_ready_issue(self) -> None:
+        """prepared_request_source=ready_issue: → False (ready-issue staged but not promoted)."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "closed",
+            "prepared_request_source": "ready_issue:def456",
+        }
+        self.assertFalse(self._call(state))
+
+    def test_returns_true_when_unrelated_pending_request_exists(self) -> None:
+        """A non-IC pending request (e.g. override:) does not suppress auto-continuation."""
+        state = {
+            "chatgpt_decision": "issue_centric:no_action",
+            "last_issue_centric_close_status": "closed",
+            "pending_request_source": "override:xyz",
+        }
+        self.assertTrue(self._call(state))
+
 
 # ---------------------------------------------------------------------------
 # bridge_orchestrator.run() IC close auto-continuation integration tests
