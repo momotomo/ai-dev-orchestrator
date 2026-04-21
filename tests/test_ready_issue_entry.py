@@ -8003,5 +8003,108 @@ class IcPlanARouteDecisionTests(unittest.TestCase):
         self.assertFalse(rd.legacy_present)
 
 
+# ---------------------------------------------------------------------------
+# Duplicate ready-issue request guard tests (Phase 21)
+# ---------------------------------------------------------------------------
+
+class ReadyIssueDuplicateGuardTests(unittest.TestCase):
+    """request_next_prompt.run() must block duplicate ready-issue sends in all pending modes.
+
+    Regression: the old guard only checked mode == "waiting_prompt_reply".
+    When the mode transitioned to "extended_wait" or "await_late_completion"
+    (Safari timeout sub-states), the same ready-issue request was re-sent.
+    """
+
+    def _make_pending_state(self, mode: str, request_source: str, request_hash: str = "h1") -> dict:
+        return {
+            "mode": mode,
+            "pending_request_source": request_source,
+            "pending_request_hash": request_hash,
+            "pending_request_log": "logs/sent_ready_issue.md",
+            "pending_request_signal": "",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+        }
+
+    def _run_and_capture(self, state: dict, argv: list) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = request_next_prompt.run(state, argv)
+        return rc, buf.getvalue()
+
+    def test_guard_blocks_duplicate_in_waiting_prompt_reply(self) -> None:
+        """Existing behaviour: waiting_prompt_reply mode blocks resend of same ready-issue request."""
+        ref = "#7 Implement feature X"
+        source = request_next_prompt.build_ready_issue_request_source(ref)
+        state = self._make_pending_state("waiting_prompt_reply", source)
+        rc, out = self._run_and_capture(state, ["--ready-issue-ref", ref, "--project-path", "/tmp/repo"])
+        self.assertEqual(rc, 0)
+        self.assertIn("再送しませんでした", out)
+
+    def test_guard_blocks_duplicate_in_extended_wait(self) -> None:
+        """Fix: extended_wait mode must also block resend of same ready-issue request."""
+        ref = "#7 Implement feature X"
+        source = request_next_prompt.build_ready_issue_request_source(ref)
+        state = self._make_pending_state("extended_wait", source)
+        rc, out = self._run_and_capture(state, ["--ready-issue-ref", ref, "--project-path", "/tmp/repo"])
+        self.assertEqual(rc, 0)
+        self.assertIn("再送しませんでした", out)
+
+    def test_guard_blocks_duplicate_in_await_late_completion(self) -> None:
+        """Fix: await_late_completion mode must also block resend of same ready-issue request."""
+        ref = "#7 Implement feature X"
+        source = request_next_prompt.build_ready_issue_request_source(ref)
+        state = self._make_pending_state("await_late_completion", source)
+        rc, out = self._run_and_capture(state, ["--ready-issue-ref", ref, "--project-path", "/tmp/repo"])
+        self.assertEqual(rc, 0)
+        self.assertIn("再送しませんでした", out)
+
+    def test_guard_allows_different_issue_in_extended_wait(self) -> None:
+        """A different ready-issue ref must NOT be blocked even when in extended_wait mode."""
+        ref_pending = "#7 Implement feature X"
+        source_pending = request_next_prompt.build_ready_issue_request_source(ref_pending)
+        state = self._make_pending_state("extended_wait", source_pending)
+
+        ref_new = "#8 Fix something else"
+        # Attempting to send a different ref while the old one is pending should
+        # NOT be blocked (different request source → not a duplicate).
+        # We mock send_initial_request_to_chatgpt so the test stays unit-level.
+        send_calls = []
+        fake_send_result = {"signal": "sent", "url": "https://chatgpt.com", "title": "", "match_kind": "", "matched_hint": "", "project_name": "", "github_source_attach_status": "", "github_source_attach_boundary": "", "github_source_attach_detail": "", "github_source_attach_context": "", "github_source_attach_log": "", "request_send_continued_without_github_source": False}
+        with (
+            patch.object(request_next_prompt, "send_initial_request_to_chatgpt", side_effect=lambda t: (send_calls.append(t), fake_send_result)[1]),
+            patch.object(request_next_prompt, "save_state"),
+            patch.object(request_next_prompt, "log_text", return_value="logs/dummy.md"),
+            patch.object(request_next_prompt, "repo_relative", side_effect=lambda x: x),
+        ):
+            rc = request_next_prompt.run(state, ["--ready-issue-ref", ref_new, "--project-path", "/tmp/repo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(send_calls), 1, "Different ready-issue ref must trigger actual send")
+
+    def test_guard_allows_idle_mode_to_resend_after_clear(self) -> None:
+        """After pending is cleared (mode=idle), same ref can be resent."""
+        ref = "#7 Implement feature X"
+        state = {
+            "mode": "idle",
+            "pending_request_source": "",
+            "pending_request_hash": "",
+            "need_chatgpt_prompt": True,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+        }
+        send_calls = []
+        fake_send_result = {"signal": "sent", "url": "https://chatgpt.com", "title": "", "match_kind": "", "matched_hint": "", "project_name": "", "github_source_attach_status": "", "github_source_attach_boundary": "", "github_source_attach_detail": "", "github_source_attach_context": "", "github_source_attach_log": "", "request_send_continued_without_github_source": False}
+        with (
+            patch.object(request_next_prompt, "send_initial_request_to_chatgpt", side_effect=lambda t: (send_calls.append(t), fake_send_result)[1]),
+            patch.object(request_next_prompt, "save_state"),
+            patch.object(request_next_prompt, "log_text", return_value="logs/dummy.md"),
+            patch.object(request_next_prompt, "repo_relative", side_effect=lambda x: x),
+        ):
+            rc = request_next_prompt.run(state, ["--ready-issue-ref", ref, "--project-path", "/tmp/repo"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(send_calls), 1, "Cleared state must allow resend")
+
+
 if __name__ == "__main__":
     unittest.main()
