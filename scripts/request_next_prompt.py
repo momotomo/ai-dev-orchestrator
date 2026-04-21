@@ -339,7 +339,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         request_text, request_hash, request_source, raw_ready_issue_ref = build_initial_request(args)
 
     if (
-        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
+        str(state.get("mode", "")).strip() in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}
         and str(state.get("pending_request_source", "")).strip() == request_source
     ):
         print(f"request: 同じ {request_source_label(request_source)} entry request は送信済みのため再送しませんでした。")
