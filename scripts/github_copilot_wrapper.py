@@ -62,6 +62,43 @@ _STUB_PROVIDER_MODULE = "github_copilot_provider_stub.py"
 _STUB_OUTPUT_MARKERS = ("provider: github_copilot_provider_stub", "stub 応答")
 
 
+def _sanitize_prompt_text(prompt: str) -> str:
+    """Strip embedded NUL bytes from free-form prompt text and warn.
+
+    NUL bytes (\\x00) in subprocess argv elements cause
+    ``ValueError: embedded null byte`` on POSIX systems.  For free-form prompt
+    text (read from stdin or a prompt file) they are always spurious binary
+    encoding artefacts and can be safely removed.
+
+    Logs a WARNING to stderr if any bytes are stripped.
+    """
+    if "\x00" not in prompt:
+        return prompt
+    count = prompt.count("\x00")
+    sanitized = prompt.replace("\x00", "")
+    print(
+        f"[github_copilot_wrapper] WARNING: {count} NUL byte(s) stripped from prompt "
+        "(binary encoding artefact). Continuing with sanitized prompt.",
+        file=sys.stderr,
+    )
+    return sanitized
+
+
+def _assert_no_null_in_structural_input(value: str, label: str) -> None:
+    """Raise a descriptive ValueError if a structural subprocess input contains NUL.
+
+    Unlike free-form prompt text, structural inputs (command paths, model names)
+    cannot be safely stripped — a NUL byte there indicates a configuration error
+    and the subprocess launch must be aborted.
+    """
+    if "\x00" in value:
+        raise ValueError(
+            f"[github_copilot_wrapper] FATAL: NUL byte in structural input '{label}'. "
+            "Cannot continue. "
+            "Check project_config.json, environment variables, and argv."
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="GitHub Copilot custom wrapper — model 指定対応 shim.",
@@ -213,6 +250,15 @@ def run(argv: list[str] | None = None) -> int:
             )
 
     prompt = sys.stdin.read()
+    prompt = _sanitize_prompt_text(prompt)
+
+    # Fail-fast: structural subprocess inputs (command path, model) must not contain NUL.
+    try:
+        _assert_no_null_in_structural_input(exec_cmd, "--exec")
+        _assert_no_null_in_structural_input(model, "--model")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     if report_file:
         if exec_cmd:
@@ -242,6 +288,9 @@ def run(argv: list[str] | None = None) -> int:
             except FileNotFoundError as exc:
                 print(f"[github_copilot_wrapper] ERROR: command not found: {exc}", file=sys.stderr)
                 return 127
+            except ValueError as exc:
+                print(f"[github_copilot_wrapper] FATAL: subprocess input error: {exc}", file=sys.stderr)
+                return 1
             if result.stdout:
                 sys.stdout.write(result.stdout)
             if result.stderr:
@@ -286,6 +335,9 @@ def run(argv: list[str] | None = None) -> int:
             except FileNotFoundError as exc:
                 print(f"[github_copilot_wrapper] ERROR: command not found: {exc}", file=sys.stderr)
                 return 127
+            except ValueError as exc:
+                print(f"[github_copilot_wrapper] FATAL: subprocess input error: {exc}", file=sys.stderr)
+                return 1
             if result.stdout:
                 sys.stdout.write(result.stdout)
             if result.stderr:
@@ -318,6 +370,9 @@ def run(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"[github_copilot_wrapper] ERROR: command not found: {exc}", file=sys.stderr)
         return 127
+    except ValueError as exc:
+        print(f"[github_copilot_wrapper] FATAL: subprocess input error: {exc}", file=sys.stderr)
+        return 1
 
     return result.returncode
 
