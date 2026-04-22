@@ -1202,9 +1202,9 @@ class CodexBodyUtf8DecodeTests(unittest.TestCase):
     Regression for: 'CHATGPT_CODEX_BODY payload is not valid UTF-8:
     utf-8 codec can't decode byte 0xe0 in position 560: invalid continuation byte'
 
-    Fix: instead of raising IssueCentricBodyDecodeError for every UnicodeDecodeError,
-    fall back to errors='replace' and emit a WARNING when the payload is mostly decodable.
-    Only raise if the lenient-decoded text is empty.
+    Strict behavior: valid base64 that decodes to non-UTF-8 bytes raises
+    IssueCentricBodyDecodeError so the run does not proceed with corrupted text.
+    fetch_next_prompt catches this and asks ChatGPT to re-emit the contract.
     """
 
     # ------------------------------------------------------------------
@@ -1238,60 +1238,49 @@ class CodexBodyUtf8DecodeTests(unittest.TestCase):
     # Partial UTF-8 failure: should warn but continue
     # ------------------------------------------------------------------
 
-    def test_partially_broken_utf8_warns_but_does_not_raise(self) -> None:
+    def test_partially_broken_utf8_raises_body_decode_error(self) -> None:
         """Valid base64, but decoded bytes contain an invalid UTF-8 sequence.
 
         Reproduces the actual failure: byte 0xe0 followed by non-continuation byte.
-        After the fix, this must NOT raise IssueCentricBodyDecodeError.
+        After strict fix, this MUST raise IssueCentricBodyDecodeError.
         """
         # bytes: valid prefix + invalid UTF-8 sequence + valid suffix
         broken_bytes = b"# Task\nfresh-start " + b"\xe0\x6d\x9c\x6e" + b"3. small step\n"
         decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
-        # must NOT raise
-        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
-        self.assertIn("# Task", prepared.codex_body.decoded_text)
-        self.assertIn("3. small step", prepared.codex_body.decoded_text)
-        # replacement character must appear where bad bytes were
-        self.assertIn("\ufffd", prepared.codex_body.decoded_text)
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIn("UTF-8", str(ctx.exception))
 
-    def test_partial_utf8_failure_warning_is_printed(self) -> None:
-        """The WARNING line is printed to stdout so operators can see it."""
+    def test_partial_utf8_failure_raises_not_warns(self) -> None:
+        """Non-UTF-8 bytes must raise IssueCentricBodyDecodeError, not merely print a warning."""
         broken_bytes = b"body\xe0\x6d tail"
         decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError):
             issue_centric_transport.decode_issue_centric_decision(decision)
-        output = buf.getvalue()
-        self.assertIn("WARNING", output)
-        self.assertIn("CHATGPT_CODEX_BODY", output)
-        self.assertIn("non-UTF-8 byte", output)
 
-    def test_partial_utf8_failure_warning_includes_position_and_hex(self) -> None:
-        """Warning message includes byte position and hex of bad bytes."""
+    def test_partial_utf8_error_message_contains_block_name(self) -> None:
+        """Error message identifies the block name so operators know which block failed."""
         broken_bytes = b"prefix_12345678_" + b"\xe0\x6d" + b"suffix"
         decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
             issue_centric_transport.decode_issue_centric_decision(decision)
-        output = buf.getvalue()
-        # position 16 (length of b"prefix_12345678_")
-        self.assertIn("16", output)
-        # hex of bad bytes
-        self.assertIn("e0", output)
+        self.assertIn("CHATGPT_CODEX_BODY", str(ctx.exception))
 
-    def test_actual_failing_payload_from_issue_7_run_decodes_without_raise(self) -> None:
-        """The exact payload from the failing run (first 60 chars of b64) must not raise."""
-        # Verified failing payload (first 100 chars, enough to trigger the byte-560 issue
-        # is beyond this truncated slice, but the mechanism is the same)
+    def test_actual_failing_payload_from_issue_7_run_raises(self) -> None:
+        """The exact payload from the failing run (first 60 chars of b64) must raise.
+
+        Previously this was decoded with errors='replace'. Now it must raise so the
+        run does not proceed with a corrupted CODEX body.
+        """
+        # bytes: valid prefix + invalid UTF-8 sequence + valid suffix
         broken_bytes = (
             b"# Issue #7\n\nfresh-start \xe3\x82\x92\xe9\x81\xb8\xe0\x6d\x9c\x6e"
             b"3. \xe5\xb0\x8f\xe3\x81\x95\xe3\x81\x84 step\n"
         )
         decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
-        # must NOT raise
-        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
-        self.assertIn("# Issue #7", prepared.codex_body.decoded_text)
-        self.assertIn("\ufffd", prepared.codex_body.decoded_text)
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIn("UTF-8", str(ctx.exception))
 
     # ------------------------------------------------------------------
     # Hard failure: empty payload after replacement
@@ -1316,19 +1305,19 @@ class CodexBodyUtf8DecodeTests(unittest.TestCase):
         self.assertIn("base64", msg)
         self.assertNotIn("UTF-8", msg)
 
-    def test_partial_utf8_no_longer_raises_body_decode_error(self) -> None:
-        """Regression: before fix, partial UTF-8 raised IssueCentricBodyDecodeError.
-        After fix, it must NOT raise."""
+    def test_non_utf8_payload_raises_body_decode_error(self) -> None:
+        """Strict regression guard: non-UTF-8 BODY payload must raise IssueCentricBodyDecodeError.
+
+        Prevents regression to the old errors='replace' fallback behavior.
+        """
         broken_bytes = b"# header\n\xe0\x6d\x9c\x6e\n# footer\n"
         decision = _codex_decision_with_raw_b64(_b64_from_bytes(broken_bytes))
-        # This is the key regression guard — was raising before the fix.
-        try:
-            prepared = issue_centric_transport.decode_issue_centric_decision(decision)
-        except issue_centric_transport.IssueCentricBodyDecodeError as exc:
-            self.fail(
-                f"IssueCentricBodyDecodeError must not be raised for partial UTF-8; got: {exc}"
-            )
-        self.assertIsNotNone(prepared.codex_body)
+        with self.assertRaises(issue_centric_transport.IssueCentricBodyDecodeError) as ctx:
+            issue_centric_transport.decode_issue_centric_decision(decision)
+        msg = str(ctx.exception)
+        self.assertIn("UTF-8", msg)
+        # Must not silently pass with U+FFFD replacement
+        self.assertNotIn("\ufffd", msg)
 
 
 class IcExecutionAgentSwitchingTests(unittest.TestCase):

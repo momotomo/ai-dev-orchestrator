@@ -62,6 +62,7 @@ from issue_centric_followup_issue import execute_followup_issue_action
 from issue_centric_github import IssueCentricGitHubError, resolve_target_issue
 from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import (
+    IssueCentricBodyDecodeError,
     IssueCentricTransportError,
     materialize_issue_centric_decision,
 )
@@ -507,6 +508,7 @@ def _build_contract_correction_request(reason: str) -> str:
         "- CHATGPT_DECISION_JSON の中身（action / target_issue / flags / summary）は一切変えないこと\n"
         f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
         "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        "  BODY payload の base64 decoded text は valid UTF-8 Markdown であること（non-UTF-8 バイト列は不可）\n"
         f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
         f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
         f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
@@ -530,6 +532,7 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
         "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / flags / summary）は変更しないこと\n"
         f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
         "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        "  BODY payload の base64 decoded text は valid UTF-8 Markdown であること（non-UTF-8 バイト列は不可）\n"
         f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
         f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
         f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
@@ -1456,6 +1459,37 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 repo_relative=repo_relative,
                 raw_log_path=raw_log,
                 decision_log_path=decision_log,
+            )
+        except IssueCentricBodyDecodeError as exc:
+            # BODY payload was valid base64 but decoded bytes are not valid UTF-8.
+            # This is retryable: ask ChatGPT to re-emit the contract with a valid payload.
+            body_decode_reason = str(exc)
+            body_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+            if body_correction_count < _MAX_CONTRACT_CORRECTIONS:
+                correction_text = _build_contract_correction_request(body_decode_reason)
+                correction_log = log_text("contract_correction_request", correction_text, suffix="md")
+                send_to_chatgpt(correction_text)
+                correction_state = clear_error_fields(dict(state))
+                correction_state["last_issue_centric_contract_correction_count"] = body_correction_count + 1
+                correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
+                correction_state["last_issue_centric_contract_correction_reason"] = body_decode_reason
+                correction_state["mode"] = "waiting_prompt_reply"
+                save_state(correction_state)
+                raise BridgeStop(
+                    f"問題: BODY block payload が valid base64 ですが decoded text が valid UTF-8 ではありませんでした"
+                    f"（{body_correction_count + 1} 回目）。\n"
+                    f"対応: 同じチャットに修正依頼を再送しました。返答後に fetch を再実行してください。\n"
+                    f"詳細: correction log: {repo_relative(correction_log)}"
+                    f" / reason: {body_decode_reason}"
+                ) from exc
+            stop_for_invalid_issue_centric_contract(
+                dict(state),
+                raw_text=raw_text,
+                detail=body_decode_reason,
+                pending_request_source=pending_request_source,
+                raw_log_path=raw_log,
+                readiness=readiness,
+                correction_count=body_correction_count,
             )
         except IssueCentricTransportError as exc:
             raise BridgeError(f"issue-centric contract transport を準備できませんでした: {exc}") from exc

@@ -3634,6 +3634,28 @@ class ContractCorrectionCanonicalTagTests(unittest.TestCase):
         text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
         self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", text)
 
+    # -- UTF-8 requirement in correction requests (Phase 25) --
+
+    def test_generic_repair_requires_utf8_decoded_text(self) -> None:
+        """Generic correction request must require decoded text to be valid UTF-8 Markdown."""
+        text = self.fp._build_contract_correction_request("some reason")
+        self.assertIn("UTF-8", text)
+
+    def test_generic_repair_mentions_non_utf8_not_allowed(self) -> None:
+        """Generic correction request must state non-UTF-8 bytes are not allowed."""
+        text = self.fp._build_contract_correction_request("some reason")
+        self.assertIn("non-UTF-8", text)
+
+    def test_binding_mismatch_repair_requires_utf8_decoded_text(self) -> None:
+        """Binding-mismatch correction request must also require valid UTF-8 BODY payloads."""
+        text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
+        self.assertIn("UTF-8", text)
+
+    def test_binding_mismatch_repair_mentions_non_utf8_not_allowed(self) -> None:
+        """Binding-mismatch correction request must state non-UTF-8 bytes are not allowed."""
+        text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
+        self.assertIn("non-UTF-8", text)
+
 
 class LegacyPathDeprecationTests(unittest.TestCase):
     """issue-centric contract が正規ルートであることを示す縮退整理テスト.
