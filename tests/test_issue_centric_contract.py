@@ -3193,3 +3193,173 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "")
 
 
+class RawTextContractFallbackTests(unittest.TestCase):
+    """Phase 27: raw_text fallback for valid IC reply when role marker is absent.
+
+    When the browser DOM does not emit "ChatGPT:" (the role label), the normal
+    assistant-segment route returns empty and previously the bridge would
+    report reply_not_ready even though the valid contract is in raw_text.
+
+    _find_last_complete_ic_contract_in_raw + the fallback branch in
+    classify_issue_centric_reply_readiness must recover the contract in this
+    case.  Tests cover the six scenarios from the request spec.
+    """
+
+    _VALID_DECISION_BLOCK = "\n".join([
+        "===CHATGPT_DECISION_JSON===",
+        '{"action":"no_action","target_issue":"none","close_current_issue":false,'
+        '"create_followup_issue":false,"summary":"fallback ok"}',
+        "===END_DECISION_JSON===",
+    ])
+    _COMPLETE = issue_centric_contract.REPLY_COMPLETE_TAG
+
+    def _valid_contract_text(self) -> str:
+        return self._VALID_DECISION_BLOCK + "\n" + self._COMPLETE + "\n"
+
+    # ------------------------------------------------------------------
+    # 1. No role marker, but complete contract in raw_text → valid
+    # ------------------------------------------------------------------
+
+    def test_no_role_marker_valid_contract_detected(self) -> None:
+        """No ChatGPT:/あなた: markers but complete contract in raw_text → valid."""
+        raw = self._valid_contract_text()
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+        self.assertIsNotNone(readiness.decision)
+
+    def test_no_role_marker_parse_for_fetch_succeeds(self) -> None:
+        """parse_issue_centric_reply_for_fetch succeeds when role marker absent but contract present."""
+        raw = self._valid_contract_text()
+        decision = fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw)
+        self.assertEqual(decision.action, issue_centric_contract.IssueCentricAction.NO_ACTION)
+
+    # ------------------------------------------------------------------
+    # 2. after_text anchor mismatch, but contract is in raw_text → valid
+    # ------------------------------------------------------------------
+
+    def test_anchor_mismatch_with_valid_contract_in_raw_text(self) -> None:
+        """after_text doesn't match anything, but complete contract in raw_text → valid."""
+        # No role markers; after_text anchor that won't match anything.
+        raw = self._valid_contract_text()
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="this anchor does not appear in raw_text at all"
+        )
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+
+    # ------------------------------------------------------------------
+    # 3. Multiple contract candidates → last complete one is used
+    # ------------------------------------------------------------------
+
+    def test_multiple_contracts_last_complete_is_used(self) -> None:
+        """When raw_text has multiple complete contracts, the last one is returned."""
+        first_block = "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"none","close_current_issue":false,'
+            '"create_followup_issue":false,"summary":"first"}',
+            "===END_DECISION_JSON===",
+        ])
+        second_block = "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"none","close_current_issue":false,'
+            '"create_followup_issue":false,"summary":"last"}',
+            "===END_DECISION_JSON===",
+        ])
+        # Both candidates are followed by REPLY_COMPLETE_TAG.
+        raw = (
+            first_block + "\n" + self._COMPLETE + "\n"
+            + "some more text\n"
+            + second_block + "\n" + self._COMPLETE + "\n"
+        )
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+        # The last contract's summary should be used.
+        assert readiness.decision is not None
+        self.assertEqual(readiness.decision.summary, "last")
+
+    # ------------------------------------------------------------------
+    # 4. Partial contract (REPLY_COMPLETE absent) → reply_not_ready
+    # ------------------------------------------------------------------
+
+    def test_partial_contract_without_reply_complete_is_not_ready(self) -> None:
+        """DECISION_JSON block present but REPLY_COMPLETE absent → reply_not_ready."""
+        # No role markers, no REPLY_COMPLETE tag.
+        raw = self._VALID_DECISION_BLOCK + "\n"
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_not_ready")
+
+    def test_partial_contract_parse_raises_not_ready(self) -> None:
+        """parse_issue_centric_reply_for_fetch raises IssueCentricReplyNotReady for partial."""
+        raw = self._VALID_DECISION_BLOCK + "\n"
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady):
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(raw)
+
+    # ------------------------------------------------------------------
+    # 5. Legacy marker still stops (not treated as valid)
+    # ------------------------------------------------------------------
+
+    def test_legacy_marker_not_treated_as_valid_via_fallback(self) -> None:
+        """Legacy markers in raw_text must still produce legacy_contract stop, not valid."""
+        # Build raw with legacy marker but no role marker.
+        raw = "===CHATGPT_PROMPT_REPLY===\nsome text\n"
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        # With no role marker and no complete contract, should be not_ready.
+        # (Legacy gate fires only when assistant_segment contains legacy marker;
+        # if fallback segment has legacy marker it would also be caught.)
+        self.assertNotEqual(readiness.status, "reply_complete_valid_contract")
+
+    # ------------------------------------------------------------------
+    # 6. Normal assistant-segment route still works (regression guard)
+    # ------------------------------------------------------------------
+
+    def test_normal_assistant_segment_route_unchanged(self) -> None:
+        """Existing role-marker path must still produce reply_source='assistant_segment'."""
+        raw = "\n".join([
+            "あなた:",
+            "request body",
+            "ChatGPT:",
+            self._VALID_DECISION_BLOCK,
+            self._COMPLETE,
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "assistant_segment")
+        self.assertIsNotNone(readiness.decision)
+
+    # ------------------------------------------------------------------
+    # 7. _find_last_complete_ic_contract_in_raw unit tests
+    # ------------------------------------------------------------------
+
+    def test_find_helper_returns_none_when_no_contract(self) -> None:
+        """Returns None when no DECISION_JSON block at all."""
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw("no contract here")
+        self.assertIsNone(result)
+
+    def test_find_helper_returns_none_when_reply_complete_absent(self) -> None:
+        """Returns None when DECISION_JSON block present but REPLY_COMPLETE absent."""
+        raw = self._VALID_DECISION_BLOCK + "\n"
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(raw)
+        self.assertIsNone(result)
+
+    def test_find_helper_returns_slice_with_reply_complete(self) -> None:
+        """Returns a non-None slice when all required markers are present."""
+        raw = self._valid_contract_text()
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(raw)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("===CHATGPT_DECISION_JSON===", result)
+        self.assertIn("===CHATGPT_REPLY_COMPLETE===", result)
+
+    def test_find_helper_stops_at_user_turn_marker(self) -> None:
+        """Slice ends at the next USER_TURN_MARKER if present."""
+        raw = self._valid_contract_text() + "あなた:\nnext request\n"
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(raw)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertNotIn("next request", result)
+
+
