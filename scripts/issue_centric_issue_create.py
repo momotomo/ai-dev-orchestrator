@@ -237,11 +237,11 @@ def execute_issue_create_draft(
                 state_setter = project_state_setter or set_github_project_item_state
                 try:
                     state_setter(
-                        resolved_project.project_id,
-                        created_project_item.item_id,
-                        resolved_project.state_field_id,
-                        resolved_project.state_option_id,
-                        token,
+                        project_id=resolved_project.project_id,
+                        item_id=created_project_item.item_id,
+                        field_id=resolved_project.state_field_id,
+                        option_id=resolved_project.state_option_id,
+                        token=token,
                     )
                 except (IssueCentricIssueCreateError, IssueCentricGitHubError) as exc:
                     project_sync_status = "issue_created_project_state_failed"

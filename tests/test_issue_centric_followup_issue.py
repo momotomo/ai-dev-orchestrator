@@ -898,7 +898,7 @@ class FollowupIssueProjectSyncSignalTests(unittest.TestCase):
                 project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
                     item_id="ITEM_111", project_id=pid
                 ),
-                project_state_setter=lambda pid, iid, fid, oid, token: None,
+                project_state_setter=lambda project_id, item_id, field_id, option_id, token: None,
                 env={"GITHUB_TOKEN": "token-x"},
             )
 
