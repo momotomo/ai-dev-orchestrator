@@ -108,6 +108,11 @@ class IssueCentricReplyReadiness:
     # present in the assistant segment.  Only when this is True does the bridge
     # proceed to parse / validate the issue-centric contract.
     reply_complete_tag_present: bool = False
+    # Source route used by reply detection.  "assistant_segment" when the
+    # normal role-marker segment (ChatGPT: … あなた:) was used;
+    # "raw_text_contract_fallback" when the role marker was absent and a
+    # complete contract was found by scanning raw_text directly.
+    reply_source: str = "assistant_segment"
     decision: IssueCentricDecision | None = None
 
 
@@ -127,6 +132,7 @@ class IssueCentricReplyNotReady(BridgeError):
         self.partial_body_block_detected = readiness.partial_body_block_detected
         self.open_body_blocks = readiness.open_body_blocks
         self.reply_complete_tag_present = readiness.reply_complete_tag_present
+        self.reply_source = readiness.reply_source
 
 
 import re as _re
@@ -291,13 +297,78 @@ def _split_meta_content_lines(
     return meta, content
 
 
+def _find_last_complete_ic_contract_in_raw(raw_text: str) -> str | None:
+    """Return the last complete IC contract slice in raw_text, ignoring role markers.
+
+    A contract is considered complete when:
+    - DECISION_JSON_START … DECISION_JSON_END block is present
+    - REPLY_COMPLETE_TAG appears after DECISION_JSON_END
+
+    Returns a slice of raw_text starting at the last such DECISION_JSON_START
+    and ending at the next USER_TURN_MARKER or end-of-text.
+    Returns None if no complete contract is found.
+
+    This is the raw-text fallback used when the assistant role marker
+    ("ChatGPT:") is absent from the DOM-scraped text but the contract itself
+    is visible in raw_text.
+    """
+    last_valid_start = -1
+    search_from = 0
+    while True:
+        pos = raw_text.find(DECISION_JSON_START, search_from)
+        if pos == -1:
+            break
+        end_pos = raw_text.find(DECISION_JSON_END, pos + len(DECISION_JSON_START))
+        if end_pos != -1:
+            after_end = end_pos + len(DECISION_JSON_END)
+            if REPLY_COMPLETE_TAG in raw_text[after_end:]:
+                last_valid_start = pos
+        search_from = pos + 1
+
+    if last_valid_start == -1:
+        return None
+
+    # Slice from last_valid_start to the next USER_TURN_MARKER or end of text.
+    next_user = raw_text.find(USER_TURN_MARKER, last_valid_start)
+    slice_end = next_user if next_user != -1 else len(raw_text)
+    return raw_text[last_valid_start:slice_end]
+
+
 def classify_issue_centric_reply_readiness(
     raw_text: str,
     *,
     after_text: str | None = None,
 ) -> IssueCentricReplyReadiness:
     assistant_segment = _assistant_segment_after_text(raw_text, after_text)
-    assistant_lines = _assistant_lines_for_readiness(raw_text, after_text)
+    reply_source = "assistant_segment"
+
+    # ── Raw-text fallback: role marker absent but contract present in raw_text ──
+    # When the browser DOM does not emit the "ChatGPT:" role label, the
+    # assistant-segment route returns an empty string.  Before declaring
+    # not-ready, scan raw_text directly for the last complete IC contract
+    # candidate (DECISION_JSON_START … DECISION_JSON_END + REPLY_COMPLETE_TAG).
+    # This prevents valid contracts from being missed due to missing role markers
+    # or anchor (after_text) mismatches.
+    if not assistant_segment:
+        _fallback = _find_last_complete_ic_contract_in_raw(raw_text)
+        if _fallback is not None:
+            assistant_segment = _fallback
+            reply_source = "raw_text_contract_fallback"
+
+    # Derive assistant lines.  For the raw-text fallback the segment does not
+    # start with the role marker, so we compute lines directly from it instead
+    # of re-calling _assistant_lines_for_readiness (which calls
+    # _assistant_segment_after_text internally and would return empty again).
+    if reply_source == "raw_text_contract_fallback":
+        assistant_lines: list[str] = [
+            line.strip()
+            for raw_line in assistant_segment.splitlines()
+            if (line := raw_line.strip())
+            and not any(m in line for m in _NON_FINAL_ASSISTANT_LINE_MARKERS)
+        ]
+    else:
+        assistant_lines = _assistant_lines_for_readiness(raw_text, after_text)
+
     assistant_text_present = bool(assistant_lines)
     meta_lines, content_lines = _split_meta_content_lines(assistant_lines)
     assistant_final_content_present = bool(content_lines)
@@ -328,6 +399,7 @@ def classify_issue_centric_reply_readiness(
             assistant_final_content_present=False,
             assistant_meta_only=False,
             reply_complete_tag_present=False,
+            reply_source=reply_source,
         )
 
     # ── Gate 1b: legacy contract detection — detect-only, explicit-stop ───
@@ -347,6 +419,7 @@ def classify_issue_centric_reply_readiness(
             assistant_final_content_present=assistant_final_content_present,
             assistant_meta_only=assistant_meta_only,
             reply_complete_tag_present=reply_complete_tag_present,
+            reply_source=reply_source,
         )
 
     # ── Gate 2 (PRIMARY): terminal tag absent → always not-ready ───────────
@@ -376,6 +449,7 @@ def classify_issue_centric_reply_readiness(
             partial_body_block_detected=partial_body_block,
             open_body_blocks=tuple(open_blocks),
             reply_complete_tag_present=False,
+            reply_source=reply_source,
         )
 
     # ── Terminal tag is present — proceed to parse / validate ───────────────
@@ -391,6 +465,7 @@ def classify_issue_centric_reply_readiness(
             assistant_final_content_present=assistant_final_content_present,
             assistant_meta_only=assistant_meta_only,
             reply_complete_tag_present=True,
+            reply_source=reply_source,
         )
 
     try:
@@ -409,6 +484,7 @@ def classify_issue_centric_reply_readiness(
             body_block_end_present=body_block_end_present,
             partial_body_block_detected=False,
             reply_complete_tag_present=True,
+            reply_source=reply_source,
         )
     except IssueCentricContractError as exc:
         return IssueCentricReplyReadiness(
@@ -424,6 +500,7 @@ def classify_issue_centric_reply_readiness(
             body_block_end_present=body_block_end_present,
             partial_body_block_detected=False,
             reply_complete_tag_present=True,
+            reply_source=reply_source,
         )
 
     return IssueCentricReplyReadiness(
@@ -439,6 +516,7 @@ def classify_issue_centric_reply_readiness(
         body_block_end_present=body_block_end_present,
         partial_body_block_detected=False,
         reply_complete_tag_present=True,
+        reply_source=reply_source,
         decision=decision,
     )
 
