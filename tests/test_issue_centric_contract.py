@@ -3050,7 +3050,7 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         # binding mismatch wording must include target_issue fix instruction
         self.assertIn("target_issue", correction_text)
         self.assertIn("#5", correction_text)  # current ready issue ref
-        self.assertIn("===CHATGPT_REPLY_COMPLETE===", correction_text)
+        self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", correction_text)
         # must NOT be generic wording (generic starts with "前回の返答に issue-centric contract の不正")
         self.assertNotIn("issue-centric contract の不正がありました", correction_text)
 

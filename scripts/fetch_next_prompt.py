@@ -38,11 +38,21 @@ from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_contract import (
     CHATGPT_TURN_MARKER,
+    CODEX_BODY_END,
+    CODEX_BODY_START,
+    DECISION_JSON_END,
+    DECISION_JSON_START,
+    FOLLOWUP_ISSUE_BODY_END,
+    FOLLOWUP_ISSUE_BODY_START,
     IssueCentricAction,
     IssueCentricContractError,
     IssueCentricContractNotFound,
     IssueCentricDecision,
+    ISSUE_BODY_END,
+    ISSUE_BODY_START,
     REPLY_COMPLETE_TAG,
+    REVIEW_BODY_END,
+    REVIEW_BODY_START,
     USER_TURN_MARKER,
     parse_issue_centric_reply,
 )
@@ -488,17 +498,19 @@ def _build_contract_correction_request(reason: str) -> str:
 
     Covers all retryable invalid-contract cases: malformed base64, invalid JSON,
     missing or broken block markers, field type errors, unknown action, etc.
+    Uses only current canonical envelope tags — no legacy aliases, no completion tags.
     """
     return (
         "前回の返答に issue-centric contract の不正がありました。\n"
         f"エラー詳細: {reason}\n\n"
-        "以下の手順で修正した返答を再出力してください。\n\n"
-        "- CHATGPT_DECISION_JSON の内容（action / target_issue / flags / summary）は一切変えないこと\n"
-        "- ===CHATGPT_DECISION_JSON=== / ===END_CHATGPT_DECISION_JSON=== マーカーを正確に配置すること\n"
-        "- BODY block（CHATGPT_ISSUE_BODY / CHATGPT_CODEX_BODY / CHATGPT_REVIEW /\n"
-        "  CHATGPT_FOLLOWUP_ISSUE_BODY）が必要なら有効な base64（padding 含む）で再エンコードすること\n"
-        "- 余計な説明・謝罪・コメントを付けないこと\n"
-        "- 最後に必ず `===CHATGPT_REPLY_COMPLETE===` を付けること\n"
+        "canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
+        "- CHATGPT_DECISION_JSON の中身（action / target_issue / flags / summary）は一切変えないこと\n"
+        f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
+        "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
+        f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
+        f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
+        f"  {FOLLOWUP_ISSUE_BODY_START} … {FOLLOWUP_ISSUE_BODY_END}\n"
     )
 
 
@@ -507,17 +519,21 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
 
     Unlike the generic correction request, this explicitly tells ChatGPT which
     target_issue to use and forbids changing anything else.
+    Uses only current canonical envelope tags — no legacy aliases, no completion tags.
     """
+    target_issue_ref = current_ready_issue_ref.split(maxsplit=1)[0].strip()
     return (
         "前回の返答の target_issue が現在の ready issue と一致していませんでした。\n"
         f"エラー詳細: {reason}\n\n"
-        "以下の点を修正して contract を再出力してください。\n\n"
-        f"- `target_issue` は必ず `{current_ready_issue_ref.split(maxsplit=1)[0].strip()}` に合わせること\n"
+        "以下の点を修正して canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
+        f"- `target_issue` は必ず `{target_issue_ref}` に合わせること\n"
         "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / flags / summary）は変更しないこと\n"
-        "- ===CHATGPT_DECISION_JSON=== / ===END_CHATGPT_DECISION_JSON=== マーカーを正確に配置すること\n"
-        "- BODY block が必要なら有効な base64 で再エンコードすること\n"
-        "- 余計な説明・謝罪・コメントを付けないこと\n"
-        "- 最後に必ず `===CHATGPT_REPLY_COMPLETE===` を付けること\n"
+        f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
+        "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
+        f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
+        f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
+        f"  {FOLLOWUP_ISSUE_BODY_START} … {FOLLOWUP_ISSUE_BODY_END}\n"
     )
 
 
