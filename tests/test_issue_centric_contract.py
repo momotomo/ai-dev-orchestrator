@@ -3363,3 +3363,207 @@ class RawTextContractFallbackTests(unittest.TestCase):
         self.assertNotIn("next request", result)
 
 
+class StaleContractPickupGuardTests(unittest.TestCase):
+    """Phase 28: raw_text fallback must NOT pick up stale contracts from previous turns.
+
+    The fallback scan is bounded to raw_text[search_start:] where search_start
+    is computed by _reply_search_start_index (after_text anchor →
+    last USER_TURN_MARKER → 0).  This prevents a past valid contract from being
+    misidentified as the current reply.
+    """
+
+    _COMPLETE = issue_centric_contract.REPLY_COMPLETE_TAG
+
+    def _make_old_contract(self, summary: str = "old") -> str:
+        return "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            (
+                '{"action":"no_action","target_issue":"none",'
+                '"close_current_issue":false,"create_followup_issue":false,'
+                f'"summary":"{summary}"}}'
+            ),
+            "===END_DECISION_JSON===",
+            self._COMPLETE,
+        ])
+
+    def _make_new_contract(self, summary: str = "new") -> str:
+        return "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            (
+                '{"action":"no_action","target_issue":"none",'
+                '"close_current_issue":false,"create_followup_issue":false,'
+                f'"summary":"{summary}"}}'
+            ),
+            "===END_DECISION_JSON===",
+            self._COMPLETE,
+        ])
+
+    # ------------------------------------------------------------------
+    # 1. old contract → user turn → pending request → no new reply
+    #    → reply_not_ready  (stale contract must NOT be picked up)
+    # ------------------------------------------------------------------
+
+    def test_old_contract_before_pending_request_is_not_picked_up(self) -> None:
+        """Old contract before current pending request must NOT be treated as current reply."""
+        # Structure: old assistant reply → user turn → pending request (no new reply yet)
+        raw = "\n".join([
+            self._make_old_contract("stale"),
+            "あなた:",
+            "current pending request body",
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="current pending request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+
+    def test_old_contract_not_picked_up_parse_raises_not_ready(self) -> None:
+        """parse_issue_centric_reply_for_fetch raises IssueCentricReplyNotReady for stale."""
+        raw = "\n".join([
+            self._make_old_contract("stale"),
+            "あなた:",
+            "current pending request body",
+        ])
+        with self.assertRaises(fetch_next_prompt.IssueCentricReplyNotReady):
+            fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                raw, after_text="current pending request body"
+            )
+
+    # ------------------------------------------------------------------
+    # 2. old contract → user turn → pending request → new valid contract
+    #    → reply_complete_valid_contract using the new one
+    # ------------------------------------------------------------------
+
+    def test_new_contract_after_pending_request_is_picked_up(self) -> None:
+        """New contract after pending request (no role marker) must be picked up."""
+        raw = "\n".join([
+            self._make_old_contract("stale"),
+            "あなた:",
+            "current pending request body",
+            self._make_new_contract("fresh"),
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="current pending request body"
+        )
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+        assert readiness.decision is not None
+        self.assertEqual(readiness.decision.summary, "fresh")
+
+    # ------------------------------------------------------------------
+    # 3. after_text anchor found → contract before anchor is ignored
+    # ------------------------------------------------------------------
+
+    def test_contract_before_anchor_is_ignored(self) -> None:
+        """Contract appearing before the after_text anchor must be ignored."""
+        raw = "\n".join([
+            self._make_old_contract("before-anchor"),
+            "あなた:",
+            "my anchor request",
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="my anchor request"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+
+    # ------------------------------------------------------------------
+    # 4. anchor not found → last USER_TURN_MARKER is used as window start
+    # ------------------------------------------------------------------
+
+    def test_last_user_turn_as_window_when_anchor_absent(self) -> None:
+        """When after_text is absent/unmatched, contract before last USER_TURN is ignored."""
+        raw = "\n".join([
+            self._make_old_contract("stale"),
+            "あなた:",
+            "latest user turn text",
+            # No new assistant reply
+        ])
+        # No after_text given → _reply_search_start_index falls back to last USER_TURN_MARKER
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_not_ready")
+
+    def test_new_contract_after_last_user_turn_is_found(self) -> None:
+        """New contract after the last USER_TURN_MARKER (no anchor) must be found."""
+        raw = "\n".join([
+            self._make_old_contract("stale"),
+            "あなた:",
+            "latest user turn text",
+            self._make_new_contract("current"),
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+        assert readiness.decision is not None
+        self.assertEqual(readiness.decision.summary, "current")
+
+    # ------------------------------------------------------------------
+    # 5. Normal assistant-segment route still works (regression guard)
+    # ------------------------------------------------------------------
+
+    def test_normal_route_unaffected_by_stale_guard(self) -> None:
+        """Existing ChatGPT: role-marker path must still produce assistant_segment source."""
+        raw = "\n".join([
+            self._make_old_contract("stale"),
+            "あなた:",
+            "current pending request",
+            "ChatGPT:",
+            self._make_new_contract("role-marker-path"),
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="current pending request"
+        )
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "assistant_segment")
+
+    # ------------------------------------------------------------------
+    # 6. Partial contract (REPLY_COMPLETE absent) → reply_not_ready
+    # ------------------------------------------------------------------
+
+    def test_partial_contract_after_pending_request_is_not_ready(self) -> None:
+        """Partial contract (REPLY_COMPLETE absent) after pending request → reply_not_ready."""
+        partial = "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"none","close_current_issue":false,'
+            '"create_followup_issue":false,"summary":"partial"}',
+            "===END_DECISION_JSON===",
+            # No REPLY_COMPLETE_TAG here
+        ])
+        raw = "\n".join([
+            "あなた:",
+            "current pending request body",
+            partial,
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="current pending request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+
+    # ------------------------------------------------------------------
+    # 7. _find_last_complete_ic_contract_in_raw with search_start unit test
+    # ------------------------------------------------------------------
+
+    def test_find_helper_search_start_excludes_old_contract(self) -> None:
+        """search_start > 0 must exclude contracts appearing before the boundary."""
+        raw = self._make_old_contract("old") + "\nあなた:\nnew pending request\n"
+        # search_start points right after the user turn
+        boundary = raw.rfind("あなた:")
+        search_start = boundary + len("あなた:")
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(
+            raw, search_start=search_start
+        )
+        # No complete contract after search_start → must return None
+        self.assertIsNone(result)
+
+    def test_find_helper_search_start_finds_new_contract(self) -> None:
+        """search_start > 0 finds a contract that appears after the boundary."""
+        new_contract = self._make_new_contract("after-boundary")
+        raw = self._make_old_contract("old") + "\nあなた:\nnew pending request\n" + new_contract
+        boundary = raw.rfind("あなた:")
+        search_start = boundary + len("あなた:")
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(
+            raw, search_start=search_start
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn("after-boundary", result)
+
+
