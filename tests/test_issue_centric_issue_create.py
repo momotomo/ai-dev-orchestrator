@@ -958,7 +958,7 @@ class IssueCreateProjectSyncSignalTests(unittest.TestCase):
                 project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
                     item_id="ITEM_101", project_id=pid
                 ),
-                project_state_setter=lambda pid, iid, fid, oid, token: None,
+                project_state_setter=lambda project_id, item_id, field_id, option_id, token: None,
                 env={"GITHUB_TOKEN": "token-x"},
             )
 
@@ -1413,9 +1413,174 @@ class NoDuplicateIssueCreationTests(unittest.TestCase):
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(dict(state), [])
 
+
         # Both bodies present → both create executions run
         self.assertEqual(primary_mock.call_count, 1)
         self.assertEqual(followup_mock.call_count, 1, "followup_issue_action must run when issue_body is also present")
+
+
+class ProjectStateSyncKeywordCallTests(unittest.TestCase):
+    """Regression tests for the positional-vs-keyword-only mismatch in project state setter call.
+
+    Phase 24 bug: issue_centric_issue_create.execute_issue_create_action called
+    set_github_project_item_state with 5 positional arguments, but the function
+    is defined with ``*,`` (keyword-only parameters only).
+    This caused ``TypeError: set_github_project_item_state() takes 0 positional
+    arguments but 5 were given`` when primary issue creation succeeded and the
+    code tried to set the GitHub Project state.
+    """
+
+    def _prepared(self, body_text: str = "# Ready: title\n\nBody.\n") -> object:
+        return issue_centric_transport.decode_issue_centric_decision(
+            build_decision(body_text)
+        )
+
+    def test_set_github_project_item_state_is_keyword_only(self) -> None:
+        """set_github_project_item_state must reject positional arguments.
+
+        This is the unit-level reproduction of the bug: calling with positional
+        args must raise TypeError.  After the fix the callsite uses keyword args
+        so this path is never reached in production.
+        """
+        import issue_centric_github as icg
+        import inspect
+        sig = inspect.signature(icg.set_github_project_item_state)
+        for name, param in sig.parameters.items():
+            self.assertEqual(
+                param.kind,
+                inspect.Parameter.KEYWORD_ONLY,
+                f"Parameter '{name}' of set_github_project_item_state must be keyword-only",
+            )
+
+    def test_production_callsite_uses_keyword_args_not_positional(self) -> None:
+        """execute_issue_create_action must call the state setter with keyword args.
+
+        The injected spy captures kwargs so we can verify no positional spill.
+        """
+        captured_kwargs: list[dict] = []
+        captured_args: list[tuple] = []
+
+        def spy_state_setter(*args, **kwargs):
+            captured_args.append(args)
+            captured_kwargs.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue_centric_issue_create.execute_issue_create_action(
+                self._prepared(),
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=200,
+                    url="https://github.com/example/repo/issues/200",
+                    title=title,
+                    repository=repo,
+                    node_id="ISSUE_node_200",
+                ),
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p",
+                    project_url=url,
+                    project_title="Backlog",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="FIELD_s",
+                    state_field_name=state_field_name,
+                    state_option_id="OPT_r",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_200", project_id=pid
+                ),
+                project_state_setter=spy_state_setter,
+                env={"GITHUB_TOKEN": "token-spy"},
+            )
+
+        self.assertEqual(len(captured_args), 1, "spy_state_setter should be called exactly once")
+        self.assertEqual(captured_args[0], (), "positional args must be empty — setter must be called with keyword args only")
+        self.assertEqual(captured_kwargs[0]["project_id"], "PVT_p")
+        self.assertEqual(captured_kwargs[0]["item_id"], "ITEM_200")
+        self.assertEqual(captured_kwargs[0]["field_id"], "FIELD_s")
+        self.assertEqual(captured_kwargs[0]["option_id"], "OPT_r")
+        self.assertEqual(captured_kwargs[0]["token"], "token-spy")
+
+    def test_real_set_github_project_item_state_raises_on_positional_call(self) -> None:
+        """Calling set_github_project_item_state with positional args must raise TypeError.
+
+        This is the pre-fix failure mode.  Verifying it still raises with positional
+        ensures the function signature has not been silently widened.
+        """
+        import issue_centric_github as icg
+        with self.assertRaises(TypeError) as ctx:
+            icg.set_github_project_item_state(
+                "PVT_p",    # positional 1 — should be project_id=...
+                "ITEM_1",   # positional 2
+                "FIELD_s",  # positional 3
+                "OPT_r",    # positional 4
+                "tok",      # positional 5
+            )
+        self.assertIn("positional", str(ctx.exception).lower())
+
+    def test_issue_create_project_state_synced_after_fix(self) -> None:
+        """Full execute_issue_create_action with real call shape: must reach project_state_synced.
+
+        Belt-and-suspenders: even if the spy test above catches the positional
+        call, this test verifies the whole execution flow reaches completion.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                self._prepared(),
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=201,
+                    url="https://github.com/example/repo/issues/201",
+                    title=title,
+                    repository=repo,
+                    node_id="ISSUE_node_201",
+                ),
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_q",
+                    project_url=url,
+                    project_title="Backlog",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="FIELD_q",
+                    state_field_name=state_field_name,
+                    state_option_id="OPT_q",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_201", project_id=pid
+                ),
+                # keyword-only setter (matches real set_github_project_item_state signature)
+                project_state_setter=lambda *, project_id, item_id, field_id, option_id, token: None,
+                env={"GITHUB_TOKEN": "token-kw"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.project_sync_status, "project_state_synced")
+        self.assertEqual(result.project_item_id, "ITEM_201")
 
 
 if __name__ == "__main__":
