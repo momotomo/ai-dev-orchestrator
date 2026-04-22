@@ -210,5 +210,156 @@ class PassthroughModeTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
 
 
+class NullByteGuardTests(unittest.TestCase):
+    """Tests for NUL-byte (\\x00) guard in github_copilot_wrapper (Phase 22)."""
+
+    # ------------------------------------------------------------------
+    # Unit tests for _sanitize_prompt_text helper
+    # ------------------------------------------------------------------
+
+    def test_sanitize_prompt_strips_nul_bytes(self) -> None:
+        """NUL bytes are removed from the returned string."""
+        self.assertEqual(
+            github_copilot_wrapper._sanitize_prompt_text("hello\x00world"),
+            "helloworld",
+        )
+
+    def test_sanitize_prompt_no_nul_unchanged(self) -> None:
+        """Prompt without NUL bytes is returned unchanged (same object)."""
+        original = "hello world\nnew line"
+        result = github_copilot_wrapper._sanitize_prompt_text(original)
+        self.assertEqual(result, original)
+
+    def test_sanitize_prompt_multiple_nul_all_stripped(self) -> None:
+        """Multiple embedded NUL bytes are all removed."""
+        result = github_copilot_wrapper._sanitize_prompt_text("a\x00b\x00c\x00")
+        self.assertEqual(result, "abc")
+
+    def test_sanitize_prompt_warns_to_stderr(self) -> None:
+        """NUL in prompt emits a WARNING message to stderr."""
+        captured = io.StringIO()
+        with unittest.mock.patch("sys.stderr", captured):
+            github_copilot_wrapper._sanitize_prompt_text("a\x00b\x00c")
+        err = captured.getvalue()
+        self.assertIn("WARNING", err)
+        self.assertIn("NUL", err)
+
+    def test_sanitize_prompt_preserves_other_whitespace(self) -> None:
+        """Stripping NUL does not affect newlines, tabs, or other whitespace."""
+        original = "line1\nline2\ttabbed\r\nwindows"
+        result = github_copilot_wrapper._sanitize_prompt_text(original + "\x00")
+        self.assertEqual(result, original)
+
+    def test_sanitize_prompt_no_warning_when_no_nul(self) -> None:
+        """No warning is emitted when prompt has no NUL bytes."""
+        captured = io.StringIO()
+        with unittest.mock.patch("sys.stderr", captured):
+            github_copilot_wrapper._sanitize_prompt_text("clean prompt")
+        self.assertEqual(captured.getvalue(), "")
+
+    # ------------------------------------------------------------------
+    # Unit tests for _assert_no_null_in_structural_input helper
+    # ------------------------------------------------------------------
+
+    def test_assert_structural_raises_on_nul(self) -> None:
+        """Structural input with NUL → ValueError with label in message."""
+        with self.assertRaises(ValueError) as ctx:
+            github_copilot_wrapper._assert_no_null_in_structural_input("path\x00here", "--exec")
+        msg = str(ctx.exception)
+        self.assertIn("--exec", msg)
+        self.assertIn("NUL", msg)
+
+    def test_assert_structural_passes_clean(self) -> None:
+        """Structural input without NUL → no exception."""
+        github_copilot_wrapper._assert_no_null_in_structural_input(
+            "/usr/local/bin/copilot", "--exec"
+        )
+
+    def test_assert_structural_model_label_included(self) -> None:
+        """Model arg with NUL → error message identifies --model."""
+        with self.assertRaises(ValueError) as ctx:
+            github_copilot_wrapper._assert_no_null_in_structural_input(
+                "gpt-4\x00bad", "--model"
+            )
+        self.assertIn("--model", str(ctx.exception))
+
+    # ------------------------------------------------------------------
+    # Integration: NUL in prompt must not reach subprocess argv
+    # ------------------------------------------------------------------
+
+    def test_nul_in_prompt_sanitized_before_subprocess_call_no_exec(self) -> None:
+        """In --report-file (no --exec) mode NUL-tainted prompt is sanitized before
+        being embedded as '-p <prompt>' in argv, so subprocess.run never sees NUL."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.md"
+            nul_prompt = "hello\x00world"
+            captured_argv: list[str] = []
+
+            def fake_run(cmd: list[str], **kwargs):  # type: ignore[override]
+                captured_argv.extend(cmd)
+                return _make_subprocess_result(stdout="output: all good", returncode=0)
+
+            captured_stderr = io.StringIO()
+            with unittest.mock.patch("sys.stdin", io.StringIO(nul_prompt)):
+                with unittest.mock.patch("sys.stderr", captured_stderr):
+                    with unittest.mock.patch("subprocess.run", side_effect=fake_run):
+                        rc = github_copilot_wrapper.run(["--report-file", str(report_path)])
+
+        self.assertEqual(rc, 0, "should exit 0 after sanitization")
+        for element in captured_argv:
+            self.assertNotIn("\x00", element, f"NUL found in argv element: {element!r}")
+
+    def test_nul_in_prompt_no_raw_valueerror_escapes_no_exec(self) -> None:
+        """Raw ValueError must not propagate from --report-file (no --exec) path.
+
+        Belt-and-suspenders: even if the subprocess.run call raises ValueError
+        (e.g. a NUL slipped through some other path), the wrapper must catch it
+        and return a non-zero int — never raise.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.md"
+            nul_prompt = "hello\x00world"
+            captured_stderr = io.StringIO()
+
+            def fake_run_raise_value_error(cmd: list[str], **kwargs):  # type: ignore[override]
+                raise ValueError("embedded null byte")
+
+            with unittest.mock.patch("sys.stdin", io.StringIO(nul_prompt)):
+                with unittest.mock.patch("sys.stderr", captured_stderr):
+                    with unittest.mock.patch(
+                        "subprocess.run", side_effect=fake_run_raise_value_error
+                    ):
+                        try:
+                            rc = github_copilot_wrapper.run(["--report-file", str(report_path)])
+                            raised = False
+                        except ValueError:
+                            rc = -1
+                            raised = True
+
+        self.assertFalse(raised, "ValueError must NOT escape run()")
+        self.assertNotEqual(rc, 0, "error exit code expected")
+
+    def test_nul_in_exec_cmd_returns_error_not_exception(self) -> None:
+        """NUL in --exec path → wrapper returns non-zero; no unhandled exception."""
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.md"
+            captured_stderr = io.StringIO()
+            with unittest.mock.patch("sys.stdin", io.StringIO("clean prompt")):
+                with unittest.mock.patch("sys.stderr", captured_stderr):
+                    with unittest.mock.patch("subprocess.run") as mock_sub:
+                        try:
+                            rc = github_copilot_wrapper.run(
+                                ["--exec", "cmd\x00path", "--report-file", str(report_path)]
+                            )
+                            raised = False
+                        except (ValueError, SystemExit):
+                            rc = -1
+                            raised = True
+
+        self.assertFalse(raised, "ValueError/SystemExit must not escape run()")
+        self.assertNotEqual(rc, 0, "non-zero exit expected for NUL in exec_cmd")
+        self.assertFalse(mock_sub.called, "subprocess.run must not be called")
+
+
 if __name__ == "__main__":
     unittest.main()
