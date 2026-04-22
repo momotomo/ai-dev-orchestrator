@@ -494,26 +494,132 @@ def _is_retryable_contract_error(reason: str, status: str) -> bool:
     return status in {"reply_complete_invalid_contract", "reply_complete_no_marker"}
 
 
+# ---------------------------------------------------------------------------
+# Structured correction request helpers (Phase 26)
+# ---------------------------------------------------------------------------
+# Shared English/ASCII-first BODY regeneration guidance.  Included in ALL
+# correction requests so ChatGPT regenerates BODY content in plain ASCII
+# Markdown instead of Japanese / mixed-encoding prose.  Also carries the
+# UTF-8 requirement so Phase-25 tests still pass.
+_ENGLISH_BODY_GUIDANCE = (
+    "BODY regeneration requirements:\n"
+    "  - Regenerate BODY content as English, ASCII-first Markdown — write fresh from scratch\n"
+    "  - Do NOT repair or reuse the previous base64 payload\n"
+    "  - Do not include Japanese prose unless strictly unavoidable for the issue content\n"
+    "  - Avoid full-width punctuation (。、「」), non-UTF-8 byte sequences, smart quotes,\n"
+    "    and decorative symbols; keep text strictly valid UTF-8\n"
+    "  - Prefer plain ASCII bullets (-), plain code fences (```), simple path notation\n"
+    "  - Keep the BODY compact and bounded to the current issue scope\n"
+    "  - Base64-encode the final plain text with correct padding\n"
+)
+
+_BODY_TAG_LIST = (
+    f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
+    f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
+    f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
+    f"  {FOLLOWUP_ISSUE_BODY_START} … {FOLLOWUP_ISSUE_BODY_END}\n"
+)
+
+_DECISION_JSON_UNCHANGED_INSTRUCTION = (
+    "- CHATGPT_DECISION_JSON の中身（action / target_issue / flags / summary）は一切変えないこと\n"
+    f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
+)
+
+
+def _classify_correction_reason(reason: str) -> str:
+    """Classify a contract correction reason string into a diagnostic category.
+
+    Returns one of: 'base64', 'utf8', 'marker', 'generic'.
+    """
+    r = reason.lower()
+    if "not valid base64" in r or (
+        "base64" in r and any(k in r for k in ("invalid", "excess", "padding", "incorrect"))
+    ):
+        return "base64"
+    if "not valid utf-8" in r or "utf-8 markdown" in r or "decoded bytes are not valid" in r:
+        return "utf8"
+    if "marker" in r or "block marker" in r or "tag pairing" in r:
+        return "marker"
+    return "generic"
+
+
+def _build_generic_correction_request(reason: str) -> str:
+    """Generic correction request for JSON / unknown contract errors."""
+    return (
+        "前回の返答に issue-centric contract の不正がありました。\n"
+        f"エラー詳細: {reason}\n\n"
+        "canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
+        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        + _BODY_TAG_LIST
+        + _ENGLISH_BODY_GUIDANCE
+    )
+
+
+def _build_marker_correction_request(reason: str) -> str:
+    """Structured correction request for BODY block marker pairing errors."""
+    return (
+        "[BODY block marker error]\n"
+        "前回の返答に BODY block のマーカー不正（start/end ペアの不一致）がありました。\n"
+        f"Error detail: {reason}\n\n"
+        "Expected canonical tag pairs:\n"
+        + _BODY_TAG_LIST
+        + "\n"
+        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + "Next action:\n"
+        "  - Do NOT reuse or repair the previous BODY block content\n"
+        "  - Re-emit each needed BODY block using only the exact canonical start/end tag pairs above\n"
+        + _ENGLISH_BODY_GUIDANCE
+    )
+
+
+def _build_base64_correction_request(reason: str) -> str:
+    """Structured correction request for BODY payload base64 encoding errors."""
+    return (
+        "[BODY base64 encoding error]\n"
+        "前回の返答の BODY payload が valid base64 ではありませんでした。\n"
+        f"Detail: {reason}\n\n"
+        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + "Next action:\n"
+        "  - Do NOT repair or modify the previous base64 payload — 変えないこと\n"
+        "  - Write the BODY as fresh plain text, then re-encode as valid base64 with correct padding\n"
+        + _ENGLISH_BODY_GUIDANCE
+        + "Canonical tag pairs for BODY blocks:\n"
+        + _BODY_TAG_LIST
+    )
+
+
+def _build_utf8_correction_request(reason: str) -> str:
+    """Structured correction request for BODY payload UTF-8 decode errors."""
+    return (
+        "[BODY UTF-8 decode error]\n"
+        "前回の返答の BODY payload は valid base64 ですが decoded bytes が valid UTF-8 ではありませんでした。\n"
+        f"Detail: {reason}\n\n"
+        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + "Next action:\n"
+        "  - Do NOT repair or modify the previous base64 payload\n"
+        "  - Write the BODY as fresh plain text, then base64-encode with correct padding\n"
+        + _ENGLISH_BODY_GUIDANCE
+        + "Canonical tag pairs for BODY blocks:\n"
+        + _BODY_TAG_LIST
+    )
+
+
 def _build_contract_correction_request(reason: str) -> str:
-    """Build a correction request to send to ChatGPT when the contract reply is invalid.
+    """Build a structured correction request dispatched by error category.
 
     Covers all retryable invalid-contract cases: malformed base64, invalid JSON,
     missing or broken block markers, field type errors, unknown action, etc.
     Uses only current canonical envelope tags — no legacy aliases, no completion tags.
     """
-    return (
-        "前回の返答に issue-centric contract の不正がありました。\n"
-        f"エラー詳細: {reason}\n\n"
-        "canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
-        "- CHATGPT_DECISION_JSON の中身（action / target_issue / flags / summary）は一切変えないこと\n"
-        f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
-        "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
-        "  BODY payload の base64 decoded text は valid UTF-8 Markdown であること（non-UTF-8 バイト列は不可）\n"
-        f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
-        f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
-        f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
-        f"  {FOLLOWUP_ISSUE_BODY_START} … {FOLLOWUP_ISSUE_BODY_END}\n"
-    )
+    category = _classify_correction_reason(reason)
+    if category == "base64":
+        return _build_base64_correction_request(reason)
+    if category == "utf8":
+        return _build_utf8_correction_request(reason)
+    if category == "marker":
+        return _build_marker_correction_request(reason)
+    return _build_generic_correction_request(reason)
 
 
 def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_ref: str) -> str:
@@ -530,14 +636,32 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
         "以下の点を修正して canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
         f"- `target_issue` は必ず `{target_issue_ref}` に合わせること\n"
         "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / flags / summary）は変更しないこと\n"
-        f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
-        "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
-        "  BODY payload の base64 decoded text は valid UTF-8 Markdown であること（non-UTF-8 バイト列は不可）\n"
-        f"  {ISSUE_BODY_START} … {ISSUE_BODY_END}\n"
-        f"  {CODEX_BODY_START} … {CODEX_BODY_END}\n"
-        f"  {REVIEW_BODY_START} … {REVIEW_BODY_END}\n"
-        f"  {FOLLOWUP_ISSUE_BODY_START} … {FOLLOWUP_ISSUE_BODY_END}\n"
+        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        + _BODY_TAG_LIST
+        + _ENGLISH_BODY_GUIDANCE
     )
+
+
+def _build_not_ready_bridge_error(readiness: IssueCentricReplyReadiness) -> BridgeError:
+    """Build a BridgeError for the not_ready route with structured operator diagnostics.
+
+    Surfaces readiness.reason, open_body_blocks, and other diagnostic fields so
+    the operator can see exactly why the reply is not yet ready.
+    """
+    lines = [
+        "ChatGPT reply はまだ未完成です。もう一度 fetch を待ってください。",
+        f"  reason: {readiness.reason}",
+        f"  reply_complete_tag_present: {readiness.reply_complete_tag_present}",
+    ]
+    if readiness.assistant_meta_only:
+        lines.append("  assistant_meta_only: true")
+    if readiness.open_body_blocks:
+        for block in readiness.open_body_blocks:
+            lines.append(f"  open_body_block: {block}")
+    if readiness.partial_body_block_detected:
+        lines.append("  partial_body_block_detected: true")
+    return BridgeError("\n".join(lines))
 
 
 def stop_for_invalid_issue_centric_contract(
@@ -1329,7 +1453,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # success path; stop_broken and legacy_stop are always explicit stops.
     route_decision = _resolve_ic_reply_route_decision(readiness)
     if route_decision.route == "not_ready":
-        raise BridgeError("ChatGPT reply はまだ未完成です。もう一度 fetch を待ってください。")
+        raise _build_not_ready_bridge_error(readiness)
 
     # --- retryable invalid contract handling ---
     # stop_broken (Plan A marker present but parse failed) and correction_retry

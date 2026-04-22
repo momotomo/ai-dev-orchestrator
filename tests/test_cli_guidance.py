@@ -3657,6 +3657,154 @@ class ContractCorrectionCanonicalTagTests(unittest.TestCase):
         self.assertIn("non-UTF-8", text)
 
 
+class CorrectionDiagnosticsTests(unittest.TestCase):
+    """Phase 26: structured diagnostics in correction requests + English/ASCII-first BODY guidance.
+
+    Verifies that:
+    - base64 errors → "Do NOT repair" + "English" + "ASCII" present in correction text
+    - UTF-8 decode errors → decode detail + English/ASCII guidance present
+    - marker pairing errors → expected canonical tags + next action guidance present
+    - reply_not_ready → readiness reason surfaces in BridgeError via _build_not_ready_bridge_error
+    - _classify_correction_reason routes to the correct category
+    """
+
+    def setUp(self) -> None:
+        import fetch_next_prompt
+        self.fp = fetch_next_prompt
+
+    # -- _classify_correction_reason --
+
+    def test_classify_base64_error(self) -> None:
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        self.assertEqual(self.fp._classify_correction_reason(reason), "base64")
+
+    def test_classify_utf8_error(self) -> None:
+        reason = "CODEX_BODY payload is valid base64 but decoded bytes are not valid UTF-8 Markdown"
+        self.assertEqual(self.fp._classify_correction_reason(reason), "utf8")
+
+    def test_classify_marker_error(self) -> None:
+        reason = "block marker pairing mismatch: ===CHATGPT_ISSUE_BODY=== has no closing tag"
+        self.assertEqual(self.fp._classify_correction_reason(reason), "marker")
+
+    def test_classify_generic_fallback(self) -> None:
+        reason = "CHATGPT_DECISION_JSON parse failed: unexpected field type"
+        self.assertEqual(self.fp._classify_correction_reason(reason), "generic")
+
+    # -- base64 correction diagnostics --
+
+    def test_base64_correction_do_not_repair_guidance(self) -> None:
+        """base64 correction must tell ChatGPT not to repair the previous payload."""
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("Do NOT repair", text)
+
+    def test_base64_correction_english_ascii_guidance(self) -> None:
+        """base64 correction must require English, ASCII-first Markdown regeneration."""
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("English", text)
+        self.assertIn("ASCII", text)
+
+    def test_base64_correction_reason_in_text(self) -> None:
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn(reason, text)
+
+    # -- UTF-8 correction diagnostics --
+
+    def test_utf8_correction_detail_in_text(self) -> None:
+        """UTF-8 correction must include the decode error detail."""
+        reason = "CODEX_BODY payload is valid base64 but decoded bytes are not valid UTF-8 Markdown: invalid start byte"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn(reason, text)
+
+    def test_utf8_correction_english_ascii_guidance(self) -> None:
+        """UTF-8 correction must require English, ASCII-first Markdown regeneration."""
+        reason = "CODEX_BODY payload is valid base64 but decoded bytes are not valid UTF-8 Markdown: invalid start byte"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("English", text)
+        self.assertIn("ASCII", text)
+
+    def test_utf8_correction_do_not_repair_guidance(self) -> None:
+        """UTF-8 correction must tell ChatGPT not to repair the previous payload."""
+        reason = "CODEX_BODY payload is valid base64 but decoded bytes are not valid UTF-8 Markdown: invalid start byte"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("Do NOT repair", text)
+
+    # -- marker correction diagnostics --
+
+    def test_marker_correction_expected_tags_present(self) -> None:
+        """Marker correction must show expected canonical tag pairs."""
+        reason = "block marker pairing mismatch: ===CHATGPT_ISSUE_BODY=== has no closing tag"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("===END_ISSUE_BODY===", text)
+        self.assertIn("===END_CODEX_BODY===", text)
+
+    def test_marker_correction_next_action_guidance(self) -> None:
+        """Marker correction must include 'Next action' guidance."""
+        reason = "block marker pairing mismatch: ===CHATGPT_ISSUE_BODY=== has no closing tag"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("Next action", text)
+
+    def test_marker_correction_english_guidance(self) -> None:
+        """Marker correction must require English/ASCII-first Markdown regeneration."""
+        reason = "block marker pairing mismatch: ===CHATGPT_ISSUE_BODY=== has no closing tag"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("English", text)
+        self.assertIn("ASCII", text)
+
+    def test_marker_correction_reason_in_text(self) -> None:
+        reason = "block marker pairing mismatch: ===CHATGPT_ISSUE_BODY=== has no closing tag"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn(reason, text)
+
+    # -- _build_not_ready_bridge_error diagnostics --
+
+    def test_not_ready_bridge_error_contains_reason(self) -> None:
+        """_build_not_ready_bridge_error must surface readiness.reason."""
+        readiness = self.fp.IssueCentricReplyReadiness(
+            status="reply_not_ready",
+            reason='completion tag "===CHATGPT_REPLY_COMPLETE===" is not yet present.',
+            assistant_text_present=True,
+            thinking_visible=False,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+        err = self.fp._build_not_ready_bridge_error(readiness)
+        self.assertIn(readiness.reason, str(err))
+        self.assertIn("未完成", str(err))
+
+    def test_not_ready_bridge_error_surfaces_open_body_blocks(self) -> None:
+        """_build_not_ready_bridge_error must include open_body_blocks when present."""
+        readiness = self.fp.IssueCentricReplyReadiness(
+            status="reply_not_ready",
+            reason="open body block detected",
+            assistant_text_present=True,
+            thinking_visible=False,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+            partial_body_block_detected=True,
+            open_body_blocks=("===CHATGPT_CODEX_BODY===",),
+        )
+        err = self.fp._build_not_ready_bridge_error(readiness)
+        self.assertIn("===CHATGPT_CODEX_BODY===", str(err))
+        self.assertIn("partial_body_block_detected: true", str(err))
+
+    def test_not_ready_bridge_error_is_bridge_error(self) -> None:
+        """_build_not_ready_bridge_error must return a BridgeError instance."""
+        from _bridge_common import BridgeError
+        readiness = self.fp.IssueCentricReplyReadiness(
+            status="reply_not_ready",
+            reason="reply not complete",
+            assistant_text_present=False,
+            thinking_visible=False,
+            decision_marker_present=False,
+            contract_parse_attempted=False,
+        )
+        err = self.fp._build_not_ready_bridge_error(readiness)
+        self.assertIsInstance(err, BridgeError)
+
+
 class LegacyPathDeprecationTests(unittest.TestCase):
     """issue-centric contract が正規ルートであることを示す縮退整理テスト.
 
