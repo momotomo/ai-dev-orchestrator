@@ -3509,9 +3509,15 @@ class ContractCorrectionHelperTests(unittest.TestCase):
         text = self.fp._build_contract_correction_request(reason)
         self.assertIn(reason, text)
 
-    def test_build_correction_request_contains_reply_complete_tag(self) -> None:
+    def test_build_correction_request_does_not_contain_reply_complete_tag(self) -> None:
+        """repair prompt must NOT instruct ChatGPT to add ===CHATGPT_REPLY_COMPLETE===.
+
+        The completion tag is a transport-level signal already covered by the
+        original system instructions.  Including it in the repair prompt
+        creates misleading "completion tag" noise in the re-output.
+        """
         text = self.fp._build_contract_correction_request("some reason")
-        self.assertIn("===CHATGPT_REPLY_COMPLETE===", text)
+        self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", text)
 
     def test_build_correction_request_mentions_decision_json(self) -> None:
         text = self.fp._build_contract_correction_request("some reason")
@@ -3533,9 +3539,10 @@ class ContractCorrectionHelperTests(unittest.TestCase):
         text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
         self.assertIn("#5", text)
 
-    def test_binding_mismatch_request_contains_reply_complete_tag(self) -> None:
+    def test_binding_mismatch_request_does_not_contain_reply_complete_tag(self) -> None:
+        """Binding-mismatch repair prompt must NOT include ===CHATGPT_REPLY_COMPLETE===."""
         text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
-        self.assertIn("===CHATGPT_REPLY_COMPLETE===", text)
+        self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", text)
 
     def test_binding_mismatch_request_mentions_target_issue(self) -> None:
         text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
@@ -3545,6 +3552,87 @@ class ContractCorrectionHelperTests(unittest.TestCase):
         """The binding mismatch request must NOT start with the generic contract error intro."""
         text = self.fp._build_binding_mismatch_correction_request("some reason", "#5 Ready: feature X")
         self.assertNotIn("issue-centric contract の不正がありました", text)
+
+
+class ContractCorrectionCanonicalTagTests(unittest.TestCase):
+    """Phase 23: repair prompt must use only canonical issue-centric contract tags.
+
+    Regression tests for the fix that replaced wrong end-tags
+    (===END_CHATGPT_DECISION_JSON===, ===END_CHATGPT_CODEX_BODY===) and
+    removed the misleading ===CHATGPT_REPLY_COMPLETE=== from repair prompts.
+    """
+
+    def setUp(self) -> None:
+        import fetch_next_prompt
+        self.fp = fetch_next_prompt
+
+    # -- generic correction request --
+
+    def test_generic_repair_uses_canonical_decision_json_end_tag(self) -> None:
+        """===END_DECISION_JSON=== (canonical) must appear in the repair prompt."""
+        text = self.fp._build_contract_correction_request("some reason")
+        self.assertIn("===END_DECISION_JSON===", text)
+
+    def test_generic_repair_no_wrong_decision_json_end_tag(self) -> None:
+        """===END_CHATGPT_DECISION_JSON=== must NOT appear — it is a non-canonical alias."""
+        text = self.fp._build_contract_correction_request("some reason")
+        self.assertNotIn("===END_CHATGPT_DECISION_JSON===", text)
+
+    def test_generic_repair_no_wrong_codex_body_end_tag(self) -> None:
+        """===END_CHATGPT_CODEX_BODY=== must NOT appear — canonical tag is ===END_CODEX_BODY===."""
+        text = self.fp._build_contract_correction_request("some reason")
+        self.assertNotIn("===END_CHATGPT_CODEX_BODY===", text)
+        self.assertIn("===END_CODEX_BODY===", text)
+
+    def test_generic_repair_lists_all_canonical_body_block_end_tags(self) -> None:
+        """All four canonical BODY block end-tags must appear in the repair prompt."""
+        text = self.fp._build_contract_correction_request("some reason")
+        self.assertIn("===END_ISSUE_BODY===", text)
+        self.assertIn("===END_CODEX_BODY===", text)
+        self.assertIn("===END_REVIEW===", text)
+        self.assertIn("===END_FOLLOWUP_ISSUE_BODY===", text)
+
+    def test_generic_repair_no_reply_complete_tag(self) -> None:
+        """===CHATGPT_REPLY_COMPLETE=== must NOT be in repair prompt (completion tag is transport, not contract)."""
+        text = self.fp._build_contract_correction_request("base64 invalid")
+        self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", text)
+
+    def test_generic_repair_base64_error_preserves_json_instruction(self) -> None:
+        """For base64 errors the repair prompt must still instruct JSON-unchanged."""
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        text = self.fp._build_contract_correction_request(reason)
+        # Must contain reason
+        self.assertIn(reason, text)
+        # Must stress JSON-unchanged
+        self.assertIn("変えない", text)
+        # Must mention base64 re-encoding
+        self.assertIn("base64", text)
+        # Must NOT contain wrong tags
+        self.assertNotIn("===END_CHATGPT_DECISION_JSON===", text)
+        self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", text)
+
+    # -- binding-mismatch correction request --
+
+    def test_binding_mismatch_repair_uses_canonical_decision_json_end_tag(self) -> None:
+        """===END_DECISION_JSON=== must appear in the binding-mismatch repair prompt."""
+        text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
+        self.assertIn("===END_DECISION_JSON===", text)
+
+    def test_binding_mismatch_repair_no_wrong_decision_json_end_tag(self) -> None:
+        """===END_CHATGPT_DECISION_JSON=== must NOT appear in binding-mismatch repair."""
+        text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
+        self.assertNotIn("===END_CHATGPT_DECISION_JSON===", text)
+
+    def test_binding_mismatch_repair_lists_canonical_body_end_tags(self) -> None:
+        """Binding-mismatch repair prompt must list canonical BODY block end-tags."""
+        text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
+        self.assertIn("===END_CODEX_BODY===", text)
+        self.assertIn("===END_ISSUE_BODY===", text)
+
+    def test_binding_mismatch_repair_no_reply_complete_tag(self) -> None:
+        """===CHATGPT_REPLY_COMPLETE=== must NOT be in binding-mismatch repair prompt."""
+        text = self.fp._build_binding_mismatch_correction_request("stale #99", "#5 Ready: feature")
+        self.assertNotIn("===CHATGPT_REPLY_COMPLETE===", text)
 
 
 class LegacyPathDeprecationTests(unittest.TestCase):
