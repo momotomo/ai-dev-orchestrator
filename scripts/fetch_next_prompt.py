@@ -727,6 +727,34 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
     )
 
 
+def _guard_correction_resend(
+    state: dict[str, object],
+    raw_text: str,
+    request_text: str | None,
+) -> None:
+    """Raise BridgeStop if no new assistant turn has appeared since the last correction was sent.
+
+    When a correction request has been sent, the assistant segment (the ChatGPT
+    turn visible in the pending-request window) must change before another
+    correction is allowed.  If the segment hash matches the hash recorded at
+    the time of the last correction send, ChatGPT has not yet responded to the
+    previous correction and a second send would be premature.
+
+    Only active when ``last_issue_centric_correction_send_hash`` is non-empty in
+    state (i.e. at least one correction has already been sent this cycle).
+    """
+    sent_hash = str(state.get("last_issue_centric_correction_send_hash", "")).strip()
+    if not sent_hash:
+        return
+    current_seg = _assistant_segment_after_text(raw_text, after_text=request_text or None)
+    current_hash = stable_text_hash(current_seg.strip())
+    if current_hash == sent_hash:
+        raise BridgeStop(
+            "問題: correction request を送信済みですが、ChatGPT からの新しい assistant turn がまだ確認できません。\n"
+            "対応: ChatGPT が前回の correction request に返答するまで待ってから fetch を再実行してください。"
+        )
+
+
 def _build_not_ready_bridge_error(readiness: IssueCentricReplyReadiness) -> BridgeError:
     """Build a BridgeError for the not_ready route with structured operator diagnostics.
 
@@ -1256,6 +1284,8 @@ def _apply_ic_fetch_handoff_state(
             "last_issue_centric_contract_correction_count": 0,
             "last_issue_centric_contract_correction_log": "",
             "last_issue_centric_contract_correction_reason": "",
+            # Clear the assistant segment hash guard — the correction cycle is done.
+            "last_issue_centric_correction_send_hash": "",
         }
     )
 
@@ -1545,6 +1575,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # response but with bad formatting / missing contract.
     if route_decision.route in ("stop_broken", "correction_retry"):
         correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+        # Guard: don't re-send correction if no new assistant turn has appeared
+        # since the previous correction was sent.
+        _guard_correction_resend(state, raw_text, request_text or None)
         if correction_count < _MAX_CONTRACT_CORRECTIONS:
             correction_text = _build_contract_correction_request(readiness.reason)
             correction_log = log_text("contract_correction_request", correction_text, suffix="md")
@@ -1554,6 +1587,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             correction_state["last_issue_centric_contract_correction_count"] = correction_count + 1
             correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
             correction_state["last_issue_centric_contract_correction_reason"] = readiness.reason
+            # Record assistant segment hash so the next fetch can detect a new turn.
+            correction_state["last_issue_centric_correction_send_hash"] = stable_text_hash(
+                _assistant_segment_after_text(raw_text, after_text=request_text or None).strip()
+            )
             correction_state["mode"] = "waiting_prompt_reply"
             save_state(correction_state)
             raise BridgeStop(
@@ -1627,6 +1664,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         if ready_issue_binding_error:
             binding_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+            # Guard: don't re-send correction if no new assistant turn has appeared
+            # since the previous correction was sent.
+            _guard_correction_resend(state, raw_text, request_text or None)
             if binding_correction_count < _MAX_CONTRACT_CORRECTIONS:
                 current_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
                 correction_text = _build_binding_mismatch_correction_request(
@@ -1638,6 +1678,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 correction_state["last_issue_centric_contract_correction_count"] = binding_correction_count + 1
                 correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
                 correction_state["last_issue_centric_contract_correction_reason"] = ready_issue_binding_error
+                # Record assistant segment hash so the next fetch can detect a new turn.
+                correction_state["last_issue_centric_correction_send_hash"] = stable_text_hash(
+                    _assistant_segment_after_text(raw_text, after_text=request_text or None).strip()
+                )
                 correction_state["mode"] = "waiting_prompt_reply"
                 save_state(correction_state)
                 raise BridgeStop(
@@ -1673,6 +1717,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             # This is retryable: ask ChatGPT to re-emit the contract with a valid payload.
             body_decode_reason = str(exc)
             body_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+            # Guard: don't re-send correction if no new assistant turn has appeared
+            # since the previous correction was sent.
+            _guard_correction_resend(state, raw_text, request_text or None)
             if body_correction_count < _MAX_CONTRACT_CORRECTIONS:
                 correction_text = _build_contract_correction_request(body_decode_reason)
                 correction_log = log_text("contract_correction_request", correction_text, suffix="md")
@@ -1681,6 +1728,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 correction_state["last_issue_centric_contract_correction_count"] = body_correction_count + 1
                 correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
                 correction_state["last_issue_centric_contract_correction_reason"] = body_decode_reason
+                # Record assistant segment hash so the next fetch can detect a new turn.
+                correction_state["last_issue_centric_correction_send_hash"] = stable_text_hash(
+                    _assistant_segment_after_text(raw_text, after_text=request_text or None).strip()
+                )
                 correction_state["mode"] = "waiting_prompt_reply"
                 save_state(correction_state)
                 raise BridgeStop(
@@ -1713,6 +1764,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         )
         mutable_state = clear_error_fields(dict(state))
         clear_pending_request_fields(mutable_state)
+        # Preserve rotation flag set during the wait (e.g. late_completion_mode).
+        # handle_wait_event saves it to disk but not to the in-memory state dict;
+        # rotation_requested (nonlocal) carries the correct value from either the
+        # original state or the callback.
+        if rotation_requested:
+            mark_next_request_requires_rotation(mutable_state, rotation_reason)
         if pending_generation_id:
             mutable_state.update(
                 {
