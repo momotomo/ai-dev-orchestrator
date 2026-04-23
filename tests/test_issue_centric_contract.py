@@ -3194,22 +3194,27 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
 
 
     def test_resend_guard_blocks_when_no_new_assistant_turn(self) -> None:
-        """Guard: if last_issue_centric_correction_send_hash matches current segment → BridgeStop, no send."""
+        """Guard: if correction was sent but no assistant turn follows it yet → BridgeStop, no send."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
 
-        # The raw text the wait loop will return — same invalid reply as before.
-        raw = self._NO_MARKER_RAW  # "あなた:\nrequest body\nChatGPT:\n[no decision marker]"
+        # correction request text that was previously sent
+        prev_correction = "前回の correction request テキスト"
 
-        # Compute the hash of the assistant segment as it would appear in the raw text.
-        # The guard uses _assistant_segment_after_text(raw, after_text="request body").
-        # With the _NO_MARKER_RAW fixture: after "request body" the segment is "ChatGPT:\n...".
-        assistant_seg = fetch_next_prompt._assistant_segment_after_text(raw, after_text="request body")
-        sent_hash = bridge_common.stable_text_hash(assistant_seg.strip())
+        # DOM still shows only the original invalid reply; the correction request
+        # text is visible as a user turn (ChatGPT has not responded yet).
+        raw = (
+            "あなた:\nrequest body\nChatGPT:\n"
+            "何かコメントをここに書きました。\n"
+            + issue_centric_contract.REPLY_COMPLETE_TAG
+            + "\nあなた:\n"
+            + prev_correction
+            # No new ChatGPT: turn after the correction request
+        )
 
-        # State claims correction_count=1 and carries the hash from that correction send.
+        # State claims correction_count=1 and carries the correction boundary text.
         state = self._base_state(correction_count=1)
-        state["last_issue_centric_correction_send_hash"] = sent_hash
+        state["last_issue_centric_correction_request_text"] = prev_correction
 
         with tempfile.TemporaryDirectory() as tmp:
             patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
@@ -3223,15 +3228,26 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertIn("ChatGPT からの新しい assistant turn", str(ctx.exception))
 
     def test_resend_guard_allows_when_new_assistant_turn_appears(self) -> None:
-        """Guard: if last_issue_centric_correction_send_hash differs from current, correction is allowed."""
+        """Guard: if correction was sent and a new (still-invalid) assistant turn B appears → correction allowed."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
 
-        raw = self._NO_MARKER_RAW  # current invalid reply
+        prev_correction = "前回の correction request テキスト"
 
-        # Simulate a different hash stored (i.e. previous correction was sent for a different segment).
+        # DOM now contains a new (but still invalid) reply B after the correction request.
+        raw = (
+            "あなた:\nrequest body\nChatGPT:\n"
+            "何かコメントをここに書きました。\n"
+            + issue_centric_contract.REPLY_COMPLETE_TAG
+            + "\nあなた:\n"
+            + prev_correction
+            + "\nChatGPT:\n"
+            + "まだ contract が壊れています。\n"
+            + issue_centric_contract.REPLY_COMPLETE_TAG
+        )
+
         state = self._base_state(correction_count=1)
-        state["last_issue_centric_correction_send_hash"] = "old-hash-that-does-not-match"
+        state["last_issue_centric_correction_request_text"] = prev_correction
 
         with tempfile.TemporaryDirectory() as tmp:
             patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
@@ -3239,15 +3255,16 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(state, [])
 
-        # Hashes differ → guard passes → correction is sent.
-        self.assertEqual(len(sent_texts), 1, "guard must allow send when new assistant turn (different hash)")
+        # New assistant turn found after correction → guard passes → 2nd correction is sent.
+        self.assertEqual(len(sent_texts), 1, "guard must allow send when new assistant turn appears")
         self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 2)
 
-    def test_valid_contract_clears_correction_send_hash(self) -> None:
-        """After a valid contract is processed, last_issue_centric_correction_send_hash is cleared."""
+    def test_valid_contract_clears_correction_request_text(self) -> None:
+        """After a valid contract is processed, last_issue_centric_correction_request_text is cleared."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = self._base_state(correction_count=1)
+        state["last_issue_centric_correction_request_text"] = "some-previous-correction"
         state["last_issue_centric_correction_send_hash"] = "some-previous-hash"
         with tempfile.TemporaryDirectory() as tmp:
             patches = self._make_patched_context(tmp, self._valid_no_action_raw(), saved_states, sent_texts)
@@ -3259,9 +3276,14 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertGreater(len(saved_states), 0)
         last_saved = saved_states[-1]
         self.assertEqual(
+            last_saved.get("last_issue_centric_correction_request_text"),
+            "",
+            "correction_request_text must be cleared after valid contract",
+        )
+        self.assertEqual(
             last_saved.get("last_issue_centric_correction_send_hash"),
             "",
-            "correction_send_hash must be cleared after valid contract",
+            "correction_send_hash must also be cleared after valid contract",
         )
 
 
