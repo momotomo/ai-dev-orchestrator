@@ -2453,18 +2453,12 @@ def _finalize_dispatch(
     # --- WRITER: build and apply continuation payload (target/source not yet set) ---
     _continuation = _build_ic_continuation_payload_from_normalized(normalized_summary, mutable_state)
     _apply_ic_continuation_payload_to_state(mutable_state, _continuation)
-    # no_action continuation: for plain no_action (prepared_artifact_only) with a
-    # continue_on_current_issue hint, enable the next bridge cycle so the runner
-    # calls request_prompt_from_report instead of resolving to "no_action" (terminal).
-    # Without this, mode stays "awaiting_user" and resolve_next_generation_transition
-    # falls through to "no_action" because chatgpt_decision "issue_centric:no_action"
-    # is not in {"human_review", "need_info"}.
-    if (
-        matrix_path == "prepared_artifact_only"
-        and _continuation.next_request_hint == "continue_on_current_issue"
-    ):
-        mutable_state["mode"] = "idle"
-        mutable_state["need_chatgpt_next"] = True
+    # prepared_artifact_only is a terminal stop: the bridge cannot execute the new
+    # contract end-to-end yet, so it stops after preparing metadata.
+    # Do NOT set mode=idle + need_chatgpt_next=True here: doing so causes
+    # run_until_stop to route to request_prompt_from_report in the same run,
+    # re-sending a request to the same current tab / target_issue in a tight loop.
+    # The operator must re-run explicitly once the implementation is available.
     mutable_state.update(
         {
             "last_issue_centric_dispatch_result": repo_relative(summary_log_path),
