@@ -622,6 +622,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             _validation = validate_selected_ready_issue_for_auto_continue(_selected_ref, state)
             if not _validation.ok:
                 _print_selected_ready_issue_validation_stop(_selected_ref, _validation)
+                # Clear the invalidated selection so run_until_stop.py stop summary does not
+                # suggest --ready-issue-ref <closed issue> to the operator.
+                _cleared = dict(state)
+                _cleared["selected_ready_issue_ref"] = ""
+                save_state(_cleared)
                 return 0
             # Auto-continue: ChatGPT clearly selected ONE ready issue.
             # Proceed directly to next issue implementation without operator re-run.
@@ -678,6 +683,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 )
                 if not _validation.ok:
                     _print_selected_ready_issue_validation_stop(_is_ref, _validation)
+                    # Clear the invalidated selection so run_until_stop.py stop summary does not
+                    # suggest --ready-issue-ref <closed issue> to the operator.
+                    _post_fetch_state["selected_ready_issue_ref"] = ""
+                    save_state(_post_fetch_state)
                     return 0
                 print(
                     f"{status.label}です。initial selection 完了: ready issue {_is_ref} が選定されました。"

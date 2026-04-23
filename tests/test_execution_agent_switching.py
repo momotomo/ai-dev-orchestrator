@@ -2003,6 +2003,34 @@ class BridgeOrchestratorAutoNextIssueTests(unittest.TestCase):
         mock_rnp.assert_not_called()
         self.assertIn("送信しません", buf.getvalue())
 
+    def test_initial_selection_stop_validation_failure_clears_selected_ref_in_state(self) -> None:
+        """initial_selection_stop validation failure: save_state called with selected_ready_issue_ref cleared."""
+        state = self._make_ic_close_completed_state()
+        state["selected_ready_issue_ref"] = "#42 closed issue"
+        config = _make_minimal_project_config("codex")
+
+        saved_states: list[dict] = []
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.request_next_prompt.run"),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(False, "closed in current run"),
+            ),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(saved_states), 1, "save_state should be called exactly once")
+        self.assertEqual(
+            saved_states[0].get("selected_ready_issue_ref"),
+            "",
+            "selected_ready_issue_ref must be cleared so stop summary does not suggest --ready-issue-ref",
+        )
+
     def test_human_review_needed_still_stops(self) -> None:
         """human_review_needed IC stop path: bridge does NOT auto-continue."""
         state = {
@@ -2588,6 +2616,39 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
         self.assertEqual(rc, 0)
         mock_rnp.assert_not_called()
         self.assertIn("送信しません", buf.getvalue())
+
+    def test_fetch_initial_selection_stop_validation_failure_clears_selected_ref_in_state(self) -> None:
+        """fetch BridgeStop validation failure: save_state called with selected_ready_issue_ref cleared."""
+        pre_state = self._make_pre_fetch_state()
+        post_state = self._make_post_fetch_state(selected_ref="#33 closed issue")
+        config = _make_minimal_project_config("codex")
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        saved_states: list[dict] = []
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run"),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=bridge_orchestrator.ReadyIssueAutoContinueValidation(False, "closed in current run"),
+            ),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(saved_states), 1, "save_state should be called exactly once")
+        self.assertEqual(
+            saved_states[0].get("selected_ready_issue_ref"),
+            "",
+            "selected_ready_issue_ref must be cleared so stop summary does not suggest --ready-issue-ref",
+        )
 
     def test_auto_continue_clears_selected_ready_issue_ref_in_forwarded_state(self) -> None:
         """Forwarded state to request_next_prompt has selected_ready_issue_ref cleared."""
