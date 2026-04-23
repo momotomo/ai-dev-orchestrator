@@ -3193,6 +3193,226 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "")
 
 
+    def test_resend_guard_blocks_when_no_new_assistant_turn(self) -> None:
+        """Guard: if last_issue_centric_correction_send_hash matches current segment → BridgeStop, no send."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+
+        # The raw text the wait loop will return — same invalid reply as before.
+        raw = self._NO_MARKER_RAW  # "あなた:\nrequest body\nChatGPT:\n[no decision marker]"
+
+        # Compute the hash of the assistant segment as it would appear in the raw text.
+        # The guard uses _assistant_segment_after_text(raw, after_text="request body").
+        # With the _NO_MARKER_RAW fixture: after "request body" the segment is "ChatGPT:\n...".
+        assistant_seg = fetch_next_prompt._assistant_segment_after_text(raw, after_text="request body")
+        sent_hash = bridge_common.stable_text_hash(assistant_seg.strip())
+
+        # State claims correction_count=1 and carries the hash from that correction send.
+        state = self._base_state(correction_count=1)
+        state["last_issue_centric_correction_send_hash"] = sent_hash
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop) as ctx:
+                    fetch_next_prompt.run(state, [])
+
+        # send_to_chatgpt must NOT be called — guard blocked the re-send.
+        self.assertEqual(len(sent_texts), 0, "guard must block re-send when no new assistant turn")
+        # The BridgeStop message must mention the guard reason.
+        self.assertIn("ChatGPT からの新しい assistant turn", str(ctx.exception))
+
+    def test_resend_guard_allows_when_new_assistant_turn_appears(self) -> None:
+        """Guard: if last_issue_centric_correction_send_hash differs from current, correction is allowed."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+
+        raw = self._NO_MARKER_RAW  # current invalid reply
+
+        # Simulate a different hash stored (i.e. previous correction was sent for a different segment).
+        state = self._base_state(correction_count=1)
+        state["last_issue_centric_correction_send_hash"] = "old-hash-that-does-not-match"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(state, [])
+
+        # Hashes differ → guard passes → correction is sent.
+        self.assertEqual(len(sent_texts), 1, "guard must allow send when new assistant turn (different hash)")
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 2)
+
+    def test_valid_contract_clears_correction_send_hash(self) -> None:
+        """After a valid contract is processed, last_issue_centric_correction_send_hash is cleared."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=1)
+        state["last_issue_centric_correction_send_hash"] = "some-previous-hash"
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._valid_no_action_raw(), saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                try:
+                    fetch_next_prompt.run(dict(state), [])
+                except (BridgeStop, BridgeError):
+                    pass
+        self.assertGreater(len(saved_states), 0)
+        last_saved = saved_states[-1]
+        self.assertEqual(
+            last_saved.get("last_issue_centric_correction_send_hash"),
+            "",
+            "correction_send_hash must be cleared after valid contract",
+        )
+
+
+class RotationFlagAfterLongWaitTests(unittest.TestCase):
+    """Rotation flag must survive through the fetch success path after a long-wait.
+
+    When handle_wait_event fires late_completion_mode (setting rotation_requested=True
+    via nonlocal), that flag must be written into mutable_state so the next
+    request_prompt_from_report call sees it and triggers chat rotation.
+
+    The original code built mutable_state from dict(state) (the pre-wait snapshot)
+    and never applied the nonlocal rotation_requested, so the flag was lost.
+    """
+
+    def _base_state(self) -> dict[str, object]:
+        # Use initial_selection source so the fetch stops before dispatch and
+        # calls save_state(mutable_state) directly (initial_selection_stop path).
+        # This allows us to inspect the saved state for the rotation flag.
+        return {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "hash-rot",
+            "pending_request_source": "initial_selection:latest",
+            "pending_request_log": "logs/req.md",
+            "pending_request_signal": "",
+            "next_request_requires_rotation": False,
+            "next_request_rotation_reason": "",
+        }
+
+    def _valid_no_action_raw(self) -> str:
+        # no_action with target_issue set → initial_selection_stop path.
+        return build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#7",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "rotation flag test.",
+            }
+        )
+
+    def test_rotation_flag_preserved_after_late_completion(self) -> None:
+        """When rotation_requested=True (set by late_completion_mode callback),
+        the flag must appear in the saved state even after a successful fetch."""
+        from pathlib import Path
+
+        saved_states: list[dict] = []
+
+        temp_root = Path(tempfile.mkdtemp())
+
+        def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+            path = temp_root / f"{prefix}.{suffix}"
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        raw = self._valid_no_action_raw()
+
+        # Simulate the scenario where rotation was already set in state
+        # (as would happen after handle_wait_event fires late_completion_mode
+        # and saves to disk, and the original state has the flag).
+        rotation_state = self._base_state()
+        rotation_state["next_request_requires_rotation"] = True
+        rotation_state["next_request_rotation_reason"] = "late_completion"
+
+        with (
+            patch.object(
+                fetch_next_prompt, "read_pending_request_text", return_value="request body"
+            ),
+            patch.object(
+                fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw
+            ),
+            patch.object(
+                fetch_next_prompt, "log_text", side_effect=fake_log_text
+            ),
+            patch.object(
+                fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))
+            ),
+            patch.object(
+                fetch_next_prompt, "send_to_chatgpt", return_value=None
+            ),
+            patch.object(
+                fetch_next_prompt, "load_project_config",
+                return_value={"github_repository": "example/repo"},
+            ),
+        ):
+            try:
+                fetch_next_prompt.run(rotation_state, [])
+            except (BridgeStop, BridgeError):
+                pass
+
+        self.assertGreater(len(saved_states), 0, "at least one save_state must occur")
+        # The rotation flag must be present in the saved state.
+        rotation_preserved = any(
+            bool(s.get("next_request_requires_rotation")) for s in saved_states
+        )
+        self.assertTrue(
+            rotation_preserved,
+            "next_request_requires_rotation must be preserved in state after successful fetch",
+        )
+
+    def test_rotation_flag_absent_when_not_set(self) -> None:
+        """When rotation was NOT requested, the flag must stay False in saved state."""
+        from pathlib import Path
+
+        saved_states: list[dict] = []
+        temp_root = Path(tempfile.mkdtemp())
+
+        def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+            path = temp_root / f"{prefix}.{suffix}"
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        raw = self._valid_no_action_raw()
+        normal_state = self._base_state()  # rotation=False
+
+        with (
+            patch.object(
+                fetch_next_prompt, "read_pending_request_text", return_value="request body"
+            ),
+            patch.object(
+                fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw
+            ),
+            patch.object(
+                fetch_next_prompt, "log_text", side_effect=fake_log_text
+            ),
+            patch.object(
+                fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))
+            ),
+            patch.object(
+                fetch_next_prompt, "send_to_chatgpt", return_value=None
+            ),
+            patch.object(
+                fetch_next_prompt, "load_project_config",
+                return_value={"github_repository": "example/repo"},
+            ),
+        ):
+            try:
+                fetch_next_prompt.run(normal_state, [])
+            except (BridgeStop, BridgeError):
+                pass
+
+        self.assertGreater(len(saved_states), 0)
+        # Rotation must NOT have been added.
+        any_rotation_set = any(
+            bool(s.get("next_request_requires_rotation")) for s in saved_states
+        )
+        self.assertFalse(
+            any_rotation_set,
+            "next_request_requires_rotation must remain False when not requested",
+        )
+
+
 class RawTextContractFallbackTests(unittest.TestCase):
     """Phase 27: raw_text fallback for valid IC reply when role marker is absent.
 
