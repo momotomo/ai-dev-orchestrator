@@ -5510,13 +5510,16 @@ class IcNoActionIssueManagementSliceTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_no_action_plain_continuation_enables_next_cycle(self):
-        """Plain no_action with current issue sets mode=idle + need_chatgpt_next for continuation.
+        """Plain no_action with current issue: prepared_artifact_only is a terminal stop.
 
-        After plain no_action executes, the final state must have:
-          mode == "idle"
-          need_chatgpt_next == True
-        so that the next bridge_orchestrator call routes to request_prompt_from_report
-        instead of resolving to "no_action" (terminal).
+        After plain no_action executes, the final state must NOT have
+        mode=idle + need_chatgpt_next=True: that combination causes
+        run_until_stop to route to request_prompt_from_report in the same
+        run, re-sending a request to the same target_issue in a loop.
+        prepared_artifact_only is a terminal stop — the operator must
+        re-run explicitly once the implementation is available.
+        last_issue_centric_next_request_hint is still written for
+        observability / future use.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5527,13 +5530,12 @@ class IcNoActionIssueManagementSliceTests(unittest.TestCase):
             result = self._dispatch(decision=decision, root=root)
             self.assertEqual(result.matrix_path, "prepared_artifact_only")
             final = result.final_state
-            self.assertEqual(
-                final.get("mode"), "idle",
-                "mode must be reset to idle so the next bridge call can proceed",
-            )
-            self.assertTrue(
-                bool(final.get("need_chatgpt_next")),
-                "need_chatgpt_next must be True so the bridge routes to request_prompt_from_report",
+            # mode must NOT be reset to idle (stays awaiting_user from fetch dispatch)
+            # and need_chatgpt_next must NOT be True (would trigger request re-send loop).
+            self.assertFalse(
+                final.get("mode") == "idle" and bool(final.get("need_chatgpt_next")),
+                "prepared_artifact_only must NOT set mode=idle + need_chatgpt_next=True "
+                "(would cause request_prompt_from_report re-send loop)",
             )
             self.assertEqual(
                 final.get("last_issue_centric_next_request_hint"),
