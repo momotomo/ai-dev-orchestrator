@@ -13,6 +13,7 @@ from _bridge_common import (
     build_chatgpt_handoff_request,
     build_chatgpt_request,
     build_pinned_ready_issue_ic_section,
+    build_request_context_section,
     can_reuse_prepared_request,
     clear_chat_rotation_fields,
     clear_error_fields,
@@ -1082,6 +1083,17 @@ def _resolve_resume_request_plan(
             open_questions=args.open_questions,
         )
     )
+    # Inject state-derived context block.
+    # Skipped on the pinned-ready-issue path because that path intentionally avoids
+    # carrying over stale last_issue_centric_* context from a previous issue.
+    if not _should_use_pinned_ready_issue_path(state):
+        _context_block = build_request_context_section(state)
+        if _context_block:
+            effective_section = (
+                effective_section.rstrip() + "\n\n" + _context_block
+                if effective_section
+                else _context_block
+            )
     request_text, request_hash, request_source, prepared_status = _resolve_resume_request_payload(
         state,
         retryable_request=retryable_request,
@@ -1167,6 +1179,14 @@ def _resolve_rotated_request_plan(
     :class:`_RotatedRequestPlan` ready for :func:`_execute_rotated_request_plan`.
     """
     ic = _resolve_normal_ic_context(state)
+    # Inject state-derived context block into the IC section for the handoff request.
+    _context_block = build_request_context_section(state)
+    if _context_block:
+        ic.next_request_section = (
+            ic.next_request_section.rstrip() + "\n\n" + _context_block
+            if ic.next_request_section
+            else _context_block
+        )
     request_source = build_report_request_source(state, "")
     handoff_text, handoff_received_log = _acquire_rotated_handoff(
         state,
