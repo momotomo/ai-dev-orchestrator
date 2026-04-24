@@ -159,12 +159,38 @@ class _LocatedMatch:
     raw_body: str
 
 
+def _rfind_compact_text_end(raw_text: str, after_text: str) -> int:
+    """Find after_text's end in raw_text while ignoring whitespace differences."""
+    compact_needle = "".join(after_text.split())
+    if not compact_needle:
+        return -1
+
+    compact_chars: list[str] = []
+    raw_end_offsets: list[int] = []
+    for raw_index, char in enumerate(raw_text):
+        if char.isspace():
+            continue
+        compact_chars.append(char)
+        raw_end_offsets.append(raw_index + 1)
+
+    compact_haystack = "".join(compact_chars)
+    compact_anchor = compact_haystack.rfind(compact_needle)
+    if compact_anchor == -1:
+        return -1
+    compact_end = compact_anchor + len(compact_needle) - 1
+    return raw_end_offsets[compact_end]
+
+
 def _search_start_index(raw_text: str, after_text: str | None = None) -> int:
     search_start = 0
     if after_text:
         anchor = raw_text.rfind(after_text)
         if anchor != -1:
             search_start = anchor + len(after_text)
+        else:
+            compact_end = _rfind_compact_text_end(raw_text, after_text)
+            if compact_end != -1:
+                search_start = compact_end
     if search_start == 0:
         last_user_turn = raw_text.rfind(USER_TURN_MARKER)
         if last_user_turn != -1:

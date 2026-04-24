@@ -238,9 +238,9 @@ _LEGACY_REPLY_MARKERS = (
 def _reply_search_start_index(raw_text: str, after_text: str | None = None) -> int:
     search_start = 0
     if after_text:
-        anchor = raw_text.rfind(after_text)
-        if anchor != -1:
-            search_start = anchor + len(after_text)
+        anchor_end = _after_text_anchor_end(raw_text, after_text)
+        if anchor_end != -1:
+            search_start = anchor_end
     if search_start == 0:
         last_user_turn = raw_text.rfind(USER_TURN_MARKER)
         if last_user_turn != -1:
@@ -248,10 +248,46 @@ def _reply_search_start_index(raw_text: str, after_text: str | None = None) -> i
     return search_start
 
 
+def _after_text_anchor_end(raw_text: str, after_text: str | None = None) -> int:
+    if not after_text:
+        return -1
+    anchor = raw_text.rfind(after_text)
+    if anchor != -1:
+        return anchor + len(after_text)
+    return _rfind_compact_text_end(raw_text, after_text)
+
+
+def _rfind_compact_text_end(raw_text: str, after_text: str) -> int:
+    """Find after_text's end in raw_text while ignoring whitespace differences.
+
+    ChatGPT DOM dumps sometimes collapse line breaks inside a just-sent request.
+    The pending request log keeps the original newlines, so exact rfind can miss
+    the boundary and accidentally scan the user prompt itself.
+    """
+    compact_needle = "".join(after_text.split())
+    if not compact_needle:
+        return -1
+
+    compact_chars: list[str] = []
+    raw_end_offsets: list[int] = []
+    for raw_index, char in enumerate(raw_text):
+        if char.isspace():
+            continue
+        compact_chars.append(char)
+        raw_end_offsets.append(raw_index + 1)
+
+    compact_haystack = "".join(compact_chars)
+    compact_anchor = compact_haystack.rfind(compact_needle)
+    if compact_anchor == -1:
+        return -1
+    compact_end = compact_anchor + len(compact_needle) - 1
+    return raw_end_offsets[compact_end]
+
+
 def _assistant_segment_after_text(raw_text: str, after_text: str | None = None) -> str:
     search_start = _reply_search_start_index(raw_text, after_text)
     assistant_start = raw_text.find(CHATGPT_TURN_MARKER, search_start)
-    if assistant_start == -1:
+    if assistant_start == -1 and search_start == 0:
         assistant_start = raw_text.rfind(CHATGPT_TURN_MARKER)
     if assistant_start == -1:
         return ""
@@ -354,9 +390,11 @@ def classify_issue_centric_reply_readiness(
     # misidentified as the current reply.
     if not assistant_segment:
         _fallback_start = _reply_search_start_index(raw_text, after_text)
-        _fallback = _find_last_complete_ic_contract_in_raw(
-            raw_text, search_start=_fallback_start
-        )
+        _fallback = None
+        if not after_text or _after_text_anchor_end(raw_text, after_text) != -1:
+            _fallback = _find_last_complete_ic_contract_in_raw(
+                raw_text, search_start=_fallback_start
+            )
         if _fallback is not None:
             assistant_segment = _fallback
             reply_source = "raw_text_contract_fallback"
