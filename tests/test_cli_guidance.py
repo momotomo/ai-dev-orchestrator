@@ -3805,6 +3805,85 @@ class CorrectionDiagnosticsTests(unittest.TestCase):
         self.assertIsInstance(err, BridgeError)
 
 
+class CorrectionSchemaGuidanceTests(unittest.TestCase):
+    """Verify correction guidance uses canonical schema fields (no stale 'flags').
+
+    Regression tests ensuring:
+    - 'flags' never appears in any correction request output
+    - canonical boolean fields (close_current_issue / create_followup_issue) are
+      present in guidance that references the DECISION_JSON schema
+    - generic (invalid JSON) correction instructs ChatGPT to regenerate fresh,
+      not to preserve the broken JSON
+    """
+
+    def setUp(self) -> None:
+        import fetch_next_prompt
+        self.fp = fetch_next_prompt
+
+    # -- no 'flags' in any correction output --
+
+    def test_generic_correction_no_flags(self) -> None:
+        """Generic (invalid JSON) correction must not mention stale 'flags' field."""
+        text = self.fp._build_contract_correction_request("CHATGPT_DECISION_JSON is not valid JSON: ...")
+        self.assertNotIn("flags", text)
+
+    def test_base64_correction_no_flags(self) -> None:
+        """base64 correction must not mention stale 'flags' field."""
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertNotIn("flags", text)
+
+    def test_marker_correction_no_flags(self) -> None:
+        """Marker correction must not mention stale 'flags' field."""
+        reason = "block marker pairing mismatch: ===CHATGPT_ISSUE_BODY=== has no closing tag"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertNotIn("flags", text)
+
+    def test_utf8_correction_no_flags(self) -> None:
+        """UTF-8 correction must not mention stale 'flags' field."""
+        reason = "CODEX_BODY payload is valid base64 but decoded bytes are not valid UTF-8 Markdown: invalid start byte"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertNotIn("flags", text)
+
+    def test_binding_mismatch_correction_no_flags(self) -> None:
+        """Binding-mismatch correction must not mention stale 'flags' field."""
+        text = self.fp._build_binding_mismatch_correction_request("stale target", "#5 Ready: feature")
+        self.assertNotIn("flags", text)
+
+    # -- generic correction mentions canonical boolean fields --
+
+    def test_generic_correction_mentions_close_current_issue(self) -> None:
+        """Generic correction must guide ChatGPT with canonical close_current_issue field."""
+        text = self.fp._build_contract_correction_request("CHATGPT_DECISION_JSON is not valid JSON: ...")
+        self.assertIn("close_current_issue", text)
+
+    def test_generic_correction_mentions_create_followup_issue(self) -> None:
+        """Generic correction must guide ChatGPT with canonical create_followup_issue field."""
+        text = self.fp._build_contract_correction_request("CHATGPT_DECISION_JSON is not valid JSON: ...")
+        self.assertIn("create_followup_issue", text)
+
+    # -- generic correction instructs fresh regeneration, not JSON-unchanged --
+
+    def test_generic_correction_invalid_json_instructs_regenerate(self) -> None:
+        """For invalid JSON errors, correction must say to regenerate, not to keep JSON unchanged."""
+        text = self.fp._build_contract_correction_request("CHATGPT_DECISION_JSON is not valid JSON: unexpected token")
+        self.assertIn("fresh", text)
+
+    def test_generic_correction_invalid_json_does_not_say_unchanged(self) -> None:
+        """For invalid JSON errors, correction must NOT instruct 'は一切変えないこと' (keep JSON unchanged)."""
+        text = self.fp._build_contract_correction_request("CHATGPT_DECISION_JSON is not valid JSON: unexpected token")
+        self.assertNotIn("一切変えないこと", text)
+
+    # -- base64/marker/utf8 unchanged instruction still mentions canonical fields --
+
+    def test_base64_correction_unchanged_instruction_mentions_canonical_fields(self) -> None:
+        """base64 correction unchanged instruction must list canonical boolean fields, not 'flags'."""
+        reason = "CHATGPT_CODEX_BODY block is not valid base64: Invalid base64-encoded string"
+        text = self.fp._build_contract_correction_request(reason)
+        self.assertIn("close_current_issue", text)
+        self.assertIn("create_followup_issue", text)
+
+
 class LegacyPathDeprecationTests(unittest.TestCase):
     """issue-centric contract が正規ルートであることを示す縮退整理テスト.
 
