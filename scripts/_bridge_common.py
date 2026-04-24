@@ -6495,3 +6495,135 @@ def build_pinned_ready_issue_ic_section(ready_issue_ref: str) -> str:
         summary_path="",
     )
     return render_issue_centric_next_request_section(ctx, repo_label=repo_label)
+
+
+# ---------------------------------------------------------------------------
+# Request context section builder
+# ---------------------------------------------------------------------------
+
+_REQUEST_CONTEXT_CLOSE_STATUSES: frozenset[str] = frozenset({"closed", "already_closed"})
+
+
+def build_request_context_section(state: Mapping[str, Any]) -> str:
+    """Build a state-derived 状況 block for ChatGPT request text.
+
+    Inspects ``last_issue_centric_*`` state fields to detect the current phase
+    and returns a non-empty string (the ``状況:`` block) when relevant context
+    is found, or ``""`` when no useful context is detected.
+
+    The block is intended to be inserted before the reply contract section in the
+    request body, providing ChatGPT with phase-specific guidance:
+
+    * **close context** — identifies the closed issue and explicitly prohibits
+      re-selection, preventing ChatGPT from picking a recently closed issue.
+    * **issue_create context** — identifies the created primary issue and the
+      expected next action (continue on the created issue).
+    * **codex_run context** — identifies the issue that was just run so
+      ChatGPT can contextualise the report continuation.
+    * **human_review context** — identifies the review target issue.
+    * **ready-issue re-selection hint** — signals that ChatGPT should select
+      a fresh ready issue (not continue the previous one).
+    * **primary / follow-up issue continuation hint** — signals the expected
+      continuation target when ``next_request_hint`` points to a specific issue.
+    * **contract correction context** — reminds ChatGPT to return a correct
+      issue-centric contract format when corrections were needed in a prior cycle.
+
+    Only non-empty lines are produced; when state carries no relevant IC context
+    (e.g. a fresh session with no prior cycle) the function returns ``""``.
+    """
+    last_action = str(state.get("last_issue_centric_action", "")).strip()
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    principal_issue = str(state.get("last_issue_centric_principal_issue", "")).strip()
+    principal_issue_kind = str(state.get("last_issue_centric_principal_issue_kind", "")).strip()
+    target_issue = str(state.get("last_issue_centric_target_issue", "")).strip()
+    resolved_issue = str(state.get("last_issue_centric_resolved_issue", "")).strip()
+    created_number = str(state.get("last_issue_centric_created_issue_number", "")).strip()
+    created_title = str(state.get("last_issue_centric_created_issue_title", "")).strip()
+    closed_number = str(state.get("last_issue_centric_closed_issue_number", "")).strip()
+    closed_title = str(state.get("last_issue_centric_closed_issue_title", "")).strip()
+    next_request_hint = str(state.get("last_issue_centric_next_request_hint", "")).strip()
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    raw_correction = state.get("last_issue_centric_contract_correction_count")
+    try:
+        correction_count = int(raw_correction or 0)
+    except (ValueError, TypeError):
+        correction_count = 0
+
+    lines: list[str] = []
+
+    # --- 1. Close context ---
+    # After close, explicitly identify the closed issue and prohibit re-selection.
+    if close_status in _REQUEST_CONTEXT_CLOSE_STATUSES:
+        if closed_number:
+            closed_ref = (
+                f"#{closed_number} {closed_title}".strip() if closed_title else f"#{closed_number}"
+            )
+        else:
+            closed_ref = resolved_issue or target_issue or principal_issue
+        if closed_ref:
+            lines.append(
+                f"- 直前の close: {closed_ref} はクローズ済みです。再選択してはいけません。"
+            )
+        else:
+            lines.append(
+                "- 直前の action で issue がクローズされました。クローズ済み issue は再選択しないでください。"
+            )
+
+    # --- 2. issue_create context ---
+    # Identify the created issue so ChatGPT can continue on it.
+    if last_action == "issue_create":
+        if created_number:
+            created_ref = (
+                f"#{created_number} {created_title}".strip() if created_title else f"#{created_number}"
+            )
+            lines.append(f"- 直前の action: issue_create (作成済み issue: {created_ref})")
+            if next_request_hint == "continue_on_primary_issue":
+                lines.append(f"- 次は {created_ref} を current issue として判断してください。")
+        elif principal_issue and principal_issue_kind == "primary_issue":
+            # created_number was cleared (bridge_orchestrator auto-continuation path)
+            # but principal_issue still holds the created issue ref.
+            lines.append(f"- 直前の action: issue_create (primary issue: {principal_issue})")
+            lines.append(f"- {principal_issue} を current issue として継続してください。")
+        else:
+            lines.append("- 直前の action: issue_create")
+
+    # --- 3. codex_run context ---
+    if last_action == "codex_run":
+        codex_issue = principal_issue or resolved_issue or target_issue
+        if codex_issue:
+            lines.append(f"- 直前の action: codex_run (対象 issue: {codex_issue})")
+        else:
+            lines.append("- 直前の action: codex_run")
+
+    # --- 4. human_review context ---
+    if last_action == "human_review_needed" or (
+        chatgpt_decision.startswith("issue_centric:") and "human_review_needed" in chatgpt_decision
+    ):
+        review_issue = target_issue or principal_issue
+        if review_issue:
+            lines.append(f"- 直前の action: human_review_needed (対象 issue: {review_issue})")
+        else:
+            lines.append("- 直前の action: human_review_needed")
+
+    # --- 5. Ready-issue re-selection hint ---
+    if next_request_hint == "select_ready_issue":
+        lines.append(
+            "- フェーズ: ready issue 再選定。open な issue を 1 件選んでください (クローズ済み issue は除く)。"
+        )
+
+    # --- 6. Primary / follow-up issue continuation hint ---
+    # Only when not already covered by the issue_create section above.
+    if next_request_hint == "continue_on_primary_issue" and last_action != "issue_create":
+        if principal_issue:
+            lines.append(f"- フェーズ: primary issue {principal_issue} を current issue として継続。")
+
+    # --- 7. Contract correction context ---
+    if correction_count > 0:
+        lines.append(
+            f"- 直前の contract correction 回数: {correction_count}。"
+            "今回は正確な issue-centric contract 形式で返答してください。"
+        )
+
+    if not lines:
+        return ""
+    return "状況:\n" + "\n".join(lines)
