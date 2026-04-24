@@ -4086,6 +4086,52 @@ class LegacyPathDeprecationTests(unittest.TestCase):
         # IC decision is absent → cannot proceed to IC dispatch
         self.assertIsNone(readiness.decision)
 
+    def test_first_fetch_after_new_request_does_not_pick_previous_contract(self) -> None:
+        """A pending request boundary must not fall back to the previous assistant turn."""
+        import fetch_next_prompt as fnp
+        request_text = "current ready issue:\n#5"
+        raw = "\n".join([
+            "ChatGPT:",
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"#5","close_current_issue":false,"create_followup_issue":false,"summary":"old selection"}',
+            "===END_DECISION_JSON===",
+            "===CHATGPT_REPLY_COMPLETE===",
+            "",
+            "あなた:",
+            "current ready issue:#5",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw, after_text=request_text)
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertIsNone(readiness.decision)
+        self.assertFalse(readiness.decision_marker_present)
+        self.assertFalse(readiness.reply_complete_tag_present)
+
+    def test_fresh_reply_after_pending_request_is_collected(self) -> None:
+        """Once a new assistant turn appears after the pending request, fetch can collect it."""
+        import fetch_next_prompt as fnp
+        request_text = "current ready issue:\n#5"
+        raw = "\n".join([
+            "ChatGPT:",
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"#41","close_current_issue":false,"create_followup_issue":false,"summary":"old selection"}',
+            "===END_DECISION_JSON===",
+            "===CHATGPT_REPLY_COMPLETE===",
+            "",
+            "あなた:",
+            "current ready issue:#5",
+            "",
+            "ChatGPT:",
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"#5","close_current_issue":false,"create_followup_issue":false,"summary":"fresh current reply"}',
+            "===END_DECISION_JSON===",
+            "===CHATGPT_REPLY_COMPLETE===",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw, after_text=request_text)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertIsNotNone(readiness.decision)
+        self.assertEqual(readiness.decision.action, "no_action")
+        self.assertEqual(readiness.decision.target_issue, "#5")
+
 
 class ProjectSyncWarningOperatorSurfaceTests(unittest.TestCase):
     """Phase 56 — project_state_sync_failed operator-facing warning surface.
@@ -6612,4 +6658,3 @@ class ProjectSyncAlertWebhookConfigValidationTests(unittest.TestCase):
         result = bc.deliver_project_sync_alert_if_pending(state, config)
         pathlib.Path(tmp_path).unlink(missing_ok=True)
         self.assertEqual(result, "skipped_already_delivered")
-
