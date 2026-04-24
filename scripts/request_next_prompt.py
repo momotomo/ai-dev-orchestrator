@@ -8,6 +8,7 @@ from pathlib import Path
 
 from _bridge_common import (
     BridgeError,
+    build_request_context_section,
     can_reuse_prepared_request,
     clear_error_fields,
     clear_pending_request_fields,
@@ -156,7 +157,9 @@ def prompt_override_request_body(example_texts: list[str]) -> str:
     return "\n".join(lines).strip()
 
 
-def compose_ready_issue_request_text(ready_issue_ref: str, project_path: Path) -> str:
+def compose_ready_issue_request_text(
+    ready_issue_ref: str, project_path: Path, *, context_section: str = ""
+) -> str:
     normalized_ref = normalize_ready_issue_ref(ready_issue_ref)
     if not normalized_ref:
         raise BridgeError("current ready issue 参照が空です。")
@@ -175,6 +178,8 @@ def compose_ready_issue_request_text(ready_issue_ref: str, project_path: Path) -
             "follow-up issue や parent issue の話に広げてはいけません。",
         ]
     )
+    if context_section:
+        body = f"{body}\n\n{context_section}"
     return f"{body}\n\n{contract_section}\n"
 
 
@@ -186,7 +191,9 @@ def compose_override_request_text(user_body: str) -> str:
     return f"{body}\n\n{contract_section}\n"
 
 
-def compose_initial_selection_request_text(project_path: Path) -> str:
+def compose_initial_selection_request_text(
+    project_path: Path, *, context_section: str = ""
+) -> str:
     """Return request text asking ChatGPT to select ONE ready issue from open issues.
 
     This request uses ``initial_selection:`` source prefix so that
@@ -205,6 +212,8 @@ def compose_initial_selection_request_text(project_path: Path) -> str:
             "選定理由は `summary` に短く書いてください。",
         ]
     )
+    if context_section:
+        body = f"{body}\n\n{context_section}"
     return f"{body}\n\n{contract_section}\n"
 
 
@@ -252,13 +261,19 @@ def request_source_label(request_source: str) -> str:
     return "初回 request"
 
 
-def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str, str]:
+def build_initial_request(
+    args: argparse.Namespace,
+    state: dict[str, object] | None = None,
+) -> tuple[str, str, str, str]:
     """Return (request_text, request_hash, request_source, ready_issue_ref).
 
     ``ready_issue_ref`` is the normalized ready issue ref when the request was built
     from a ready_issue path (non-empty), otherwise empty string.  It is saved to state
     as ``current_ready_issue_ref`` so that continuation requests can detect a fresh-start
     context and prevent carry-over from a previous issue's ``last_issue_centric_*`` state.
+
+    ``state`` is used to build a state-derived 状況 block via
+    ``build_request_context_section``; if ``None``, no context block is added.
     """
     ready_issue_ref = normalize_ready_issue_ref(args.ready_issue_ref)
     request_body = args.request_body.strip()
@@ -268,8 +283,12 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str, str]
     if select_issue and (ready_issue_ref or request_body):
         raise BridgeError("`--select-issue` は `--ready-issue-ref` / `--request-body` と同時に使えません。")
 
+    context_section = build_request_context_section(state) if state is not None else ""
+
     if select_issue:
-        request_text = compose_initial_selection_request_text(project_path)
+        request_text = compose_initial_selection_request_text(
+            project_path, context_section=context_section
+        )
         request_source = build_initial_selection_request_source(str(project_path))
         return request_text, stable_text_hash(request_text), request_source, ""
 
@@ -277,7 +296,9 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str, str]
         raise BridgeError("`--ready-issue-ref` と `--request-body` は同時に使えません。通常入口か override のどちらか 1 つを選んでください。")
 
     if ready_issue_ref:
-        request_text = compose_ready_issue_request_text(ready_issue_ref, project_path)
+        request_text = compose_ready_issue_request_text(
+            ready_issue_ref, project_path, context_section=context_section
+        )
         return request_text, stable_text_hash(request_text), build_ready_issue_request_source(ready_issue_ref), ready_issue_ref
 
     if request_body:
@@ -296,7 +317,9 @@ def build_initial_request(args: argparse.Namespace) -> tuple[str, str, str, str]
 
     interactive_ready_issue_ref = normalize_ready_issue_ref(prompt_ready_issue_reference(project_path))
     if interactive_ready_issue_ref:
-        request_text = compose_ready_issue_request_text(interactive_ready_issue_ref, project_path)
+        request_text = compose_ready_issue_request_text(
+            interactive_ready_issue_ref, project_path, context_section=context_section
+        )
         return request_text, stable_text_hash(request_text), build_ready_issue_request_source(interactive_ready_issue_ref), interactive_ready_issue_ref
 
     override_text = prompt_override_request_body(build_override_example_templates(project_path))
@@ -336,7 +359,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         else:
             print(f"request: 前回未送信の {request_source_label(request_source)} entry request を再送します。")
     else:
-        request_text, request_hash, request_source, raw_ready_issue_ref = build_initial_request(args)
+        request_text, request_hash, request_source, raw_ready_issue_ref = build_initial_request(args, state)
 
     if (
         str(state.get("mode", "")).strip() in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}
