@@ -605,7 +605,20 @@ _BODY_TAG_LIST = (
 )
 
 _DECISION_JSON_UNCHANGED_INSTRUCTION = (
-    "- CHATGPT_DECISION_JSON の中身（action / target_issue / flags / summary）は一切変えないこと\n"
+    "- CHATGPT_DECISION_JSON の中身（action / target_issue / close_current_issue / create_followup_issue / summary）は一切変えないこと\n"
+    f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
+)
+
+# Used when DECISION_JSON itself is invalid (not parseable as JSON): instruct
+# ChatGPT to regenerate the entire block fresh using the canonical schema,
+# rather than attempting to patch a broken JSON value in place.
+_DECISION_JSON_REGENERATE_INSTRUCTION = (
+    "CHATGPT_DECISION_JSON 全体を前回の内容を参照せず、以下の canonical schema に従って fresh に再生成してください:\n"
+    "  action               : 必須文字列 (\"codex_run\" / \"no_action\" / \"issue_create\" / \"human_review_needed\")\n"
+    "  target_issue         : 必須文字列 (例: \"#123\"、または \"none\")\n"
+    "  close_current_issue  : 必須 boolean (true / false)\n"
+    "  create_followup_issue: 必須 boolean (true / false)\n"
+    "  summary              : 必須文字列\n"
     f"- {DECISION_JSON_START} ～ {DECISION_JSON_END} マーカーを正確に配置すること\n"
 )
 
@@ -633,7 +646,7 @@ def _build_generic_correction_request(reason: str) -> str:
         "前回の返答に issue-centric contract の不正がありました。\n"
         f"エラー詳細: {reason}\n\n"
         "canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
-        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + _DECISION_JSON_REGENERATE_INSTRUCTION
         + "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
         + _BODY_TAG_LIST
         + _ENGLISH_BODY_GUIDANCE
@@ -719,7 +732,7 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
         f"エラー詳細: {reason}\n\n"
         "以下の点を修正して canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
         f"- `target_issue` は必ず `{target_issue_ref}` に合わせること\n"
-        "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / flags / summary）は変更しないこと\n"
+        "- target_issue 以外の CHATGPT_DECISION_JSON フィールド（action / close_current_issue / create_followup_issue / summary）は変更しないこと\n"
         + _DECISION_JSON_UNCHANGED_INSTRUCTION
         + "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
         + _BODY_TAG_LIST
