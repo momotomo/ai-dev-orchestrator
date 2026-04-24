@@ -331,6 +331,35 @@ def _should_passthrough_ic_close(state: dict[str, Any]) -> bool:
     return detect_ic_stop_path(state) == ""
 
 
+def _should_passthrough_ic_issue_create(state: dict[str, Any]) -> bool:
+    """Return True when the no_action stop should be bypassed for IC issue_create auto-continuation.
+
+    When issue-centric issue_create just succeeded and no human intervention is required,
+    bridge_orchestrator.run() handles the auto-continuation internally
+    (via _is_ic_issue_create_completed_for_auto_continuation).  run_until_stop must not
+    stop here; instead it should let bridge_orchestrator run so it can proceed to
+    request_next_prompt with --ready-issue-ref <created_issue>.
+
+    Conditions that must ALL hold:
+      - last_issue_centric_created_issue_number is non-empty (an issue was created)
+      - chatgpt_decision is an issue_centric: value (confirms IC context)
+      - last_issue_centric_close_status is NOT "closed" or "already_closed"
+        (close path is handled by _should_passthrough_ic_close; this guard prevents
+        double-trigger on issue_create_then_close combo paths)
+      - detect_ic_stop_path returns "" (no initial_selection_stop / human_review_needed)
+    """
+    created_number = str(state.get("last_issue_centric_created_issue_number", "")).strip()
+    if not created_number:
+        return False
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return False
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    if close_status in {"closed", "already_closed"}:
+        return False
+    return detect_ic_stop_path(state) == ""
+
+
 def _should_passthrough_fetch_pending_reply(state: dict[str, Any]) -> bool:
     """Return True when a fetch_next_prompt state-unchanged cycle should continue.
 
@@ -1426,7 +1455,10 @@ def run(argv: list[str] | None = None) -> int:
                 # IC close passthrough: when IC close just completed and no human
                 # intervention is required, bridge_orchestrator.run() handles the
                 # auto-next-selection.  Let it run instead of stopping here.
-                if _should_passthrough_ic_close(before):
+                # IC issue_create passthrough: when IC issue_create just completed and no
+                # human intervention is required, bridge_orchestrator.run() handles the
+                # auto-continuation to the created issue's implementation cycle.
+                if _should_passthrough_ic_close(before) or _should_passthrough_ic_issue_create(before):
                     pass  # fall through to run_command_with_heartbeat
                 else:
                     history.append(
