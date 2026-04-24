@@ -8106,5 +8106,177 @@ class ReadyIssueDuplicateGuardTests(unittest.TestCase):
         self.assertEqual(len(send_calls), 1, "Cleared state must allow resend")
 
 
+class ResumeRequestContextBlockInjectionTests(unittest.TestCase):
+    """_resolve_resume_request_plan injects build_request_context_section output.
+
+    Covers: normal path injects context; pinned path skips injection;
+    close/issue_create/codex_run state produces expected context lines;
+    empty state produces no injection; rotated path injects context.
+    """
+
+    def _module(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        import request_prompt_from_report as m
+        return m
+
+    def _make_args(self):
+        import argparse
+        args = argparse.Namespace()
+        args.next_todo = "do next"
+        args.open_questions = ""
+        args.current_status = ""
+        return args
+
+    def _make_ic_context(self, *, section="IC_ORIG"):
+        from request_prompt_from_report import _IcResolvedContext
+        return _IcResolvedContext(
+            runtime_snapshot=None,
+            runtime_mode=None,
+            next_request_section=section,
+            route_selected="issue_centric",
+        )
+
+    def _resolve_plan_with_state(self, state, *, orig_section="IC_ORIG"):
+        """Run _resolve_resume_request_plan and capture the effective_section in plan."""
+        import unittest.mock as mock
+        m = self._module()
+        ic = self._make_ic_context(section=orig_section)
+        captured = {}
+
+        def capture_payload(*_, issue_centric_next_request_section="", **__):
+            captured["section"] = issue_centric_next_request_section
+            return ("TEXT", "HASH", "report:dummy.md", None)
+
+        with mock.patch.object(m, "_resolve_report_request_ic_context", return_value=ic), \
+             mock.patch.object(m, "_resolve_completion_followup_request",
+                               return_value=(orig_section, "do next", "")), \
+             mock.patch.object(m, "_resolve_resume_request_payload",
+                               side_effect=capture_payload):
+            plan = m._resolve_resume_request_plan(state, self._make_args(), "", "", None)
+        return plan, captured.get("section", "")
+
+    # --- normal path: context injected ---
+
+    def test_close_state_context_appended_to_effective_section(self):
+        """Close state → 再選択してはいけません appears in effective_section."""
+        state = {
+            "last_issue_centric_close_status": "closed",
+            "last_issue_centric_closed_issue_number": "5",
+            "last_issue_centric_closed_issue_title": "Old task",
+        }
+        plan, passed_section = self._resolve_plan_with_state(state)
+        self.assertIn("IC_ORIG", plan.effective_section)
+        self.assertIn("再選択してはいけません", plan.effective_section)
+        self.assertIn("#5 Old task", plan.effective_section)
+        # Also check that the same modified section was passed to _resolve_resume_request_payload
+        self.assertIn("再選択してはいけません", passed_section)
+
+    def test_issue_create_state_context_appended(self):
+        """issue_create with cleared created_number → principal_issue in effective_section."""
+        state = {
+            "last_issue_centric_action": "issue_create",
+            "last_issue_centric_created_issue_number": "",
+            "last_issue_centric_principal_issue": "#22 Primary task",
+            "last_issue_centric_principal_issue_kind": "primary_issue",
+            "last_issue_centric_next_request_hint": "continue_on_primary_issue",
+        }
+        plan, _ = self._resolve_plan_with_state(state)
+        self.assertIn("issue_create", plan.effective_section)
+        self.assertIn("#22 Primary task", plan.effective_section)
+
+    def test_codex_run_state_context_appended(self):
+        """codex_run state → action line appears in effective_section."""
+        state = {
+            "last_issue_centric_action": "codex_run",
+            "last_issue_centric_principal_issue": "#10 Feature",
+        }
+        plan, _ = self._resolve_plan_with_state(state)
+        self.assertIn("codex_run", plan.effective_section)
+        self.assertIn("#10 Feature", plan.effective_section)
+
+    def test_empty_state_no_context_injected(self):
+        """Empty state → no 状況: block; effective_section unchanged."""
+        plan, passed_section = self._resolve_plan_with_state({})
+        self.assertEqual(plan.effective_section, "IC_ORIG")
+        self.assertEqual(passed_section, "IC_ORIG")
+        self.assertNotIn("状況:", plan.effective_section)
+
+    def test_irrelevant_state_no_context_injected(self):
+        """State without IC fields → no 状況: block injected."""
+        state = {"mode": "idle", "chatgpt_decision": ""}
+        plan, _ = self._resolve_plan_with_state(state)
+        self.assertNotIn("状況:", plan.effective_section)
+
+    def test_context_appended_after_orig_section_with_blank_line(self):
+        """Context block is separated from orig section by a blank line."""
+        state = {"last_issue_centric_close_status": "closed", "last_issue_centric_closed_issue_number": "3"}
+        plan, _ = self._resolve_plan_with_state(state, orig_section="## orig_section\n- x: y")
+        # blank line between orig section and 状況: block
+        self.assertIn("\n\n状況:", plan.effective_section)
+
+    # --- pinned ready issue path: context NOT injected ---
+
+    def test_pinned_ready_issue_path_no_context_injected(self):
+        """Pinned ready issue path → context block is skipped."""
+        state = {
+            "pending_request_source": "ready_issue:abc123",
+            "current_ready_issue_ref": "#7 Some task",
+            # IC state that would normally produce a context block
+            "last_issue_centric_close_status": "closed",
+            "last_issue_centric_closed_issue_number": "5",
+        }
+        plan, passed_section = self._resolve_plan_with_state(state)
+        self.assertNotIn("再選択してはいけません", plan.effective_section)
+        self.assertNotIn("状況:", plan.effective_section)
+        self.assertNotIn("再選択してはいけません", passed_section)
+
+    # --- rotated path: context injected into ic.next_request_section ---
+
+    def test_rotated_path_context_injected_into_ic_section(self):
+        """_resolve_rotated_request_plan injects context into ic.next_request_section."""
+        import unittest.mock as mock
+        m = self._module()
+        state = {
+            "last_issue_centric_close_status": "closed",
+            "last_issue_centric_closed_issue_number": "9",
+            "last_issue_centric_closed_issue_title": "Done item",
+        }
+        ic = self._make_ic_context(section="HANDOFF_ORIG")
+        captured_ic = {}
+
+        def fake_acquire_handoff(state, args, last_report, *, request_source, ic_context):
+            captured_ic["section"] = ic_context.next_request_section
+            return ("handoff text", "handoff_log")
+
+        with mock.patch.object(m, "_resolve_normal_ic_context", return_value=ic), \
+             mock.patch.object(m, "build_report_request_source", return_value="report:x"), \
+             mock.patch.object(m, "_acquire_rotated_handoff", side_effect=fake_acquire_handoff):
+            m._resolve_rotated_request_plan(state, self._make_args(), "last report")
+
+        self.assertIn("HANDOFF_ORIG", captured_ic["section"])
+        self.assertIn("再選択してはいけません", captured_ic["section"])
+        self.assertIn("#9 Done item", captured_ic["section"])
+
+    def test_rotated_path_empty_state_no_context_injected(self):
+        """_resolve_rotated_request_plan with empty state: ic.next_request_section unchanged."""
+        import unittest.mock as mock
+        m = self._module()
+        ic = self._make_ic_context(section="HANDOFF_ORIG")
+        captured_ic = {}
+
+        def fake_acquire_handoff(state, args, last_report, *, request_source, ic_context):
+            captured_ic["section"] = ic_context.next_request_section
+            return ("handoff text", "handoff_log")
+
+        with mock.patch.object(m, "_resolve_normal_ic_context", return_value=ic), \
+             mock.patch.object(m, "build_report_request_source", return_value="report:x"), \
+             mock.patch.object(m, "_acquire_rotated_handoff", side_effect=fake_acquire_handoff):
+            m._resolve_rotated_request_plan({}, self._make_args(), "last report")
+
+        self.assertEqual(captured_ic["section"], "HANDOFF_ORIG")
+        self.assertNotIn("状況:", captured_ic["section"])
+
+
 if __name__ == "__main__":
     unittest.main()
