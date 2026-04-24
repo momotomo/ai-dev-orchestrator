@@ -3342,6 +3342,111 @@ class IcClosePassthroughTests(unittest.TestCase):
                 self.assertTrue(run_until_stop._should_passthrough_ic_close(state))
 
 
+class IcIssueCreatePassthroughTests(unittest.TestCase):
+    """_should_passthrough_ic_issue_create() — IC issue_create auto-continuation passthrough guard.
+
+    Root cause:
+      After IC issue_create executes successfully, fetch_next_prompt saves state
+      with mode="awaiting_user", chatgpt_decision="issue_centric:issue_create", and
+      last_issue_centric_created_issue_number=<N>, then raises BridgeStop.
+      bridge_orchestrator re-raises the BridgeStop, guarded_main returns 0.
+      run_until_stop continues the loop (state changed) but resolve_unified_next_action
+      returns "no_action" (mode=awaiting_user + issue_create decision, no pending hash).
+      Without a passthrough guard, run_until_stop stops here, requiring the operator
+      to manually supply --ready-issue-ref, and on re-run the same original issue
+      triggers another issue_create, creating duplicate GitHub issues.
+
+    Fix: _should_passthrough_ic_issue_create() returns True for this state so
+      run_until_stop lets bridge_orchestrator run, which then uses the existing
+      _is_ic_issue_create_completed_for_auto_continuation() check to auto-continue
+      to the created issue's implementation cycle via request_next_prompt
+      with --ready-issue-ref <created_issue>.
+    """
+
+    def _ic_issue_create_state(self, created_number: str = "37") -> dict:
+        return {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": created_number,
+            "last_issue_centric_close_status": "",
+            "mode": "awaiting_user",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+        }
+
+    def test_passthrough_when_issue_created(self) -> None:
+        """created_issue_number non-empty + IC decision + no human stop → passthrough True."""
+        self.assertTrue(run_until_stop._should_passthrough_ic_issue_create(self._ic_issue_create_state("37")))
+
+    def test_passthrough_with_any_created_number(self) -> None:
+        """Any non-empty created_issue_number qualifies."""
+        self.assertTrue(run_until_stop._should_passthrough_ic_issue_create(self._ic_issue_create_state("1")))
+        self.assertTrue(run_until_stop._should_passthrough_ic_issue_create(self._ic_issue_create_state("999")))
+
+    def test_no_passthrough_when_created_number_empty(self) -> None:
+        """Genuine no_action with no created issue → passthrough False."""
+        state = self._ic_issue_create_state("")
+        self.assertFalse(run_until_stop._should_passthrough_ic_issue_create(state))
+
+    def test_no_passthrough_for_non_ic_chatgpt_decision(self) -> None:
+        """Non-IC chatgpt_decision → passthrough False (not IC context)."""
+        state = {
+            "chatgpt_decision": "legacy_contract_detected",
+            "last_issue_centric_created_issue_number": "37",
+            "last_issue_centric_close_status": "",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_issue_create(state))
+
+    def test_no_passthrough_when_close_also_completed(self) -> None:
+        """close_status=closed alongside created_number → passthrough False (close path takes precedence)."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "37",
+            "last_issue_centric_close_status": "closed",
+            "mode": "awaiting_user",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_issue_create(state))
+
+    def test_no_passthrough_when_close_status_already_closed(self) -> None:
+        """close_status=already_closed → passthrough False (close path takes precedence)."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "37",
+            "last_issue_centric_close_status": "already_closed",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_issue_create(state))
+
+    def test_no_passthrough_when_human_review_needed(self) -> None:
+        """IC human_review_needed in chatgpt_decision → passthrough False (human intervention required)."""
+        state = {
+            "chatgpt_decision": "issue_centric:human_review_needed",
+            "last_issue_centric_created_issue_number": "37",
+            "last_issue_centric_close_status": "",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_issue_create(state))
+
+    def test_no_passthrough_when_initial_selection_stop(self) -> None:
+        """selected_ready_issue_ref non-empty → detect_ic_stop_path returns initial_selection_stop → passthrough False."""
+        state = {
+            "chatgpt_decision": "issue_centric:issue_create",
+            "last_issue_centric_created_issue_number": "37",
+            "last_issue_centric_close_status": "",
+            "selected_ready_issue_ref": "#10 some issue",
+        }
+        self.assertFalse(run_until_stop._should_passthrough_ic_issue_create(state))
+
+    def test_passthrough_with_various_ic_decision_prefixes(self) -> None:
+        """Any issue_centric: prefix qualifies for the decision check."""
+        for decision in ("issue_centric:issue_create", "issue_centric:no_action", "issue_centric:codex_run"):
+            with self.subTest(decision=decision):
+                state = {
+                    "chatgpt_decision": decision,
+                    "last_issue_centric_created_issue_number": "37",
+                    "last_issue_centric_close_status": "",
+                    "mode": "awaiting_user",
+                }
+                self.assertTrue(run_until_stop._should_passthrough_ic_issue_create(state))
+
+
 class IcReplyPendingPassthroughTests(unittest.TestCase):
     """_should_passthrough_fetch_pending_reply() — fetch reply-pending passthrough guard.
 
