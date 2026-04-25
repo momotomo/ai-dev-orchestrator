@@ -1649,6 +1649,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 request_text=effective_after,
                 stage_callback=handle_wait_event,
                 allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
+                conversation_url=str(state.get("current_chat_session", "")).strip(),
             )
         except IssueCentricReplyInvalid as exc:
             # Set raw_text so the common correction retry logic below handles this
