@@ -3920,6 +3920,161 @@ end run
     return result.stdout.rstrip("\n")
 
 
+# ---------------------------------------------------------------------------
+# Conversation-tab-aware Safari helpers
+# ---------------------------------------------------------------------------
+
+# AppleScript that enumerates all Safari windows/tabs and returns TSV lines.
+# Inside a "tell application Safari" block `tab` is a scripting keyword, so
+# ASCII character 9 is used as the separator instead.
+_SAFARI_ENUMERATE_TABS_SCRIPT = """\
+on run
+    set sep to ASCII character 9
+    set out to ""
+    tell application "Safari"
+        if not running then error "safari_not_running"
+        set winList to every window
+        if (count of winList) is 0 then error "no_windows"
+        set frontWin to front window
+        set frontIdx to index of frontWin
+        set winIdx to 0
+        repeat with w in winList
+            set winIdx to winIdx + 1
+            set isFront to (index of w) is frontIdx
+            set tabIdx to 0
+            set currentTabIdx to index of current tab of w
+            repeat with t in every tab of w
+                set tabIdx to tabIdx + 1
+                set isCurrent to (tabIdx is currentTabIdx)
+                set u to URL of t
+                set nm to name of t
+                if isFront then
+                    set frontStr to "1"
+                else
+                    set frontStr to "0"
+                end if
+                if isCurrent then
+                    set curStr to "1"
+                else
+                    set curStr to "0"
+                end if
+                set out to out & "TAB" & sep & winIdx & sep & tabIdx & sep & frontStr & sep & curStr & sep & u & sep & nm & linefeed
+            end repeat
+        end repeat
+    end tell
+    return out
+end run
+"""
+
+# AppleScript to run JavaScript in a specific Safari window/tab by index.
+# argv: [0]=window_index  [1]=tab_index  [2]=javascript_code
+_SAFARI_JS_IN_TAB_SCRIPT = """\
+on run argv
+    set winIdx to (item 1 of argv) as integer
+    set tabIdx to (item 2 of argv) as integer
+    set jsCode to item 3 of argv
+    tell application "Safari"
+        set w to window winIdx
+        set t to tab tabIdx of w
+        return do JavaScript jsCode in t
+    end tell
+end run
+"""
+
+_CONVERSATION_ID_RE = re.compile(r"/c/([0-9a-f-]{8,})", re.IGNORECASE)
+
+
+def _extract_conversation_id(url: str) -> str:
+    """Return the conversation UUID from a ChatGPT /c/<id> URL, or empty string."""
+    m = _CONVERSATION_ID_RE.search(url)
+    return m.group(1) if m else ""
+
+
+def _enumerate_safari_tabs() -> list[dict[str, Any]]:
+    """Return all Safari window/tab info as a list of dicts.
+
+    Each dict has: window_index, tab_index, is_front_window, is_current_tab,
+    url, title, conversation_id.
+
+    Returns an empty list on any AppleScript error (non-fatal; caller falls back).
+    """
+    try:
+        result = _run_osascript_script(
+            _SAFARI_ENUMERATE_TABS_SCRIPT,
+            timeout_label="Safari タブ列挙",
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    tabs: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("TAB"):
+            continue
+        parts = line.split("\t")
+        # Expected: TAB, winIdx, tabIdx, isFront, isCurrent, url, title...
+        if len(parts) < 7:
+            continue
+        _, win_s, tab_s, front_s, cur_s, url, *title_parts = parts
+        try:
+            win_idx = int(win_s)
+            tab_idx = int(tab_s)
+        except ValueError:
+            continue
+        tabs.append(
+            {
+                "window_index": win_idx,
+                "tab_index": tab_idx,
+                "is_front_window": front_s == "1",
+                "is_current_tab": cur_s == "1",
+                "url": url,
+                "title": "\t".join(title_parts),
+                "conversation_id": _extract_conversation_id(url),
+            }
+        )
+    return tabs
+
+
+def _find_safari_tab_by_conversation_id(conversation_id: str) -> dict[str, Any] | None:
+    """Find the first Safari tab whose URL matches *conversation_id*.
+
+    Returns the tab dict or None if not found or enumeration fails.
+    Prefers the current tab of the front window when multiple matches exist.
+    """
+    if not conversation_id:
+        return None
+    tabs = _enumerate_safari_tabs()
+    if not tabs:
+        return None
+    matches = [t for t in tabs if t.get("conversation_id") == conversation_id]
+    if not matches:
+        return None
+    # Prefer front window's current tab, then any current tab, then first match.
+    for t in matches:
+        if t["is_front_window"] and t["is_current_tab"]:
+            return t
+    for t in matches:
+        if t["is_current_tab"]:
+            return t
+    return matches[0]
+
+
+def _run_safari_javascript_in_tab(win_idx: int, tab_idx: int, script: str) -> str:
+    """Run *script* in a specific Safari tab by window/tab index.
+
+    Returns the result string on success.  Raises BridgeError on failure.
+    """
+    result = _run_osascript_script(
+        _SAFARI_JS_IN_TAB_SCRIPT,
+        [str(win_idx), str(tab_idx), script],
+        timeout_label="Safari タブ指定 JavaScript 実行",
+    )
+    if result.returncode != 0:
+        raise BridgeError(_safari_js_error_message(result.stderr))
+    return result.stdout.rstrip("\n")
+
+
 def frontmost_safari_tab_info(
     config: Mapping[str, Any],
     *,
@@ -6022,6 +6177,70 @@ def read_chatgpt_conversation_dom(page: SafariChatPage) -> str:
     raise BridgeError("Safari 上の ChatGPT 会話テキストを取得できませんでした。会話領域が見えているか確認してください。")
 
 
+# Fetch-route labels used in diagnostics.
+FETCH_ROUTE_CURRENT_TAB = "current_tab"
+FETCH_ROUTE_CONVERSATION_TAB = "conversation_tab"
+FETCH_ROUTE_FALLBACK_CURRENT_TAB = "fallback_current_tab"
+FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND = "conversation_tab_not_found"
+FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR = "conversation_tab_read_error"
+
+
+def _read_chatgpt_dom_for_fetch(
+    page: SafariChatPage,
+    conversation_url: str = "",
+) -> tuple[str, str]:
+    """Read ChatGPT DOM text, preferring the conversation tab when a URL is given.
+
+    Returns (text, fetch_route) where fetch_route is one of the FETCH_ROUTE_*
+    constants.
+
+    Strategy:
+    1. If *conversation_url* contains a conversation id, enumerate all Safari
+       tabs and look for the matching tab.
+    2. If found, run JavaScript directly in that tab (no tab switching).
+    3. If the tab-specific read fails, fall back to current-tab fetch.
+    4. If no conversation_url or no matching tab, use current-tab fetch.
+    """
+    conversation_id = _extract_conversation_id(conversation_url) if conversation_url else ""
+
+    if conversation_id:
+        tab = _find_safari_tab_by_conversation_id(conversation_id)
+        if tab is None:
+            # Tab not found — fall through to current-tab fetch.
+            try:
+                text = read_chatgpt_conversation_dom(page)
+                return text, FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND
+            except BridgeError:
+                raise
+        # Tab found — attempt direct JS read.
+        js_script = _build_visible_text_script(["main", "article", "body"])
+        try:
+            text = _run_safari_javascript_in_tab(
+                tab["window_index"], tab["tab_index"], js_script
+            ).strip()
+            if text:
+                return text, FETCH_ROUTE_CONVERSATION_TAB
+            # Empty result — fall back.
+        except BridgeError:
+            # Tab-specific read failed; fall back to current-tab fetch.
+            try:
+                text = read_chatgpt_conversation_dom(page)
+                return text, FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR
+            except BridgeError:
+                raise
+
+        # Tab found but returned empty text — fall back to current tab.
+        try:
+            text = read_chatgpt_conversation_dom(page)
+            return text, FETCH_ROUTE_FALLBACK_CURRENT_TAB
+        except BridgeError:
+            raise
+
+    # No conversation_url or no conversation_id — use current-tab fetch.
+    text = read_chatgpt_conversation_dom(page)
+    return text, FETCH_ROUTE_CURRENT_TAB
+
+
 def read_chatgpt_conversation() -> str:
     with open_chatgpt_page(reset_chat=False) as (_, page, _, _):
         return read_chatgpt_conversation_dom(page)
@@ -6034,6 +6253,7 @@ def _wait_for_chatgpt_reply_text(
     extractor: Callable[[str, str | None], Any],
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
     allow_project_page_wait: bool = False,
+    conversation_url: str = "",
 ) -> str:
     with open_chatgpt_page(
         reset_chat=False,
@@ -6059,9 +6279,13 @@ def _wait_for_chatgpt_reply_text(
         timeout_attempts = 0
         stage = "initial"
         last_reply_readiness_signature = ""
+        last_fetch_route = ""
         while True:
             try:
-                latest_text = read_chatgpt_conversation_dom(page)
+                latest_text, fetch_route = _read_chatgpt_dom_for_fetch(page, conversation_url)
+                if fetch_route != last_fetch_route:
+                    print(f"[fetch_route] {fetch_route}", flush=True)
+                    last_fetch_route = fetch_route
             except BridgeError as exc:
                 if is_apple_event_timeout_text(str(exc)):
                     timeout_attempts += 1
@@ -6182,6 +6406,7 @@ def wait_for_issue_centric_reply_text(
     request_text: str | None = None,
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
     allow_project_page_wait: bool = False,
+    conversation_url: str = "",
 ) -> str:
     """Wait for a ChatGPT reply that satisfies the issue-centric (Plan A) contract extractor.
 
@@ -6197,6 +6422,7 @@ def wait_for_issue_centric_reply_text(
         extractor=plan_a_extractor,
         stage_callback=stage_callback,
         allow_project_page_wait=allow_project_page_wait,
+        conversation_url=conversation_url,
     )
 
 
