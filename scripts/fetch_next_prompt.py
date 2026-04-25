@@ -818,17 +818,29 @@ def _guard_correction_resend(
     if not correction_text:
         return
     # Locate the correction request in the DOM.
+    # Try exact match first; fall back to compact (whitespace/backtick-stripped) match
+    # because the ChatGPT DOM may strip newlines and backticks from the sent text.
     anchor = raw_text.rfind(correction_text)
-    if anchor == -1:
-        # Correction text not found in DOM yet — ChatGPT has not responded.
-        raise BridgeStop(
-            "問題: correction request を送信済みですが、ChatGPT からの新しい assistant turn がまだ確認できません。\n"
-            "対応: ChatGPT が前回の correction request に返答するまで待ってから fetch を再実行してください。"
-        )
-    search_start = anchor + len(correction_text)
-    # Look for an assistant turn strictly after the correction request — no rfind fallback.
-    assistant_pos = raw_text.find(CHATGPT_TURN_MARKER, search_start)
-    if assistant_pos == -1:
+    if anchor != -1:
+        search_start = anchor + len(correction_text)
+    else:
+        compact_end = _rfind_compact_text_end(raw_text, correction_text)
+        if compact_end == -1:
+            # Correction text not found in DOM at all — ChatGPT has not responded yet.
+            raise BridgeStop(
+                "問題: correction request を送信済みですが、ChatGPT からの新しい assistant turn がまだ確認できません。\n"
+                "対応: ChatGPT が前回の correction request に返答するまで待ってから fetch を再実行してください。"
+            )
+        search_start = compact_end
+    # Look for a new assistant reply after the correction request.  The ChatGPT DOM
+    # often omits role turn markers, so also accept IC contract markers (DECISION_JSON
+    # or REPLY_COMPLETE_TAG) as evidence that a new assistant turn has appeared.
+    has_new_reply = (
+        raw_text.find(CHATGPT_TURN_MARKER, search_start) != -1
+        or raw_text.find(DECISION_JSON_START, search_start) != -1
+        or raw_text.find(REPLY_COMPLETE_TAG, search_start) != -1
+    )
+    if not has_new_reply:
         raise BridgeStop(
             "問題: correction request を送信済みですが、ChatGPT からの新しい assistant turn がまだ確認できません。\n"
             "対応: ChatGPT が前回の correction request に返答するまで待ってから fetch を再実行してください。"

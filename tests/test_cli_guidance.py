@@ -3910,6 +3910,101 @@ class CorrectionDiagnosticsTests(unittest.TestCase):
         self.assertIsInstance(err, BridgeError)
 
 
+class CorrectionGuardTests(unittest.TestCase):
+    """Unit-tests for _guard_correction_resend in fetch_next_prompt.
+
+    Regression tests for the fix that added compact (whitespace/backtick-stripped)
+    match fallback and IC contract marker detection so the guard does not
+    raise BridgeStop when ChatGPT has responded (even if the DOM collapsed
+    newlines or backticks in the correction request text).
+    """
+
+    def setUp(self) -> None:
+        import fetch_next_prompt
+        from _bridge_common import BridgeStop
+        self.fp = fetch_next_prompt
+        self.BridgeStop = BridgeStop
+
+    def _make_state(self, correction_text: str) -> dict:
+        return {"last_issue_centric_correction_request_text": correction_text}
+
+    # -- exact match: correction text found as-is --
+
+    def test_exact_match_with_role_marker_passes(self) -> None:
+        """When correction text is found exactly and ChatGPT: follows, guard returns."""
+        corr = "Please fix the BODY block"
+        raw = f"あなた: {corr}\nChatGPT: here is the fix\n===CHATGPT_REPLY_COMPLETE===\n"
+        self.fp._guard_correction_resend(self._make_state(corr), raw)  # no raise
+
+    def test_exact_match_with_decision_json_marker_passes(self) -> None:
+        """When correction text is found exactly and DECISION_JSON follows, guard returns."""
+        corr = "Please fix the BODY block"
+        raw = f"あなた: {corr}\n===CHATGPT_DECISION_JSON===\n{{}}\n===CHATGPT_REPLY_COMPLETE===\n"
+        self.fp._guard_correction_resend(self._make_state(corr), raw)  # no raise
+
+    def test_exact_match_with_reply_complete_only_passes(self) -> None:
+        """REPLY_COMPLETE_TAG after correction is sufficient to pass the guard."""
+        corr = "Please fix the BODY block"
+        raw = f"あなた: {corr}\n===CHATGPT_REPLY_COMPLETE===\n"
+        self.fp._guard_correction_resend(self._make_state(corr), raw)  # no raise
+
+    def test_exact_match_no_reply_raises(self) -> None:
+        """Exact match found but nothing after it — BridgeStop raised."""
+        corr = "Please fix the BODY block"
+        raw = f"あなた: {corr}\n"
+        with self.assertRaises(self.BridgeStop):
+            self.fp._guard_correction_resend(self._make_state(corr), raw)
+
+    # -- compact match fallback: DOM strips newlines/backticks --
+
+    def test_compact_match_with_decision_json_passes(self) -> None:
+        """Compact match succeeds when DOM strips newlines from correction text."""
+        # correction_text has newlines; DOM collapses them
+        corr = "Please fix:\n- use plain code fences (```)\n- re-encode as base64"
+        dom_corr = "Please fix:- use plain code fences ()- re-encode as base64"
+        raw = f"あなた: {dom_corr}\n===CHATGPT_DECISION_JSON===\n{{}}\n===CHATGPT_REPLY_COMPLETE===\n"
+        self.fp._guard_correction_resend(self._make_state(corr), raw)  # no raise
+
+    def test_compact_match_with_reply_complete_passes(self) -> None:
+        """Compact match succeeds and REPLY_COMPLETE_TAG after anchor is accepted."""
+        corr = "Fix the block:\n  - regenerate\n  - re-encode"
+        dom_corr = "Fix the block:  - regenerate  - re-encode"
+        raw = f"あなた: {dom_corr}\n===CHATGPT_REPLY_COMPLETE===\n"
+        self.fp._guard_correction_resend(self._make_state(corr), raw)  # no raise
+
+    def test_compact_match_no_reply_raises(self) -> None:
+        """Compact match found but no reply markers after it — BridgeStop raised."""
+        corr = "Fix the block:\n  - regenerate"
+        dom_corr = "Fix the block:  - regenerate"
+        raw = f"あなた: {dom_corr}\n"
+        with self.assertRaises(self.BridgeStop):
+            self.fp._guard_correction_resend(self._make_state(corr), raw)
+
+    def test_no_match_raises(self) -> None:
+        """Correction text absent from DOM entirely — BridgeStop raised."""
+        corr = "Please fix the base64 encoding"
+        raw = "Some unrelated ChatGPT output without the correction text."
+        with self.assertRaises(self.BridgeStop):
+            self.fp._guard_correction_resend(self._make_state(corr), raw)
+
+    def test_empty_correction_text_is_noop(self) -> None:
+        """Empty last_issue_centric_correction_request_text → guard is a no-op."""
+        state: dict = {"last_issue_centric_correction_request_text": ""}
+        self.fp._guard_correction_resend(state, "any raw text")  # no raise
+
+    def test_missing_correction_text_key_is_noop(self) -> None:
+        """Missing state key → guard is a no-op."""
+        self.fp._guard_correction_resend({}, "any raw text")  # no raise
+
+    def test_ic_marker_before_correction_does_not_satisfy_guard(self) -> None:
+        """IC markers that appear BEFORE the correction anchor must not satisfy the guard."""
+        corr = "Fix the block"
+        # The REPLY_COMPLETE appears before the correction text in the DOM
+        raw = f"===CHATGPT_REPLY_COMPLETE===\nあなた: {corr}\n"
+        with self.assertRaises(self.BridgeStop):
+            self.fp._guard_correction_resend(self._make_state(corr), raw)
+
+
 class CorrectionSchemaGuidanceTests(unittest.TestCase):
     """Verify correction guidance uses canonical schema fields (no stale 'flags').
 
