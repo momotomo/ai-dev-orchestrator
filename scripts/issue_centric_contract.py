@@ -160,15 +160,19 @@ class _LocatedMatch:
 
 
 def _rfind_compact_text_end(raw_text: str, after_text: str) -> int:
-    """Find after_text's end in raw_text while ignoring whitespace differences."""
-    compact_needle = "".join(after_text.split())
+    """Find after_text's end in raw_text while ignoring whitespace differences.
+
+    Backtick characters are also stripped because the ChatGPT DOM renders inline
+    code spans (e.g. `foo`) without the surrounding backtick delimiters.
+    """
+    compact_needle = "".join(c for c in after_text if not c.isspace() and c != "`")
     if not compact_needle:
         return -1
 
     compact_chars: list[str] = []
     raw_end_offsets: list[int] = []
     for raw_index, char in enumerate(raw_text):
-        if char.isspace():
+        if char.isspace() or char == "`":
             continue
         compact_chars.append(char)
         raw_end_offsets.append(raw_index + 1)

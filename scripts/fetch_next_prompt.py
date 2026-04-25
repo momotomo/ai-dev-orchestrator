@@ -263,15 +263,18 @@ def _rfind_compact_text_end(raw_text: str, after_text: str) -> int:
     ChatGPT DOM dumps sometimes collapse line breaks inside a just-sent request.
     The pending request log keeps the original newlines, so exact rfind can miss
     the boundary and accidentally scan the user prompt itself.
+
+    Backtick characters are also stripped because the ChatGPT DOM renders inline
+    code spans (e.g. `foo`) without the surrounding backtick delimiters.
     """
-    compact_needle = "".join(after_text.split())
+    compact_needle = "".join(c for c in after_text if not c.isspace() and c != "`")
     if not compact_needle:
         return -1
 
     compact_chars: list[str] = []
     raw_end_offsets: list[int] = []
     for raw_index, char in enumerate(raw_text):
-        if char.isspace():
+        if char.isspace() or char == "`":
             continue
         compact_chars.append(char)
         raw_end_offsets.append(raw_index + 1)
@@ -390,11 +393,9 @@ def classify_issue_centric_reply_readiness(
     # misidentified as the current reply.
     if not assistant_segment:
         _fallback_start = _reply_search_start_index(raw_text, after_text)
-        _fallback = None
-        if not after_text or _after_text_anchor_end(raw_text, after_text) != -1:
-            _fallback = _find_last_complete_ic_contract_in_raw(
-                raw_text, search_start=_fallback_start
-            )
+        _fallback = _find_last_complete_ic_contract_in_raw(
+            raw_text, search_start=_fallback_start
+        )
         if _fallback is not None:
             assistant_segment = _fallback
             reply_source = "raw_text_contract_fallback"
@@ -1651,6 +1652,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # success path; stop_broken and legacy_stop are always explicit stops.
     route_decision = _resolve_ic_reply_route_decision(readiness)
     if route_decision.route == "not_ready":
+        # Guard: if a correction was already sent but ChatGPT has not responded
+        # yet, raise BridgeStop so the operator knows to wait rather than surfacing
+        # a generic BridgeError.
+        _guard_correction_resend(state, raw_text)
         raise _build_not_ready_bridge_error(readiness)
 
     # --- retryable invalid contract handling ---

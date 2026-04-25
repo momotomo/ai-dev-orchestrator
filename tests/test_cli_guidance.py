@@ -4132,6 +4132,64 @@ class LegacyPathDeprecationTests(unittest.TestCase):
         self.assertEqual(readiness.decision.action, "no_action")
         self.assertEqual(readiness.decision.target_issue, "#5")
 
+    def test_pending_request_with_backtick_code_anchor_found_fresh_reply_collected(self) -> None:
+        """Pending request log has backtick inline code; DOM strips backticks.
+
+        The compact match must strip backticks so _after_text_anchor_end locates
+        the boundary and the raw-text fallback can collect the reply that follows.
+        """
+        import fetch_next_prompt as fnp
+        # after_text as written by the bridge (backticks present)
+        request_text = "必要なら `追加確認 docs` だけを\n## heading\nsome content"
+        # raw_text simulates the ChatGPT DOM: backticks stripped, whitespace collapsed
+        raw = "\n".join([
+            # Old reply (before the pending request — must NOT be collected)
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"#41","summary":"old"}',
+            "===END_DECISION_JSON===",
+            "===CHATGPT_REPLY_COMPLETE===",
+            "",
+            # Pending request in DOM (backticks absent)
+            "必要なら 追加確認 docs だけを",
+            "## heading",
+            "some content",
+            "",
+            # New reply (the current reply to collect)
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"#5","summary":"fresh reply after backtick request"}',
+            "===END_DECISION_JSON===",
+            "===CHATGPT_REPLY_COMPLETE===",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw, after_text=request_text)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertIsNotNone(readiness.decision)
+        self.assertEqual(readiness.decision.target_issue, "#5")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+
+    def test_pending_request_with_backtick_code_no_reply_yet_returns_not_ready(self) -> None:
+        """Pending request log has backtick inline code; DOM strips backticks.
+
+        When no reply has appeared after the pending request, reply_not_ready is
+        returned even though an old complete contract exists before the request.
+        """
+        import fetch_next_prompt as fnp
+        request_text = "必要なら `追加確認 docs` だけを\n## heading\nsome content"
+        raw = "\n".join([
+            # Old reply (before the pending request)
+            "===CHATGPT_DECISION_JSON===",
+            '{"action":"no_action","target_issue":"#41","summary":"old"}',
+            "===END_DECISION_JSON===",
+            "===CHATGPT_REPLY_COMPLETE===",
+            "",
+            # Pending request in DOM (backticks absent) — NO new reply follows
+            "必要なら 追加確認 docs だけを",
+            "## heading",
+            "some content",
+        ])
+        readiness = fnp.classify_issue_centric_reply_readiness(raw, after_text=request_text)
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertIsNone(readiness.decision)
+
 
 class ProjectSyncWarningOperatorSurfaceTests(unittest.TestCase):
     """Phase 56 — project_state_sync_failed operator-facing warning surface.
