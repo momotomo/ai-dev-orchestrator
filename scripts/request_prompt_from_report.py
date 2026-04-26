@@ -978,6 +978,7 @@ def _apply_rotated_request_result(
                 f"url: {rotated_chat.get('url', '')}",
                 f"title: {rotated_chat.get('title', '')}",
                 f"signal: {rotation_signal}",
+                f"send_route: {rotated_chat.get('send_route', '')}",
                 f"delivery_mode: {'soft_success_wait' if soft_wait else 'confirmed_send'}",
                 f"github_source_attach_status: {rotated_chat.get('github_source_attach_status', '')}",
                 f"github_source_attach_boundary: {rotated_chat.get('github_source_attach_boundary', '')}",

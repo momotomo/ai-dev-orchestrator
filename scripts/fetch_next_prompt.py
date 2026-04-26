@@ -1634,6 +1634,17 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         stage_log = log_text(event_name, latest_text, suffix="txt")
         print(f"{event_name}: {stage_log}")
 
+    def handle_conversation_url_resolved(url: str) -> None:
+        resolved_url = str(url).strip()
+        if not resolved_url:
+            return
+        mutable_state = clear_error_fields(dict(load_state()))
+        if str(mutable_state.get("current_chat_session", "")).strip() == resolved_url:
+            return
+        mutable_state["current_chat_session"] = resolved_url
+        save_state(mutable_state)
+        print(f"[fetch_route] current_chat_session_resolved {resolved_url}", flush=True)
+
     if args.raw_file:
         raw_text = read_text(Path(args.raw_file)).strip()
         if not raw_text:
@@ -1650,6 +1661,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 stage_callback=handle_wait_event,
                 allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
                 conversation_url=str(state.get("current_chat_session", "")).strip(),
+                conversation_url_callback=handle_conversation_url_resolved,
             )
         except IssueCentricReplyInvalid as exc:
             # Set raw_text so the common correction retry logic below handles this
