@@ -6366,7 +6366,7 @@ def _read_chatgpt_dom_for_fetch(
                     if page_config is not None
                     else {}
                 )
-            except BridgeError:
+            except (BridgeError, OSError):
                 current_tab = {}
             current_url = str(current_tab.get("url", ""))
             if (
