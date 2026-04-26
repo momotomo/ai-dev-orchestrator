@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +24,34 @@ class _DummyPage:
 
 
 class HandoffRotationTests(unittest.TestCase):
+    def test_read_pending_handoff_ignores_placeholder_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "handoff.md"
+            path.write_text(_bridge_common.HANDOFF_REPLY_PLACEHOLDER, encoding="utf-8")
+            state = {"pending_handoff_log": str(path)}
+
+            self.assertEqual(_bridge_common.read_pending_handoff_text(state), "")
+
+    def test_extract_handoff_rejects_placeholder_body(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "handoff request",
+                "ChatGPT:",
+                _bridge_common.HANDOFF_REPLY_START,
+                _bridge_common.HANDOFF_REPLY_PLACEHOLDER,
+                _bridge_common.HANDOFF_REPLY_END,
+            ]
+        )
+
+        with self.assertRaises(BridgeError) as cm:
+            _bridge_common.extract_last_chatgpt_handoff(
+                raw,
+                after_text="handoff request",
+            )
+
+        self.assertIn("プレースホルダ", str(cm.exception))
+
     def test_project_page_send_treats_empty_probe_as_submitted_unconfirmed(self) -> None:
         page = _DummyPage("https://chatgpt.com/g/g-p-demo/project")
 
