@@ -287,6 +287,24 @@ class ReadChatgptDomForFetchTests(unittest.TestCase):
         self.assertEqual(text, "active fallback")
         self.assertEqual(resolved_url, "")
 
+    def test_request_anchor_not_found_ignores_missing_osascript_during_fallback(self) -> None:
+        page = self._mock_page("active fallback")
+        tab = self._tab()
+        with patch("_bridge_common._conversation_tab_candidates", return_value=[tab]):
+            with patch("_bridge_common._run_safari_javascript_in_tab", return_value="unrelated"):
+                with patch(
+                    "_bridge_common.frontmost_safari_tab_info",
+                    side_effect=FileNotFoundError("osascript"),
+                ):
+                    text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(
+                        page,
+                        conversation_url="https://chatgpt.com/g/demo/project",
+                        request_anchor_text="hello world",
+                    )
+        self.assertEqual(route, bc.FETCH_ROUTE_REQUEST_ANCHOR_TAB_NOT_FOUND)
+        self.assertEqual(text, "active fallback")
+        self.assertEqual(resolved_url, "")
+
     def test_request_anchor_current_conversation_fallback_resolves_url(self) -> None:
         page = self._mock_page("あなた:\nhello world\nChatGPT:\nThinking")
         tab = self._tab()
