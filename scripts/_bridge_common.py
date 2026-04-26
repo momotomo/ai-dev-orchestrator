@@ -43,6 +43,7 @@ BROWSER_CONFIG_PATH = BRIDGE_DIR / "browser_config.json"
 PROJECT_CONFIG_PATH = BRIDGE_DIR / "project_config.json"
 HANDOFF_REPLY_START = "===CHATGPT_CHAT_HANDOFF==="
 HANDOFF_REPLY_END = "===END_CHAT_HANDOFF==="
+HANDOFF_REPLY_PLACEHOLDER = "[新しいチャットの最初のメッセージ本文だけ]"
 BRIDGE_SUMMARY_START = "===BRIDGE_SUMMARY==="
 BRIDGE_SUMMARY_END = "===END_BRIDGE_SUMMARY==="
 CHATGPT_REQUEST_START = "===CHATGPT_REQUEST==="
@@ -1621,7 +1622,10 @@ def pending_handoff_log_path(state: Mapping[str, Any]) -> Path | None:
 def read_pending_handoff_text(state: Mapping[str, Any]) -> str:
     log_path = pending_handoff_log_path(state)
     if log_path and log_path.exists():
-        return read_text(log_path).strip()
+        handoff = read_text(log_path).strip()
+        if handoff == HANDOFF_REPLY_PLACEHOLDER:
+            return ""
+        return handoff
     return ""
 
 
@@ -3787,6 +3791,11 @@ def extract_last_chatgpt_handoff(raw_text: str, *, after_text: str | None = None
     handoff = sorted(selected, key=lambda item: item[0])[-1][1].strip()
     if not handoff:
         raise BridgeError("CHATGPT_CHAT_HANDOFF ブロックが空でした。")
+    if handoff == HANDOFF_REPLY_PLACEHOLDER:
+        raise BridgeError(
+            "CHATGPT_CHAT_HANDOFF ブロックがプレースホルダのままでした。"
+            "新しいチャットへ送る完成済み本文を再生成してください。"
+        )
     return handoff + "\n"
 
 
@@ -6632,8 +6641,10 @@ def build_chatgpt_handoff_request(
         "本文の流れは project 前提 / 現在進捗 / 直前完了 / next request / bridge reply contract の順に固定してください。\n\n"
         "返答は前置きなしで次のブロックだけにしてください。\n\n"
         f"{HANDOFF_REPLY_START}\n"
-        "[新しいチャットの最初のメッセージ本文だけ]\n"
+        f"{HANDOFF_REPLY_PLACEHOLDER}\n"
         f"{HANDOFF_REPLY_END}\n\n"
+        f"注意: {HANDOFF_REPLY_PLACEHOLDER} は説明用プレースホルダです。"
+        "返答では必ず実際の本文に置き換えてください。\n\n"
         "## current_status\n"
         f"{status_text}\n\n"
         "## last_report\n"
