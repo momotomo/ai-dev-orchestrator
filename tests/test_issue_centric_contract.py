@@ -2014,6 +2014,64 @@ class IssueCentricReplyWaitTests(unittest.TestCase):
         self.assertEqual(events[0].details["reply_readiness_status"], "reply_not_ready")
         self.assertTrue(events[0].details["thinking_visible"])
 
+    def test_wait_returns_stalled_reply_after_late_completion(self) -> None:
+        raw_stalled = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "Received app response",
+                "Thought for 16s",
+                "拡張",
+                "GitHub",
+            ]
+        )
+
+        class _DummyPage:
+            def __init__(self) -> None:
+                self.wait_calls = 0
+
+            def wait_for_timeout(self, _: int) -> None:
+                self.wait_calls += 1
+
+        page = _DummyPage()
+        events: list[bridge_common.ChatGPTWaitEvent] = []
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {"poll_interval_seconds": 0, "extended_fetch_timeout_seconds": 0}, {"url": "https://chatgpt.com/c/demo", "title": "ChatGPT"}
+
+        times = [0, 2, 2]
+
+        def fake_time() -> int:
+            if times:
+                return times.pop(0)
+            return 2
+
+        with (
+            patch.object(bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                bridge_common,
+                "_read_chatgpt_dom_for_fetch",
+                return_value=(raw_stalled, bridge_common.FETCH_ROUTE_CURRENT_TAB, ""),
+            ),
+            patch.object(bridge_common.time, "time", side_effect=fake_time),
+        ):
+            result = bridge_common.wait_for_issue_centric_reply_text(
+                plan_a_extractor=(
+                    lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                        raw_text,
+                        after_text=after_text,
+                    )
+                ),
+                timeout_seconds=1,
+                request_text="request body",
+                stage_callback=events.append,
+            )
+
+        self.assertEqual(result, raw_stalled)
+        self.assertIn("late_completion_mode", [event.name for event in events])
+
     def test_propagates_non_bridgeerror_from_plan_a_extractor(self) -> None:
         raw = build_raw_reply(
             {
@@ -2616,6 +2674,16 @@ class ReplyCompleteTagGateTests(unittest.TestCase):
         self.assertEqual(readiness.status, "reply_not_ready")
         self.assertFalse(readiness.reply_complete_tag_present)
 
+    def test_received_app_response_extension_labels_are_meta_only(self) -> None:
+        """Received app response + extension labels should not look like final content."""
+        raw = self._make_raw("Received app response", "Thought for 16s", "拡張", "GitHub")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            raw, after_text="request body"
+        )
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertTrue(readiness.assistant_meta_only)
+        self.assertFalse(readiness.assistant_final_content_present)
+
     def test_no_tag_running_app_never_raises_invalid(self) -> None:
         """Running app labels + 完了タグなし → IssueCentricReplyNotReady, never IssueCentricReplyInvalid."""
         raw = self._make_raw("Running app request", "Running app response", "Received app response")
@@ -2903,6 +2971,15 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
     # Helper: a raw reply text that has no completion tag → reply_not_ready
     _NOT_READY_RAW = "あなた:\nrequest body\nChatGPT:\nまだ考え中です。"
 
+    # Helper: app/tool UI finished without the canonical reply contract.
+    _LATE_STALLED_APP_RAW = (
+        "あなた:\nrequest body\nChatGPT:\n"
+        "Received app response\n"
+        "Thought for 16s\n"
+        "拡張\n"
+        "GitHub"
+    )
+
     def _base_state(self, *, correction_count: int = 0) -> dict[str, object]:
         state: dict[str, object] = {
             "mode": "waiting_prompt_reply",
@@ -3000,6 +3077,21 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
                 with self.assertRaises(BridgeError):
                     fetch_next_prompt.run(self._base_state(correction_count=0), [])
         self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must NOT be called for reply_not_ready")
+
+    def test_late_completion_stalled_app_response_sends_correction(self) -> None:
+        """await_late_completion + stalled app metadata should request a contract re-emit."""
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=0)
+        state["mode"] = "await_late_completion"
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, self._LATE_STALLED_APP_RAW, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(state, [])
+        self.assertEqual(len(sent_texts), 1, "late stalled no-contract should trigger one correction")
+        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_count"], 1)
+        self.assertIn("late completion reached", saved_states[0]["last_issue_centric_contract_correction_reason"])
 
     # ------------------------------------------------------------------
     # ready_issue_binding_error retry
@@ -3807,5 +3899,3 @@ class StaleContractPickupGuardTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertIn("after-boundary", result)
-
-
