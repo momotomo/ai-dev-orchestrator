@@ -5513,9 +5513,11 @@ class RunLevelLifecycleIntegrationTests(unittest.TestCase):
         m = self._module()
         state = self._eligible_ic_state()
         section = m._build_completion_followup_section(state, self._eligible_report_text())
-        self.assertIn("Issue コメントだけで判断せず", section)
-        self.assertIn("commit / diff / changed files / tests / remaining issues", section)
-        self.assertIn("repo を直接確認できない場合は未確認", section)
+        self.assertIn("最初に GitHub repo を直接確認してください", section)
+        self.assertIn("Issue コメントだけで判断しないでください", section)
+        self.assertIn("GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues", section)
+        self.assertIn("GitHub repo を直接確認できない場合は未確認", section)
+        self.assertLess(section.index("最初に GitHub repo"), section.index("archived_report_result"))
 
     def test_ready_bounded_completion_followup_guides_close_after_clean_repo_review(self):
         """Ready bounded completion followup should guide close_current_issue after clean repo review."""
@@ -5523,14 +5525,16 @@ class RunLevelLifecycleIntegrationTests(unittest.TestCase):
         state = self._eligible_ic_state()
         state["current_ready_issue_ref"] = "#11 Ready: verify conversation-tab send and fetch first cycle"
         section = m._build_completion_followup_section(state, self._eligible_report_text())
-        self.assertIn("completed report + target issue commit + scope 内変更 + remaining issues なし", section)
+        self.assertIn("GitHub commit / GitHub diff / GitHub changed files", section)
+        self.assertIn("変更が target issue scope 内で remaining issues がない場合", section)
         self.assertIn("原則 close_current_issue=true", section)
         self.assertIn("具体的な未完了理由を summary", section)
 
     def test_lifecycle_only_guidance_mentions_repo_review_boundary(self):
         """Lifecycle-only guidance should preserve repo-review boundary for completion decisions."""
-        self.assertIn("Issue コメントだけで判断せず", _bridge_common._LIFECYCLE_ONLY_REQUEST_GUIDANCE)
-        self.assertIn("commit / diff / changed files / tests / remaining issues", _bridge_common._LIFECYCLE_ONLY_REQUEST_GUIDANCE)
+        self.assertIn("最初に GitHub repo を直接確認してください", _bridge_common._LIFECYCLE_ONLY_REQUEST_GUIDANCE)
+        self.assertIn("Issue コメントだけで判断しないでください", _bridge_common._LIFECYCLE_ONLY_REQUEST_GUIDANCE)
+        self.assertIn("GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues", _bridge_common._LIFECYCLE_ONLY_REQUEST_GUIDANCE)
         self.assertIn("具体的な未完了理由を summary", _bridge_common._LIFECYCLE_ONLY_REQUEST_GUIDANCE)
 
     def test_completion_followup_target_explicit_next_request_target_wins(self):
