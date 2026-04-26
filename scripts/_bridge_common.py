@@ -6665,12 +6665,14 @@ _DEFAULT_REQUEST_GUIDANCE = (
 )
 
 _LIFECYCLE_ONLY_REQUEST_GUIDANCE = (
+    "最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。\n"
+    "worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。\n"
     "今回は新しい Codex 用 prompt を作りません。lifecycle automation だけを issue-centric contract で判断してください。\n"
     "返答は action=no_action を基本とし、issue を閉じるなら close_current_issue=true を添えてください。\n"
     "CHATGPT_CODEX_BODY は返さないでください。\n"
-    "worker report 後は Issue コメントだけで判断せず、target repo の commit / diff / changed files / tests / remaining issues を直接確認してください。\n"
-    "repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。\n"
-    "close_current_issue=false の場合は、repo 確認後に見つかった具体的な未完了理由を summary に書いてください。"
+    "GitHub commit / GitHub diff / GitHub changed files を確認し、変更が target issue scope 内で remaining issues がない場合は close_current_issue=true を検討してください。\n"
+    "GitHub repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。\n"
+    "close_current_issue=false の場合は、GitHub repo 確認後に見つかった具体的な未完了理由を summary に書いてください。"
 )
 
 

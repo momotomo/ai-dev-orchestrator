@@ -286,13 +286,13 @@ def _build_completion_followup_section(state: dict[str, object], report_text: st
 
     lines = [
         "## issue_centric_completion_followup",
+        "- directive: 最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。",
+        "- directive: worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。",
         f"- archived_report_result: {summary_fields.get('result', '')}",
         f"- archived_report_live_ready: {summary_fields.get('live_ready', '')}",
         f"- target_issue: {target_issue}",
-        "- directive: worker report 後は Issue コメントだけで判断せず、target repo の実 commit / diff / changed files / tests / remaining issues を直接確認してください。",
-        "- directive: report に commit SHA が含まれる場合は、その commit と diff を確認して target issue scope が完了しているか判断してください。",
-        "- directive: repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。",
-        "- directive: close_current_issue=false を返す場合は、repo 確認後に見つかった具体的な未完了理由を summary に書いてください。",
+        "- directive: GitHub repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。",
+        "- directive: close_current_issue=false を返す場合は、GitHub repo 確認後に見つかった具体的な未完了理由を summary に書いてください。",
     ]
 
     if _is_ready_bounded_continuation(state):
@@ -302,7 +302,7 @@ def _build_completion_followup_section(state: dict[str, object], report_text: st
             "- directive: この continuation で action=codex_run は不正です。CHATGPT_CODEX_BODY を返さないでください。",
             "- directive: 正規経路は action=no_action です。create_followup_issue=false のまま返してください。",
             "- directive: current issue を閉じるべきなら close_current_issue=true を返してください。閉じない判断でも action=no_action のまま返してください。",
-            "- directive: completed report + target issue commit + scope 内変更 + remaining issues なしを確認できた場合は、原則 close_current_issue=true を検討してください。",
+            "- directive: GitHub commit / GitHub diff / GitHub changed files を確認し、変更が target issue scope 内で remaining issues がない場合は、原則 close_current_issue=true を検討してください。",
             "- directive: target_issue は current issue の issue ref だけを使ってください。",
             "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
         ]
@@ -391,18 +391,20 @@ def _build_completion_followup_wording(state: dict[str, object]) -> tuple[str, s
     """
     if _is_ready_bounded_continuation(state):
         completion_next_todo = (
-            "新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
+            "最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。"
+            " worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。"
+            " 新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
             " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
-            " Issue コメントだけで判断せず、target repo の commit / diff / changed files / tests / remaining issues を直接確認してください。"
-            " completed report + scope 内変更 + remaining issues なしを確認できた場合は close_current_issue=true を検討してください。"
-            " close_current_issue=false の場合は repo 確認後の具体的な未完了理由を summary に書いてください。"
+            " GitHub commit / GitHub diff / GitHub changed files を確認し、変更が target issue scope 内で remaining issues がない場合は close_current_issue=true を検討してください。"
+            " close_current_issue=false の場合は GitHub repo 確認後の具体的な未完了理由を summary に書いてください。"
         )
     else:
         completion_next_todo = (
-            "archived report を踏まえて、parent / planned issue の continuation を issue-centric contract で判断してください。"
+            "最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。"
+            " worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。"
+            " archived report を踏まえて、parent / planned issue の continuation を issue-centric contract で判断してください。"
             " child / follow-up issue の作成 (action=issue_create)、追加 Codex 実行 (action=codex_run)、issue close (action=no_action + close_current_issue=true) から選んでください。"
-            " Issue コメントだけで判断せず、target repo の commit / diff / changed files / tests / remaining issues を直接確認してください。"
-            " repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。"
+            " GitHub repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。"
         )
     completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
     return completion_next_todo, completion_open_questions
