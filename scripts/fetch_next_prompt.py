@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import launch_codex_once
@@ -157,6 +157,8 @@ _META_ONLY_EXACT = frozenset(
         "Thinking",
         "Reasoning",
         "ChatGPT",
+        "拡張",
+        "Extensions",
         # Tool-call status labels shown while ChatGPT is executing an app/plugin.
         "Running app request",
         "Running app response",
@@ -866,6 +868,39 @@ def _build_not_ready_bridge_error(readiness: IssueCentricReplyReadiness) -> Brid
     if readiness.partial_body_block_detected:
         lines.append("  partial_body_block_detected: true")
     return BridgeError("\n".join(lines))
+
+
+def _late_completion_not_ready_is_stalled(readiness: IssueCentricReplyReadiness) -> bool:
+    """Return True when late completion should stop waiting and ask for a re-emit.
+
+    Normal ``reply_not_ready`` means "keep polling".  After the extended wait
+    window, however, a reply with no visible thinking spinner and no open body
+    block is no longer evidence of active generation.  Treat that as a stalled
+    assistant turn so the existing correction flow can request the canonical
+    issue-centric contract again.
+    """
+    return (
+        readiness.status == "reply_not_ready"
+        and readiness.assistant_text_present
+        and not readiness.reply_complete_tag_present
+        and not readiness.thinking_visible
+        and not readiness.partial_body_block_detected
+    )
+
+
+def _promote_late_completion_not_ready(
+    readiness: IssueCentricReplyReadiness,
+) -> IssueCentricReplyReadiness:
+    return replace(
+        readiness,
+        status="reply_complete_no_marker",
+        reason=(
+            "late completion reached without an issue-centric contract or completion tag; "
+            "ChatGPT appears stalled after app/tool metadata. Re-emit the full canonical "
+            "issue-centric contract."
+        ),
+        contract_parse_attempted=False,
+    )
 
 
 def stop_for_invalid_issue_centric_contract(
@@ -1597,9 +1632,10 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if str(state.get("mode", "")).strip() == "await_late_completion":
         rotation_requested = True
         rotation_reason = rotation_reason or "late_completion"
+    late_completion_observed = str(state.get("mode", "")).strip() == "await_late_completion"
 
     def handle_wait_event(event: object) -> None:
-        nonlocal rotation_requested, rotation_reason
+        nonlocal rotation_requested, rotation_reason, late_completion_observed
         event_name = str(getattr(event, "name", "")).strip()
         latest_text = str(getattr(event, "latest_text", "") or "")
         event_details = dict(getattr(event, "details", {}) or {})
@@ -1610,6 +1646,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             mutable_state["mode"] = "await_late_completion"
             rotation_requested = True
             rotation_reason = "late_completion"
+            late_completion_observed = True
             mark_next_request_requires_rotation(mutable_state, rotation_reason)
         elif event_name == "reply_not_ready":
             mutable_state.update(
@@ -1677,12 +1714,15 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     # success path; stop_broken and legacy_stop are always explicit stops.
     route_decision = _resolve_ic_reply_route_decision(readiness)
     if route_decision.route == "not_ready":
-        # Guard: if a correction was already sent but ChatGPT has not responded
-        # yet, raise BridgeStop so the operator knows to wait rather than surfacing
-        # a generic BridgeError.
-        _guard_correction_resend(state, raw_text)
-        raise _build_not_ready_bridge_error(readiness)
-
+        if late_completion_observed and _late_completion_not_ready_is_stalled(readiness):
+            readiness = _promote_late_completion_not_ready(readiness)
+            route_decision = _resolve_ic_reply_route_decision(readiness)
+        else:
+            # Guard: if a correction was already sent but ChatGPT has not responded
+            # yet, raise BridgeStop so the operator knows to wait rather than surfacing
+            # a generic BridgeError.
+            _guard_correction_resend(state, raw_text)
+            raise _build_not_ready_bridge_error(readiness)
     # --- retryable invalid contract handling ---
     # stop_broken (Plan A marker present but parse failed) and correction_retry
     # (Plan A marker absent) are both retryable: ChatGPT produced a complete

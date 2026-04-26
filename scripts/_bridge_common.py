@@ -6538,6 +6538,14 @@ def _wait_for_chatgpt_reply_text(
                             )
                         )
                         last_reply_readiness_signature = signature
+                    if (
+                        stage == "late_completion"
+                        and readiness_details["reply_readiness_status"] == "reply_not_ready"
+                        and readiness_details["assistant_text_present"]
+                        and not readiness_details["thinking_visible"]
+                        and not readiness_details["partial_body_block_detected"]
+                    ):
+                        return latest_text
                 pass
 
             now = time.time()
