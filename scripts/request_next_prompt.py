@@ -402,6 +402,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         json.dumps(
             {
                 "signal": str(send_result.get("signal", "")),
+                "send_route": str(send_result.get("send_route", "")),
                 "url": str(send_result.get("url", "")),
                 "title": str(send_result.get("title", "")),
                 "match_kind": str(send_result.get("match_kind", "")),

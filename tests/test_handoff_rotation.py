@@ -76,6 +76,71 @@ class HandoffRotationTests(unittest.TestCase):
         self.assertEqual(result["match_kind"], "preferred_hint")
         self.assertEqual(result["project_name"], "作曲アプリ開発")
 
+    def test_project_page_send_resolves_unconfirmed_conversation_by_request_anchor(self) -> None:
+        page = _DummyPage("https://chatgpt.com/g/g-p-demo/project")
+        resolved_tab = {
+            "url": "https://chatgpt.com/g/g-p-demo/c/resolved",
+            "title": "ChatGPT - Project",
+            "window_index": 1,
+            "tab_index": 2,
+            "conversation_id": "resolved",
+        }
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {"chat_url_prefix": "https://chatgpt.com/"}, page.front_tab
+
+        with (
+            patch.object(_bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                _bridge_common,
+                "ensure_project_page_github_source_ready",
+                return_value={
+                    "composerFound": True,
+                    "plusFound": True,
+                    "plusClicked": True,
+                    "menuOpened": True,
+                    "moreFound": True,
+                    "moreActionPerformed": True,
+                    "submenuOpened": True,
+                    "sourceAddFound": True,
+                    "githubFound": True,
+                    "githubClicked": True,
+                    "githubPillConfirmed": True,
+                    "githubPillRemoveButtonFound": True,
+                    "finalAttachConfirmationKind": "github_pill_remove_button",
+                },
+            ),
+            patch.object(
+                _bridge_common,
+                "fill_chatgpt_composer",
+                return_value={"matchKind": "preferred_hint", "matchedHint": "内の新しいチャット", "projectName": "demo"},
+            ),
+            patch.object(_bridge_common, "submit_chatgpt_message", return_value=None),
+            patch.object(
+                _bridge_common,
+                "_read_post_send_state",
+                side_effect=BridgeError("新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。"),
+            ),
+            patch.object(
+                _bridge_common,
+                "_resolve_request_anchor_conversation_url",
+                return_value=(resolved_tab, _bridge_common.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB),
+            ),
+            patch.object(_bridge_common.time, "time", side_effect=[0, 1, 16]),
+            patch.object(_bridge_common.time, "sleep", return_value=None),
+            patch("builtins.print"),
+        ):
+            result = _bridge_common.send_to_chatgpt_in_current_surface(
+                "handoff body",
+                preferred_hint="内の新しいチャット",
+                project_page_mode=True,
+            )
+
+        self.assertEqual(result["signal"], "submitted_unconfirmed")
+        self.assertEqual(result["url"], "https://chatgpt.com/g/g-p-demo/c/resolved")
+        self.assertEqual(result["send_route"], _bridge_common.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB)
+
     def test_rotate_chat_does_not_resend_after_unconfirmed_submit(self) -> None:
         project_url = "https://chatgpt.com/g/g-p-demo/project"
         conversation_url = "https://chatgpt.com/g/g-p-demo/c/demo"

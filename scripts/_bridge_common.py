@@ -5859,10 +5859,12 @@ def send_initial_request_to_chatgpt(text: str) -> dict[str, Any]:
     current_url = front_tab.get("url", "")
     if _conversation_url_matches(current_url, config):
         send_to_chatgpt(text)
+        print("[send_route] conversation_url", flush=True)
         return {
             "url": current_url,
             "title": front_tab.get("title", ""),
             "signal": "conversation_url",
+            "send_route": "conversation_url",
             "match_kind": "",
             "matched_hint": "",
             "project_name": "",
@@ -5957,30 +5959,36 @@ def send_to_chatgpt_in_current_surface(
             last_tab = tab_info
             last_payload = payload
             if _conversation_url_matches(tab_info.get("url", ""), config):
+                print("[send_route] conversation_url", flush=True)
                 return {
                     "url": tab_info.get("url", ""),
                     "title": tab_info.get("title", ""),
                     "signal": "conversation_url",
+                    "send_route": "conversation_url",
                     "match_kind": str(composer_state.get("matchKind", "")),
                     "matched_hint": str(composer_state.get("matchedHint", "")),
                     "project_name": str(composer_state.get("projectName", "")),
                     **attach_fields,
                 }
             if bool(payload.get("bodyContainsExpected")):
+                print("[send_route] message_visible", flush=True)
                 return {
                     "url": tab_info.get("url", ""),
                     "title": tab_info.get("title", ""),
                     "signal": "message_visible",
+                    "send_route": "message_visible",
                     "match_kind": str(composer_state.get("matchKind", "")),
                     "matched_hint": str(composer_state.get("matchedHint", "")),
                     "project_name": str(composer_state.get("projectName", "")),
                     **attach_fields,
                 }
             if bool(payload.get("composerEmpty")):
+                print("[send_route] composer_cleared", flush=True)
                 return {
                     "url": tab_info.get("url", ""),
                     "title": tab_info.get("title", ""),
                     "signal": "composer_cleared",
+                    "send_route": "composer_cleared",
                     "match_kind": str(composer_state.get("matchKind", "")),
                     "matched_hint": str(composer_state.get("matchedHint", "")),
                     "project_name": str(composer_state.get("projectName", "")),
@@ -5989,11 +5997,27 @@ def send_to_chatgpt_in_current_surface(
             time.sleep(0.5)
 
         if project_page_mode and last_probe_error:
+            resolved_tab, resolve_route = _resolve_request_anchor_conversation_url(text)
+            if resolved_tab is not None:
+                print(f"[send_route] {resolve_route}", flush=True)
+                return {
+                    "url": str(resolved_tab.get("url", "")),
+                    "title": str(resolved_tab.get("title", "")),
+                    "signal": "submitted_unconfirmed",
+                    "send_route": resolve_route,
+                    "match_kind": str(composer_state.get("matchKind", "")),
+                    "matched_hint": str(composer_state.get("matchedHint", "")),
+                    "project_name": str(composer_state.get("projectName", "")),
+                    "warning": last_probe_error,
+                    **attach_fields,
+                }
+            print(f"[send_route] {resolve_route}", flush=True)
             fallback_tab = last_tab or dict(page.front_tab)
             return {
                 "url": fallback_tab.get("url", ""),
                 "title": fallback_tab.get("title", ""),
                 "signal": "submitted_unconfirmed",
+                "send_route": resolve_route,
                 "match_kind": str(composer_state.get("matchKind", "")),
                 "matched_hint": str(composer_state.get("matchedHint", "")),
                 "project_name": str(composer_state.get("projectName", "")),
@@ -6180,19 +6204,112 @@ def read_chatgpt_conversation_dom(page: SafariChatPage) -> str:
 # Fetch-route labels used in diagnostics.
 FETCH_ROUTE_CURRENT_TAB = "current_tab"
 FETCH_ROUTE_CONVERSATION_TAB = "conversation_tab"
+FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB = "request_anchor_conversation_tab"
 FETCH_ROUTE_FALLBACK_CURRENT_TAB = "fallback_current_tab"
 FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND = "conversation_tab_not_found"
 FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR = "conversation_tab_read_error"
+FETCH_ROUTE_REQUEST_ANCHOR_TAB_NOT_FOUND = "request_anchor_tab_not_found"
+FETCH_ROUTE_REQUEST_ANCHOR_TAB_READ_ERROR = "request_anchor_tab_read_error"
+
+
+def _compact_anchor_text(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
+
+
+def _request_anchor_matches(body_text: str, request_text: str) -> bool:
+    """Return True when *body_text* appears to contain *request_text*.
+
+    ChatGPT's rendered DOM can flatten or drop whitespace between markdown
+    paragraphs, so this intentionally uses a compact whitespace-insensitive
+    match instead of a strict substring check.
+    """
+    compact_request = _compact_anchor_text(request_text)
+    if not compact_request:
+        return False
+    compact_body = _compact_anchor_text(body_text)
+    if not compact_body:
+        return False
+    if compact_request in compact_body:
+        return True
+    chunks = [
+        compact_request[index : index + 120]
+        for index in range(0, min(len(compact_request), 1800), 180)
+    ]
+    chunks = [chunk for chunk in chunks if len(chunk) >= 60]
+    if not chunks or chunks[0] not in compact_body:
+        return False
+    return sum(1 for chunk in chunks if chunk in compact_body) >= 2
+
+
+def _conversation_tab_candidates() -> list[dict[str, Any]]:
+    tabs = _enumerate_safari_tabs()
+    candidates = [
+        tab
+        for tab in tabs
+        if tab.get("conversation_id") and "chatgpt.com" in str(tab.get("url", ""))
+    ]
+    return sorted(
+        candidates,
+        key=lambda tab: (
+            not bool(tab.get("is_front_window") and tab.get("is_current_tab")),
+            not bool(tab.get("is_current_tab")),
+            not bool(tab.get("is_front_window")),
+            -int(tab.get("window_index", 0)),
+            -int(tab.get("tab_index", 0)),
+        ),
+    )
+
+
+def _find_safari_tab_by_request_anchor(
+    request_text: str,
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Find a ChatGPT conversation tab containing *request_text*.
+
+    Returns (tab, body_text, route).  When no tab matches, *tab* and
+    *body_text* are empty and route explains whether reads failed or no anchor
+    was found.
+    """
+    if not _compact_anchor_text(request_text):
+        return None, "", FETCH_ROUTE_REQUEST_ANCHOR_TAB_NOT_FOUND
+
+    saw_read_error = False
+    js_script = _build_visible_text_script(["main", "article", "body"])
+    for tab in _conversation_tab_candidates():
+        try:
+            text = _run_safari_javascript_in_tab(
+                int(tab["window_index"]), int(tab["tab_index"]), js_script
+            ).strip()
+        except BridgeError:
+            saw_read_error = True
+            continue
+        if text and _request_anchor_matches(text, request_text):
+            return tab, text, FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB
+
+    return (
+        None,
+        "",
+        FETCH_ROUTE_REQUEST_ANCHOR_TAB_READ_ERROR
+        if saw_read_error
+        else FETCH_ROUTE_REQUEST_ANCHOR_TAB_NOT_FOUND,
+    )
+
+
+def _resolve_request_anchor_conversation_url(request_text: str) -> tuple[dict[str, Any] | None, str]:
+    tab, _text, route = _find_safari_tab_by_request_anchor(request_text)
+    if tab is None:
+        return None, route
+    return tab, route
 
 
 def _read_chatgpt_dom_for_fetch(
     page: SafariChatPage,
     conversation_url: str = "",
-) -> tuple[str, str]:
+    request_anchor_text: str = "",
+) -> tuple[str, str, str]:
     """Read ChatGPT DOM text, preferring the conversation tab when a URL is given.
 
-    Returns (text, fetch_route) where fetch_route is one of the FETCH_ROUTE_*
-    constants.
+    Returns (text, fetch_route, resolved_conversation_url) where fetch_route is
+    one of the FETCH_ROUTE_* constants.
 
     Strategy:
     1. If *conversation_url* contains a conversation id, enumerate all Safari
@@ -6209,7 +6326,7 @@ def _read_chatgpt_dom_for_fetch(
             # Tab not found — fall through to current-tab fetch.
             try:
                 text = read_chatgpt_conversation_dom(page)
-                return text, FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND
+                return text, FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND, ""
             except BridgeError:
                 raise
         # Tab found — attempt direct JS read.
@@ -6219,26 +6336,52 @@ def _read_chatgpt_dom_for_fetch(
                 tab["window_index"], tab["tab_index"], js_script
             ).strip()
             if text:
-                return text, FETCH_ROUTE_CONVERSATION_TAB
+                return text, FETCH_ROUTE_CONVERSATION_TAB, str(tab.get("url", ""))
             # Empty result — fall back.
         except BridgeError:
             # Tab-specific read failed; fall back to current-tab fetch.
             try:
                 text = read_chatgpt_conversation_dom(page)
-                return text, FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR
+                return text, FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR, ""
             except BridgeError:
                 raise
 
         # Tab found but returned empty text — fall back to current tab.
         try:
             text = read_chatgpt_conversation_dom(page)
-            return text, FETCH_ROUTE_FALLBACK_CURRENT_TAB
+            return text, FETCH_ROUTE_FALLBACK_CURRENT_TAB, ""
+        except BridgeError:
+            raise
+
+    if request_anchor_text:
+        tab, text, route = _find_safari_tab_by_request_anchor(request_anchor_text)
+        if tab is not None:
+            return text, route, str(tab.get("url", ""))
+        try:
+            fallback_text = read_chatgpt_conversation_dom(page)
+            page_config = getattr(page, "config", None)
+            try:
+                current_tab = (
+                    frontmost_safari_tab_info(page_config, require_conversation=False)
+                    if page_config is not None
+                    else {}
+                )
+            except BridgeError:
+                current_tab = {}
+            current_url = str(current_tab.get("url", ""))
+            if (
+                page_config is not None
+                and _conversation_url_matches(current_url, page_config)
+                and _request_anchor_matches(fallback_text, request_anchor_text)
+            ):
+                return fallback_text, FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB, current_url
+            return fallback_text, route, ""
         except BridgeError:
             raise
 
     # No conversation_url or no conversation_id — use current-tab fetch.
     text = read_chatgpt_conversation_dom(page)
-    return text, FETCH_ROUTE_CURRENT_TAB
+    return text, FETCH_ROUTE_CURRENT_TAB, ""
 
 
 def read_chatgpt_conversation() -> str:
@@ -6254,6 +6397,7 @@ def _wait_for_chatgpt_reply_text(
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
     allow_project_page_wait: bool = False,
     conversation_url: str = "",
+    conversation_url_callback: Callable[[str], None] | None = None,
 ) -> str:
     with open_chatgpt_page(
         reset_chat=False,
@@ -6280,12 +6424,23 @@ def _wait_for_chatgpt_reply_text(
         stage = "initial"
         last_reply_readiness_signature = ""
         last_fetch_route = ""
+        last_resolved_conversation_url = _normalized_url(conversation_url)
         while True:
             try:
-                latest_text, fetch_route = _read_chatgpt_dom_for_fetch(page, conversation_url)
+                latest_text, fetch_route, resolved_conversation_url = _read_chatgpt_dom_for_fetch(
+                    page,
+                    conversation_url,
+                    request_anchor_text=request_text or "",
+                )
                 if fetch_route != last_fetch_route:
                     print(f"[fetch_route] {fetch_route}", flush=True)
                     last_fetch_route = fetch_route
+                normalized_resolved_url = _normalized_url(resolved_conversation_url)
+                if normalized_resolved_url and normalized_resolved_url != last_resolved_conversation_url:
+                    conversation_url = resolved_conversation_url
+                    last_resolved_conversation_url = normalized_resolved_url
+                    if conversation_url_callback is not None:
+                        conversation_url_callback(resolved_conversation_url)
             except BridgeError as exc:
                 if is_apple_event_timeout_text(str(exc)):
                     timeout_attempts += 1
@@ -6407,6 +6562,7 @@ def wait_for_issue_centric_reply_text(
     stage_callback: Callable[[ChatGPTWaitEvent], None] | None = None,
     allow_project_page_wait: bool = False,
     conversation_url: str = "",
+    conversation_url_callback: Callable[[str], None] | None = None,
 ) -> str:
     """Wait for a ChatGPT reply that satisfies the issue-centric (Plan A) contract extractor.
 
@@ -6423,6 +6579,7 @@ def wait_for_issue_centric_reply_text(
         stage_callback=stage_callback,
         allow_project_page_wait=allow_project_page_wait,
         conversation_url=conversation_url,
+        conversation_url_callback=conversation_url_callback,
     )
 
 

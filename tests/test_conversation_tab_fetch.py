@@ -194,6 +194,7 @@ class ReadChatgptDomForFetchTests(unittest.TestCase):
     def _mock_page(self, body_text: str = "page body") -> MagicMock:
         page = MagicMock()
         page.evaluate.return_value = body_text
+        page.config = {"conversation_url_keywords": ["/c/"]}
         return page
 
     def _tab(self, win=1, tab=1) -> dict:
@@ -209,25 +210,28 @@ class ReadChatgptDomForFetchTests(unittest.TestCase):
 
     def test_no_conversation_url_uses_current_tab(self) -> None:
         page = self._mock_page("body text")
-        text, route = bc._read_chatgpt_dom_for_fetch(page, conversation_url="")
+        text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(page, conversation_url="")
         self.assertEqual(route, bc.FETCH_ROUTE_CURRENT_TAB)
         self.assertEqual(text, "body text")
+        self.assertEqual(resolved_url, "")
 
     def test_conversation_tab_found_returns_conversation_tab_route(self) -> None:
         page = self._mock_page()
         tab = self._tab()
         with patch("_bridge_common._find_safari_tab_by_conversation_id", return_value=tab):
             with patch("_bridge_common._run_safari_javascript_in_tab", return_value="conv body"):
-                text, route = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
+                text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
         self.assertEqual(route, bc.FETCH_ROUTE_CONVERSATION_TAB)
         self.assertEqual(text, "conv body")
+        self.assertEqual(resolved_url, self.CONV_URL)
 
     def test_conversation_tab_not_found_falls_back_to_current(self) -> None:
         page = self._mock_page("fallback body")
         with patch("_bridge_common._find_safari_tab_by_conversation_id", return_value=None):
-            text, route = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
+            text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
         self.assertEqual(route, bc.FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND)
         self.assertEqual(text, "fallback body")
+        self.assertEqual(resolved_url, "")
 
     def test_conversation_tab_read_error_falls_back(self) -> None:
         page = self._mock_page("fallback after error")
@@ -237,26 +241,97 @@ class ReadChatgptDomForFetchTests(unittest.TestCase):
                 "_bridge_common._run_safari_javascript_in_tab",
                 side_effect=bc.BridgeError("JS error"),
             ):
-                text, route = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
+                text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
         self.assertEqual(route, bc.FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR)
         self.assertEqual(text, "fallback after error")
+        self.assertEqual(resolved_url, "")
 
     def test_conversation_tab_empty_body_falls_back(self) -> None:
         page = self._mock_page("fallback from empty")
         tab = self._tab()
         with patch("_bridge_common._find_safari_tab_by_conversation_id", return_value=tab):
             with patch("_bridge_common._run_safari_javascript_in_tab", return_value=""):
-                text, route = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
+                text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(page, self.CONV_URL)
         self.assertEqual(route, bc.FETCH_ROUTE_FALLBACK_CURRENT_TAB)
         self.assertEqual(text, "fallback from empty")
+        self.assertEqual(resolved_url, "")
+
+    def test_request_anchor_found_returns_request_anchor_route(self) -> None:
+        page = self._mock_page("wrong active tab")
+        tab = self._tab()
+        with patch("_bridge_common._conversation_tab_candidates", return_value=[tab]):
+            with patch(
+                "_bridge_common._run_safari_javascript_in_tab",
+                return_value="あなた:\nhello world\nChatGPT:\nThinking",
+            ):
+                text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(
+                    page,
+                    conversation_url="https://chatgpt.com/g/demo/project",
+                    request_anchor_text="hello\nworld",
+                )
+        self.assertEqual(route, bc.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB)
+        self.assertIn("hello world", text)
+        self.assertEqual(resolved_url, self.CONV_URL)
+
+    def test_request_anchor_not_found_reports_route_and_falls_back(self) -> None:
+        page = self._mock_page("active fallback")
+        tab = self._tab()
+        with patch("_bridge_common._conversation_tab_candidates", return_value=[tab]):
+            with patch("_bridge_common._run_safari_javascript_in_tab", return_value="unrelated"):
+                text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(
+                    page,
+                    conversation_url="https://chatgpt.com/g/demo/project",
+                    request_anchor_text="hello world",
+                )
+        self.assertEqual(route, bc.FETCH_ROUTE_REQUEST_ANCHOR_TAB_NOT_FOUND)
+        self.assertEqual(text, "active fallback")
+        self.assertEqual(resolved_url, "")
+
+    def test_request_anchor_current_conversation_fallback_resolves_url(self) -> None:
+        page = self._mock_page("あなた:\nhello world\nChatGPT:\nThinking")
+        tab = self._tab()
+        with patch("_bridge_common._conversation_tab_candidates", return_value=[tab]):
+            with patch("_bridge_common._run_safari_javascript_in_tab", return_value="unrelated"):
+                with patch(
+                    "_bridge_common.frontmost_safari_tab_info",
+                    return_value={"url": self.CONV_URL, "title": "ChatGPT"},
+                ):
+                    text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(
+                        page,
+                        conversation_url="https://chatgpt.com/g/demo/project",
+                        request_anchor_text="hello\nworld",
+                    )
+        self.assertEqual(route, bc.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB)
+        self.assertIn("hello world", text)
+        self.assertEqual(resolved_url, self.CONV_URL)
+
+    def test_request_anchor_read_error_reports_route_and_falls_back(self) -> None:
+        page = self._mock_page("active fallback")
+        tab = self._tab()
+        with patch("_bridge_common._conversation_tab_candidates", return_value=[tab]):
+            with patch(
+                "_bridge_common._run_safari_javascript_in_tab",
+                side_effect=bc.BridgeError("read failed"),
+            ):
+                text, route, resolved_url = bc._read_chatgpt_dom_for_fetch(
+                    page,
+                    conversation_url="https://chatgpt.com/g/demo/project",
+                    request_anchor_text="hello world",
+                )
+        self.assertEqual(route, bc.FETCH_ROUTE_REQUEST_ANCHOR_TAB_READ_ERROR)
+        self.assertEqual(text, "active fallback")
+        self.assertEqual(resolved_url, "")
 
     def test_fetch_route_constants_match_spec(self) -> None:
-        """Verify all five route constants have the expected string values."""
+        """Verify route constants have the expected string values."""
         self.assertEqual(bc.FETCH_ROUTE_CURRENT_TAB, "current_tab")
         self.assertEqual(bc.FETCH_ROUTE_CONVERSATION_TAB, "conversation_tab")
+        self.assertEqual(bc.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB, "request_anchor_conversation_tab")
         self.assertEqual(bc.FETCH_ROUTE_FALLBACK_CURRENT_TAB, "fallback_current_tab")
         self.assertEqual(bc.FETCH_ROUTE_CONVERSATION_TAB_NOT_FOUND, "conversation_tab_not_found")
         self.assertEqual(bc.FETCH_ROUTE_CONVERSATION_TAB_READ_ERROR, "conversation_tab_read_error")
+        self.assertEqual(bc.FETCH_ROUTE_REQUEST_ANCHOR_TAB_NOT_FOUND, "request_anchor_tab_not_found")
+        self.assertEqual(bc.FETCH_ROUTE_REQUEST_ANCHOR_TAB_READ_ERROR, "request_anchor_tab_read_error")
 
 
 if __name__ == "__main__":
