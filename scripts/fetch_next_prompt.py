@@ -1414,6 +1414,17 @@ def _apply_ic_fetch_handoff_state(
             # Clear the correction boundary — the correction cycle is done.
             "last_issue_centric_correction_request_text": "",
             "last_issue_centric_correction_send_hash": "",
+            # A valid reply was recovered, so any previous Safari timeout soft-wait
+            # diagnostic is no longer an active waiting condition.
+            "safari_timeout_soft_wait_count": 0,
+            "safari_timeout_soft_wait_reason": "",
+            "safari_timeout_soft_wait_fetch_route": "",
+            "safari_timeout_soft_wait_current_chat_session": "",
+            "safari_timeout_soft_wait_elapsed_seconds": 0,
+            "safari_timeout_soft_wait_max_count": 0,
+            "safari_timeout_soft_wait_max_elapsed_seconds": 0,
+            "safari_timeout_soft_wait_backoff_seconds": 0.0,
+            "safari_timeout_soft_wait_limit_exceeded": False,
         }
     )
 
@@ -1634,6 +1645,17 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         rotation_reason = rotation_reason or "late_completion"
     late_completion_observed = str(state.get("mode", "")).strip() == "await_late_completion"
 
+    def safari_timeout_soft_wait_enabled() -> bool:
+        mode = str(state.get("mode", "")).strip()
+        current_chat_session = str(state.get("current_chat_session", "")).strip()
+        return (
+            mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}
+            and "/c/" in current_chat_session
+            and bool(pending_request_hash)
+            and bool(pending_request_source)
+            and bool(request_text)
+        )
+
     def handle_wait_event(event: object) -> None:
         nonlocal rotation_requested, rotation_reason, late_completion_observed
         event_name = str(getattr(event, "name", "")).strip()
@@ -1665,6 +1687,33 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "partial_body_block_detected": bool(event_details.get("partial_body_block_detected", False)),
                     "open_body_blocks": list(event_details.get("open_body_blocks", [])),
                     "contract_parse_attempted": bool(event_details.get("contract_parse_attempted", False)),
+                }
+            )
+        elif event_name in {"safari_timeout_soft_wait", "safari_timeout_soft_wait_limit"}:
+            count = int(event_details.get("safari_timeout_soft_wait_count") or 0)
+            fetch_route = str(event_details.get("fetch_route", "")).strip()
+            conversation_url = str(event_details.get("conversation_url", "")).strip()
+            mutable_state.update(
+                {
+                    "mode": "waiting_prompt_reply",
+                    "safari_timeout_soft_wait_count": count,
+                    "safari_timeout_soft_wait_reason": str(event_details.get("reason", "")).strip(),
+                    "safari_timeout_soft_wait_fetch_route": fetch_route,
+                    "safari_timeout_soft_wait_current_chat_session": conversation_url,
+                    "safari_timeout_soft_wait_elapsed_seconds": int(
+                        event_details.get("safari_timeout_soft_wait_elapsed_seconds") or 0
+                    ),
+                    "safari_timeout_soft_wait_max_count": int(
+                        event_details.get("safari_timeout_soft_wait_max_count") or 0
+                    ),
+                    "safari_timeout_soft_wait_max_elapsed_seconds": int(
+                        event_details.get("safari_timeout_soft_wait_max_elapsed_seconds") or 0
+                    ),
+                    "safari_timeout_soft_wait_backoff_seconds": float(
+                        event_details.get("safari_timeout_soft_wait_backoff_seconds") or 0.0
+                    ),
+                    "safari_timeout_soft_wait_limit_exceeded": event_name == "safari_timeout_soft_wait_limit",
+                    "last_fetch_route": fetch_route,
                 }
             )
         save_state(mutable_state)
@@ -1699,6 +1748,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 allow_project_page_wait=(pending_request_signal == "submitted_unconfirmed"),
                 conversation_url=str(state.get("current_chat_session", "")).strip(),
                 conversation_url_callback=handle_conversation_url_resolved,
+                safari_timeout_soft_wait_enabled=safari_timeout_soft_wait_enabled(),
             )
         except IssueCentricReplyInvalid as exc:
             # Set raw_text so the common correction retry logic below handles this

@@ -579,15 +579,16 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         )
     if action == "fetch_next_prompt":
         route_note = issue_centric_route_note(final_state)
+        soft_note = safari_timeout_soft_wait_note(final_state)
         if route_note and "reply 待ち" in route_note:
-            return route_note.strip()
+            return f"{route_note}{soft_note}".strip()
         if pending_request_signal == "submitted_unconfirmed":
             return ic_delivery_pending_detail(
                 "新しいチャットへの送信は通った可能性が高いため、"
                 "同じ handoff は再送せず reply を待ってから再実行してください。",
                 final_state,
-            )
-        return "issue-centric contract reply が同じ current tab に出たら再実行してください。"
+            ) + soft_note
+        return f"issue-centric contract reply が同じ current tab に出たら再実行してください。{soft_note}"
     if action == "dispatch_issue_centric_codex_run":
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
         if note:
@@ -773,10 +774,17 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 " handoff 再送より先に、その report を archive して ChatGPT 返送導線へ戻してください。"
             )
         elif is_apple_event_timeout_text(error_message):
-            note = (
-                "Safari timeout が起きています。"
-                f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
-            )
+            if bool(final_state.get("safari_timeout_soft_wait_limit_exceeded")):
+                note = (
+                    "Safari AppleEvent timeout の soft wait 上限を超えました。"
+                    f"{safari_timeout_soft_wait_note(final_state)}"
+                    f" {safari_timeout_checklist_text()} 状態を確認してから --clear-error で再開してください。"
+                )
+            else:
+                note = (
+                    "Safari timeout が起きています。"
+                    f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
+                )
         elif pending_handoff_log:
             note = (
                 "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
@@ -938,6 +946,20 @@ def fetch_retry_diagnostics(history: list[str]) -> tuple[int, int]:
     return timeout_count, recovery_count
 
 
+def safari_timeout_soft_wait_note(state: dict[str, Any]) -> str:
+    count = int(state.get("safari_timeout_soft_wait_count") or 0)
+    if count <= 0:
+        return ""
+    elapsed = int(state.get("safari_timeout_soft_wait_elapsed_seconds") or 0)
+    route = str(state.get("safari_timeout_soft_wait_fetch_route", "")).strip() or "unknown"
+    limit = int(state.get("safari_timeout_soft_wait_max_count") or 0)
+    limit_part = f"/{limit}" if limit > 0 else ""
+    return (
+        " Safari AppleEvent timeout は一時過負荷として soft wait 済みです。"
+        f" count={count}{limit_part} elapsed={elapsed}s fetch_route={route}."
+    )
+
+
 def wait_for_codex_report(
     *,
     args: argparse.Namespace,
@@ -1071,6 +1093,7 @@ def run_command_with_heartbeat(
                         wait_suffix = " stage=extended_wait"
                     elif is_fetch_late_completion_state(live_state):
                         wait_suffix = " stage=late_completion_mode"
+                    wait_suffix += safari_timeout_soft_wait_note(live_state)
                 print(
                     f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
                     f"{describe_wait_message(action)}{wait_suffix}"
@@ -1104,6 +1127,10 @@ def summarize_run(
     blocked_guidance = blocked_next_guidance(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
     fetch_retry_timeouts, fetch_retry_recoveries = fetch_retry_diagnostics(history)
+    soft_wait_count = int(final_state.get("safari_timeout_soft_wait_count") or 0)
+    soft_wait_elapsed = int(final_state.get("safari_timeout_soft_wait_elapsed_seconds") or 0)
+    soft_wait_route = str(final_state.get("safari_timeout_soft_wait_fetch_route", "")).strip()
+    soft_wait_limit_exceeded = bool(final_state.get("safari_timeout_soft_wait_limit_exceeded"))
     safari_timeout_blocked = bool(final_state.get("error")) and is_apple_event_timeout_text(
         str(final_state.get("error_message", "")).strip()
     )
@@ -1196,6 +1223,10 @@ def summarize_run(
         f"- stale_codex_running_candidate: {stale_codex_running}",
         f"- fetch_retry_timeouts: {fetch_retry_timeouts}",
         f"- fetch_retry_recoveries: {fetch_retry_recoveries}",
+        f"- safari_timeout_soft_wait_count: {soft_wait_count}",
+        f"- safari_timeout_soft_wait_elapsed_seconds: {soft_wait_elapsed}",
+        f"- safari_timeout_soft_wait_fetch_route: {soft_wait_route}",
+        f"- safari_timeout_soft_wait_limit_exceeded: {soft_wait_limit_exceeded}",
         f"- safari_timeout_blocked: {safari_timeout_blocked}",
         f"- report_reference: {report_reference}",
         "",

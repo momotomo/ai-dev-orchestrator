@@ -2014,6 +2014,227 @@ class IssueCentricReplyWaitTests(unittest.TestCase):
         self.assertEqual(events[0].details["reply_readiness_status"], "reply_not_ready")
         self.assertTrue(events[0].details["thinking_visible"])
 
+    def test_wait_soft_waits_safari_timeout_after_conversation_tab_reply_pending(self) -> None:
+        raw_not_ready = "\n".join(
+            [
+                "あなた:",
+                "request body",
+                "ChatGPT:",
+                "思考中",
+            ]
+        )
+        raw_valid = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#2",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Run Codex.",
+            },
+            parts=[
+                block("codex", b64("Codex body")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": "#2",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Run Codex.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+
+        class _DummyPage:
+            def __init__(self) -> None:
+                self.wait_calls = 0
+
+            def wait_for_timeout(self, _: int) -> None:
+                self.wait_calls += 1
+
+        page = _DummyPage()
+        events: list[bridge_common.ChatGPTWaitEvent] = []
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {
+                "poll_interval_seconds": 0,
+                "apple_event_timeout_retry_count": 0,
+                "apple_event_timeout_retry_delay_seconds": 0,
+                "conversation_url_keywords": ["/c/"],
+            }, {"url": "https://chatgpt.com/c/demo", "title": "ChatGPT"}
+
+        with (
+            patch.object(bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                bridge_common,
+                "_read_chatgpt_dom_for_fetch",
+                side_effect=[
+                    (raw_not_ready, bridge_common.FETCH_ROUTE_CONVERSATION_TAB, "https://chatgpt.com/c/demo"),
+                    BridgeError("Safari JavaScript 実行 が AppleEvent timeout で止まりました。"),
+                    (raw_valid, bridge_common.FETCH_ROUTE_CONVERSATION_TAB, "https://chatgpt.com/c/demo"),
+                ],
+            ),
+        ):
+            result = bridge_common.wait_for_issue_centric_reply_text(
+                plan_a_extractor=(
+                    lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                        raw_text,
+                        after_text=after_text,
+                    )
+                ),
+                request_text="request body",
+                stage_callback=events.append,
+                conversation_url="https://chatgpt.com/c/demo",
+                safari_timeout_soft_wait_enabled=True,
+            )
+
+        self.assertEqual(result, raw_valid)
+        soft_events = [event for event in events if event.name == "safari_timeout_soft_wait"]
+        self.assertEqual(len(soft_events), 1)
+        self.assertEqual(soft_events[0].details["safari_timeout_soft_wait_count"], 1)
+        self.assertEqual(soft_events[0].details["fetch_route"], bridge_common.FETCH_ROUTE_CONVERSATION_TAB)
+
+    def test_wait_errors_when_safari_timeout_soft_wait_limit_is_exceeded(self) -> None:
+        raw_not_ready = "\n".join(["あなた:", "request body", "ChatGPT:", "思考中"])
+
+        class _DummyPage:
+            def wait_for_timeout(self, _: int) -> None:
+                return None
+
+        page = _DummyPage()
+        events: list[bridge_common.ChatGPTWaitEvent] = []
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {
+                "poll_interval_seconds": 0,
+                "apple_event_timeout_retry_count": 0,
+                "apple_event_timeout_retry_delay_seconds": 0,
+                "conversation_url_keywords": ["/c/"],
+            }, {"url": "https://chatgpt.com/c/demo", "title": "ChatGPT"}
+
+        with (
+            patch.object(bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                bridge_common,
+                "_read_chatgpt_dom_for_fetch",
+                side_effect=[
+                    (raw_not_ready, bridge_common.FETCH_ROUTE_CONVERSATION_TAB, "https://chatgpt.com/c/demo"),
+                    BridgeError("Safari JavaScript 実行 が AppleEvent timeout で止まりました。"),
+                    BridgeError("Safari JavaScript 実行 が AppleEvent timeout で止まりました。"),
+                ],
+            ),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                bridge_common.wait_for_issue_centric_reply_text(
+                    plan_a_extractor=(
+                        lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                            raw_text,
+                            after_text=after_text,
+                        )
+                    ),
+                    request_text="request body",
+                    stage_callback=events.append,
+                    conversation_url="https://chatgpt.com/c/demo",
+                    safari_timeout_soft_wait_enabled=True,
+                    safari_timeout_soft_wait_max_count=1,
+                )
+
+        self.assertIn("soft wait の上限", str(ctx.exception))
+        self.assertIn("safari_timeout_soft_wait_limit", [event.name for event in events])
+
+    def test_wait_does_not_soft_wait_without_target_conversation_url(self) -> None:
+        raw_not_ready = "\n".join(["あなた:", "request body", "ChatGPT:", "思考中"])
+
+        class _DummyPage:
+            def wait_for_timeout(self, _: int) -> None:
+                return None
+
+        page = _DummyPage()
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {
+                "poll_interval_seconds": 0,
+                "apple_event_timeout_retry_count": 0,
+                "apple_event_timeout_retry_delay_seconds": 0,
+                "conversation_url_keywords": ["/c/"],
+            }, {"url": "https://chatgpt.com/c/demo", "title": "ChatGPT"}
+
+        with (
+            patch.object(bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                bridge_common,
+                "_read_chatgpt_dom_for_fetch",
+                side_effect=[
+                    (raw_not_ready, bridge_common.FETCH_ROUTE_CONVERSATION_TAB, "https://chatgpt.com/c/demo"),
+                    BridgeError("Safari JavaScript 実行 が AppleEvent timeout で止まりました。"),
+                ],
+            ),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                bridge_common.wait_for_issue_centric_reply_text(
+                    plan_a_extractor=(
+                        lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                            raw_text,
+                            after_text=after_text,
+                        )
+                    ),
+                    request_text="request body",
+                    conversation_url="",
+                    safari_timeout_soft_wait_enabled=True,
+                )
+
+        self.assertIn("soft_wait_unavailable=target_conversation_url_missing", str(ctx.exception))
+
+    def test_wait_does_not_soft_wait_when_soft_wait_is_not_enabled(self) -> None:
+        raw_not_ready = "\n".join(["あなた:", "request body", "ChatGPT:", "思考中"])
+
+        class _DummyPage:
+            def wait_for_timeout(self, _: int) -> None:
+                return None
+
+        page = _DummyPage()
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {
+                "poll_interval_seconds": 0,
+                "apple_event_timeout_retry_count": 0,
+                "apple_event_timeout_retry_delay_seconds": 0,
+                "conversation_url_keywords": ["/c/"],
+            }, {"url": "https://chatgpt.com/c/demo", "title": "ChatGPT"}
+
+        with (
+            patch.object(bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                bridge_common,
+                "_read_chatgpt_dom_for_fetch",
+                side_effect=[
+                    (raw_not_ready, bridge_common.FETCH_ROUTE_CONVERSATION_TAB, "https://chatgpt.com/c/demo"),
+                    BridgeError("Safari JavaScript 実行 が AppleEvent timeout で止まりました。"),
+                ],
+            ),
+        ):
+            with self.assertRaises(BridgeError) as ctx:
+                bridge_common.wait_for_issue_centric_reply_text(
+                    plan_a_extractor=(
+                        lambda raw_text, after_text: fetch_next_prompt.parse_issue_centric_reply_for_fetch(
+                            raw_text,
+                            after_text=after_text,
+                        )
+                    ),
+                    request_text="request body",
+                    conversation_url="https://chatgpt.com/c/demo",
+                )
+
+        self.assertIn("soft_wait_unavailable=soft_wait_disabled", str(ctx.exception))
+
     def test_wait_returns_stalled_reply_after_late_completion(self) -> None:
         raw_stalled = "\n".join(
             [

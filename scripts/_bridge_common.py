@@ -334,6 +334,9 @@ APPLE_EVENT_TIMEOUT_MARKERS = (
     "AppleEventがタイムアウト",
     "AppleEvent timed out",
 )
+SAFARI_TIMEOUT_SOFT_WAIT_MAX_COUNT = 10
+SAFARI_TIMEOUT_SOFT_WAIT_MAX_ELAPSED_SECONDS = 600
+SAFARI_TIMEOUT_SOFT_WAIT_MAX_BACKOFF_SECONDS = 30.0
 
 
 class BridgeError(Exception):
@@ -6407,6 +6410,9 @@ def _wait_for_chatgpt_reply_text(
     allow_project_page_wait: bool = False,
     conversation_url: str = "",
     conversation_url_callback: Callable[[str], None] | None = None,
+    safari_timeout_soft_wait_enabled: bool = False,
+    safari_timeout_soft_wait_max_count: int = SAFARI_TIMEOUT_SOFT_WAIT_MAX_COUNT,
+    safari_timeout_soft_wait_max_elapsed_seconds: int = SAFARI_TIMEOUT_SOFT_WAIT_MAX_ELAPSED_SECONDS,
 ) -> str:
     with open_chatgpt_page(
         reset_chat=False,
@@ -6430,10 +6436,13 @@ def _wait_for_chatgpt_reply_text(
         extended_deadline = first_deadline + extended_timeout
         latest_text = ""
         timeout_attempts = 0
+        soft_timeout_count = 0
+        soft_timeout_started_at: float | None = None
         stage = "initial"
         last_reply_readiness_signature = ""
         last_fetch_route = ""
         last_resolved_conversation_url = _normalized_url(conversation_url)
+        soft_wait_conversation_url = last_resolved_conversation_url
         while True:
             try:
                 latest_text, fetch_route, resolved_conversation_url = _read_chatgpt_dom_for_fetch(
@@ -6463,8 +6472,89 @@ def _wait_for_chatgpt_reply_text(
                         if retry_delay_seconds > 0:
                             page.wait_for_timeout(int(retry_delay_seconds * 1000))
                         continue
+                    conversation_url_has_c_path = bool(
+                        soft_wait_conversation_url
+                        and _conversation_url_matches(soft_wait_conversation_url, config)
+                    )
+                    soft_wait_route_ok = last_fetch_route in {
+                        FETCH_ROUTE_CONVERSATION_TAB,
+                        FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB,
+                    }
+                    soft_wait_allowed = (
+                        safari_timeout_soft_wait_enabled
+                        and conversation_url_has_c_path
+                        and soft_wait_route_ok
+                        and bool(request_text)
+                    )
+                    if soft_wait_allowed:
+                        now = time.time()
+                        if soft_timeout_started_at is None:
+                            soft_timeout_started_at = now
+                        soft_timeout_count += 1
+                        soft_elapsed_seconds = max(0.0, now - soft_timeout_started_at)
+                        soft_limit_exceeded = (
+                            soft_timeout_count > max(0, int(safari_timeout_soft_wait_max_count))
+                            or soft_elapsed_seconds > max(0, int(safari_timeout_soft_wait_max_elapsed_seconds))
+                        )
+                        backoff_seconds = min(
+                            SAFARI_TIMEOUT_SOFT_WAIT_MAX_BACKOFF_SECONDS,
+                            max(retry_delay_seconds, poll_seconds)
+                            * (2 ** min(max(soft_timeout_count - 1, 0), 4)),
+                        )
+                        soft_details = {
+                            "safari_timeout_soft_wait_count": soft_timeout_count,
+                            "safari_timeout_soft_wait_elapsed_seconds": int(soft_elapsed_seconds),
+                            "safari_timeout_soft_wait_max_count": int(safari_timeout_soft_wait_max_count),
+                            "safari_timeout_soft_wait_max_elapsed_seconds": int(safari_timeout_soft_wait_max_elapsed_seconds),
+                            "safari_timeout_soft_wait_backoff_seconds": float(backoff_seconds),
+                            "fetch_route": last_fetch_route,
+                            "conversation_url": soft_wait_conversation_url,
+                            "conversation_url_has_c_path": conversation_url_has_c_path,
+                            "reason": "Safari AppleEvent timeout during fetch_next_prompt; temporary overload soft wait",
+                        }
+                        if stage_callback is not None:
+                            stage_callback(
+                                ChatGPTWaitEvent(
+                                    "safari_timeout_soft_wait_limit"
+                                    if soft_limit_exceeded
+                                    else "safari_timeout_soft_wait",
+                                    latest_text,
+                                    soft_details,
+                                )
+                            )
+                        if soft_limit_exceeded:
+                            raise BridgeError(
+                                f"{exc} Safari AppleEvent timeout soft wait の上限を超えました。"
+                                f" count={soft_timeout_count}/{int(safari_timeout_soft_wait_max_count)}"
+                                f" elapsed={int(soft_elapsed_seconds)}s/{int(safari_timeout_soft_wait_max_elapsed_seconds)}s"
+                                f" fetch_route={last_fetch_route or 'unknown'}"
+                                f" conversation_url_has_c_path={conversation_url_has_c_path}."
+                                f" {safari_timeout_checklist_text()}"
+                            ) from exc
+                        print(
+                            f"[soft_wait] fetch_next_prompt Safari AppleEvent timeout を一時過負荷として待機します。"
+                            f" count={soft_timeout_count}/{int(safari_timeout_soft_wait_max_count)}"
+                            f" backoff={backoff_seconds:.1f}s"
+                            f" route={last_fetch_route}",
+                            flush=True,
+                        )
+                        if backoff_seconds > 0:
+                            page.wait_for_timeout(int(backoff_seconds * 1000))
+                        continue
+                    soft_reason = "disabled"
+                    if not safari_timeout_soft_wait_enabled:
+                        soft_reason = "soft_wait_disabled"
+                    elif not conversation_url_has_c_path:
+                        soft_reason = "target_conversation_url_missing"
+                    elif not soft_wait_route_ok:
+                        soft_reason = f"fetch_route_not_safe:{last_fetch_route or 'unknown'}"
+                    elif not request_text:
+                        soft_reason = "pending_request_text_missing"
                     raise BridgeError(
                         f"{exc} fetch_next_prompt では Safari timeout を {timeout_attempts}/{total_attempts} 回確認しました。"
+                        f" soft_wait_unavailable={soft_reason}"
+                        f" fetch_route={last_fetch_route or 'unknown'}"
+                        f" conversation_url_has_c_path={conversation_url_has_c_path}."
                         f" {safari_timeout_checklist_text()}"
                     ) from exc
                 raise
@@ -6580,6 +6670,9 @@ def wait_for_issue_centric_reply_text(
     allow_project_page_wait: bool = False,
     conversation_url: str = "",
     conversation_url_callback: Callable[[str], None] | None = None,
+    safari_timeout_soft_wait_enabled: bool = False,
+    safari_timeout_soft_wait_max_count: int = SAFARI_TIMEOUT_SOFT_WAIT_MAX_COUNT,
+    safari_timeout_soft_wait_max_elapsed_seconds: int = SAFARI_TIMEOUT_SOFT_WAIT_MAX_ELAPSED_SECONDS,
 ) -> str:
     """Wait for a ChatGPT reply that satisfies the issue-centric (Plan A) contract extractor.
 
@@ -6597,6 +6690,9 @@ def wait_for_issue_centric_reply_text(
         allow_project_page_wait=allow_project_page_wait,
         conversation_url=conversation_url,
         conversation_url_callback=conversation_url_callback,
+        safari_timeout_soft_wait_enabled=safari_timeout_soft_wait_enabled,
+        safari_timeout_soft_wait_max_count=safari_timeout_soft_wait_max_count,
+        safari_timeout_soft_wait_max_elapsed_seconds=safari_timeout_soft_wait_max_elapsed_seconds,
     )
 
 
