@@ -22,11 +22,11 @@
 - 2 回目以降は既存どおり Codex 完了報告ベースで継続する
 - `initial_selection_stop`: ChatGPT が ready issue を選定して止まった場合は、`selected_ready_issue_ref` に書かれた ref を `--ready-issue-ref` に付けて再実行する
 - `human_review_needed`: ChatGPT が人レビューを求めた場合は `--resume` で補足入力へ進む
-- Safari fetch 待機は通常運用で 1800 秒前提。未完了なら追加 600 秒待機し、それでも未完了なら late completion mode で書き切りまで監視する
+- Safari fetch 待機は `bridge/browser_config.json` の `fetch_timeout_seconds` 前提。未完了なら `extended_fetch_timeout_seconds` で追加待機し、それでも未完了なら late completion mode で書き切りまで監視する
 - `max_execution_count` は上限であり、ChatGPT が `Codex 不要` を返した時は途中で正常停止しうる
 - `run_until_stop.py` は既定で継続実行する。archive 後の次 request / fetch へ進んでも、同じ report / same request は idempotency guard で再送しない
 - report ベース継続は通常、同じチャットで続ける
-- handoff / chat rotation は、1800 秒 + 600 秒を超えて late completion mode に入った reply を最後まで回収し、その reply を Codex に渡して使い切ったあと、次の ChatGPT request を送る前にだけ走る
+- handoff / chat rotation は、通常待機 + extended wait を超えて late completion mode に入った reply を最後まで回収し、その reply を実行 agent に渡して使い切ったあと、次の ChatGPT request を送る前にだけ走る
 - handoff request は、次チャットへそのまま貼る完成済みの最初のメッセージだけを返させる。要約メモは求めない
 - late completion 後の handoff/new-chat 前処理は `handoff_requested` → `handoff_received` → `chat_rotated` → `sent_prompt_request_from_report*` の順で見れば追いやすい
 - `sent_prompt_request_from_report_soft_wait` は、handoff 本文を新チャットへ送った可能性が高いため再送せず wait に入ったケースを表す
@@ -131,7 +131,7 @@ state がこの前提と違う場合は、下の `state を見た次の 1 手` �
 - 外部 worker repo 向けの最小例は `bridge/project_config.example.json` を見る。まず `worker_repo_path` を対象 repo へ合わせる
 - 旧 `repo_path` は後方互換のため `bridge_runtime_root` の alias として読まれる
 - report 後の request 既定文を変えたい場合は `report_request_next_todo` と `report_request_open_questions` を直す
-- Codex CLI の呼び方を変えたい場合は `codex_bin`、`codex_model`、`codex_sandbox`、`codex_timeout_seconds` を直す
+- 実行 agent を変えたい場合は `execution_agent` を使い、Codex CLI の呼び方を変えたい場合は `codex_bin`、`codex_model`、`codex_sandbox`、`codex_timeout_seconds` を直す
 
 ## 外部 worker repo 導入 3 ステップ
 
@@ -143,11 +143,11 @@ state がこの前提と違う場合は、下の `state を見た次の 1 手` �
 
 ## project config と browser / 環境準備の境界
 
-- `bridge/project_config.json` は repo 固有差分を置く。`project_name`、`bridge_runtime_root`、`worker_repo_path`、必要なら `worker_repo_markers`、Codex CLI 設定、request 既定文だけを持つ
+- `bridge/project_config.json` は repo 固有差分を置く。`project_name`、`bridge_runtime_root`、`worker_repo_path`、必要なら `worker_repo_markers`、実行 agent 設定、request 既定文だけを持つ
 - `codex_sandbox` を空のままにすると bridge は `--sandbox` を付けず、Codex の user / project `.codex/config.toml` に委ねる。project ごとに上書きしたい時だけ `codex_sandbox` を入れる
 - 初回 request 本文は config や state から自動生成せず、起動時のユーザー入力本文を正本として使い、bridge は固定の返答契約だけを自動付与する
 - `bridge/browser_config.json` は Safari 側の調整値を置く。`fetch_timeout_seconds`、`extended_fetch_timeout_seconds`、`poll_interval_seconds`、`apple_event_timeout_retry_count`、`apple_event_timeout_retry_delay_seconds`、`runner_heartbeat_seconds`、必要なら `chat_hint` と `project_page_url` を持つ
-- 通常運用の Safari fetch 待機は 1800 秒前提で扱い、既存チャットをそのまま使う前提は変えない
+- 通常運用の Safari fetch 待機は `bridge/browser_config.json` の秒数前提で扱い、既存チャットをそのまま使う前提は変えない
 - Safari current tab、ChatGPT ログイン、`Allow JavaScript from Apple Events`、Automation 許可は環境準備であり config には入れない
 - `bridge_runtime_root` は bridge の runtime 実ファイルを持つ現在の workspace root、`worker_repo_path` は Codex が作業する対象 repo
 - 現在の最小導入では `bridge_runtime_root` は通常 `.` のままでよく、別 repo 運用では `worker_repo_path` だけを変える

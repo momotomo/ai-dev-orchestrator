@@ -10,14 +10,15 @@ for issue states, GitHub Projects usage, and review flow.
 Use this document for Epic sizing, planned issue grain, ready-promotion gates,
 and the initial seed backlog shape.
 
-This is still a planning and GitHub-operations phase.
-It does **not** mean the bridge runtime is already fully issue-centric.
+This began as a planning and GitHub-operations document. It remains the seed
+catalog / backlog-shape reference rather than a promise of generic runtime
+automation support.
 
 The first-party path remains:
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 The repo remains a narrow first-party workflow, not a generic browser
 automation framework.
@@ -26,8 +27,7 @@ The current runtime assumptions also remain:
 
 - same-chat by default
 - handoff / new-chat only as exception paths
-- Safari timeout assumptions of 1800 seconds normal wait and 600 seconds
-  extended wait
+- Safari timeout assumptions configured in `bridge/browser_config.json`
 - unsupported paths are not guaranteed and remain at the operator's own risk
 
 ## Why A Seed Catalog Exists
@@ -173,7 +173,7 @@ Use an Epic when:
 - the work will likely need several `planned` or `ready` child issues
 - the theme needs a durable boundary and outcome statement
 
-Do **not** use an Epic as a direct Codex implementation target.
+Do **not** use an Epic as a direct execution-agent implementation target.
 
 A good Epic should capture:
 

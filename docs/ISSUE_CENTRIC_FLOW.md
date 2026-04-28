@@ -3,12 +3,12 @@
 This document defines the source-of-truth layers for the phased move toward
 issue-centric operation in `ai-dev-orchestrator`.
 
-It is a transition document, not a claim that the bridge runtime is already
-fully migrated. The current first-party path remains:
+It is a transition document for the issue-centric operating model. The current
+first-party path remains:
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 This repository is still a narrow first-party workflow, not a generic browser
 automation framework.
@@ -19,20 +19,17 @@ Normal operation is being re-centered around a ready issue as the execution
 unit. The goal is to let the bridge carry issue numbers and state transitions
 instead of acting as a long-form meaning transport between tools.
 
-Phase 1 in this repository is docs-first:
+The initial phase in this repository was docs-first:
 
 - redefine source of truth in repo docs
 - add minimal ready-issue and completion-comment templates
 - align README and contribution guidance
 
-This phase does **not** yet change:
+This document does **not** broaden:
 
-- bridge runtime implementation
-- bridge state machine behavior
 - same-chat as the default continuation mode
 - handoff / new-chat as the exception path
-- the Safari fetch wait assumptions of 1800 seconds normal wait and 600
-  seconds extended wait
+- the Safari fetch wait assumptions configured in `bridge/browser_config.json`
 
 ## Source-Of-Truth Layers
 
@@ -45,7 +42,7 @@ Use the following layers consistently:
   comments
 
 A ready issue is the smallest execution unit that is explicit enough for one
-Codex implementation phase without needing a second hidden task definition.
+implementation phase without needing a second hidden task definition.
 
 ## Current Runtime Relationship
 
@@ -120,10 +117,10 @@ When this path is used:
 ## Normal Flow During The Transition
 
 1. Use ChatGPT Projects for upstream design context, tradeoffs, and planning.
-2. Capture the next Codex-sized execution unit in a ready issue.
+2. Capture the next execution-agent-sized unit in a ready issue.
 3. Use repository docs for durable operating rules and constraints.
-4. Run the current first-party path on ChatGPT Projects + macOS Safari +
-   Codex CLI.
+4. Run the current first-party path on ChatGPT Projects + macOS Safari with
+   the configured execution agent.
 5. If a first request or override is needed, point it at the ready issue rather
    than inventing a parallel source of truth.
 6. Record implementation results in commits, PRs, and an issue completion

@@ -18,7 +18,7 @@ issue-centric runtime の **first-party path** は以下の組み合わせを前
 | 要素 | 値 |
 |------|------|
 | AI フロントエンド | ChatGPT Projects (macOS Safari) |
-| コード実行 worker | Codex CLI |
+| コード実行 worker | `execution_agent` で選択した Codex CLI または GitHub Copilot |
 | チャットセッション方針 | same-chat 継続 (既定) |
 | 初回 request の source of truth | ユーザー入力本文 |
 | ChatGPT reply 取得方式 | Plan A BODY base64 transport (優先) / visible DOM text (fallback) |

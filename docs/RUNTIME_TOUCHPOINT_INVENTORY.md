@@ -1,17 +1,17 @@
 # Runtime Touchpoint Inventory
 
 This document inventories the minimum bridge/runtime touchpoints that would
-matter for a future move toward `ready`-issue-first execution in
+matter for the staged move toward `ready`-issue-first execution in
 `ai-dev-orchestrator`.
 
 It is intentionally an inventory / staging / boundary-definition document.
-It does **not** implement runtime migration.
+It does **not** promise broad runtime behavior outside the first-party path.
 
 The first-party path remains:
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 This repository remains a narrow first-party workflow, not a generic browser
 automation framework.
@@ -51,8 +51,8 @@ During this inventory phase, all of the following stay unchanged:
   the normal entry
 - same-chat remains the default continuation mode
 - handoff / new-chat remains the exception path
-- Safari timeout assumptions remain `1800 + 600` seconds before late-completion
-  handling
+- Safari timeout assumptions follow `bridge/browser_config.json` before
+  late-completion handling
 - unsupported paths remain operator-risk paths with no behavioral guarantee
 
 ## Current Runtime Touchpoints

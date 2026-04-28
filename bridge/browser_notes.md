@@ -20,11 +20,11 @@
 
 ## 基本方針
 
-- bridge 全体は state 管理、ChatGPT 送信 / 回収、Codex 1 回起動、archive を担当する
+- bridge 全体は state 管理、ChatGPT 送信 / 回収、実行 agent 1 回起動、archive を担当する
 - Safari current tab を使う自動化部分は、ChatGPT 送信と回収だけを担当する
 - Safari 起動、ログイン、アカウント切り替え、新規チャット作成は行わない
 - Chrome は自動化対象にしない
-- 重い既存チャットでも通常運用はその current tab をそのまま使い、fetch 待機は 30 分前提で扱う
+- 重い既存チャットでも通常運用はその current tab をそのまま使い、fetch 待機は `bridge/browser_config.json` の秒数前提で扱う
 - Safari の現在タブが ChatGPT でない、対象会話 URL でない、または対象チャット識別に失敗した場合は停止する
 - 停止時に会話本文を読める場合は `logs/raw_chatgpt_prompt_dump_*.txt` を残す
 
@@ -35,7 +35,8 @@
 - `conversation_url_keywords`: 対象会話ページとみなす URL 断片
 - `chat_hint`: 対象チャットを識別したいときの軽いヒント文字列
 - `require_chat_hint`: `true` の場合、ヒントが見つからなければ停止する
-- `fetch_timeout_seconds`: fetch 側で ChatGPT reply を待つ上限秒数。通常運用の既定値は 1800 秒で、reply を見つけたらこの秒数より前でもすぐ返る
+- `fetch_timeout_seconds`: fetch 側で ChatGPT reply を待つ上限秒数。tracked config の現在値は 60 秒で、reply を見つけたらこの秒数より前でもすぐ返る
+- `extended_fetch_timeout_seconds`: 通常待機後の追加待機秒数。tracked config の現在値は 30 秒
 - `poll_interval_seconds`: fetch 中に会話 DOM を見直す間隔
 - `apple_event_timeout_retry_count`: Safari AppleEvent timeout 時に追加で試す回数。通常 poll には影響しない
 - `apple_event_timeout_retry_delay_seconds`: timeout retry の前に待つ秒数。timeout 時だけ効く
