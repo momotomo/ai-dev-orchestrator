@@ -370,15 +370,18 @@ Use these assumptions consistently:
 - the `ready` issue is the execution-unit source of truth
 - the backlog may use three layers: `Epic -> planned parent -> ready`
   implementation issue
-- Codex directly implements only the `ready` implementation issue
+- the configured execution agent directly implements only the `ready`
+  implementation issue
 - the current open `ready` count should usually stay at `0` or `1`
 - ChatGPT is the judgment and review authority
 - the bridge is the execution and routing authority
-- Codex is the implementation authority for one bounded `ready` issue
-- the first-party path remains `ChatGPT Projects + macOS Safari + Codex CLI`
+- the configured execution agent is the implementation authority for one
+  bounded `ready` issue
+- the first-party path remains `ChatGPT Projects + macOS Safari` plus a
+  configured execution agent (`codex` or `github_copilot`)
 - `same-chat` remains the default continuation mode
 - `handoff / new chat` remains the exception path
-- Safari timeout expectations remain `1800 + 600`
+- Safari timeout expectations follow `bridge/browser_config.json`
 - `submitted_unconfirmed` and `pending_request_signal` remain important current
   delivery-safety signals
 - unsupported paths remain best-effort and at the operator's own risk
@@ -766,18 +769,18 @@ For the current dispatcher / orchestrator boundary:
   - a generation that was explicitly sent through legacy fallback is treated
     as invalidated and is not reused by recovery or request preparation
 
-## Bridge To Codex Contract
+## Bridge To Execution Agent Contract
 
-### Bridge To Codex Input
+### Bridge To Execution Agent Input
 
-The bridge should send Codex this minimum context:
+The bridge should send the configured execution agent this minimum context:
 
 - `repo`
 - `target_issue`
 - `request`
 - `trigger_comment` (optional)
 
-`request` should stay natural-language, but it should instruct Codex to:
+`request` should stay natural-language, but it should instruct the agent to:
 
 - confirm the target issue
 - inspect issue comments when needed
@@ -786,9 +789,9 @@ The bridge should send Codex this minimum context:
 - follow the repo's Git operating rules
 
 When ChatGPT returns `CHATGPT_CODEX_BODY`, the bridge should decode that body
-and register it as a comment on the target issue before Codex runs.
-Codex should then treat the issue body, issue comments, `AGENTS.md` if present,
-and repo docs as the durable sources it reads directly.
+and register it as a comment on the target issue before the execution agent
+runs. The agent should then treat the issue body, issue comments, `AGENTS.md`
+if present, and repo docs as the durable sources it reads directly.
 
 The current implementation can now prepare the decoded body, register it as the
 trigger comment, assemble the downstream launch payload, and hand that payload
@@ -799,9 +802,9 @@ It has **not** yet implemented broader `codex_run + close_current_issue`
 automation outside the narrow follow-up path, broader Projects update, or a
 full runtime cutover.
 
-### Codex To Bridge Output
+### Execution Agent To Bridge Output
 
-Codex should return:
+The execution agent should return:
 
 - `result`
 - `target_issue`
@@ -816,9 +819,9 @@ Codex should return:
 
 Use those results with these meanings:
 
-- `completed`: Codex left a completion report comment on the issue
-- `consultation_needed`: Codex left a consultation comment on the issue
-- `blocked`: Codex left a blocked-reason comment on the issue
+- `completed`: the agent left a completion report comment on the issue
+- `consultation_needed`: the agent left a consultation comment on the issue
+- `blocked`: the agent left a blocked-reason comment on the issue
 - `failed`: a bridge or runtime execution failure happened before a valid issue
   outcome was recorded
 

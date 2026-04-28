@@ -8,17 +8,19 @@ layers and transition framing.
 Use this document for the practical GitHub issue, GitHub Projects, review, and
 PR flow.
 Use [docs/ISSUE_CENTRIC_RUNTIME_CONTRACT.md](ISSUE_CENTRIC_RUNTIME_CONTRACT.md)
-for the bridge / ChatGPT / Codex contract that future runtime work should
-converge toward.
+for the bridge / ChatGPT / execution-agent contract that runtime work should
+keep aligned with.
 
-This is still a docs-first / GitHub-operations phase.
-It does **not** mean the bridge runtime is already fully issue-centric.
+This document started as docs-first GitHub operations guidance. The runtime now
+has a bounded issue-centric path, but this document still describes the
+operator-facing GitHub issue / Project policy rather than promising generic
+automation support.
 
 The first-party path remains:
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 This repository remains a narrow first-party workflow, not a generic browser
 automation framework.
@@ -33,15 +35,11 @@ Phase 2 focuses on the GitHub operating surface:
 - review expectations
 - PR and completion-comment handoff points
 
-This phase does **not** yet change:
+This phase does **not** broaden:
 
-- bridge runtime implementation
-- bridge state machine behavior
-- issue-number-based runtime orchestration
 - the current same-chat default
 - handoff / new-chat as the exception path
-- the Safari timeout assumptions of 1800 seconds normal wait and 600 seconds
-  extended wait
+- the configured Safari timeout assumptions
 
 Unsupported paths still have no behavioral guarantee and remain at the
 operator's own risk.
@@ -51,7 +49,7 @@ operator's own risk.
 Use these operating rules consistently:
 
 - `1 issue = 1 phase = one coherent value bundle`
-- only `ready` issues are direct Codex implementation targets
+- only `ready` issues are direct implementation targets
 - `planned` issues may still be split, merged, or rewritten
 - the GitHub issue is the execution-unit source of truth
 - repo docs remain the permanent-rules source of truth
@@ -72,8 +70,8 @@ Use the GitHub operating surfaces like this:
   current state
 - GitHub Projects: queue visibility and state mirroring for operational
   tracking
-- Codex: implement one `ready` issue, then post the completion comment and link
-  the diff
+- execution agent: implement one `ready` issue, then post the completion
+  comment and link the diff
 - Pull request: reviewable implementation artifact and merge vehicle
 - Repo docs: durable rules, workflow policy, and public explanation
 
@@ -88,10 +86,10 @@ Use at least these six states:
 - `planned`: candidate work that still allows decomposition, merging, or
   reframing
 - `ready`: bounded work with explicit scope and acceptance criteria; direct
-  Codex target
+  execution-agent target
 - `in_progress`: currently being implemented against the ready issue
-- `review`: Codex implementation is finished enough for diff review and issue
-  review
+- `review`: execution-agent implementation is finished enough for diff review
+  and issue review
 - `done`: accepted result, with implementation records and completion context in
   place
 - `blocked`: progress is paused because a dependency, decision, failure, or
@@ -99,7 +97,7 @@ Use at least these six states:
 
 ### `planned`
 
-Use `planned` when the work is real but not yet direct Codex input.
+Use `planned` when the work is real but not yet direct execution-agent input.
 
 - splitting or merging is allowed
 - acceptance criteria may still move
@@ -119,7 +117,8 @@ At minimum, a `ready` issue should include:
 - related docs or related issues
 - Codex notes or implementation constraints when needed
 
-Only `ready` issues should be used as the direct implementation unit for Codex.
+Only `ready` issues should be used as the direct implementation unit for the
+configured execution agent.
 
 ### `in_progress`
 
@@ -141,7 +140,7 @@ During `review`:
 - decide whether the issue is truly done, still blocked, or needs follow-up
   work
 
-Codex completion does **not** automatically mean `done`.
+Execution-agent completion does **not** automatically mean `done`.
 
 ### `done`
 

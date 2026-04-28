@@ -1,12 +1,13 @@
 # ai-dev-orchestrator
 
-`ai-dev-orchestrator` is a macOS + Safari automation bridge between ChatGPT and Codex.
+`ai-dev-orchestrator` is a macOS + Safari automation bridge between ChatGPT
+Projects and a local execution agent.
 
 Its job is simple in principle:
 
-1. ask ChatGPT for the next one-phase Codex prompt
-2. run Codex once against your target repository
-3. take the Codex report and send it back to ChatGPT
+1. ask ChatGPT for the next one-phase execution prompt
+2. run the configured agent once against your target repository
+3. take the agent report and send it back to ChatGPT
 4. continue to the next request when it is safe to do so
 
 This repository is optimized for a very specific workflow, not for generic browser automation.
@@ -92,22 +93,22 @@ When you do use free-form input:
   the result can return there afterward
 - do not use the text to silently replace the normal `ready`-issue-first path
 
-Before you start, it is often worth spending a few manual messages in ChatGPT to align the task size, constraints, and what should count as a single Codex phase.
+Before you start, it is often worth spending a few manual messages in ChatGPT to align the task size, constraints, and what should count as a single execution phase.
 
 ## What This Tool Is For
 
 This bridge is for people who want to keep a long-running implementation loop going between:
 
-- ChatGPT, which decides the next one-phase task for Codex
-- Codex, which performs exactly one implementation phase and writes a report
+- ChatGPT, which decides the next one-phase implementation task
+- an execution agent, which performs exactly one implementation phase and writes a report
 
 The normal loop is:
 
 1. you start the bridge
 2. on the first request in the current runtime, you normally provide the
    current `ready` issue reference
-3. ChatGPT returns the next Codex prompt
-4. Codex runs once and writes a report
+3. ChatGPT returns the next execution prompt
+4. the configured agent runs once and writes a report
 5. the bridge sends that report back to ChatGPT
 6. ChatGPT returns the next prompt
 
@@ -118,7 +119,7 @@ The bridge is intentionally conservative in many places, but it is not a safety 
 Good fit:
 
 - you already use ChatGPT Projects
-- you want ChatGPT to plan the next one-phase Codex task repeatedly
+- you want ChatGPT to plan the next one-phase implementation task repeatedly
 - you are comfortable supervising an automation loop
 - you can tolerate Safari/UI-driven fragility
 
@@ -139,7 +140,8 @@ This repository assumes all of the following:
 - Safari
 - ChatGPT in Safari
 - the ChatGPT **Project** feature
-- Codex CLI installed locally
+- Codex CLI installed locally, or GitHub CLI / Copilot available for
+  `execution_agent: github_copilot`
 - Apple Events / Safari automation enabled
 
 This is not designed around:
@@ -157,9 +159,11 @@ The current bridge expects that you already have a ChatGPT Project and are opera
 Use this tool at your own risk.
 
 - It automates real browser actions.
-- It depends heavily on ChatGPT UI structure, Safari behavior, macOS Automation permissions, and Codex CLI behavior.
-- ChatGPT UI changes, Safari behavior changes, or Codex CLI changes can break it without warning.
-- It can consume Codex usage aggressively if you let it keep running.
+- It depends heavily on ChatGPT UI structure, Safari behavior, macOS Automation permissions, and execution-agent behavior.
+- ChatGPT UI changes, Safari behavior changes, Codex CLI changes, or GitHub Copilot CLI/API behavior changes can break it without warning.
+- Display-off, sleep, lock-screen, and unattended background operation are not guaranteed.
+- Unsupported paths are best-effort only and remain your responsibility.
+- It can consume Codex or Copilot usage aggressively if you let it keep running.
 - It is safety-biased, but not foolproof.
 - You are still responsible for reviewing prompts, changes, reports, Git actions, and repository state.
 
@@ -172,7 +176,7 @@ It is often better to spend a little time talking to ChatGPT manually first.
 For example, before starting the bridge, you may want to:
 
 - narrow the scope of the current task
-- decide what Codex should and should not touch
+- decide what the execution agent should and should not touch
 - align on how small a “one phase” should be
 - clarify any domain-specific constraints
 
@@ -201,7 +205,7 @@ Target project: melody-craft-studio
 Target repo: /Users/you/projects/melody-craft-studio
 Ready issue: #123 sample browser wording cleanup
 Use the ready issue as the execution-unit source of truth
-Please return the next one-phase Codex prompt.
+Please return the next one-phase execution prompt.
 ```
 
 Or even shorter:
@@ -210,7 +214,7 @@ Or even shorter:
 Target repo: /Users/you/projects/melody-craft-studio
 Ready issue: #123
 Use the ready issue and keep the next phase inside the sample browser only
-Please return the next one-phase Codex prompt.
+Please return the next one-phase execution prompt.
 ```
 
 The bridge sends your body as written and appends only the reply contract it needs for parsing.
@@ -265,15 +269,23 @@ Typical local setup is:
 4. optionally set `execution_agent` to `github_copilot` to use the GitHub Copilot CLI path instead of Codex
 5. optionally set `agent_model` to specify the model for the active provider (empty = provider default)
 
+`execution_agent` is a single active worker choice. Use `codex` for the local
+Codex CLI path, or `github_copilot` when your environment has GitHub CLI /
+Copilot configured and you want the Copilot wrapper path to produce the bridge
+report.
+
 Browser timing and Safari-specific behavior live in:
 
 - [bridge/browser_config.json](bridge/browser_config.json)
 
-This repository currently treats Safari fetch waiting as:
+The tracked browser configuration currently treats Safari fetch waiting as:
 
-- 1800 seconds normal timeout
-- then 600 seconds extended wait
+- 60 seconds normal timeout
+- then 30 seconds extended wait
 - then late-completion monitoring if needed
+
+For longer unattended waits, adjust [bridge/browser_config.json](bridge/browser_config.json)
+locally before running.
 
 Runtime state, prompt / report artifacts, and live logs are intended to stay
 local. The repository keeps templates, docs, and `.gitkeep` placeholders, but
@@ -313,9 +325,9 @@ The normal day-one flow is:
 1. start `scripts/start_bridge.py`
 2. type the first ChatGPT request yourself
 3. the bridge appends the fixed reply contract
-4. ChatGPT returns the next Codex prompt
-5. Codex runs once
-6. the bridge sends the Codex report back to ChatGPT
+4. ChatGPT returns the next execution prompt
+5. the configured agent runs once
+6. the bridge sends the agent report back to ChatGPT
 
 After that, continuation is normally report-based.
 
@@ -351,7 +363,7 @@ After the first request, the normal continuation is report-based.
 
 That means:
 
-- Codex writes a report to the bridge outbox
+- the configured agent writes a report to the bridge outbox
 - the bridge sends that report back to ChatGPT
 - ChatGPT returns the next one-phase prompt
 
@@ -397,10 +409,10 @@ In short:
 
 Handoff / new-chat rotation is not the default.
 
-It is only intended for heavy-chat recovery cases, especially when a reply had to go through:
+It is only intended for heavy-chat recovery cases, especially when a reply had to go through the configured:
 
-- 1800-second timeout
-- then 600-second extended wait
+- normal timeout
+- then extended wait
 - then late-completion monitoring
 
 When that happens, the bridge may decide that the **next** ChatGPT request should be sent only after creating a fresh chat inside the same ChatGPT Project.
@@ -413,7 +425,7 @@ The key idea is:
 So the order is:
 
 1. the heavy reply is fully recovered
-2. that reply is used for the Codex phase
+2. that reply is used for the execution-agent phase
 3. only before the next ChatGPT request, the bridge may rotate into a fresh project chat
 
 That means handoff is not “normal continuation” and not “cycle cleanup.” It is a conditional preprocessing step before the next ChatGPT send.
@@ -511,7 +523,7 @@ Common failure classes include:
 - ChatGPT Project page layout changed
 - Project-page composer detection changed
 - ChatGPT reply took too long
-- Codex CLI auth expired
+- Codex CLI or GitHub Copilot auth expired
 - a handoff was recovered but not actually sent
 - a report exists but recovery / archive order was interrupted
 
@@ -529,7 +541,7 @@ If a run stops unexpectedly, check these first:
 1. Safari current tab is still the intended ChatGPT surface
 2. Safari Automation / Apple Events permission is still valid
 3. ChatGPT Project page or conversation UI did not drift
-4. Codex CLI auth is still valid
+4. Codex CLI or GitHub Copilot auth is still valid for the selected execution agent
 5. the chat may have become too heavy and entered long-wait / late-completion behavior
 
 In many cases, those five checks are more useful than reading raw state first.
@@ -542,7 +554,7 @@ This tool depends strongly on:
 - ChatGPT Project UI
 - project page composer behavior
 - macOS Automation permissions
-- Codex CLI behavior and configuration
+- Codex CLI or GitHub Copilot behavior and configuration
 - local filesystem layout in this repository
 
 If any of those change, behavior may drift or break.
@@ -552,7 +564,7 @@ This is especially true for:
 - ChatGPT project-page composer detection
 - same-chat vs project-page surface detection
 - Safari tab targeting
-- Codex CLI authentication
+- execution-agent authentication
 
 ## What This Tool Does Not Guarantee
 
@@ -580,7 +592,7 @@ You should still review:
 
 - the first request you type
 - the prompts coming back from ChatGPT
-- Codex output and report contents
+- execution-agent output and report contents
 - Git state in the target repository
 - any repeated retries or unusual stops
 

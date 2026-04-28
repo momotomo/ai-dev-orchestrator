@@ -12,9 +12,9 @@ rename are still manual human actions.
 
 Pick one and adjust it manually in GitHub settings if you decide to publish.
 
-1. Bridge ChatGPT Projects and Codex CLI to iterate one implementation phase at a time through Safari-driven local automation.
-2. Local Safari-based bridge between ChatGPT Projects and Codex CLI for phase-by-phase prompt generation, execution, and report continuation.
-3. Opinionated macOS automation that loops ChatGPT Project prompts into Codex work and feeds Codex reports back for the next phase.
+1. Bridge ChatGPT Projects and local execution agents to iterate one implementation phase at a time through Safari-driven automation.
+2. Local Safari-based bridge between ChatGPT Projects and Codex or GitHub Copilot for phase-by-phase prompt generation, execution, and report continuation.
+3. Opinionated macOS automation that loops ChatGPT Project prompts into a configured coding agent and feeds reports back for the next phase.
 
 ## Website / Homepage Guidance
 
@@ -49,6 +49,7 @@ Use with care:
 - `browser-automation`
 - `chatgpt-projects`
 - `openai-codex`
+- `github-copilot`
 
 Those can be accurate, but they also increase the risk of people assuming this
 repo is a generic framework instead of a narrow, environment-dependent tool.

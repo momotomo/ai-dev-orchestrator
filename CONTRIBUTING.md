@@ -18,7 +18,7 @@ This repo is strongly dependent on:
 - ChatGPT Projects
 - Safari
 - macOS Automation / Apple Events
-- Codex CLI
+- Codex CLI or GitHub Copilot, selected through `execution_agent`
 
 If a proposal assumes headless automation, generic browser support, or API-only operation, it is probably outside the intended scope.
 
@@ -28,7 +28,7 @@ Please keep these assumptions in mind:
 
 - repo docs are the permanent rules source of truth
 - during the current transition, the ready issue is the normal execution-unit source of truth
-- only `ready` issues should be direct Codex implementation targets
+- only `ready` issues should be direct implementation targets
 - Epic and `planned` issues should stay flexible enough to allow future split and merge decisions
 - the current bridge runtime may still use a user-authored first ChatGPT request when that entry path or override path is used
 - the bridge may append reply contracts, but it should not silently invent the initial request body
@@ -58,7 +58,7 @@ If you are filing a bug, it is especially helpful to include:
   - for example: `start_bridge.py`, `--status`, `--doctor`, `--resume`, `--clear-error`
 - the relevant `--status` and `--doctor` output
 - a short reproduction sequence
-- whether Codex CLI auth looked healthy
+- whether Codex CLI or GitHub Copilot auth looked healthy for the selected execution agent
 
 For stop / recovery bugs, `--status` and `--doctor` usually help more than raw state alone.
 

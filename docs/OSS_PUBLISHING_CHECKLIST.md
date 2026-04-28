@@ -43,7 +43,7 @@ The following are not fully owned by Codex and should be treated as manual publi
 - repository-level permissions
 - ChatGPT Project naming and settings
 - Safari / macOS Automation permissions
-- Codex CLI login / auth refresh
+- Codex CLI or GitHub Copilot login / auth refresh
 - final review of whether publishing this automation is appropriate
 
 If a task happens in GitHub settings, account settings, browser settings, OS settings, or ChatGPT product settings, assume human action is required unless you explicitly perform it yourself outside Codex.
@@ -68,7 +68,8 @@ Before calling the repo “ready”, confirm:
 - Safari is really the intended supported browser
 - macOS Automation and Apple Events are still required and documented
 - ChatGPT Project feature is a hard prerequisite and remains visible in README
-- Codex CLI is still the intended worker runtime
+- Codex CLI remains supported and GitHub Copilot is documented as the
+  `execution_agent: github_copilot` runtime path
 - `bridge/browser_config.json` still reflects the current default timeout assumptions
 - the current heavy-chat model is still accurate:
   - same-chat by default
@@ -87,7 +88,7 @@ Before publishing, confirm the repo still clearly says all of the following:
 - the current first-request path is explained as a transitional runtime / override path, not as a contradiction to ready-issue normal operation
 - the bridge appends reply contracts but does not invent the first task body
 - the tool is safety-biased but not guaranteed safe
-- the tool can consume Codex usage aggressively
+- the tool can consume Codex or Copilot usage aggressively
 - Safari / ChatGPT UI changes may break it
 - the tool is environment-dependent and should be used at the operator’s own risk
 
@@ -140,6 +141,8 @@ You are probably ready to publish when all of these are true:
 - major failure modes are called out
 - manual responsibilities are separated from Codex-owned changes
 - runtime junk is not tracked
+- local config such as `bridge/project_config.json`, runtime state, inbox /
+  outbox files, and logs stay out of commits
 
 If any of those are still fuzzy, publish later.
 
