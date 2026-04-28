@@ -8,17 +8,19 @@ layers and transition framing.
 Use this document for the practical GitHub issue, GitHub Projects, review, and
 PR flow.
 Use [docs/ISSUE_CENTRIC_RUNTIME_CONTRACT.md](ISSUE_CENTRIC_RUNTIME_CONTRACT.md)
-for the bridge / ChatGPT / Codex contract that future runtime work should
-converge toward.
+for the bridge / ChatGPT / execution-agent contract that runtime work should
+keep aligned with.
 
-This is still a docs-first / GitHub-operations phase.
-It does **not** mean the bridge runtime is already fully issue-centric.
+This document started as docs-first GitHub operations guidance. The runtime now
+has a bounded issue-centric path, but this document still describes the
+operator-facing GitHub issue / Project policy rather than promising generic
+automation support.
 
 The first-party path remains:
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 This repository remains a narrow first-party workflow, not a generic browser
 automation framework.
@@ -33,15 +35,11 @@ Phase 2 focuses on the GitHub operating surface:
 - review expectations
 - PR and completion-comment handoff points
 
-This phase does **not** yet change:
+This phase does **not** broaden:
 
-- bridge runtime implementation
-- bridge state machine behavior
-- issue-number-based runtime orchestration
 - the current same-chat default
 - handoff / new-chat as the exception path
-- the Safari timeout assumptions of 1800 seconds normal wait and 600 seconds
-  extended wait
+- the configured Safari timeout assumptions
 
 Unsupported paths still have no behavioral guarantee and remain at the
 operator's own risk.
@@ -51,7 +49,7 @@ operator's own risk.
 Use these operating rules consistently:
 
 - `1 issue = 1 phase = one coherent value bundle`
-- only `ready` issues are direct Codex implementation targets
+- only `ready` issues are direct implementation targets
 - `planned` issues may still be split, merged, or rewritten
 - the GitHub issue is the execution-unit source of truth
 - repo docs remain the permanent-rules source of truth
@@ -72,8 +70,8 @@ Use the GitHub operating surfaces like this:
   current state
 - GitHub Projects: queue visibility and state mirroring for operational
   tracking
-- Codex: implement one `ready` issue, then post the completion comment and link
-  the diff
+- execution agent: implement one `ready` issue, then post the completion
+  comment and link the diff
 - Pull request: reviewable implementation artifact and merge vehicle
 - Repo docs: durable rules, workflow policy, and public explanation
 
@@ -88,10 +86,10 @@ Use at least these six states:
 - `planned`: candidate work that still allows decomposition, merging, or
   reframing
 - `ready`: bounded work with explicit scope and acceptance criteria; direct
-  Codex target
+  execution-agent target
 - `in_progress`: currently being implemented against the ready issue
-- `review`: Codex implementation is finished enough for diff review and issue
-  review
+- `review`: execution-agent implementation is finished enough for diff review
+  and issue review
 - `done`: accepted result, with implementation records and completion context in
   place
 - `blocked`: progress is paused because a dependency, decision, failure, or
@@ -99,7 +97,7 @@ Use at least these six states:
 
 ### `planned`
 
-Use `planned` when the work is real but not yet direct Codex input.
+Use `planned` when the work is real but not yet direct execution-agent input.
 
 - splitting or merging is allowed
 - acceptance criteria may still move
@@ -119,7 +117,8 @@ At minimum, a `ready` issue should include:
 - related docs or related issues
 - Codex notes or implementation constraints when needed
 
-Only `ready` issues should be used as the direct implementation unit for Codex.
+Only `ready` issues should be used as the direct implementation unit for the
+configured execution agent.
 
 ### `in_progress`
 
@@ -141,7 +140,7 @@ During `review`:
 - decide whether the issue is truly done, still blocked, or needs follow-up
   work
 
-Codex completion does **not** automatically mean `done`.
+Execution-agent completion does **not** automatically mean `done`.
 
 ### `done`
 
@@ -261,6 +260,271 @@ Keep the backlog readable with these minimum rules:
 - keep GitHub Projects as a list or grouping surface; the issue body and
   `state:*` label remain the authoritative operating record
 
+## Duplicate Merge and Follow-Up Cutting Rules
+
+### When to merge duplicate planned issues
+
+Two `planned` issues are duplicates when all of the following apply:
+
+- they describe the same bounded work or theme, even if wording differs
+- one could be closed without losing any candidate slice or open question
+  that the other does not already hold
+- keeping both alive would force an unnecessary choice between them at
+  promotion time
+
+When merging:
+
+1. pick the surviving issue that has the clearer scope, title, and context
+2. move any candidate slices or open questions from the closing issue into
+   the surviving issue before closing
+3. close the duplicate with a short note pointing to the surviving issue
+4. update any parent Epic or `planned` cross-references accordingly
+
+Do **not** merge issues that cover meaningfully different future slices even
+if they share the same Epic track.
+Keep them separate and let the `planned` label carry the distinction.
+
+### When to cut a follow-up issue
+
+Cut a follow-up issue when at least one of the following applies:
+
+- review finds unresolved work that does not fit cleanly inside the
+  acceptance criteria of the completed issue
+- the completed issue would need its scope silently stretched to absorb
+  the work
+- the work is real and durable but was deliberately out of scope for this
+  phase and should land in a later phase
+
+Do **not** cut a follow-up when the work can be absorbed honestly into an
+existing `planned` issue without distorting it.
+Add a note to the relevant `planned` issue instead.
+
+When you do cut a follow-up:
+
+- write it as `planned` if it still needs decomposition before it becomes
+  a direct Codex target
+- write it as `ready` only if it is already bounded and passes the ready gate
+- link it back to the same Epic or parent `planned` issue as the completed issue
+- cut at most one follow-up per review pass unless multiple independent themes
+  each need their own separate tracking record
+
+### Zero-ready promotion principle
+
+When open `state:ready` reaches zero:
+
+- do not force any `planned` issue into `ready` immediately
+- review the backlog with one question: what is the single most bounded,
+  actionable next slice?
+- promote only that one slice to `ready`
+- leave all other `planned` issues as `planned` even if they are nearly ready
+- if nothing is clearly ready to promote right now, zero open `ready` is a
+  valid steady state until the next review pass
+
+`ready` is a scarce execution slot, not a quota to keep filled at all times.
+
+## Backlog Curation Review Triggers
+
+Use this section alongside the rules in
+[Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules)
+to answer the question: **when does a trigger fire during a backlog review pass?**
+
+The rules above say what to do when a trigger fires.
+This section says which review signals should cause each trigger to fire.
+
+### Merge trigger
+
+Merge is worth considering when you see at least one of the following during a
+review pass:
+
+- two `planned` issues describe work that is indistinguishable from each other
+  when you try to write separate acceptance criteria for both
+- a `planned` issue has become a subset of another open `planned` issue after
+  recent scoping work
+- promotion time would force a choice between two `planned` issues covering the
+  same theme, with no meaningful distinction to guide the choice
+
+**Basic action**: merge toward the issue with the clearer scope, title, and
+Epic alignment; close the other with a short note pointing to the survivor.
+
+Do **not** fire this trigger just because two issues share the same Epic or
+track. Shared track is not enough.
+
+### Split trigger
+
+Split is worth considering when you see at least one of the following:
+
+- a `planned` or `ready` issue has grown to cover two or more independent value
+  bundles that could each be reviewed separately
+- implementation started on a `ready` issue and review found that a meaningful
+  part of the scope is not actually needed for the original acceptance criteria
+- the issue would need to be kept in `in_progress` or `review` much longer than
+  one phase because two separable themes are tangled inside it
+
+**Basic action**: write a new `planned` issue for the split-off scope; keep
+the original issue tight to its original acceptance criteria; link both back
+to the same Epic or parent `planned` issue.
+
+Do **not** fire this trigger as a way to make a large issue look smaller
+without actually reducing scope.
+
+### Archival trigger
+
+Archival is worth considering when you see at least one of the following:
+
+- a `planned` issue has not moved toward `ready` across multiple backlog review
+  passes and no review pass has surfaced a reason to promote it
+- the context that originally motivated the `planned` issue has changed enough
+  that the issue would need to be rewritten substantially before it could
+  become a direct Codex target
+- a `planned` issue was predicated on a design decision or dependency that has
+  since been resolved in a different direction
+
+**Basic action**: close the issue with a short note explaining why it is no
+longer active; if the underlying theme is still real, add a note to the parent
+Epic or surviving `planned` issue so the context is not lost.
+
+Archival is not the same as abandonment. It means the issue is no longer in
+the active backlog but the context is preserved.
+
+### Follow-up cutting trigger
+
+Follow-up cutting is worth considering when you see at least one of the
+following:
+
+- review of a completed `done` issue surfaces unresolved work that does not
+  belong inside that issue's acceptance criteria
+- implementation revealed a real adjacent problem that was intentionally kept
+  out of scope during this phase
+- a `review` pass finds that the only way to accept the current issue is to
+  defer a specific bounded piece of work into a separate future slice
+
+**Basic action**: check first whether an existing `planned` parent can absorb
+the work honestly; if yes, add a note there instead of cutting a new issue; if
+no existing parent can absorb it without distortion, cut a new `planned` issue
+(or `ready` if already bounded) and link it to the same Epic.
+
+### Using triggers during a zero-ready review pass
+
+When open `state:ready` reaches zero and you run a backlog review, use the
+trigger rules in this order:
+
+1. scan `planned` issues for merge triggers first — reducing duplicates before
+   promoting reduces future noise
+2. scan for archival triggers — issues that are no longer active should not
+   compete for promotion attention
+3. scan `done` issues completed since the last review for follow-up cutting
+   triggers — absorb into existing `planned` first, cut new only when needed
+4. scan for split triggers in any `planned` issue you are considering for
+   promotion — split before promoting, not after
+5. after the above clean-up, apply the zero-ready promotion principle: choose
+   the single most bounded, actionable next slice and promote only that one
+   to `ready`
+
+This order keeps the backlog honest before adding new work, not after.
+
+## Backlog Curation Calibration Examples
+
+Use this section as a reference point when running a backlog curation review
+pass.
+Each completed example below shows which curation rule or trigger applies and
+what the correct action was.
+When a review signal during a new pass resembles one of these examples, use the
+matching rule from
+[Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules)
+or
+[Backlog Curation Review Triggers](#backlog-curation-review-triggers)
+to guide the decision.
+
+### How to use this section
+
+During a review pass:
+
+1. identify the signal you see in the current backlog (a duplicate, a scope
+   question, an inactive issue, an unresolved follow-up, or a promotion
+   decision)
+2. find the closest calibration example below
+3. follow the rule or trigger referenced by that example
+4. if no example matches closely, go directly to the rule and trigger sections
+
+The examples are not exhaustive.
+They are calibration points — anchors that show the rules applied to real
+decisions in this repository.
+
+### #11 — first accepted ready slice (cadence calibration point)
+
+`#11 Ready: confirm labels-first GitHub bootstrap as the initial operating route`
+
+**What this example shows**: the first slice from a `planned` issue (#7)
+promoted to `ready` and completed successfully through the full
+`ready → in_progress → review → done` loop.
+
+**Calibration use**: when deciding whether a `planned` issue is ready for
+promotion, compare against #11's scope size.
+If the candidate slice is significantly larger than #11 was, consider whether
+it needs to be split first.
+Relevant rule: [Ready-Issue To Review Flow](#ready-issue-to-review-flow) and
+[Planned-To-Ready Promotion Pattern](#planned-to-ready-promotion-pattern).
+
+### #12 — zero-ready cadence (backlog cadence calibration point)
+
+`#12 Ready: define one-next-ready cadence for the labels-first backlog`
+
+**What this example shows**: after a `done` issue, the open `ready` queue
+returned to zero and the next `ready` was promoted as a single bounded slice
+rather than filling the queue.
+
+**Calibration use**: when open `ready` reaches zero, use #12 as the reference
+for what "promote only one" looks like in practice.
+If you are tempted to promote more than one `planned` issue at once, check
+whether each candidate is actually #12-sized and independently reviewable.
+Relevant rule: [Backlog Curation Cadence](#backlog-curation-cadence) and
+[Zero-ready promotion principle](#zero-ready-promotion-principle).
+
+### #37 — duplicate merge / follow-up cutting / zero-ready rule itself (rule calibration point)
+
+`#37 Ready: document duplicate merge and follow-up cutting rules for zero-ready backlog curation`
+
+**What this example shows**: a docs-only slice that added the rule itself for
+duplicate merging, follow-up cutting, and zero-ready promotion.
+No runtime changes.
+
+**Calibration use**: when you see two `planned` issues that look like
+duplicates, check whether they meet the three-condition test from #37 before
+merging.
+When review surfaces unresolved work, check the follow-up cutting conditions
+from #37 before cutting a new issue.
+When open `ready` reaches zero, use the zero-ready promotion principle from #37.
+Relevant rule: [Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules).
+
+### #38 — review triggers (trigger calibration point)
+
+`#38 Ready: document review triggers for merge, split, archive, and follow-up decisions during backlog curation`
+
+**What this example shows**: a docs-only slice that added the trigger rubric —
+the signals that cause merge, split, archival, and follow-up cutting to fire
+during a review pass.
+No runtime changes.
+
+**Calibration use**: when you are running a review pass and a signal appears
+(for example, two issues look similar, or a `planned` issue has not moved in
+several passes), use the trigger rubric from #38 to decide whether to act.
+Use the zero-ready review pass ordering from #38 to sequence your review
+actions.
+Relevant rule: [Backlog Curation Review Triggers](#backlog-curation-review-triggers).
+
+### Role summary: how the four sections work together
+
+| Section | Answers |
+|---|---|
+| [Backlog Curation Cadence](#backlog-curation-cadence) | When to run a review pass |
+| [Duplicate Merge and Follow-Up Cutting Rules](#duplicate-merge-and-follow-up-cutting-rules) | What to do when a trigger fires |
+| [Backlog Curation Review Triggers](#backlog-curation-review-triggers) | When a trigger fires |
+| This section | How past decisions illustrate the above |
+
+Use them in that order during a review pass: cadence tells you when, triggers
+tell you what to look for, rules tell you what to do, and calibration examples
+show what it looked like in practice.
+
 ## GitHub Projects Usage
 
 If you use GitHub Projects, keep the setup minimal.
@@ -279,6 +543,10 @@ state model.
 For an initial bootstrap, a labels-first setup plus a plain Project list view is
 acceptable.
 `gh` is optional for this step; GitHub UI or direct API calls are also valid.
+
+See [Minimal Bootstrap Invariants](#minimal-bootstrap-invariants) for the
+conditions under which labels-first remains acceptable and the minimum rules
+for keeping Project and label state coherent.
 
 ## Minimal Label Taxonomy
 
@@ -302,6 +570,124 @@ Optional work-type labels can stay narrow:
 
 If you use both Project `State` and `state:*` labels, keep them synchronized.
 Do not let labels become a second conflicting state system.
+
+See [Minimal Bootstrap Invariants](#minimal-bootstrap-invariants) for the
+essential / optional label distinction and the guardrail rules.
+
+## Minimal Bootstrap Invariants
+
+Use this section as the authoritative reference for keeping GitHub Project and
+label bootstrap minimal and coherent in this repository.
+
+These invariants define the operational floor — the smallest set of rules that
+preserve issue-centric backlog honesty without creating a heavy second workflow
+surface.
+
+The first completed implementation of labels-first bootstrap is `#11`.
+This section documents the invariants that make that bootstrap sustainable
+going forward.
+
+### Source-of-truth ordering
+
+When a GitHub Project item, a `state:*` label, and an issue body disagree,
+resolve in this order:
+
+1. **issue body / completion comment / state record** — authoritative source
+   of truth for scope, acceptance criteria, and current state
+2. **`state:*` label** — mirrors operating state on the issue surface; update
+   to match the issue body
+3. **GitHub Project item** — mirrors operating state for queue visibility;
+   update last, to match the issue body and label
+
+In practice: fix the issue body first, update the label next, then bring the
+Project item into sync.
+
+Never adjust scope or acceptance criteria in the issue body to rationalize a
+Project field value.
+
+### Labels-first bootstrap condition
+
+A labels-first setup — using only `state:*` labels with no Project State field
+— is acceptable when all of the following hold:
+
+- the backlog is small enough that label scan gives sufficient queue visibility
+- no automated workflow depends on the Project State field
+- label and issue state coherence can be maintained manually without significant
+  overhead
+- a Project State field has not yet been justified by backlog size or automation
+  need
+
+When any of those conditions fails, add the Project State field and keep it
+synchronized with `state:*` labels from that point forward.
+
+### Minimal Project / label sync rules
+
+When both a GitHub Project `Status` field and `state:*` labels are in use,
+apply these minimum rules:
+
+- keep label and Project Status in agreement at the end of each review pass
+- if label and Project Status disagree, treat the `state:*` label as correct
+  and update the Project Status to match
+- when closing an issue as `done`, update both the `state:done` label and the
+  Project Status to `Done` before closing
+
+Batch updates are acceptable.
+The invariant is that no issue stays permanently mismatched between label and
+Project.
+
+### Essential labels
+
+The following labels are required for the issue-centric operating model to
+function:
+
+| Label | Purpose |
+|---|---|
+| `state:planned` | Backlog candidate; decomposition still allowed |
+| `state:ready` | Bounded execution unit; direct Codex target |
+| `state:done` | Accepted result with coherent implementation records |
+| `track:ops` | GitHub operations and process bootstrap track |
+
+Without `state:planned`, `state:ready`, and `state:done`, the
+`planned → ready → done` loop cannot be expressed as label state.
+At least one `track:*` label is required to keep theming visible without
+issue-title scanning.
+
+### Optional labels
+
+The following labels are optional — add them only when they provide clear
+queue or filter benefit:
+
+| Label | When to add |
+|---|---|
+| `state:in_progress` | When active implementation status adds queue clarity |
+| `state:review` | When review-in-progress state aids operator awareness |
+| `state:blocked` | When a blocked issue needs visibility distinct from `planned` |
+| `type:epic` | When a parent grouping issue needs explicit Epic marking |
+| `track:docs` | When docs-only work needs separation from ops |
+| `track:runtime` | When runtime-focused work needs its own track label |
+
+Do not pre-populate optional labels that have no issues attached.
+
+### Labels-as-second-workflow guardrail
+
+Labels become a second conflicting workflow when any of the following happens:
+
+- label state disagrees with the issue body and neither is updated to resolve
+  the conflict
+- label combinations express compound state (for example, two `state:*` labels
+  on the same issue)
+- labels carry information that belongs in the issue body (for example,
+  priority flags, checklist-style labels, or sub-phase labels)
+- labels are changed without updating the issue body or Project item, leaving
+  three-way disagreement
+
+To stay on the right side of this boundary:
+
+- keep label meaning to state and track taxonomy only
+- if a label creates ambiguity about which surface is correct, remove it and
+  consolidate into the issue body
+- prefer fewer labels that map cleanly to the state model over a richer
+  taxonomy that drifts out of sync with issue bodies
 
 ## Ready-Issue To Review Flow
 

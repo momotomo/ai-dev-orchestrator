@@ -1,0 +1,27 @@
+{
+  "pack_id": "ai-dev-orchestrator.required-files.v1",
+  "title": "ai-dev-orchestrator required files bootstrap pack",
+  "description": "Canonical minimum repo-side files required for using ai-dev-orchestrator safely in a fresh target repository.",
+  "required_files": [
+    {
+      "path": "AGENTS.md",
+      "template": "templates/AGENTS.md",
+      "purpose": "Primary repo-side operating contract for Codex or bridge-driven coding agents.",
+      "minimum_anchors": [
+        "## Repository Scope",
+        "## Working Rules",
+        "## Verification"
+      ]
+    },
+    {
+      "path": ".github/copilot-instructions.md",
+      "template": "templates/copilot-instructions.md",
+      "purpose": "GitHub Copilot-facing instructions that stay aligned with AGENTS.md during bridge handoff flows.",
+      "minimum_anchors": [
+        "## Required Reading",
+        "## Delivery Rules",
+        "## Verification Rules"
+      ]
+    }
+  ]
+}

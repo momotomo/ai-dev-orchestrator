@@ -6,10 +6,73 @@
   "worker_repo_markers": [
     "go.mod"
   ],
+  "github_repository": "",
+  "github_project_url": "",
+  "github_project_state_field_name": "State",
+  "github_project_default_issue_state": "",
+  "github_project_in_progress_state": "in_progress",
+  "github_project_review_state": "review",
+  "github_project_done_state": "done",
+  "execution_agent": "codex",
+  "agent_model": "",
+  "github_copilot_bin": "gh",
+  "_notes_github_copilot_wrapper": {
+    "summary": "github_copilot execution_agent で model (例: sonnet-4.6) を指定するには custom wrapper を使います。",
+    "gh_direct_limitation": "'github_copilot_bin': 'gh' の場合、gh copilot suggest は --model を受け付けないため agent_model は CLI 引数に含まれません。",
+    "wrapper_usage": "scripts/github_copilot_wrapper.py を github_copilot_bin に指定すると --model <agent_model> が wrapper に渡ります。",
+    "example_config_stub": {
+      "_note": "疎通確認専用。stub は --report-file モードで必ず失敗します (stub safety guard)。",
+      "execution_agent": "github_copilot",
+      "agent_model": "gpt-4o-mini",
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_stub.py"
+    },
+    "example_config_real": {
+      "_note": "実運用用。GitHub Models API (gpt-4o-mini) を使用。事前に 'gh auth login' が必要。",
+      "execution_agent": "github_copilot",
+      "agent_model": "gpt-4o-mini",
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py --exec /absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_provider_real.py"
+    },
+    "example_config_copilot_cli": {
+      "_note": "推奨: wrapper 経由で copilot CLI を使用。wrapper が bridge report 契約を担保します。PATH に 'copilot' コマンドが必要。",
+      "execution_agent": "github_copilot",
+      "agent_model": "claude-sonnet-4.6",
+      "github_copilot_bin": "/absolute/path/to/ai-dev-orchestrator/scripts/github_copilot_wrapper.py",
+      "github_copilot_autopilot": false,
+      "github_copilot_reasoning_effort": "high"
+    },
+    "example_config_copilot_direct": {
+      "_note": "直接 copilot CLI 呼び出し (後方互換)。stdout extractor が fallback で動作しますが、planning notes のみの場合に bridge report が生成されない可能性があります。",
+      "execution_agent": "github_copilot",
+      "agent_model": "claude-sonnet-4.6",
+      "github_copilot_bin": "copilot",
+      "github_copilot_autopilot": false,
+      "github_copilot_reasoning_effort": "high"
+    },
+    "model_aware_provider": "wrapper が --exec オプションを受け取った場合、その provider に --model を転送します。例: github_copilot_wrapper.py --exec /usr/local/bin/my-provider",
+    "note": "_notes_* キーは project_config_warnings には影響しません。このフィールドはドキュメント目的のみです。"
+  },
   "codex_bin": "codex",
   "codex_model": "",
   "codex_sandbox": "",
   "codex_timeout_seconds": 7200,
   "report_request_next_todo": "前回 report を踏まえて、対象 repo の次の 1 フェーズ分の Codex 用 prompt を作成してください。",
-  "report_request_open_questions": "未解決事項があれば安全側で補ってください。"
+  "report_request_open_questions": "未解決事項があれば安全側で補ってください。",
+  "_notes_project_sync_alert_webhook": {
+    "summary": "project_state_sync_failed が発生したとき、alert payload を generic webhook へ POST します。",
+    "usage": "project_sync_alert_webhook_url に POST 先 URL を設定すると有効になります。空文字列のままにすると webhook delivery はスキップされます。",
+    "payload": "JSON body: family / sync_status / issue_ref / project_url / project_item_id / project_state_field / project_state_value / runtime_mode / runtime_action / detected_at / hash / source_note",
+    "delivery": "bounded retry: 最大 3 attempts (初回 + retry 2 回)。retry delay は固定 1秒→3秒。delivery_failed のときのみ retry。same hash 二重送信なし。delivery failure は hard error にはなりません。",
+    "retry_policy": "max_attempts=3, retry_delays=(1, 3) 秒固定。exponential backoff / jitter なし。1 run 内で完結。",
+    "timing": "payload が送られるのは run_until_stop.py の finish() ステップ内 (final_state 確定後) です。",
+    "config_validation": "URL は静的チェックのみ (疎通確認なし)。http:// または https:// で始まる必要があります。不正な URL は doctor の project_sync_alert_webhook_config 行に config_warning として表示されます。runtime hard error にはなりません。",
+    "troubleshooting_delivery_failed": {
+      "step1_url": "URL が正しいか確認してください (scheme が http/https、タイポなし)。",
+      "step2_permissions": "webhook endpoint が外部 POST を受け付けているか確認してください (認証トークン、IP 制限など)。",
+      "step3_endpoint": "受信側 endpoint が稼働しているか確認してください (応答コードが 2xx になっているか)。",
+      "step4_network": "bridge を実行しているマシンからそのホストへネットワーク疎通があるか確認してください。",
+      "step5_logs": "logs/ ディレクトリの最新ログで delivery error の詳細を確認してください。state.json の last_project_sync_alert_delivery_error も参照できます。"
+    },
+    "signal_boundary": "runtime_error / project_sync_warning / alert_delivery_failed / webhook_config_warning はそれぞれ独立した信号です。config_warning が出ていても runtime は継続します。"
+  },
+  "project_sync_alert_webhook_url": ""
 }

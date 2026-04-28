@@ -15,7 +15,7 @@ The first-party path remains:
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 The bridge remains a narrow first-party workflow, not a generic browser
 automation framework.

@@ -2,9 +2,11 @@
 
 ===BRIDGE_SUMMARY===
 - summary: [今回の 1 フェーズで何をしたか]
+- issue_context: [issue-centric codex_run の時だけ target issue / trigger comment。不要なら なし]
 - changed: [主要ファイル。なければ なし]
 - verify: [確認結果。未実施なら未実施]
 - next_state: codex_done
+- result: [completed | consultation_needed | blocked | failed]
 - live_ready: [live 1 周確認へ進める状態か。条件付きなら一言]
 - risks: [残課題や注意点。なければ なし]
 ===END_BRIDGE_SUMMARY===
@@ -29,3 +31,7 @@
 - next_state: codex_done
 - live_ready: [live 1 周確認へ進める状態か]
 - [次に引き継ぐ注意点]
+
+5. Issue-Centric Context
+
+- [issue-centric codex_run の時だけ target issue / trigger comment を短く書く。不要なら なし]

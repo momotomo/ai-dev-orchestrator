@@ -42,7 +42,11 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     project_config = project_config or load_project_config()
     parser = argparse.ArgumentParser(description="bridge/inbox/codex_prompt.md を入力に Codex を 1 回だけ起動します。")
     parser.add_argument("--codex-bin", default=str(project_config.get("codex_bin", DEFAULT_CODEX_BIN)), help="Codex CLI コマンド")
-    parser.add_argument("--model", default=str(project_config.get("codex_model", "")), help="Codex CLI に渡す model 名")
+    # agent_model (active-provider common field) takes priority over codex_model (legacy Codex-specific field).
+    # If agent_model is set (non-empty), it is used; otherwise fall back to codex_model.
+    _agent_model = str(project_config.get("agent_model", "")).strip()
+    _codex_model_default = _agent_model or str(project_config.get("codex_model", ""))
+    parser.add_argument("--model", default=_codex_model_default, help="Codex CLI に渡す model 名 (agent_model 優先、fallback: codex_model)")
     parser.add_argument(
         "--sandbox",
         default=str(project_config.get("codex_sandbox", "")),

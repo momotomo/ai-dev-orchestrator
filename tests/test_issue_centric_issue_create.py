@@ -1,0 +1,1587 @@
+from __future__ import annotations
+
+import base64
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import fetch_next_prompt  # noqa: E402
+import issue_centric_close_current_issue  # noqa: E402
+import issue_centric_contract  # noqa: E402
+import issue_centric_followup_issue  # noqa: E402
+import issue_centric_github  # noqa: E402
+import issue_centric_issue_create  # noqa: E402
+import issue_centric_transport  # noqa: E402
+from _bridge_common import BridgeStop  # noqa: E402
+
+
+def b64(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def build_decision(
+    body_text: str,
+    *,
+    target_issue: str | None = None,
+    close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
+) -> issue_centric_contract.IssueCentricDecision:
+    return issue_centric_contract.IssueCentricDecision(
+        action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+        target_issue=target_issue,
+        close_current_issue=close_current_issue,
+        create_followup_issue=create_followup_issue,
+        summary="Create a GitHub issue from the decoded body.",
+        issue_body_base64=b64(body_text),
+        codex_body_base64=None,
+        review_base64=None,
+        followup_issue_body_base64=(b64(followup_text) if followup_text is not None else None),
+        raw_json="{}",
+        raw_segment="segment",
+    )
+
+
+def build_issue_create_reply(
+    body_text: str,
+    *,
+    target_issue: str | None = "none",
+    close_current_issue: bool = False,
+    create_followup_issue: bool = False,
+    followup_text: str | None = None,
+) -> str:
+    parts = [
+        "あなた:",
+        "request body",
+        "ChatGPT:",
+        issue_centric_contract.ISSUE_BODY_START,
+        b64(body_text),
+        issue_centric_contract.ISSUE_BODY_END,
+    ]
+    if followup_text is not None:
+        parts.extend(
+            [
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+                b64(followup_text),
+                issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+            ]
+        )
+    parts.extend(
+        [
+            issue_centric_contract.DECISION_JSON_START,
+            json.dumps(
+                {
+                    "action": "issue_create",
+                    "target_issue": target_issue if target_issue is not None else "none",
+                    "close_current_issue": close_current_issue,
+                    "create_followup_issue": create_followup_issue,
+                    "summary": "Create the next issue.",
+                },
+                ensure_ascii=True,
+            ),
+            issue_centric_contract.DECISION_JSON_END,
+            issue_centric_contract.REPLY_COMPLETE_TAG,
+        ]
+    )
+    return "\n".join(parts)
+
+
+class TempLogWriter:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.counter = 0
+
+    def __call__(self, prefix: str, content: str, suffix: str = "md") -> Path:
+        self.counter += 1
+        path = self.root / f"{self.counter:02d}_{prefix}.{suffix}"
+        path.write_text(content, encoding="utf-8")
+        return path
+
+
+class IssueCreateExecutionTests(unittest.TestCase):
+    def prepared(self, body_text: str) -> issue_centric_transport.PreparedIssueCentricDecision:
+        return issue_centric_transport.decode_issue_centric_decision(build_decision(body_text))
+
+    def test_materializes_title_and_body_from_prepared_artifact(self) -> None:
+        draft = issue_centric_issue_create.materialize_issue_create_draft(
+            self.prepared("# Ready: title\n\nBody paragraph.\n- item\n"),
+            source_artifact_path="logs/issue-body.md",
+        )
+        self.assertEqual(draft.title, "Ready: title")
+        self.assertEqual(draft.body, "Body paragraph.\n- item\n")
+
+    def test_title_extraction_requires_h1_on_first_non_empty_line(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_issue_create.IssueCentricIssueCreateError,
+            "level-1 heading",
+        ):
+            issue_centric_issue_create.materialize_issue_create_draft(
+                self.prepared("Body first\n# Late title\n"),
+                source_artifact_path="logs/issue-body.md",
+            )
+
+    def test_empty_body_after_h1_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            issue_centric_issue_create.IssueCentricIssueCreateError,
+            "body must not be empty",
+        ):
+            issue_centric_issue_create.materialize_issue_create_draft(
+                self.prepared("# Title only\n\n"),
+                source_artifact_path="logs/issue-body.md",
+            )
+
+    def test_execute_issue_create_creates_github_issue_and_logs_stateful_result(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+        created_calls: list[tuple[str, str, str, str]] = []
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            created_calls.append((repository, title, body, token))
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=51,
+                url="https://github.com/example/repo/issues/51",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_51",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.created_issue.number, 51)
+            self.assertEqual(result.project_sync_status, "not_requested_no_project")
+            self.assertEqual(created_calls[0], ("example/repo", "Ready: title", "Body paragraph.\n", "token-123"))
+            self.assertTrue(result.execution_log_path.exists())
+            execution = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
+            self.assertEqual(execution["created_issue"]["number"], 51)
+            self.assertEqual(execution["draft"]["title"], "Ready: title")
+            self.assertEqual(execution["source_prepared_artifact"], "logs/prepared_issue_body.md")
+
+    def test_non_issue_create_action_does_not_enter_execution(self) -> None:
+        prepared = issue_centric_transport.PreparedIssueCentricDecision(
+            decision=issue_centric_contract.IssueCentricDecision(
+                action=issue_centric_contract.IssueCentricAction.CODEX_RUN,
+                target_issue="#20",
+                close_current_issue=False,
+                create_followup_issue=False,
+                summary="Run Codex.",
+                issue_body_base64=None,
+                codex_body_base64=b64("body"),
+                review_base64=None,
+                followup_issue_body_base64=None,
+                raw_json="{}",
+                raw_segment="segment",
+            ),
+            issue_body=None,
+            codex_body=issue_centric_transport.IssueCentricDecodedBody(
+                kind=issue_centric_transport.IssueCentricArtifactKind.CODEX_BODY,
+                block_name="CHATGPT_CODEX_BODY",
+                raw_base64=b64("body"),
+                normalized_base64=b64("body"),
+                decoded_text="body",
+            ),
+            review_body=None,
+            followup_issue_body=None,
+        )
+        with self.assertRaisesRegex(
+            issue_centric_issue_create.IssueCentricIssueCreateError,
+            "action=issue_create",
+        ):
+            issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo"},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/body.md",
+                log_writer=TempLogWriter(REPO_ROOT / "logs"),
+                repo_relative=lambda path: path.name,
+            )
+
+    def test_project_requirement_blocks_before_issue_create_when_state_config_is_missing(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+        called = False
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            nonlocal called
+            called = True
+            raise AssertionError("should not be called")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: (_ for _ in ()).throw(
+                    AssertionError("resolver should not be called")
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "blocked_project_preflight")
+            self.assertFalse(called)
+            execution = json.loads(result.execution_log_path.read_text(encoding="utf-8"))
+            self.assertIsNone(execution["created_issue"])
+
+    def test_project_issue_create_places_item_and_sets_state(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+        create_calls: list[tuple[str, str, str, str]] = []
+        item_calls: list[tuple[str, str, str]] = []
+        state_calls: list[tuple[str, str, str, str, str]] = []
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            create_calls.append((repository, title, body, token))
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=52,
+                url="https://github.com/example/repo/issues/52",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_52",
+            )
+
+        def fake_resolver(project_url: str, state_field_name: str, state_option_name: str, token: str) -> issue_centric_github.ResolvedGitHubProjectState:
+            return issue_centric_github.ResolvedGitHubProjectState(
+                project_id="PVT_proj_1",
+                project_url=project_url,
+                project_title="Issue Centric",
+                owner_login="example",
+                owner_kind="users",
+                state_field_id="PVTSSF_field_1",
+                state_field_name=state_field_name,
+                state_option_id="PVTSSO_ready",
+                state_option_name=state_option_name,
+            )
+
+        def fake_item_creator(project_id: str, issue_node_id: str, token: str) -> issue_centric_github.CreatedGitHubProjectItem:
+            item_calls.append((project_id, issue_node_id, token))
+            return issue_centric_github.CreatedGitHubProjectItem(item_id="PVT_item_1", project_id=project_id)
+
+        def fake_state_setter(project_id: str, item_id: str, field_id: str, option_id: str, token: str) -> None:
+            state_calls.append((project_id, item_id, field_id, option_id, token))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=fake_resolver,
+                project_item_creator=fake_item_creator,
+                project_state_setter=fake_state_setter,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.project_sync_status, "project_state_synced")
+            self.assertEqual(result.project_item_id, "PVT_item_1")
+            self.assertEqual(result.project_state_field_name, "State")
+            self.assertEqual(result.project_state_value_name, "ready")
+            self.assertEqual(create_calls[0], ("example/repo", "Ready: title", "Body paragraph.\n", "token-123"))
+            self.assertEqual(item_calls[0], ("PVT_proj_1", "ISSUE_node_52", "token-123"))
+            self.assertEqual(state_calls[0], ("PVT_proj_1", "PVT_item_1", "PVTSSF_field_1", "PVTSSO_ready", "token-123"))
+
+    def test_project_item_create_failure_is_recorded_as_partial_success(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=53,
+                url="https://github.com/example/repo/issues/53",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_53",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_1",
+                    project_url=project_url,
+                    project_title="Issue Centric",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_field_1",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_ready",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda project_id, issue_node_id, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("item failed")
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
+            self.assertEqual(result.created_issue.number, 53)
+            self.assertIn("item failed", result.safe_stop_reason)
+
+    def test_project_preflight_success_but_issue_create_failure_is_recorded(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repository, title, body, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("issue create failed")
+                ),
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_1",
+                    project_url=project_url,
+                    project_title="Issue Centric",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_field_1",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_ready",
+                    state_option_name=state_option_name,
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "issue_create_failed_before_project_item")
+            self.assertIsNone(result.created_issue)
+            self.assertIn("issue create failed", result.safe_stop_reason)
+
+    def test_project_state_set_failure_is_recorded_as_partial_success(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            return issue_centric_issue_create.CreatedGitHubIssue(
+                number=54,
+                url="https://github.com/example/repo/issues/54",
+                title=title,
+                repository=repository,
+                node_id="ISSUE_node_54",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                project_state_resolver=lambda project_url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_proj_1",
+                    project_url=project_url,
+                    project_title="Issue Centric",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="PVTSSF_field_1",
+                    state_field_name=state_field_name,
+                    state_option_id="PVTSSO_ready",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda project_id, issue_node_id, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="PVT_item_54",
+                    project_id=project_id,
+                ),
+                project_state_setter=lambda project_id, item_id, field_id, option_id, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("state failed")
+                ),
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.project_sync_status, "issue_created_project_state_failed")
+            self.assertEqual(result.project_item_id, "PVT_item_54")
+            self.assertIn("state failed", result.safe_stop_reason)
+
+    def test_github_mutation_failure_is_recorded_as_blocked(self) -> None:
+        prepared = self.prepared("# Ready: title\n\nBody paragraph.\n")
+
+        def fake_creator(repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+            raise issue_centric_issue_create.IssueCentricIssueCreateError("boom")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=fake_creator,
+                env={"GITHUB_TOKEN": "token-123"},
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertIn("boom", result.safe_stop_reason)
+
+
+class FetchNextPromptIssueCreateIntegrationTests(unittest.TestCase):
+    def test_fetch_next_prompt_executes_issue_create_and_records_created_issue(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#24",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_issue_create_reply("# Ready: title\n\nBody paragraph.\n")
+        saved_states: list[dict[str, object]] = []
+
+        fake_result = issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Ready: title",
+                body="Body paragraph.\n",
+                title_line="# Ready: title",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=77,
+                url="https://github.com/example/repo/issues/77",
+                title="Ready: title",
+                repository="example/repo",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            project_url="",
+            project_sync_status="issue_only_fallback",
+            project_sync_note="No project configured.",
+            project_item_id="",
+            project_state_field_name="",
+            project_state_value_name="",
+            safe_stop_reason="issue_create completed.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result) as exec_mock,
+            ):
+                with self.assertRaisesRegex(BridgeStop, "created primary issue: #77"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(exec_mock.call_count, 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_execution_status"], "completed")
+            self.assertEqual(saved["last_issue_centric_created_issue_number"], "77")
+            self.assertEqual(saved["last_issue_centric_created_issue_url"], "https://github.com/example/repo/issues/77")
+            self.assertEqual(saved["last_issue_centric_project_sync_status"], "issue_only_fallback")
+            self.assertEqual(saved["last_issue_centric_project_item_id"], "")
+
+    def test_fetch_next_prompt_records_blocked_issue_create_reason(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#24",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_issue_create_reply("# Ready: title\n\nBody paragraph.\n")
+        saved_states: list[dict[str, object]] = []
+
+        fake_result = issue_centric_issue_create.IssueCreateExecutionResult(
+            status="blocked",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Ready: title",
+                body="Body paragraph.\n",
+                title_line="# Ready: title",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=None,
+            draft_log_path=REPO_ROOT / "logs" / "draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="blocked_project_preflight",
+            project_sync_note="Project config present.",
+            project_item_id="",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            safe_stop_reason="issue_create blocked before mutation.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "https://github.com/users/example/projects/1", "github_project_state_field_name": "State", "github_project_default_issue_state": "ready", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result),
+                patch.object(fetch_next_prompt, "execute_close_current_issue") as close_mock,
+            ):
+                with self.assertRaisesRegex(BridgeStop, "issue_create primary execution を完了できず停止しました"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_execution_status"], "blocked")
+            self.assertEqual(saved["last_issue_centric_created_issue_number"], "")
+            self.assertEqual(saved["last_issue_centric_project_sync_status"], "blocked_project_preflight")
+            self.assertEqual(close_mock.call_count, 0)
+
+    def test_fetch_next_prompt_records_project_item_and_state_when_issue_create_syncs_project(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "ready_issue:#24",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+        }
+        raw = build_issue_create_reply("# Ready: title\n\nBody paragraph.\n")
+        saved_states: list[dict[str, object]] = []
+
+        fake_result = issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Ready: title",
+                body="Body paragraph.\n",
+                title_line="# Ready: title",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=88,
+                url="https://github.com/example/repo/issues/88",
+                title="Ready: title",
+                repository="example/repo",
+                node_id="ISSUE_node_88",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Project synced.",
+            project_item_id="PVT_item_88",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            safe_stop_reason="issue_create completed with project sync.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo", "github_project_url": "https://github.com/users/example/projects/1", "github_project_state_field_name": "State", "github_project_default_issue_state": "ready", "worker_repo_path": "."}),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=fake_result),
+            ):
+                with self.assertRaisesRegex(BridgeStop, "project item: PVT_item_88"):
+                    fetch_next_prompt.run(dict(state), [])
+
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_project_sync_status"], "project_state_synced")
+            self.assertEqual(saved["last_issue_centric_project_url"], "https://github.com/users/example/projects/1")
+            self.assertEqual(saved["last_issue_centric_project_item_id"], "PVT_item_88")
+            self.assertEqual(saved["last_issue_centric_project_state_field"], "State")
+            self.assertEqual(saved["last_issue_centric_project_state_value"], "ready")
+
+    def test_fetch_next_prompt_executes_issue_create_followup_then_close_combo(self) -> None:
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#20",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/20",
+            "last_issue_centric_target_issue": "#20",
+        }
+        raw = build_issue_create_reply(
+            "# Primary issue\n\nPrimary body.\n",
+            target_issue="#20",
+            close_current_issue=True,
+            create_followup_issue=True,
+            followup_text="# Follow-up issue\n\nFollow-up body.\n",
+        )
+        saved_states: list[dict[str, object]] = []
+
+        primary_result = issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Primary issue",
+                body="Primary body.\n",
+                title_line="# Primary issue",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=90,
+                url="https://github.com/example/repo/issues/90",
+                title="Primary issue",
+                repository="example/repo",
+                node_id="ISSUE_node_90",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "primary-draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "primary-execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Primary synced.",
+            project_item_id="PVT_item_90",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            safe_stop_reason="primary issue create completed.",
+        )
+        followup_result = issue_centric_followup_issue.FollowupIssueExecutionResult(
+            status="completed",
+            followup_status="completed",
+            parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title="Follow-up issue",
+                body="Follow-up body.\n",
+                title_line="# Follow-up issue",
+                source_artifact_path="logs/prepared_followup_issue_body.md",
+            ),
+            created_issue=issue_centric_github.CreatedGitHubIssue(
+                number=91,
+                url="https://github.com/example/repo/issues/91",
+                title="Follow-up issue",
+                repository="example/repo",
+                node_id="ISSUE_node_91",
+            ),
+            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup-inner.json",
+            execution_log_path=REPO_ROOT / "logs" / "followup-execution.json",
+            project_url="https://github.com/users/example/projects/1",
+            project_sync_status="project_state_synced",
+            project_sync_note="Follow-up synced.",
+            project_item_id="PVT_item_91",
+            project_state_field_name="State",
+            project_state_value_name="ready",
+            close_policy="after_issue_create_followup_success_then_close",
+            safe_stop_reason="follow-up issue create completed.",
+        )
+        close_result = issue_centric_close_current_issue.IssueCloseExecutionResult(
+            status="completed",
+            close_status="closed",
+            close_order="after_issue_create_followup",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=20,
+                issue_url="https://github.com/example/repo/issues/20",
+                source_ref="#20",
+            ),
+            issue_before=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Current issue",
+                repository="example/repo",
+                state="open",
+            ),
+            issue_after=issue_centric_github.GitHubIssueSnapshot(
+                number=20,
+                url="https://github.com/example/repo/issues/20",
+                title="Current issue",
+                repository="example/repo",
+                state="closed",
+            ),
+            execution_log_path=REPO_ROOT / "logs" / "close-execution.json",
+            safe_stop_reason="closed current issue after primary and follow-up success.",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={
+                        "github_repository": "example/repo",
+                        "github_project_url": "https://github.com/users/example/projects/1",
+                        "github_project_state_field_name": "State",
+                        "github_project_default_issue_state": "ready",
+                        "worker_repo_path": ".",
+                    },
+                ),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=followup_result) as followup_mock,
+                patch.object(fetch_next_prompt, "execute_close_current_issue", return_value=close_result) as close_mock,
+                patch.object(
+                    fetch_next_prompt,
+                    "execute_current_issue_project_state_sync",
+                    return_value=SimpleNamespace(
+                        status="completed",
+                        sync_status="project_state_synced",
+                        lifecycle_stage="done",
+                        resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                            repository="example/repo",
+                            issue_number=20,
+                            issue_url="https://github.com/example/repo/issues/20",
+                            source_ref="#20",
+                        ),
+                        issue_snapshot=issue_centric_github.GitHubIssueSnapshot(
+                            number=20,
+                            url="https://github.com/example/repo/issues/20",
+                            title="Current issue",
+                            repository="example/repo",
+                            state="closed",
+                            node_id="ISSUE_node_20",
+                        ),
+                        execution_log_path=temp_root / "lifecycle-sync.json",
+                        project_url="https://github.com/users/example/projects/1",
+                        project_item_id="ITEM_20",
+                        project_state_field_name="State",
+                        project_state_value_name="done",
+                        safe_stop_reason="current issue synced to done",
+                    ),
+                ) as lifecycle_sync_mock,
+            ):
+                with self.assertRaisesRegex(
+                    BridgeStop,
+                    "primary issue create / narrow follow-up issue create / narrow close",
+                ):
+                    fetch_next_prompt.run(dict(state), [])
+
+            self.assertEqual(primary_mock.call_count, 1)
+            self.assertEqual(followup_mock.call_count, 1)
+            self.assertEqual(close_mock.call_count, 1)
+            self.assertEqual(lifecycle_sync_mock.call_count, 1)
+            saved = saved_states[0]
+            self.assertEqual(saved["last_issue_centric_primary_issue_number"], "90")
+            self.assertEqual(saved["last_issue_centric_followup_issue_number"], "91")
+            self.assertEqual(saved["last_issue_centric_close_order"], "after_issue_create_followup")
+            self.assertEqual(saved["last_issue_centric_lifecycle_sync_state_value"], "done")
+
+
+class IssueCreateProjectSyncSignalTests(unittest.TestCase):
+    """Tests for issue_create_project_sync_signal and issue_create_project_sync_suffix (issue #65)."""
+
+    def test_signal_synced_for_project_state_synced(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("project_state_synced"),
+            "synced",
+        )
+
+    def test_signal_skipped_no_project_for_issue_only_fallback(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("issue_only_fallback"),
+            "skipped_no_project",
+        )
+
+    def test_signal_skipped_no_project_for_not_requested(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("not_requested"),
+            "skipped_no_project",
+        )
+
+    def test_signal_sync_failed_for_item_create_failed(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("issue_created_project_item_failed"),
+            "sync_failed",
+        )
+
+    def test_signal_sync_failed_for_state_set_failed(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("issue_created_project_state_failed"),
+            "sync_failed",
+        )
+
+    def test_signal_sync_failed_for_blocked_project_preflight(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_signal("blocked_project_preflight"),
+            "sync_failed",
+        )
+
+    def test_suffix_format_synced(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_suffix("project_state_synced"),
+            " [project_sync: signal=synced]",
+        )
+
+    def test_suffix_format_skipped_no_project(self) -> None:
+        self.assertEqual(
+            issue_centric_issue_create.issue_create_project_sync_suffix("issue_only_fallback"),
+            " [project_sync: signal=skipped_no_project]",
+        )
+
+    def test_suffix_format_sync_failed_includes_reason(self) -> None:
+        suffix = issue_centric_issue_create.issue_create_project_sync_suffix("issue_created_project_item_failed")
+        self.assertIn("signal=sync_failed", suffix)
+        self.assertIn("reason=issue_created_project_item_failed", suffix)
+
+    def test_safe_stop_reason_contains_synced_suffix_when_project_synced(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=101, url="https://github.com/example/repo/issues/101",
+                    title=title, repository=repo, node_id="NODE_101",
+                ),
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p", project_url=url, project_title="Backlog",
+                    owner_login="example", owner_kind="users",
+                    state_field_id="FIELD_s", state_field_name=state_field_name,
+                    state_option_id="OPT_r", state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_101", project_id=pid
+                ),
+                project_state_setter=lambda project_id, item_id, field_id, option_id, token: None,
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.project_sync_status, "project_state_synced")
+        self.assertIn("[project_sync: signal=synced]", result.safe_stop_reason)
+
+    def test_safe_stop_reason_contains_skipped_no_project_when_no_project_configured(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=102, url="https://github.com/example/repo/issues/102",
+                    title=title, repository=repo, node_id="NODE_102",
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.project_sync_status, "not_requested_no_project")
+        self.assertIn("[project_sync: signal=skipped_no_project]", result.safe_stop_reason)
+
+    def test_safe_stop_reason_contains_sync_failed_when_project_item_create_fails(self) -> None:
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=103, url="https://github.com/example/repo/issues/103",
+                    title=title, repository=repo, node_id="NODE_103",
+                ),
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p", project_url=url, project_title="Backlog",
+                    owner_login="example", owner_kind="users",
+                    state_field_id="FIELD_s", state_field_name=state_field_name,
+                    state_option_id="OPT_r", state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda pid, nid, token: (_ for _ in ()).throw(
+                    issue_centric_github.IssueCentricGitHubError("item failed")
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        self.assertEqual(result.project_sync_status, "issue_created_project_item_failed")
+        self.assertIn("signal=sync_failed", result.safe_stop_reason)
+        self.assertIn("reason=issue_created_project_item_failed", result.safe_stop_reason)
+
+    def test_no_sync_suffix_when_issue_create_blocked_before_project_check(self) -> None:
+        """Regression: safe_stop_reason must not have a sync suffix when status is not_requested."""
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_decision("# Ready: title\n\nBody paragraph.\n")
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: (_ for _ in ()).throw(
+                    issue_centric_issue_create.IssueCentricIssueCreateError("boom")
+                ),
+                env={"GITHUB_TOKEN": "token-x"},
+            )
+
+        # project_sync_status == "not_requested" (initial) — no suffix expected
+        self.assertEqual(result.project_sync_status, "not_requested")
+        self.assertNotIn("[project_sync:", result.safe_stop_reason)
+
+
+def build_followup_only_decision(
+    followup_text: str,
+) -> issue_centric_contract.IssueCentricDecision:
+    """issue_body_base64=None, followup_issue_body_base64=set, create_followup_issue=True."""
+    return issue_centric_contract.IssueCentricDecision(
+        action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+        target_issue=None,
+        close_current_issue=False,
+        create_followup_issue=True,
+        summary="Followup-only issue create.",
+        issue_body_base64=None,  # omitted on purpose
+        codex_body_base64=None,
+        review_base64=None,
+        followup_issue_body_base64=b64(followup_text),
+        raw_json="{}",
+        raw_segment="segment",
+    )
+
+
+class PrimaryBodyFallbackExecutionTests(unittest.TestCase):
+    """Verify that issue_create execution uses primary_body (with followup fallback).
+
+    When action=issue_create and CHATGPT_ISSUE_BODY is absent but
+    create_followup_issue=True + CHATGPT_FOLLOWUP_ISSUE_BODY is present,
+    primary_body returns followup_issue_body and execution should succeed.
+    """
+
+    def _fake_creator(self, repository: str, title: str, body: str, token: str) -> issue_centric_issue_create.CreatedGitHubIssue:
+        return issue_centric_issue_create.CreatedGitHubIssue(
+            number=99,
+            url="https://github.com/example/repo/issues/99",
+            title=title,
+            repository=repository,
+            node_id="ISSUE_node_99",
+        )
+
+    def test_materialize_draft_uses_followup_body_when_issue_body_absent(self) -> None:
+        decision = build_followup_only_decision("# Followup Title\n\nFollowup body.\n")
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        # primary_body falls back to followup_issue_body
+        self.assertIsNone(prepared.issue_body)
+        self.assertIsNotNone(prepared.followup_issue_body)
+        self.assertIsNotNone(prepared.primary_body)
+        draft = issue_centric_issue_create.materialize_issue_create_draft(
+            prepared,
+            source_artifact_path="logs/followup-body.md",
+        )
+        self.assertEqual(draft.title, "Followup Title")
+        self.assertEqual(draft.body, "Followup body.\n")
+
+    def test_materialize_draft_raises_when_both_bodies_absent(self) -> None:
+        # Bypass contract validation to test the guard inside materialize_issue_create_draft.
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="Nothing.",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        # Construct PreparedIssueCentricDecision directly to bypass validation
+        prepared = issue_centric_transport.PreparedIssueCentricDecision(
+            decision=decision,
+            issue_body=None,
+            codex_body=None,
+            review_body=None,
+            followup_issue_body=None,
+        )
+        with self.assertRaisesRegex(
+            issue_centric_issue_create.IssueCentricIssueCreateError,
+            "No decoded issue body",
+        ):
+            issue_centric_issue_create.materialize_issue_create_draft(
+                prepared,
+                source_artifact_path="logs/none.md",
+            )
+
+    def test_execute_issue_create_succeeds_with_followup_body_only(self) -> None:
+        decision = build_followup_only_decision("# Followup Title\n\nFollowup body.\n")
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                prepared,
+                project_config={"github_repository": "example/repo", "github_project_url": ""},
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/followup-body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=self._fake_creator,
+                env={"GITHUB_TOKEN": "token-abc"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.created_issue.number, 99)
+        self.assertEqual(result.created_issue.title, "Followup Title")
+
+    def test_execute_issue_create_uses_issue_body_when_both_present(self) -> None:
+        """When both bodies are set, issue_body takes precedence via primary_body."""
+        decision = build_decision(
+            "# Primary Title\n\nPrimary body.\n",
+            create_followup_issue=True,
+            followup_text="# Followup Title\n\nFollowup body.\n",
+        )
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIsNotNone(prepared.issue_body)
+        self.assertIsNotNone(prepared.followup_issue_body)
+        # primary_body must return issue_body (higher priority)
+        self.assertEqual(prepared.primary_body, prepared.issue_body)
+        draft = issue_centric_issue_create.materialize_issue_create_draft(
+            prepared,
+            source_artifact_path="logs/primary.md",
+        )
+        self.assertEqual(draft.title, "Primary Title")
+
+    def test_primary_body_returns_none_when_no_issue_body_and_no_followup(self) -> None:
+        # create_followup_issue=True + followup_body=None is rejected by contract,
+        # so bypass validation to unit-test primary_body directly.
+        decision = issue_centric_contract.IssueCentricDecision(
+            action=issue_centric_contract.IssueCentricAction.ISSUE_CREATE,
+            target_issue=None,
+            close_current_issue=False,
+            create_followup_issue=True,
+            summary="No bodies.",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=None,
+            raw_json="{}",
+            raw_segment="segment",
+        )
+        prepared = issue_centric_transport.PreparedIssueCentricDecision(
+            decision=decision,
+            issue_body=None,
+            codex_body=None,
+            review_body=None,
+            followup_issue_body=None,
+        )
+        self.assertIsNone(prepared.primary_body)
+
+    def test_primary_body_returns_issue_body_when_issue_body_present_and_no_followup(self) -> None:
+        decision = build_decision("# Solo Title\n\nSolo body.\n")
+        prepared = issue_centric_transport.decode_issue_centric_decision(decision)
+        self.assertIsNotNone(prepared.issue_body)
+        self.assertIsNone(prepared.followup_issue_body)
+        self.assertEqual(prepared.primary_body, prepared.issue_body)
+
+
+def build_followup_only_reply(
+    followup_text: str,
+    *,
+    target_issue: str | None = "none",
+) -> str:
+    """Build a raw reply with CHATGPT_FOLLOWUP_ISSUE_BODY but NO CHATGPT_ISSUE_BODY.
+
+    action=issue_create + create_followup_issue=true: Task 5 allows this combo when
+    issue_body_base64 is absent but followup_issue_body_base64 is present.
+    """
+    parts = [
+        "あなた:",
+        "request body",
+        "ChatGPT:",
+        issue_centric_contract.FOLLOWUP_ISSUE_BODY_START,
+        b64(followup_text),
+        issue_centric_contract.FOLLOWUP_ISSUE_BODY_END,
+        issue_centric_contract.DECISION_JSON_START,
+        json.dumps(
+            {
+                "action": "issue_create",
+                "target_issue": target_issue if target_issue is not None else "none",
+                "close_current_issue": False,
+                "create_followup_issue": True,
+                "summary": "Create the child follow-up issue.",
+            },
+            ensure_ascii=True,
+        ),
+        issue_centric_contract.DECISION_JSON_END,
+        issue_centric_contract.REPLY_COMPLETE_TAG,
+    ]
+    return "\n".join(parts)
+
+
+class NoDuplicateIssueCreationTests(unittest.TestCase):
+    """Verify that issue_create + create_followup_issue=true + followup_body only → 1 issue, not 2.
+
+    Regression for: action=issue_create + create_followup_issue=true with only
+    CHATGPT_FOLLOWUP_ISSUE_BODY caused execute_followup_issue_action to create a second
+    duplicate issue from the same body.
+    """
+
+    def _primary_result(self, title: str, number: int) -> "issue_centric_issue_create.IssueCreateExecutionResult":
+        return issue_centric_issue_create.IssueCreateExecutionResult(
+            status="completed",
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title=title,
+                body="Body.\n",
+                title_line=f"# {title}",
+                source_artifact_path="logs/prepared_issue_body.md",
+            ),
+            created_issue=issue_centric_issue_create.CreatedGitHubIssue(
+                number=number,
+                url=f"https://github.com/example/repo/issues/{number}",
+                title=title,
+                repository="example/repo",
+                node_id=f"ISSUE_node_{number}",
+            ),
+            draft_log_path=REPO_ROOT / "logs" / "primary-draft.md",
+            execution_log_path=REPO_ROOT / "logs" / "primary-execution.json",
+            project_url="",
+            project_sync_status="issue_only_fallback",
+            project_sync_note="No project configured.",
+            project_item_id=None,
+            project_state_field_name="State",
+            project_state_value_name="",
+            safe_stop_reason=f"Created issue #{number}.",
+        )
+
+    def _followup_result(self, title: str, number: int) -> "issue_centric_followup_issue.FollowupIssueExecutionResult":
+        return issue_centric_followup_issue.FollowupIssueExecutionResult(
+            status="completed",
+            followup_status="completed",
+            parent_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=1,
+                issue_url="https://github.com/example/repo/issues/1",
+                source_ref="#1",
+            ),
+            draft=issue_centric_issue_create.IssueCreateDraft(
+                title=title,
+                body="Body.\n",
+                title_line=f"# {title}",
+                source_artifact_path="logs/followup-body.md",
+            ),
+            created_issue=issue_centric_github.CreatedGitHubIssue(
+                number=number,
+                url=f"https://github.com/example/repo/issues/{number}",
+                title=title,
+                repository="example/repo",
+                node_id=f"ISSUE_node_{number}",
+            ),
+            issue_create_execution_log_path=REPO_ROOT / "logs" / "followup-inner.json",
+            execution_log_path=REPO_ROOT / "logs" / "followup-execution.json",
+            project_url="",
+            project_sync_status="issue_only_fallback",
+            project_sync_note="No project configured.",
+            project_item_id=None,
+            project_state_field_name="State",
+            project_state_value_name="",
+            close_policy="after_issue_create_followup_success_only",
+            safe_stop_reason=f"Created follow-up issue #{number}.",
+        )
+
+    def test_followup_only_body_creates_single_issue_not_duplicate(self) -> None:
+        """When only CHATGPT_FOLLOWUP_ISSUE_BODY is provided, followup_mock must NOT be called."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#1",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/1",
+            "last_issue_centric_target_issue": "#1",
+        }
+        raw = build_followup_only_reply("# Child Issue\n\nChild body.\n")
+        saved_states: list[dict[str, object]] = []
+
+        primary_result = self._primary_result("Child Issue", 13)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                ),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action") as followup_mock,
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(dict(state), [])
+
+        # Primary issue create must run exactly once; followup must NOT run (no duplicate)
+        self.assertEqual(primary_mock.call_count, 1)
+        self.assertEqual(followup_mock.call_count, 0, "followup_issue_action must NOT be called when issue_body is absent (duplicate prevention)")
+
+    def test_both_bodies_present_creates_two_issues(self) -> None:
+        """When both CHATGPT_ISSUE_BODY and CHATGPT_FOLLOWUP_ISSUE_BODY are provided, both execute."""
+        state = {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "request-hash",
+            "pending_request_source": "review:#1",
+            "pending_request_log": "logs/request.md",
+            "pending_request_signal": "",
+            "last_processed_request_hash": "",
+            "last_processed_reply_hash": "",
+            "last_issue_centric_resolved_issue": "https://github.com/example/repo/issues/1",
+            "last_issue_centric_target_issue": "#1",
+        }
+        raw = build_issue_create_reply(
+            "# Primary Issue\n\nPrimary body.\n",
+            create_followup_issue=True,
+            followup_text="# Follow-up Issue\n\nFollow-up body.\n",
+        )
+        saved_states: list[dict[str, object]] = []
+
+        primary_result = self._primary_result("Primary Issue", 13)
+        followup_result = self._followup_result("Follow-up Issue", 14)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str, suffix: str = "md") -> Path:
+                path = temp_root / f"{prefix}.{suffix}"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request body"),
+                patch.object(fetch_next_prompt, "wait_for_issue_centric_reply_text", return_value=raw),
+                patch.object(fetch_next_prompt, "log_text", side_effect=fake_log_text),
+                patch.object(fetch_next_prompt, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+                patch.object(
+                    fetch_next_prompt,
+                    "load_project_config",
+                    return_value={"github_repository": "example/repo", "github_project_url": "", "worker_repo_path": "."},
+                ),
+                patch.object(fetch_next_prompt, "execute_issue_create_action", return_value=primary_result) as primary_mock,
+                patch.object(fetch_next_prompt, "execute_followup_issue_action", return_value=followup_result) as followup_mock,
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(dict(state), [])
+
+
+        # Both bodies present → both create executions run
+        self.assertEqual(primary_mock.call_count, 1)
+        self.assertEqual(followup_mock.call_count, 1, "followup_issue_action must run when issue_body is also present")
+
+
+class ProjectStateSyncKeywordCallTests(unittest.TestCase):
+    """Regression tests for the positional-vs-keyword-only mismatch in project state setter call.
+
+    Phase 24 bug: issue_centric_issue_create.execute_issue_create_action called
+    set_github_project_item_state with 5 positional arguments, but the function
+    is defined with ``*,`` (keyword-only parameters only).
+    This caused ``TypeError: set_github_project_item_state() takes 0 positional
+    arguments but 5 were given`` when primary issue creation succeeded and the
+    code tried to set the GitHub Project state.
+    """
+
+    def _prepared(self, body_text: str = "# Ready: title\n\nBody.\n") -> object:
+        return issue_centric_transport.decode_issue_centric_decision(
+            build_decision(body_text)
+        )
+
+    def test_set_github_project_item_state_is_keyword_only(self) -> None:
+        """set_github_project_item_state must reject positional arguments.
+
+        This is the unit-level reproduction of the bug: calling with positional
+        args must raise TypeError.  After the fix the callsite uses keyword args
+        so this path is never reached in production.
+        """
+        import issue_centric_github as icg
+        import inspect
+        sig = inspect.signature(icg.set_github_project_item_state)
+        for name, param in sig.parameters.items():
+            self.assertEqual(
+                param.kind,
+                inspect.Parameter.KEYWORD_ONLY,
+                f"Parameter '{name}' of set_github_project_item_state must be keyword-only",
+            )
+
+    def test_production_callsite_uses_keyword_args_not_positional(self) -> None:
+        """execute_issue_create_action must call the state setter with keyword args.
+
+        The injected spy captures kwargs so we can verify no positional spill.
+        """
+        captured_kwargs: list[dict] = []
+        captured_args: list[tuple] = []
+
+        def spy_state_setter(*args, **kwargs):
+            captured_args.append(args)
+            captured_kwargs.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue_centric_issue_create.execute_issue_create_action(
+                self._prepared(),
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=200,
+                    url="https://github.com/example/repo/issues/200",
+                    title=title,
+                    repository=repo,
+                    node_id="ISSUE_node_200",
+                ),
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_p",
+                    project_url=url,
+                    project_title="Backlog",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="FIELD_s",
+                    state_field_name=state_field_name,
+                    state_option_id="OPT_r",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_200", project_id=pid
+                ),
+                project_state_setter=spy_state_setter,
+                env={"GITHUB_TOKEN": "token-spy"},
+            )
+
+        self.assertEqual(len(captured_args), 1, "spy_state_setter should be called exactly once")
+        self.assertEqual(captured_args[0], (), "positional args must be empty — setter must be called with keyword args only")
+        self.assertEqual(captured_kwargs[0]["project_id"], "PVT_p")
+        self.assertEqual(captured_kwargs[0]["item_id"], "ITEM_200")
+        self.assertEqual(captured_kwargs[0]["field_id"], "FIELD_s")
+        self.assertEqual(captured_kwargs[0]["option_id"], "OPT_r")
+        self.assertEqual(captured_kwargs[0]["token"], "token-spy")
+
+    def test_real_set_github_project_item_state_raises_on_positional_call(self) -> None:
+        """Calling set_github_project_item_state with positional args must raise TypeError.
+
+        This is the pre-fix failure mode.  Verifying it still raises with positional
+        ensures the function signature has not been silently widened.
+        """
+        import issue_centric_github as icg
+        with self.assertRaises(TypeError) as ctx:
+            icg.set_github_project_item_state(
+                "PVT_p",    # positional 1 — should be project_id=...
+                "ITEM_1",   # positional 2
+                "FIELD_s",  # positional 3
+                "OPT_r",    # positional 4
+                "tok",      # positional 5
+            )
+        self.assertIn("positional", str(ctx.exception).lower())
+
+    def test_issue_create_project_state_synced_after_fix(self) -> None:
+        """Full execute_issue_create_action with real call shape: must reach project_state_synced.
+
+        Belt-and-suspenders: even if the spy test above catches the positional
+        call, this test verifies the whole execution flow reaches completion.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = issue_centric_issue_create.execute_issue_create_action(
+                self._prepared(),
+                project_config={
+                    "github_repository": "example/repo",
+                    "github_project_url": "https://github.com/users/example/projects/1",
+                    "github_project_state_field_name": "State",
+                    "github_project_default_issue_state": "ready",
+                },
+                repo_path=REPO_ROOT,
+                source_decision_log="logs/decision.md",
+                source_metadata_log="logs/metadata.json",
+                source_artifact_path="logs/prepared_issue_body.md",
+                log_writer=TempLogWriter(root),
+                repo_relative=lambda path: path.name,
+                issue_creator=lambda repo, title, body, token: issue_centric_issue_create.CreatedGitHubIssue(
+                    number=201,
+                    url="https://github.com/example/repo/issues/201",
+                    title=title,
+                    repository=repo,
+                    node_id="ISSUE_node_201",
+                ),
+                project_state_resolver=lambda url, state_field_name, state_option_name, token: issue_centric_github.ResolvedGitHubProjectState(
+                    project_id="PVT_q",
+                    project_url=url,
+                    project_title="Backlog",
+                    owner_login="example",
+                    owner_kind="users",
+                    state_field_id="FIELD_q",
+                    state_field_name=state_field_name,
+                    state_option_id="OPT_q",
+                    state_option_name=state_option_name,
+                ),
+                project_item_creator=lambda pid, nid, token: issue_centric_github.CreatedGitHubProjectItem(
+                    item_id="ITEM_201", project_id=pid
+                ),
+                # keyword-only setter (matches real set_github_project_item_state signature)
+                project_state_setter=lambda *, project_id, item_id, field_id, option_id, token: None,
+                env={"GITHUB_TOKEN": "token-kw"},
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.project_sync_status, "project_state_synced")
+        self.assertEqual(result.project_item_id, "ITEM_201")
+
+
+if __name__ == "__main__":
+    unittest.main()

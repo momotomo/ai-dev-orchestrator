@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
+import re
 import sys
 
 from _bridge_common import (
@@ -9,6 +12,9 @@ from _bridge_common import (
     BridgeStop,
     build_chatgpt_handoff_request,
     build_chatgpt_request,
+    build_pinned_ready_issue_ic_section,
+    build_request_context_section,
+    can_reuse_prepared_request,
     clear_chat_rotation_fields,
     clear_error_fields,
     clear_pending_handoff_fields,
@@ -18,12 +24,16 @@ from _bridge_common import (
     guarded_main,
     load_project_config,
     log_text,
+    _LIFECYCLE_ONLY_REQUEST_GUIDANCE,
+    prepare_issue_centric_runtime_mode,
+    prepare_issue_centric_runtime_snapshot,
     present_resume_prompt,
     promote_pending_request,
     read_pending_handoff_text,
     read_prepared_request_text,
     read_last_report_text,
     repo_relative,
+    resolve_issue_centric_route_choice,
     rotate_chat_with_handoff,
     send_to_chatgpt,
     save_state,
@@ -36,6 +46,8 @@ from _bridge_common import (
 
 DEFAULT_NEXT_TODO = "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。"
 DEFAULT_OPEN_QUESTIONS = "未解決事項があれば安全側で補ってください。"
+
+_REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_]+):\s+(.+?)\s*$", re.MULTILINE)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -103,7 +115,325 @@ def build_report_request_source(state: dict[str, object], resume_note: str) -> s
         decision = str(state.get("chatgpt_decision", "")).strip() or "resume"
         resume_hash = stable_text_hash(resume_note.strip() or "no-note")
         return f"handoff:{decision}:{last_report_file}:{resume_hash}"
+    principal_issue = str(state.get("last_issue_centric_principal_issue", "")).strip()
+    if principal_issue:
+        return f"report:{last_report_file}:issue:{principal_issue}"
     return f"report:{last_report_file}"
+
+
+def _parse_report_summary_fields(report_text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for match in _REPORT_SUMMARY_FIELD_RE.finditer(report_text):
+        key = str(match.group(1)).strip().lower()
+        value = str(match.group(2)).strip()
+        if key and value and key not in fields:
+            fields[key] = value
+    return fields
+
+
+def _is_ready_bounded_continuation(state: dict[str, object]) -> bool:
+    """Return True when the current continuation is for a Ready:-prefixed bounded issue.
+
+    A continuation qualifies as a Ready: bounded issue if ``current_ready_issue_ref``
+    (saved by request_next_prompt when ``--ready-issue-ref`` is supplied) is non-empty
+    and its value contains the "Ready:" prefix (case-insensitive).  This is the naming
+    convention used by the orchestrator to mark a bounded single-issue work item.
+
+    When ``current_ready_issue_ref`` is absent or does not start with "Ready:", the
+    issue is treated as a parent / planned issue, allowing child / follow-up creation
+    in the completion followup continuation.
+    """
+    ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+    if not ready_issue_ref:
+        return False
+    return "ready:" in ready_issue_ref.lower()
+
+
+@dataclasses.dataclass(frozen=True)
+class _IcNextCycleContext:
+    """Execution-summary fields that drive the next request cycle.
+
+    Built by :func:`_read_ic_next_cycle_context` from ``last_issue_centric_*``
+    state written by ``_finalize_dispatch`` (and the action-specific
+    ``_apply_*_execution_state`` helpers) after each execution cycle.
+
+    **Priority chain for target resolution** (see :attr:`resolved_next_request_target`):
+
+    1. ``next_request_target`` — explicitly set by the normalized summary when
+       the runtime snapshot names a specific issue to target next.
+    2. ``principal_issue`` — the issue that drove the last cycle; written by
+       ``_finalize_dispatch`` from ``principal_issue_candidate`` in the
+       normalized summary.
+    3. ``resolved_issue`` — the issue resolved by the last cycle; written by
+       ``_apply_codex_execution_state`` / ``_apply_review_execution_state``.
+    4. ``target_issue`` — the raw target ref saved at the start of the last
+       cycle; last-resort fallback.
+
+    **Action-specific provenance**:
+
+    * ``issue_create``  → ``principal_issue`` is the created primary issue
+    * ``codex_run``     → ``resolved_issue`` is the closed/resolved issue;
+      ``principal_issue`` is the issue that was being worked on
+    * ``human_review_needed`` → ``resolved_issue`` carries the review target
+    * follow-up combo  → ``next_request_target`` points to the follow-up issue
+    * ``close_current_issue`` → ``close_order`` is non-empty; target is the
+      closed issue's next sibling or parent
+    * ``no_action``    → ``next_request_hint`` drives the path; target is
+      unchanged from the prior cycle
+    """
+
+    next_request_target: str
+    principal_issue: str
+    principal_issue_kind: str
+    resolved_issue: str
+    target_issue: str
+    action: str
+    next_request_hint: str
+    close_order: str
+
+    @property
+    def resolved_next_request_target(self) -> str:
+        """Return the first non-empty value from the 4-field priority chain."""
+        for value in (
+            self.next_request_target,
+            self.principal_issue,
+            self.resolved_issue,
+            self.target_issue,
+        ):
+            if value:
+                return value
+        return ""
+
+
+def _read_ic_next_cycle_context(state: dict[str, object]) -> "_IcNextCycleContext":
+    """Read execution-summary state and build a :class:`_IcNextCycleContext`.
+
+    All values are stripped strings; missing keys yield empty strings.
+    """
+    return _IcNextCycleContext(
+        next_request_target=str(state.get("last_issue_centric_next_request_target", "")).strip(),
+        principal_issue=str(state.get("last_issue_centric_principal_issue", "")).strip(),
+        principal_issue_kind=str(state.get("last_issue_centric_principal_issue_kind", "")).strip(),
+        resolved_issue=str(state.get("last_issue_centric_resolved_issue", "")).strip(),
+        target_issue=str(state.get("last_issue_centric_target_issue", "")).strip(),
+        action=str(state.get("last_issue_centric_action", "")).strip(),
+        next_request_hint=str(state.get("last_issue_centric_next_request_hint", "")).strip(),
+        close_order=str(state.get("last_issue_centric_close_order", "")).strip(),
+    )
+
+
+def _is_completion_followup_eligible(
+    summary_fields: dict[str, str],
+    state: dict[str, object],
+) -> bool:
+    """Return True when the archived report and state qualify for a completion followup section.
+
+    All five conditions must hold:
+
+    1. ``result=completed`` in the archived report summary — the last Codex run finished
+       successfully.
+    2. ``live_ready=confirmed`` in the archived report summary — the result was verified
+       in the live environment.
+    3. ``last_issue_centric_action == codex_run`` — the action that produced the archived
+       report was a Codex run (not an issue-create or no-action cycle).
+    4. ``last_issue_centric_principal_issue_kind == current_issue`` — the principal issue
+       of the last cycle is the current issue (not a parent or planned issue).
+    5. ``last_issue_centric_next_request_hint == continue_on_current_issue`` — the
+       normalized summary explicitly requests continuation on the same issue.
+
+    When any condition fails the caller should skip building the completion followup
+    section entirely.
+    """
+    if summary_fields.get("result", "").strip().lower() != "completed":
+        return False
+    if summary_fields.get("live_ready", "").strip().lower() != "confirmed":
+        return False
+    ic = _read_ic_next_cycle_context(state)
+    if ic.action != "codex_run":
+        return False
+    if ic.principal_issue_kind != "current_issue":
+        return False
+    if ic.next_request_hint != "continue_on_current_issue":
+        return False
+    return True
+
+
+def _resolve_completion_followup_target_issue(state: dict[str, object]) -> str:
+    """Resolve the target issue URL/ref for a completion followup section.
+
+    Delegates to :func:`_read_ic_next_cycle_context` and returns the first
+    non-empty value from the 4-field priority chain documented on
+    :class:`_IcNextCycleContext`:
+
+    1. ``next_request_target`` (``last_issue_centric_next_request_target``)
+    2. ``principal_issue``     (``last_issue_centric_principal_issue``)
+    3. ``resolved_issue``      (``last_issue_centric_resolved_issue``)
+    4. ``target_issue``        (``last_issue_centric_target_issue``)
+
+    Returns ``""`` when all four fields are absent or empty.
+    """
+    return _read_ic_next_cycle_context(state).resolved_next_request_target
+
+
+def _build_completion_followup_section(state: dict[str, object], report_text: str) -> str:
+    summary_fields = _parse_report_summary_fields(report_text)
+    if not _is_completion_followup_eligible(summary_fields, state):
+        return ""
+
+    target_issue = _resolve_completion_followup_target_issue(state)
+    if not target_issue:
+        return ""
+
+    lines = [
+        "## issue_centric_completion_followup",
+        "- directive: 最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。",
+        "- directive: worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。",
+        f"- archived_report_result: {summary_fields.get('result', '')}",
+        f"- archived_report_live_ready: {summary_fields.get('live_ready', '')}",
+        f"- target_issue: {target_issue}",
+        "- directive: GitHub repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。",
+        "- directive: close_current_issue=false を返す場合は、GitHub repo 確認後に見つかった具体的な未完了理由を summary に書いてください。",
+    ]
+
+    if _is_ready_bounded_continuation(state):
+        # Bounded Ready: issue — close-only lifecycle decision, no new Codex prompt.
+        lines += [
+            "- directive: 今回は新しい Codex 用 prompt を作りません。今回判断するのは lifecycle automation だけです。",
+            "- directive: この continuation で action=codex_run は不正です。CHATGPT_CODEX_BODY を返さないでください。",
+            "- directive: 正規経路は action=no_action です。create_followup_issue=false のまま返してください。",
+            "- directive: current issue を閉じるべきなら close_current_issue=true を返してください。閉じない判断でも action=no_action のまま返してください。",
+            "- directive: GitHub commit / GitHub diff / GitHub changed files を確認し、変更が target issue scope 内で remaining issues がない場合は、原則 close_current_issue=true を検討してください。",
+            "- directive: target_issue は current issue の issue ref だけを使ってください。",
+            "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
+        ]
+    else:
+        # Parent / planned / non-Ready: issue — allow child issue creation, additional
+        # codex run, or close.  These issues have possible sub-issues and are not
+        # bounded to a single Ready: work item.
+        lines += [
+            "- directive: target_issue は parent / planned issue です (Ready: 接頭辞なし)。",
+            "- directive: archived report を踏まえて、以下の action から最適な 1 つを選んでください:",
+            "  - action=issue_create + create_followup_issue=true: target_issue の下に child / follow-up issue を 1 件作る",
+            "  - action=codex_run: target_issue に対してもう 1 フェーズ bounded に続ける (Codex 用 prompt を作成)",
+            "  - action=no_action + close_current_issue=true: target_issue を閉じて次へ進む",
+            "  - action=no_action + close_current_issue=false: 今回は何もしない",
+            "- directive: child / follow-up issue が適切な場合は action=issue_create + create_followup_issue=true を返してください。",
+            "- directive: target_issue は current issue の issue ref だけを使ってください。",
+            "- directive: parent update は今回 scope 外です。未対応なら summary で短く境界を示してください。",
+        ]
+
+    return "\n".join(lines)
+
+
+def _should_use_pinned_ready_issue_path(state: dict[str, object]) -> bool:
+    """Return True when the continuation should use a fresh pinned ready issue path.
+
+    Two conditions must both hold:
+
+    1. ``pending_request_source`` starts with ``"ready_issue:"`` — the previous request
+       was made for an initial ready-issue entry, not a normal report continuation.
+    2. ``current_ready_issue_ref`` is non-empty — the orchestrator saved an explicit
+       ready issue ref that should anchor this continuation.
+
+    When both are True, ``run_resume_request()`` should skip the old
+    ``last_issue_centric_*`` snapshot entirely and build a fresh IC section from the
+    pinned ready issue ref.  This prevents context carry-over from a previous issue
+    that might still be visible in the state fields.
+    """
+    pending_source = str(state.get("pending_request_source", "")).strip()
+    pinned_ref = str(state.get("current_ready_issue_ref", "")).strip()
+    return pending_source.startswith("ready_issue:") and bool(pinned_ref)
+
+
+def _is_ready_bounded_completion_followup_request(
+    state: dict[str, object],
+    *,
+    effective_next_todo: str,
+    original_next_todo: str,
+) -> bool:
+    """Return True when this request is a Ready:-bounded completion followup continuation.
+
+    The lifecycle-only guidance path applies when two conditions hold simultaneously:
+
+    1. ``_is_ready_bounded_continuation(state)`` is True — the current issue carries
+       the "Ready:" prefix that marks it as a single, bounded work item (no child-issue
+       creation is expected after completion).
+
+    2. ``effective_next_todo != original_next_todo`` — the next_todo was overridden by
+       ``_resolve_completion_followup_request()``, which only modifies next_todo when a
+       non-empty completion followup section was produced.  A changed next_todo therefore
+       signals that we are inside the completion followup path, not a plain continuation.
+
+    When both are True the caller should use ``_LIFECYCLE_ONLY_REQUEST_GUIDANCE`` so the
+    request no longer asks ChatGPT to produce a new Codex prompt.
+    """
+    return (
+        _is_ready_bounded_continuation(state)
+        and effective_next_todo != original_next_todo
+    )
+
+
+def _build_completion_followup_wording(state: dict[str, object]) -> tuple[str, str]:
+    """Return (completion_next_todo, completion_open_questions) for a completion followup request.
+
+    The wording differs based on whether the current continuation is for a Ready:-bounded
+    issue or a parent / planned issue:
+
+    - **Ready bounded**: lifecycle automation only — no new Codex prompt.  The returned
+      next_todo instructs ChatGPT to evaluate lifecycle actions (close or no-action) using
+      the issue-centric contract.
+    - **Parent / planned**: a broader set of actions is appropriate — child issue creation,
+      additional Codex run, or issue close.  The returned next_todo asks ChatGPT to pick
+      the most suitable action from those options.
+
+    In both cases ``completion_open_questions`` instructs ChatGPT to acknowledge the
+    parent-update scope boundary in the summary if anything is left unhandled.
+    """
+    if _is_ready_bounded_continuation(state):
+        completion_next_todo = (
+            "最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。"
+            " worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。"
+            " 新しい Codex 用 prompt は作りません。archived report 後の lifecycle automation だけを issue-centric contract で判断してください。"
+            " この continuation で action=codex_run は不正です。action=no_action を返し、current issue を閉じるなら close_current_issue=true を返してください。"
+            " GitHub commit / GitHub diff / GitHub changed files を確認し、変更が target issue scope 内で remaining issues がない場合は close_current_issue=true を検討してください。"
+            " close_current_issue=false の場合は GitHub repo 確認後の具体的な未完了理由を summary に書いてください。"
+        )
+    else:
+        completion_next_todo = (
+            "最初に GitHub repo を直接確認してください。Issue コメントだけで判断しないでください。"
+            " worker report に commit SHA が含まれる場合は、GitHub commit / GitHub diff / GitHub changed files / tests / remaining issues を確認してから target issue scope が完了しているか判断してください。"
+            " archived report を踏まえて、parent / planned issue の continuation を issue-centric contract で判断してください。"
+            " child / follow-up issue の作成 (action=issue_create)、追加 Codex 実行 (action=codex_run)、issue close (action=no_action + close_current_issue=true) から選んでください。"
+            " GitHub repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。"
+        )
+    completion_open_questions = "parent issue update は今回 scope 外です。未対応境界だけを summary で短く返してください。"
+    return completion_next_todo, completion_open_questions
+
+
+def _resolve_completion_followup_request(
+    state: dict[str, object],
+    *,
+    last_report: str,
+    issue_centric_next_request_section: str,
+    route_selected: str,
+    next_todo: str,
+    open_questions: str,
+) -> tuple[str, str, str]:
+    if route_selected != "issue_centric":
+        return issue_centric_next_request_section, next_todo, open_questions
+
+    completion_section = _build_completion_followup_section(state, last_report)
+    if not completion_section:
+        return issue_centric_next_request_section, next_todo, open_questions
+
+    merged_section = issue_centric_next_request_section.rstrip()
+    if merged_section:
+        merged_section = merged_section + "\n\n" + completion_section
+    else:
+        merged_section = completion_section
+
+    completion_next_todo, completion_open_questions = _build_completion_followup_wording(state)
+    return merged_section, completion_next_todo, completion_open_questions
 
 
 def load_retryable_prepared_request(state: dict[str, object]) -> tuple[str, str, str] | None:
@@ -112,7 +442,7 @@ def load_retryable_prepared_request(state: dict[str, object]) -> tuple[str, str,
     prepared_status = str(state.get("prepared_request_status", "")).strip()
     prepared_source = str(state.get("prepared_request_source", "")).strip()
     prepared_hash = str(state.get("prepared_request_hash", "")).strip()
-    if prepared_status != "retry_send":
+    if not can_reuse_prepared_request(state):
         return None
     if not prepared_source.startswith(("report:", "handoff:", "human_review_continue:")):
         return None
@@ -131,6 +461,96 @@ def log_wait_event(event: object) -> None:
     print(f"{event_name}: {stage_log}")
 
 
+def _stage_prepared_request_state(
+    state: dict[str, object],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log_rel: str,
+    issue_centric_runtime_snapshot: object | None,
+    status: str = "prepared",
+) -> None:
+    """Build, stage, and save a prepared request state snapshot.
+
+    Called for both the initial ``"prepared"`` staging and the
+    ``"retry_send"`` fallback staging when ``send_to_chatgpt`` raises.
+
+    **Cycle boundary cleanup** — the following stale state families are cleared
+    so that a new request cycle starts from a consistent baseline:
+
+    * error / retry_send remnants — via :func:`clear_error_fields`
+    * previous pending request fields — via :func:`clear_pending_request_fields`
+    * stale pending handoff fields — via :func:`clear_pending_handoff_fields`
+      (a prior rotation cycle's handoff must not bleed into a fresh prepared
+      request that is not part of a rotation)
+    * stale chat rotation fields — via :func:`clear_chat_rotation_fields`
+      (chat rotation metadata from a previous cycle must not persist)
+
+    IC generation binding is applied when ``issue_centric_runtime_snapshot``
+    is provided.
+    """
+    staged = clear_error_fields(dict(state))
+    clear_pending_request_fields(staged)
+    clear_pending_handoff_fields(staged)
+    clear_chat_rotation_fields(staged)
+    if issue_centric_runtime_snapshot is not None:
+        staged.update(
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="prepared")
+        )
+    stage_prepared_request(
+        staged,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=request_log_rel,
+        status=status,
+    )
+    save_state(staged)
+
+
+def _apply_pending_request_state(
+    state: dict[str, object],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log_path: str,
+    issue_centric_runtime_snapshot: object | None,
+    success_updates: dict[str, object] | None,
+) -> None:
+    """Build and save the pending request state after a successful send.
+
+    **Cycle boundary cleanup** — the following stale state families are cleared
+    before the pending-request fields are written:
+
+    * error / retry_send remnants — via :func:`clear_error_fields`
+    * stale pending handoff fields — via :func:`clear_pending_handoff_fields`
+      (the handoff was consumed by the rotation and must not persist into the
+      new pending-request cycle)
+    * stale chat rotation fields — via :func:`clear_chat_rotation_fields`
+      (chat rotation metadata from the previous cycle is no longer meaningful
+      once the request is in ``waiting_prompt_reply``)
+
+    After cleanup, promotes the prepared request to pending, applies IC
+    generation binding, merges any caller-supplied ``success_updates``, and
+    saves.
+    """
+    mutable = clear_error_fields(dict(state))
+    clear_pending_handoff_fields(mutable)
+    clear_chat_rotation_fields(mutable)
+    promote_pending_request(
+        mutable,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log=repo_relative(request_log_path),
+    )
+    if issue_centric_runtime_snapshot is not None:
+        mutable.update(
+            _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="pending")
+        )
+    if success_updates:
+        mutable.update(success_updates)
+    save_state(mutable)
+
+
 def dispatch_request(
     state: dict[str, object],
     *,
@@ -139,50 +559,238 @@ def dispatch_request(
     request_source: str,
     prepared_prefix: str,
     sent_prefix: str,
+    issue_centric_runtime_snapshot: object | None = None,
     success_updates: dict[str, object] | None = None,
 ) -> int:
+    # log
     prepared_log = log_text(prepared_prefix, request_text)
     prepared_log_rel = repo_relative(prepared_log)
-
-    prepared_state = clear_error_fields(dict(state))
-    clear_pending_request_fields(prepared_state)
-    stage_prepared_request(
-        prepared_state,
+    # state transition — prepared staging
+    _stage_prepared_request_state(
+        state,
         request_hash=request_hash,
         request_source=request_source,
-        request_log=prepared_log_rel,
+        request_log_rel=prepared_log_rel,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
     )
-    save_state(prepared_state)
-
     try:
         send_to_chatgpt(request_text)
     except Exception:
-        retry_state = clear_error_fields(dict(state))
-        clear_pending_request_fields(retry_state)
-        stage_prepared_request(
-            retry_state,
+        # state transition — retry_send fallback staging
+        _stage_prepared_request_state(
+            state,
             request_hash=request_hash,
             request_source=request_source,
-            request_log=prepared_log_rel,
+            request_log_rel=prepared_log_rel,
+            issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
             status="retry_send",
         )
-        save_state(retry_state)
         raise
-
+    # log + state transition — pending
     request_log = log_text(sent_prefix, request_text)
-    mutable_state = clear_error_fields(dict(state))
-    clear_pending_handoff_fields(mutable_state)
-    promote_pending_request(
-        mutable_state,
+    _apply_pending_request_state(
+        state,
         request_hash=request_hash,
         request_source=request_source,
-        request_log=repo_relative(request_log),
+        request_log_path=request_log,
+        issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        success_updates=success_updates,
     )
-    if success_updates:
-        mutable_state.update(success_updates)
-    save_state(mutable_state)
     print(f"sent: {request_log}")
     return 0
+
+
+@dataclasses.dataclass
+class _IcResolvedContext:
+    """Resolved issue-centric context for a report request cycle.
+
+    Carries the four values that describe the IC resolution outcome so that
+    callers can read ``.runtime_snapshot``, ``.runtime_mode``,
+    ``.next_request_section``, and ``.route_selected`` as named fields
+    instead of relying on positional tuple destructuring.
+    """
+
+    runtime_snapshot: object | None = None
+    runtime_mode: object | None = None
+    next_request_section: str = ""
+    route_selected: str = ""
+
+
+def _build_ic_runtime_mode_state(
+    state: dict[str, object],
+    snapshot: object | None,
+) -> dict[str, object]:
+    """Build the runtime-mode-state dict used for IC mode and route resolution.
+
+    Copies ``state`` and, when ``snapshot`` is not None, overlays
+    ``last_issue_centric_runtime_snapshot`` and
+    ``last_issue_centric_snapshot_status`` from the snapshot so that
+    ``prepare_issue_centric_runtime_mode`` and
+    ``resolve_issue_centric_route_choice`` see the persisted snapshot values.
+    """
+    runtime_mode_state = dict(state)
+    if snapshot is not None:
+        runtime_mode_state.update(
+            {
+                "last_issue_centric_runtime_snapshot": str(getattr(snapshot, "snapshot_path", "") or "").strip(),
+                "last_issue_centric_snapshot_status": str(getattr(snapshot, "snapshot_status", "") or "").strip(),
+            }
+        )
+    return runtime_mode_state
+
+
+def _resolve_normal_ic_context(
+    state: dict[str, object],
+) -> "_IcResolvedContext":
+    """Resolve issue-centric context via the normal snapshot / mode / route path.
+
+    Three stages:
+
+    * **A — snapshot prepare / persist**: ``prepare_issue_centric_runtime_snapshot``
+      and ``_persist_runtime_snapshot_if_needed``.
+    * **B — runtime-mode-state build**: ``_build_ic_runtime_mode_state`` overlays
+      snapshot path/status onto a copy of ``state``.
+    * **C — mode / section / route resolution**: ``prepare_issue_centric_runtime_mode``
+      and ``resolve_issue_centric_route_choice``.
+
+    Returns an :class:`_IcResolvedContext` with named fields.
+    Used by both ``_resolve_report_request_ic_context`` and
+    ``run_rotated_report_request``.
+    """
+    # A — snapshot
+    snapshot, _ = prepare_issue_centric_runtime_snapshot(state)
+    snapshot = _persist_runtime_snapshot_if_needed(snapshot)
+    # B — runtime-mode-state
+    runtime_mode_state = _build_ic_runtime_mode_state(state, snapshot)
+    # C — mode / section / route
+    runtime_mode, next_request_section = prepare_issue_centric_runtime_mode(runtime_mode_state)
+    route_choice = resolve_issue_centric_route_choice(runtime_mode_state)
+    return _IcResolvedContext(
+        runtime_snapshot=snapshot,
+        runtime_mode=runtime_mode,
+        next_request_section=next_request_section,
+        route_selected=route_choice.route_selected,
+    )
+
+
+def _resolve_report_request_ic_context(
+    state: dict[str, object],
+) -> "_IcResolvedContext":
+    """Resolve issue-centric context for a report-based resume request.
+
+    Returns an :class:`_IcResolvedContext` with named fields.
+
+    Two paths:
+
+    * **Pinned ready issue path** — when ``_should_use_pinned_ready_issue_path(state)``
+      is True, snapshot and runtime_mode are ``None`` and a fresh IC section is built
+      from the pinned ready issue ref.  Old ``last_issue_centric_*`` context is not
+      carried over.
+
+    * **Normal path** — delegates to ``_resolve_normal_ic_context``.
+    """
+    if _should_use_pinned_ready_issue_path(state):
+        _pinned_ready_issue_ref = str(state.get("current_ready_issue_ref", "")).strip()
+        return _IcResolvedContext(
+            runtime_snapshot=None,
+            runtime_mode=None,
+            next_request_section=build_pinned_ready_issue_ic_section(_pinned_ready_issue_ref),
+            route_selected="issue_centric",
+        )
+    return _resolve_normal_ic_context(state)
+
+
+def _resolve_resume_request_payload(
+    state: dict[str, object],
+    *,
+    retryable_request: tuple[str, str, str] | None,
+    args: argparse.Namespace,
+    last_report: str,
+    resume_note: str,
+    effective_next_todo: str,
+    effective_open_questions: str,
+    issue_centric_next_request_section: str,
+) -> tuple[str, str, str, str | None]:
+    """Resolve the request payload for a resume request.
+
+    Returns ``(request_text, request_hash, request_source, prepared_status)``.
+
+    Two paths:
+
+    * **Retryable prepared request** — if ``retryable_request`` is provided it is used
+      directly; otherwise ``load_retryable_prepared_request(state)`` is tried.  When a
+      retryable request is found the returned ``prepared_status`` is the current
+      ``prepared_request_status`` value from *state* (may be ``"prepared"`` or another
+      status string, including empty string).
+
+    * **Fresh build** — when no retryable request is available,
+      ``build_chatgpt_request()`` assembles the text, ``stable_text_hash()`` hashes it,
+      and ``build_report_request_source()`` produces the source token.
+      ``prepared_status`` is ``None`` in this case.
+    """
+    if retryable_request is None:
+        retryable_request = load_retryable_prepared_request(state)
+    if retryable_request is not None:
+        request_text, request_hash, request_source = retryable_request
+        prepared_status: str | None = str(state.get("prepared_request_status", "")).strip()
+        return request_text, request_hash, request_source, prepared_status
+    template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
+    _request_guidance = (
+        _LIFECYCLE_ONLY_REQUEST_GUIDANCE
+        if _is_ready_bounded_completion_followup_request(
+            state,
+            effective_next_todo=effective_next_todo,
+            original_next_todo=args.next_todo,
+        )
+        else None
+    )
+    request_text = build_chatgpt_request(
+        state=state,
+        template_path=template_path,
+        next_todo=effective_next_todo,
+        open_questions=effective_open_questions,
+        current_status=args.current_status or None,
+        last_report=last_report,
+        resume_note=resume_note or None,
+        issue_centric_next_request_section=issue_centric_next_request_section,
+        request_guidance=_request_guidance,
+    )
+    request_hash = stable_text_hash(request_text)
+    request_source = build_report_request_source(state, resume_note)
+    return request_text, request_hash, request_source, None
+
+
+def _log_prepared_request_reuse(prepared_status: str, route_selected: str) -> None:
+    """Print the appropriate reuse message for a prepared request.
+
+    Called only when a prepared request is being reused (``prepared_status`` is not
+    ``None``).  Distinguishes the "re-generate skipped" prepared path from the
+    "unsent retry" path, and within the former selects the route-specific wording.
+    """
+    if prepared_status == "prepared":
+        if route_selected == "issue_centric":
+            print("request: issue-centric preferred route の prepared ChatGPT request を再生成せず送信します。")
+        else:
+            print("request: legacy fallback へ寄せた prepared の ChatGPT request を再生成せず送信します。")
+    else:
+        print("request: 前回未送信の ChatGPT request を再送します。")
+
+
+def _is_duplicate_pending_request(state: dict[str, object], request_source: str) -> bool:
+    """Return True when the same request source is already pending.
+
+    Prints the duplicate-detection message (and the pending log path if available)
+    as a side-effect when a duplicate is detected.
+    """
+    if (
+        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
+        and str(state.get("pending_request_source", "")).strip() == request_source
+    ):
+        print("request: 同じ report からの request は送信済みのため再送しませんでした。")
+        if str(state.get("pending_request_log", "")).strip():
+            print(f"pending: {state.get('pending_request_log', '')}")
+        return True
+    return False
 
 
 def run_resume_request(
@@ -192,45 +800,10 @@ def run_resume_request(
     resume_note: str,
     retryable_request: tuple[str, str, str] | None = None,
 ) -> int:
-    if retryable_request is not None:
-        request_text, request_hash, request_source = retryable_request
-        print("request: 前回未送信の ChatGPT request を再送します。")
-    else:
-        template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
-        request_text = build_chatgpt_request(
-            state=state,
-            template_path=template_path,
-            next_todo=args.next_todo,
-            open_questions=args.open_questions,
-            current_status=args.current_status or None,
-            last_report=last_report,
-            resume_note=resume_note or None,
-        )
-        request_hash = stable_text_hash(request_text)
-        request_source = build_report_request_source(state, resume_note)
-
-    if (
-        str(state.get("mode", "")).strip() == "waiting_prompt_reply"
-        and str(state.get("pending_request_source", "")).strip() == request_source
-    ):
-        print("request: 同じ report からの request は送信済みのため再送しませんでした。")
-        if str(state.get("pending_request_log", "")).strip():
-            print(f"pending: {state.get('pending_request_log', '')}")
-        return 0
-
-    return dispatch_request(
-        state,
-        request_text=request_text,
-        request_hash=request_hash,
-        request_source=request_source,
-        prepared_prefix="prepared_prompt_request_from_report",
-        sent_prefix="sent_prompt_request_from_report",
-        success_updates={
-            "chatgpt_decision": "",
-            "chatgpt_decision_note": "",
-            "human_review_auto_continue_count": 0,
-        },
-    )
+    # 1. resolve
+    plan = _resolve_resume_request_plan(state, args, last_report, resume_note, retryable_request)
+    # 2. execute
+    return _execute_resume_request_plan(plan)
 
 
 def run_rotated_report_request(
@@ -238,49 +811,175 @@ def run_rotated_report_request(
     args: argparse.Namespace,
     last_report: str,
 ) -> int:
-    request_source = build_report_request_source(state, "")
-    pending_handoff_text = ""
-    pending_handoff_source = str(state.get("pending_handoff_source", "")).strip()
-    if pending_handoff_source == request_source:
+    # 1. resolve
+    plan = _resolve_rotated_request_plan(state, args, last_report)
+    # 2. execute
+    return _execute_rotated_request_plan(plan)
+
+
+def _can_reuse_pending_handoff_for_rotation(
+    state: dict[str, object],
+    request_source: str,
+) -> bool:
+    """Return True when the cached pending handoff can be safely reused for rotation.
+
+    The handoff is reusable when its recorded source matches the current request
+    source *and* handoff text is available — indicating a prior rotation cycle was
+    interrupted and the same handoff can be replayed without sending a new request.
+    A source mismatch means the cached handoff belongs to a different report cycle
+    and must not be re-used.
+    """
+    if str(state.get("pending_handoff_source", "")).strip() != request_source:
+        return False
+    return bool(read_pending_handoff_text(state))
+
+
+def _acquire_rotated_handoff(
+    state: dict[str, object],
+    args: argparse.Namespace,
+    last_report: str,
+    *,
+    request_source: str,
+    ic_context: "_IcResolvedContext",
+) -> tuple[str, str]:
+    """Acquire handoff text for a rotated report request.
+
+    Returns ``(handoff_text, handoff_received_log)``.
+
+    Two paths:
+
+    * **Cached pending handoff** — if :func:`_can_reuse_pending_handoff_for_rotation`
+      returns True the cached handoff is replayed without sending a new request.
+
+    * **Fresh acquisition** — builds and sends a handoff request, waits for the
+      reply, extracts the handoff text, and persists the pending handoff state.
+    """
+    if _can_reuse_pending_handoff_for_rotation(state, request_source):
         pending_handoff_text = read_pending_handoff_text(state)
-
-    if pending_handoff_text:
-        handoff_text = pending_handoff_text
-        handoff_received_log = state.get("pending_handoff_log", "") or ""
         print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
-    else:
-        handoff_request_text = build_chatgpt_handoff_request(
-            state=state,
-            last_report=last_report,
-            next_todo=args.next_todo,
-            open_questions=args.open_questions,
-            current_status=args.current_status or None,
-        )
-        handoff_request_log = log_text("handoff_requested", handoff_request_text)
-        send_to_chatgpt(handoff_request_text)
-        print(f"handoff requested: {handoff_request_log}")
-
-        raw_text = wait_for_handoff_reply_text(
-            request_text=handoff_request_text,
-            stage_callback=log_wait_event,
-        )
-        handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
-        handoff_received_log = log_text("handoff_received", handoff_text)
-        handoff_state = clear_error_fields(dict(state))
-        clear_pending_request_fields(handoff_state)
+        return pending_handoff_text, str(state.get("pending_handoff_log", "") or "")
+    handoff_request_text = build_chatgpt_handoff_request(
+        state=state,
+        last_report=last_report,
+        next_todo=args.next_todo,
+        open_questions=args.open_questions,
+        current_status=args.current_status or None,
+        issue_centric_next_request_section=ic_context.next_request_section,
+    )
+    handoff_request_log = log_text("handoff_requested", handoff_request_text)
+    send_to_chatgpt(handoff_request_text)
+    print(f"handoff requested: {handoff_request_log}")
+    raw_text = wait_for_handoff_reply_text(
+        request_text=handoff_request_text,
+        stage_callback=log_wait_event,
+    )
+    handoff_text = extract_last_chatgpt_handoff(raw_text, after_text=handoff_request_text)
+    handoff_received_log = log_text("handoff_received", handoff_text)
+    handoff_state = clear_error_fields(dict(state))
+    clear_pending_request_fields(handoff_state)
+    handoff_state.update(
+        {
+            "mode": "idle",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": True,
+            "need_codex_run": False,
+            "pending_handoff_hash": stable_text_hash(handoff_text),
+            "pending_handoff_source": request_source,
+            "pending_handoff_log": repo_relative(handoff_received_log),
+        }
+    )
+    if ic_context.runtime_snapshot is not None:
         handoff_state.update(
-            {
-                "mode": "idle",
-                "need_chatgpt_prompt": False,
-                "need_chatgpt_next": True,
-                "need_codex_run": False,
-                "pending_handoff_hash": stable_text_hash(handoff_text),
-                "pending_handoff_source": request_source,
-                "pending_handoff_log": repo_relative(handoff_received_log),
-            }
+            _issue_centric_next_request_state_updates(
+                ic_context.runtime_mode or ic_context.runtime_snapshot,
+                phase="prepared",
+            )
         )
-        save_state(handoff_state)
+    save_state(handoff_state)
+    return handoff_text, handoff_received_log
 
+
+def _apply_rotated_pending_request_state(
+    state: dict[str, object],
+    *,
+    request_hash: str,
+    request_source: str,
+    request_log_path: str,
+    rotation_signal: str,
+    rotated_chat: dict[str, object],
+    issue_centric_runtime_snapshot: object | None,
+    issue_centric_runtime_mode: object | None,
+) -> None:
+    """Build and save the pending request state for a rotated chat request.
+
+    **Cycle boundary cleanup** — all four stale-state families are cleared
+    before the rotated pending-request fields are written, because rotation
+    constitutes a full cycle boundary:
+
+    * error / retry_send remnants — via :func:`clear_error_fields`
+    * previous pending request fields — via :func:`clear_pending_request_fields`
+      (the prior cycle's pending request is superseded by this rotation)
+    * pending handoff fields — via :func:`clear_pending_handoff_fields`
+      (the handoff has been consumed; it must not be replayed after this)
+    * chat rotation fields — via :func:`clear_chat_rotation_fields`
+      (the rotation signal is stored in ``pending_request_signal`` instead)
+
+    After cleanup, populates all rotated pending-request fields including
+    rotation metadata and IC generation binding.
+    """
+    mutable = clear_error_fields(dict(state))
+    clear_pending_request_fields(mutable)
+    clear_pending_handoff_fields(mutable)
+    clear_chat_rotation_fields(mutable)
+    mutable.update(
+        {
+            "mode": "waiting_prompt_reply",
+            "need_chatgpt_prompt": False,
+            "need_chatgpt_next": False,
+            "need_codex_run": False,
+            "chatgpt_decision": "",
+            "chatgpt_decision_note": "",
+            "human_review_auto_continue_count": 0,
+            "pending_request_hash": request_hash,
+            "pending_request_source": request_source,
+            "pending_request_log": repo_relative(request_log_path),
+            "pending_request_signal": rotation_signal,
+            "current_chat_session": rotated_chat.get("url", ""),
+            "github_source_attach_status": str(rotated_chat.get("github_source_attach_status", "")),
+            "github_source_attach_boundary": str(rotated_chat.get("github_source_attach_boundary", "")),
+            "github_source_attach_detail": str(rotated_chat.get("github_source_attach_detail", "")),
+            "github_source_attach_context": str(rotated_chat.get("github_source_attach_context", "")),
+            "github_source_attach_log": str(rotated_chat.get("github_source_attach_log", "")),
+            "request_send_continued_without_github_source": bool(
+                rotated_chat.get("request_send_continued_without_github_source")
+            ),
+        }
+    )
+    if issue_centric_runtime_snapshot is not None:
+        mutable.update(
+            _issue_centric_next_request_state_updates(
+                issue_centric_runtime_mode or issue_centric_runtime_snapshot,
+                phase="pending",
+            )
+        )
+    save_state(mutable)
+
+
+def _apply_rotated_request_result(
+    state: dict[str, object],
+    *,
+    handoff_text: str,
+    handoff_received_log: str,
+    request_source: str,
+    ic_context: "_IcResolvedContext",
+) -> int:
+    """Apply rotated report request result to state, logs, and stdout.
+
+    Rotates the chat with the handoff text, updates state with pending request
+    fields and IC context, saves state, and prints the rotation result.
+    Returns 0.
+    """
+    # log
     rotated_chat = rotate_chat_with_handoff(handoff_text)
     rotation_signal = str(rotated_chat.get("signal", "")).strip()
     soft_wait = rotation_signal == "submitted_unconfirmed"
@@ -291,7 +990,14 @@ def run_rotated_report_request(
                 f"url: {rotated_chat.get('url', '')}",
                 f"title: {rotated_chat.get('title', '')}",
                 f"signal: {rotation_signal}",
+                f"send_route: {rotated_chat.get('send_route', '')}",
                 f"delivery_mode: {'soft_success_wait' if soft_wait else 'confirmed_send'}",
+                f"github_source_attach_status: {rotated_chat.get('github_source_attach_status', '')}",
+                f"github_source_attach_boundary: {rotated_chat.get('github_source_attach_boundary', '')}",
+                f"github_source_attach_detail: {rotated_chat.get('github_source_attach_detail', '')}",
+                f"github_source_attach_log: {rotated_chat.get('github_source_attach_log', '')}",
+                "request_send_continued_without_github_source: "
+                f"{bool(rotated_chat.get('request_send_continued_without_github_source'))}",
                 f"match_kind: {rotated_chat.get('match_kind', '')}",
                 f"matched_hint: {rotated_chat.get('matched_hint', '')}",
                 f"project_name: {rotated_chat.get('project_name', '')}",
@@ -304,29 +1010,18 @@ def run_rotated_report_request(
         handoff_text,
     )
     request_hash = stable_text_hash(handoff_text)
-
-    mutable_state = clear_error_fields(dict(state))
-    clear_pending_request_fields(mutable_state)
-    clear_pending_handoff_fields(mutable_state)
-    clear_chat_rotation_fields(mutable_state)
-    mutable_state.update(
-        {
-            "mode": "waiting_prompt_reply",
-            "need_chatgpt_prompt": False,
-            "need_chatgpt_next": False,
-            "need_codex_run": False,
-            "chatgpt_decision": "",
-            "chatgpt_decision_note": "",
-            "human_review_auto_continue_count": 0,
-            "pending_request_hash": request_hash,
-            "pending_request_source": request_source,
-            "pending_request_log": repo_relative(request_log),
-            "pending_request_signal": rotation_signal,
-            "current_chat_session": rotated_chat.get("url", ""),
-        }
+    # state transition — pending
+    _apply_rotated_pending_request_state(
+        state,
+        request_hash=request_hash,
+        request_source=request_source,
+        request_log_path=request_log,
+        rotation_signal=rotation_signal,
+        rotated_chat=rotated_chat,
+        issue_centric_runtime_snapshot=ic_context.runtime_snapshot,
+        issue_centric_runtime_mode=ic_context.runtime_mode,
     )
-    save_state(mutable_state)
-
+    # print
     if handoff_received_log:
         print(f"handoff received: {handoff_received_log}")
     print(f"chat rotated: {chat_rotated_log}")
@@ -350,31 +1045,630 @@ def run_rotated_report_request(
     return 0
 
 
+@dataclasses.dataclass
+class _ResumeRequestPlan:
+    """Resolved execution plan for a resume report-request cycle.
+
+    Built by ``_resolve_resume_request_plan`` and consumed by
+    ``_execute_resume_request_plan``.  Carries every value needed to execute
+    the resume path so that ``run_resume_request`` reads as two clear steps:
+    resolve → execute.
+    """
+
+    state: dict[str, object]
+    args: "argparse.Namespace"
+    last_report: str
+    resume_note: str
+    ic_context: "_IcResolvedContext"
+    effective_section: str
+    effective_next_todo: str
+    effective_open_questions: str
+    request_text: str
+    request_hash: str
+    request_source: str
+    prepared_status: "str | None"
+    # ``runtime_mode or runtime_snapshot`` — passed to dispatch as
+    # ``issue_centric_runtime_snapshot`` (mode object takes priority when present)
+    ic_snapshot_for_dispatch: object | None = None
+
+
+def _resolve_resume_request_plan(
+    state: dict[str, object],
+    args: "argparse.Namespace",
+    last_report: str,
+    resume_note: str,
+    retryable_request: "tuple[str, str, str] | None",
+) -> "_ResumeRequestPlan":
+    """Resolve all values required to execute a resume report-request cycle.
+
+    Resolves IC context, completion-followup adjustment, and the request payload,
+    then bundles everything into a :class:`_ResumeRequestPlan` ready for
+    :func:`_execute_resume_request_plan`.
+    """
+    ic = _resolve_report_request_ic_context(state)
+    effective_section, effective_next_todo, effective_open_questions = (
+        _resolve_completion_followup_request(
+            state,
+            last_report=last_report,
+            issue_centric_next_request_section=ic.next_request_section,
+            route_selected=ic.route_selected,
+            next_todo=args.next_todo,
+            open_questions=args.open_questions,
+        )
+    )
+    # Inject state-derived context block.
+    # Skipped on the pinned-ready-issue path because that path intentionally avoids
+    # carrying over stale last_issue_centric_* context from a previous issue.
+    if not _should_use_pinned_ready_issue_path(state):
+        _context_block = build_request_context_section(state)
+        if _context_block:
+            effective_section = (
+                effective_section.rstrip() + "\n\n" + _context_block
+                if effective_section
+                else _context_block
+            )
+    request_text, request_hash, request_source, prepared_status = _resolve_resume_request_payload(
+        state,
+        retryable_request=retryable_request,
+        args=args,
+        last_report=last_report,
+        resume_note=resume_note,
+        effective_next_todo=effective_next_todo,
+        effective_open_questions=effective_open_questions,
+        issue_centric_next_request_section=effective_section,
+    )
+    return _ResumeRequestPlan(
+        state=state,
+        args=args,
+        last_report=last_report,
+        resume_note=resume_note,
+        ic_context=ic,
+        effective_section=effective_section,
+        effective_next_todo=effective_next_todo,
+        effective_open_questions=effective_open_questions,
+        request_text=request_text,
+        request_hash=request_hash,
+        request_source=request_source,
+        prepared_status=prepared_status,
+        ic_snapshot_for_dispatch=ic.runtime_mode or ic.runtime_snapshot,
+    )
+
+
+def _execute_resume_request_plan(plan: "_ResumeRequestPlan") -> int:
+    """Execute a resolved :class:`_ResumeRequestPlan`.
+
+    Three steps:
+    1. Log prepared-request reuse if applicable.
+    2. Guard against duplicate pending request (early return 0).
+    3. Dispatch the request.
+    """
+    if plan.prepared_status is not None:
+        _log_prepared_request_reuse(plan.prepared_status, plan.ic_context.route_selected)
+    if _is_duplicate_pending_request(plan.state, plan.request_source):
+        return 0
+    return dispatch_request(
+        plan.state,
+        request_text=plan.request_text,
+        request_hash=plan.request_hash,
+        request_source=plan.request_source,
+        prepared_prefix="prepared_prompt_request_from_report",
+        sent_prefix="sent_prompt_request_from_report",
+        issue_centric_runtime_snapshot=plan.ic_snapshot_for_dispatch,
+        success_updates={
+            "chatgpt_decision": "",
+            "chatgpt_decision_note": "",
+            "human_review_auto_continue_count": 0,
+        },
+    )
+
+
+@dataclasses.dataclass
+class _RotatedRequestPlan:
+    """Resolved execution plan for a rotated report-request cycle.
+
+    Built by ``_resolve_rotated_request_plan`` and consumed by
+    ``_execute_rotated_request_plan``.  Carries the IC context, request source,
+    and acquired handoff so that ``run_rotated_report_request`` reads as two clear
+    steps: resolve → execute.
+    """
+
+    state: dict[str, object]
+    last_report: str
+    request_source: str
+    ic_context: "_IcResolvedContext"
+    handoff_text: str
+    handoff_received_log: str
+
+
+def _resolve_rotated_request_plan(
+    state: dict[str, object],
+    args: "argparse.Namespace",
+    last_report: str,
+) -> "_RotatedRequestPlan":
+    """Resolve all values required to execute a rotated report-request cycle.
+
+    Resolves IC context via the normal path, builds the request source, and
+    acquires the handoff text (from cache or fresh acquisition).  Returns a
+    :class:`_RotatedRequestPlan` ready for :func:`_execute_rotated_request_plan`.
+    """
+    ic = _resolve_normal_ic_context(state)
+    # Inject state-derived context block into the IC section for the handoff request.
+    _context_block = build_request_context_section(state)
+    if _context_block:
+        ic.next_request_section = (
+            ic.next_request_section.rstrip() + "\n\n" + _context_block
+            if ic.next_request_section
+            else _context_block
+        )
+    request_source = build_report_request_source(state, "")
+    handoff_text, handoff_received_log = _acquire_rotated_handoff(
+        state,
+        args,
+        last_report,
+        request_source=request_source,
+        ic_context=ic,
+    )
+    return _RotatedRequestPlan(
+        state=state,
+        last_report=last_report,
+        request_source=request_source,
+        ic_context=ic,
+        handoff_text=handoff_text,
+        handoff_received_log=handoff_received_log,
+    )
+
+
+def _execute_rotated_request_plan(plan: "_RotatedRequestPlan") -> int:
+    """Execute a resolved :class:`_RotatedRequestPlan`.
+
+    Delegates to ``_apply_rotated_request_result`` which handles chat rotation,
+    state transition, and result printing.
+    """
+    return _apply_rotated_request_result(
+        plan.state,
+        handoff_text=plan.handoff_text,
+        handoff_received_log=plan.handoff_received_log,
+        request_source=plan.request_source,
+        ic_context=plan.ic_context,
+    )
+
+
+def _needs_stale_pending_handoff_cleanup(state: dict[str, object]) -> bool:
+    """Return True when a stale pending handoff needs to be cleared before resuming.
+
+    A pending handoff is considered stale when the handoff log field is present but
+    chat rotation is no longer required — meaning a previous rotation cycle left behind
+    state that would falsely trigger handoff re-use on the normal resume path.
+    """
+    return (
+        not should_rotate_before_next_chat_request(state)
+        and bool(str(state.get("pending_handoff_log", "")).strip())
+    )
+
+
+def _clean_stale_pending_handoff_if_needed(state: dict[str, object]) -> dict[str, object]:
+    """Clear a stale pending handoff from state when rotation is not needed.
+
+    Delegates the staleness check to :func:`_needs_stale_pending_handoff_cleanup`.
+    When the handoff is stale, clears all pending-handoff fields, saves state,
+    and returns the cleaned state dict.  Otherwise returns the original unchanged.
+    """
+    if _needs_stale_pending_handoff_cleanup(state):
+        cleaned_state = dict(state)
+        clear_pending_handoff_fields(cleaned_state)
+        save_state(cleaned_state)
+        return cleaned_state
+    return state
+
+
+@dataclasses.dataclass
+class _RecoveryDecision:
+    """Recovery-path decision for a report request cycle.
+
+    Named boolean fields capture *why* each path was chosen, making
+    restart-safety reasoning visible from the entry plan resolver without
+    inspecting control flow.
+
+    ``path`` mirrors :attr:`_ReportRequestEntryPlan.path`.
+
+    ``state`` may differ from the input state when ``stale_handoff_cleaned``
+    is True — in that case pending-handoff fields have already been removed
+    and the cleaned state has been saved.
+    """
+
+    path: str
+    state: dict[str, object]
+    resume_note: str
+    retryable_request: "tuple[str, str, str] | None"
+    has_retryable_request: bool
+    is_awaiting_user_stop: bool
+    stale_handoff_cleaned: bool
+    needs_rotation: bool
+
+
+def _resolve_recovery_decision(
+    state: dict[str, object],
+    resume_note: str,
+    retryable_request: "tuple[str, str, str] | None",
+) -> "_RecoveryDecision":
+    """Resolve the recovery-path decision for a report request cycle.
+
+    Evaluates restart-safety conditions in priority order and returns a
+    :class:`_RecoveryDecision` that names the chosen path and records why it
+    was chosen.  Stale pending handoff cleanup is the only side effect — it is
+    applied before the awaiting-user and rotation checks so that those checks
+    operate on clean state.
+
+    Priority:
+
+    1. ``retryable_resume``     — retryable prepared request present
+    2. ``awaiting_user_stop``   — ``awaiting_user`` mode with empty resume note
+    3. ``awaiting_user_resume`` — ``awaiting_user`` mode with non-empty note
+    4. ``rotated``              — chat rotation required
+    5. ``normal_resume``        — default continuation path
+    """
+    if retryable_request is not None:
+        return _RecoveryDecision(
+            path="retryable_resume",
+            state=state,
+            resume_note="",
+            retryable_request=retryable_request,
+            has_retryable_request=True,
+            is_awaiting_user_stop=False,
+            stale_handoff_cleaned=False,
+            needs_rotation=False,
+        )
+    is_awaiting_user = str(state.get("mode", "")).strip() == "awaiting_user"
+    if is_awaiting_user and not resume_note.strip():
+        # awaiting_user_stop: clean any stale pending handoff before stopping.
+        # Rotation is not going to proceed, so a pending handoff is stale and
+        # must not be carried forward to the next cycle after the user resumes.
+        stale_handoff_cleaned = False
+        if _needs_stale_pending_handoff_cleanup(state):
+            state = _clean_stale_pending_handoff_if_needed(state)
+            stale_handoff_cleaned = True
+        return _RecoveryDecision(
+            path="awaiting_user_stop",
+            state=state,
+            resume_note=resume_note,
+            retryable_request=None,
+            has_retryable_request=False,
+            is_awaiting_user_stop=True,
+            stale_handoff_cleaned=stale_handoff_cleaned,
+            needs_rotation=False,
+        )
+    stale_handoff_cleaned = False
+    if _needs_stale_pending_handoff_cleanup(state):
+        state = _clean_stale_pending_handoff_if_needed(state)
+        stale_handoff_cleaned = True
+    if is_awaiting_user:
+        return _RecoveryDecision(
+            path="awaiting_user_resume",
+            state=state,
+            resume_note=resume_note,
+            retryable_request=None,
+            has_retryable_request=False,
+            is_awaiting_user_stop=False,
+            stale_handoff_cleaned=stale_handoff_cleaned,
+            needs_rotation=False,
+        )
+    needs_rotation = should_rotate_before_next_chat_request(state)
+    if needs_rotation:
+        return _RecoveryDecision(
+            path="rotated",
+            state=state,
+            resume_note="",
+            retryable_request=None,
+            has_retryable_request=False,
+            is_awaiting_user_stop=False,
+            stale_handoff_cleaned=stale_handoff_cleaned,
+            needs_rotation=True,
+        )
+    return _RecoveryDecision(
+        path="normal_resume",
+        state=state,
+        resume_note="",
+        retryable_request=None,
+        has_retryable_request=False,
+        is_awaiting_user_stop=False,
+        stale_handoff_cleaned=stale_handoff_cleaned,
+        needs_rotation=False,
+    )
+
+
+@dataclasses.dataclass
+class _ReportRequestEntryPlan:
+    """Resolved entry plan for a report request cycle.
+
+    ``path`` names the execution branch:
+
+    * ``"retryable_resume"``    — retryable prepared request detected; call
+      ``run_resume_request`` immediately with ``retryable_request``.
+    * ``"awaiting_user_stop"``  — mode is ``awaiting_user`` but ``resume_note``
+      is empty; print guidance and return 0.
+    * ``"awaiting_user_resume"`` — mode is ``awaiting_user`` with a non-empty
+      ``resume_note``; call ``run_resume_request`` with the note.
+    * ``"rotated"``             — chat rotation needed; call
+      ``run_rotated_report_request``.
+    * ``"normal_resume"``       — standard report-based continuation; call
+      ``run_resume_request`` with an empty note.
+    """
+
+    path: str
+    state: dict[str, object]
+    args: argparse.Namespace
+    last_report: str
+    resume_note: str
+    retryable_request: tuple[str, str, str] | None
+
+
+def _resolve_report_request_entry_plan(
+    state: dict[str, object],
+    args: argparse.Namespace,
+) -> _ReportRequestEntryPlan:
+    """Resolve the entry plan for a report request cycle.
+
+    Reads retryable request and resume note, delegates path selection and stale
+    handoff cleanup to :func:`_resolve_recovery_decision`, then reads the report
+    text and bundles everything into a :class:`_ReportRequestEntryPlan`.
+    """
+    retryable_request = load_retryable_prepared_request(state)
+    resume_note = "" if retryable_request is not None else resolve_resume_note(state, args)
+    decision = _resolve_recovery_decision(state, resume_note, retryable_request)
+    last_report = "" if decision.path == "awaiting_user_stop" else read_last_report_text(state)
+    return _ReportRequestEntryPlan(
+        path=decision.path,
+        state=decision.state,
+        args=args,
+        last_report=last_report,
+        resume_note=decision.resume_note,
+        retryable_request=decision.retryable_request,
+    )
+
+
+def _execute_report_request_entry_plan(plan: _ReportRequestEntryPlan) -> int:
+    """Execute the resolved entry plan for a report request cycle."""
+    if plan.path == "awaiting_user_stop":
+        print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
+        return 0
+    if plan.path == "retryable_resume":
+        return run_resume_request(plan.state, plan.args, plan.last_report, "", plan.retryable_request)
+    if plan.path == "awaiting_user_resume":
+        return run_resume_request(plan.state, plan.args, plan.last_report, plan.resume_note)
+    if plan.path == "rotated":
+        return run_rotated_report_request(plan.state, plan.args, plan.last_report)
+    # normal_resume
+    return run_resume_request(plan.state, plan.args, plan.last_report, "")
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
+    # 1. preflight
     if should_prioritize_unarchived_report(state):
         raise BridgeStop(
             "bridge/outbox/codex_report.md に未退避 report が残っているため、"
             "handoff / 新チャット送信へは進みません。先に report archive から再開してください。"
         )
+    # 2. args
     args = parse_args(argv)
-    retryable_request = load_retryable_prepared_request(state)
-    if retryable_request is not None:
-        return run_resume_request(state, args, read_last_report_text(state), "", retryable_request)
-    resume_note = resolve_resume_note(state, args)
-    if str(state.get("mode", "")).strip() == "awaiting_user" and not resume_note.strip():
-        print("再開用の補足入力が空のため送信しませんでした。必要な補足を入力して再実行してください。")
-        return 0
-    last_report = read_last_report_text(state)
-    if not should_rotate_before_next_chat_request(state) and str(state.get("pending_handoff_log", "")).strip():
-        cleaned_state = dict(state)
-        clear_pending_handoff_fields(cleaned_state)
-        save_state(cleaned_state)
-        state = cleaned_state
-    if str(state.get("mode", "")).strip() == "awaiting_user":
-        return run_resume_request(state, args, last_report, resume_note)
-    if should_rotate_before_next_chat_request(state):
-        return run_rotated_report_request(state, args, last_report)
-    return run_resume_request(state, args, last_report, "")
+    # 3. recovery decision → entry plan
+    plan = _resolve_report_request_entry_plan(state, args)
+    # 4. execute
+    return _execute_report_request_entry_plan(plan)
+
+
+def _issue_centric_next_request_state_updates(
+    context: object,
+    *,
+    phase: str,
+) -> dict[str, object]:
+    """Build the IC next-request state update dict for a prepared or pending request.
+
+    Extracts snapshot / runtime_mode / target / recovery base fields from
+    ``context``, delegates generation lifecycle resolution to
+    ``_resolve_ic_generation_lifecycle``, and assembles the final state update
+    dict.  External key names are unchanged.
+    """
+    # --- base fields from context ---
+    snapshot_path = str(getattr(context, "snapshot_path", "") or "").strip()
+    snapshot_status = str(getattr(context, "snapshot_status", "") or "").strip()
+    generation_id = str(getattr(context, "generation_id", "") or "").strip()
+    runtime_mode = str(getattr(context, "runtime_mode", "") or "").strip()
+    runtime_mode_reason = str(getattr(context, "runtime_mode_reason", "") or "").strip()
+    runtime_mode_source = str(getattr(context, "runtime_mode_source", "") or "").strip()
+    target_issue = str(getattr(context, "target_issue", "") or "").strip()
+    target_issue_source = str(getattr(context, "target_issue_source", "") or "").strip()
+    fallback_reason = str(getattr(context, "fallback_reason", "") or "").strip()
+    route_selected = str(getattr(context, "route_selected", "") or "").strip()
+    recovery_status = str(getattr(context, "recovery_status", "") or "").strip()
+    recovery_source = str(getattr(context, "recovery_source", "") or "").strip()
+    # context-derived freshness / invalidation defaults (used only when no
+    # generation_id is present — see _resolve_ic_generation_lifecycle)
+    ctx_freshness_status = str(getattr(context, "freshness_status", "") or "").strip()
+    ctx_freshness_reason = str(getattr(context, "freshness_reason", "") or "").strip()
+    ctx_freshness_source = str(getattr(context, "freshness_source", "") or "").strip()
+    ctx_invalidation_status = str(getattr(context, "invalidation_status", "") or "").strip()
+    ctx_invalidation_reason = str(getattr(context, "invalidation_reason", "") or "").strip()
+    # --- generation lifecycle resolution ---
+    lc = _resolve_ic_generation_lifecycle(
+        generation_id,
+        runtime_mode=runtime_mode,
+        runtime_mode_reason=runtime_mode_reason,
+        fallback_reason=fallback_reason,
+        route_selected=route_selected,
+        phase=phase,
+        ctx_freshness_status=ctx_freshness_status,
+        ctx_freshness_reason=ctx_freshness_reason,
+        ctx_freshness_source=ctx_freshness_source,
+        ctx_invalidation_status=ctx_invalidation_status,
+        ctx_invalidation_reason=ctx_invalidation_reason,
+    )
+    # --- assemble payload ---
+    return {
+        "last_issue_centric_runtime_snapshot": snapshot_path,
+        "last_issue_centric_snapshot_status": snapshot_status,
+        "last_issue_centric_runtime_generation_id": generation_id,
+        "last_issue_centric_generation_lifecycle": lc.generation_lifecycle,
+        "last_issue_centric_generation_lifecycle_reason": lc.generation_lifecycle_reason,
+        "last_issue_centric_generation_lifecycle_source": lc.generation_lifecycle_source,
+        "last_issue_centric_prepared_generation_id": lc.prepared_generation_id,
+        "last_issue_centric_pending_generation_id": lc.pending_generation_id,
+        "last_issue_centric_runtime_mode": runtime_mode,
+        "last_issue_centric_runtime_mode_reason": runtime_mode_reason,
+        "last_issue_centric_runtime_mode_source": runtime_mode_source,
+        "last_issue_centric_freshness_status": lc.freshness_status,
+        "last_issue_centric_freshness_reason": lc.freshness_reason,
+        "last_issue_centric_freshness_source": lc.freshness_source,
+        "last_issue_centric_invalidation_status": lc.invalidation_status,
+        "last_issue_centric_invalidation_reason": lc.invalidation_reason,
+        "last_issue_centric_invalidated_generation_id": lc.invalidated_generation_id,
+        "last_issue_centric_consumed_generation_id": lc.consumed_generation_id,
+        "last_issue_centric_next_request_target": target_issue,
+        "last_issue_centric_next_request_target_source": target_issue_source,
+        "last_issue_centric_next_request_fallback_reason": lc.fallback_reason,
+        "last_issue_centric_route_selected": lc.route_selected,
+        "last_issue_centric_route_fallback_reason": lc.fallback_reason,
+        "last_issue_centric_recovery_status": recovery_status,
+        "last_issue_centric_recovery_source": recovery_source,
+        "last_issue_centric_recovery_fallback_reason": lc.fallback_reason,
+    }
+
+
+@dataclasses.dataclass
+class _IcGenerationLifecycle:
+    """Resolved IC generation lifecycle fields for a next-request state update.
+
+    All string fields default to empty string.  The ``route_selected`` and
+    ``fallback_reason`` fields carry either the context-derived originals (when no
+    override is needed) or the corrected values (in the degraded/unavailable case).
+    """
+
+    freshness_status: str = ""
+    freshness_reason: str = ""
+    freshness_source: str = ""
+    invalidation_status: str = ""
+    invalidation_reason: str = ""
+    generation_lifecycle: str = ""
+    generation_lifecycle_reason: str = ""
+    generation_lifecycle_source: str = ""
+    prepared_generation_id: str = ""
+    pending_generation_id: str = ""
+    consumed_generation_id: str = ""
+    invalidated_generation_id: str = ""
+    route_selected: str = ""
+    fallback_reason: str = ""
+
+
+def _resolve_ic_generation_lifecycle(
+    generation_id: str,
+    *,
+    runtime_mode: str,
+    runtime_mode_reason: str,
+    fallback_reason: str,
+    route_selected: str,
+    phase: str,
+    ctx_freshness_status: str = "",
+    ctx_freshness_reason: str = "",
+    ctx_freshness_source: str = "",
+    ctx_invalidation_status: str = "",
+    ctx_invalidation_reason: str = "",
+) -> _IcGenerationLifecycle:
+    """Resolve IC generation lifecycle fields for a next-request state update.
+
+    Five cases:
+
+    * **No generation_id** — lifecycle fields remain empty; freshness and
+      invalidation fall back to context-derived values.
+    * **degraded/unavailable fallback** — generation is marked invalidated;
+      ``route_selected`` is forced to ``"fallback_legacy"``.
+    * **phase=prepared** — generation is bound as ``prepared_generation_id``;
+      lifecycle is ``"fresh_prepared"``.
+    * **phase=pending** — generation is bound as ``pending_generation_id``;
+      lifecycle is ``"fresh_pending"``.
+    * **generation present, no phase match** — lifecycle is
+      ``"fresh_available"``; generation is not bound to a specific id slot.
+    """
+    if not generation_id:
+        # no generation: pass context defaults through unchanged
+        return _IcGenerationLifecycle(
+            freshness_status=ctx_freshness_status,
+            freshness_reason=ctx_freshness_reason,
+            freshness_source=ctx_freshness_source,
+            invalidation_status=ctx_invalidation_status,
+            invalidation_reason=ctx_invalidation_reason,
+            route_selected=route_selected,
+            fallback_reason=fallback_reason,
+        )
+    if runtime_mode in {"issue_centric_degraded_fallback", "issue_centric_unavailable"}:
+        # generation invalidated by degraded/unavailable fallback
+        invalidation_reason = runtime_mode_reason or fallback_reason or "issue_centric_context_invalidated"
+        return _IcGenerationLifecycle(
+            freshness_status="issue_centric_invalidated",
+            freshness_reason=invalidation_reason,
+            freshness_source="legacy_fallback_selection",
+            invalidation_status="issue_centric_invalidated",
+            invalidation_reason=invalidation_reason,
+            generation_lifecycle="issue_centric_invalidated",
+            generation_lifecycle_reason=invalidation_reason,
+            generation_lifecycle_source="legacy_fallback_selection",
+            invalidated_generation_id=generation_id,
+            route_selected="fallback_legacy",
+            fallback_reason=invalidation_reason,
+        )
+    if phase == "prepared":
+        # binds prepared_generation_id; lifecycle is fresh_prepared
+        return _IcGenerationLifecycle(
+            freshness_status="issue_centric_fresh",
+            freshness_reason="prepared_request_bound_to_generation",
+            freshness_source="prepared_request_state",
+            generation_lifecycle="fresh_prepared",
+            generation_lifecycle_reason="prepared_request_bound_to_generation",
+            generation_lifecycle_source="prepared_request_state",
+            prepared_generation_id=generation_id,
+            route_selected=route_selected,
+            fallback_reason=fallback_reason,
+        )
+    if phase == "pending":
+        # binds pending_generation_id; lifecycle is fresh_pending
+        return _IcGenerationLifecycle(
+            freshness_status="issue_centric_fresh",
+            freshness_reason="pending_request_bound_to_generation",
+            freshness_source="pending_request_state",
+            generation_lifecycle="fresh_pending",
+            generation_lifecycle_reason="pending_request_bound_to_generation",
+            generation_lifecycle_source="pending_request_state",
+            pending_generation_id=generation_id,
+            route_selected=route_selected,
+            fallback_reason=fallback_reason,
+        )
+    # generation present, no specific phase match → fresh_available
+    return _IcGenerationLifecycle(
+        freshness_status="issue_centric_fresh",
+        freshness_reason="latest_issue_centric_generation_available",
+        freshness_source="runtime_snapshot_generation",
+        generation_lifecycle="fresh_available",
+        generation_lifecycle_reason="latest_issue_centric_generation_available",
+        generation_lifecycle_source="runtime_snapshot_generation",
+        route_selected=route_selected,
+        fallback_reason=fallback_reason,
+    )
+
+
+def _persist_runtime_snapshot_if_needed(snapshot: object | None) -> object | None:
+    if snapshot is None:
+        return None
+    snapshot_path = str(getattr(snapshot, "snapshot_path", "") or "").strip()
+    if snapshot_path:
+        return snapshot
+    payload = dict(vars(snapshot))
+    payload["snapshot_path"] = ""
+    status = str(payload.get("snapshot_status", "")).strip() or "issue_centric_snapshot"
+    log_path = log_text(
+        f"issue_centric_runtime_snapshot_{status}",
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        "json",
+    )
+    payload["snapshot_path"] = repo_relative(log_path)
+    return type(snapshot)(**payload)
 
 
 if __name__ == "__main__":

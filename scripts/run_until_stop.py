@@ -11,20 +11,35 @@ from typing import Any
 
 from _bridge_common import (
     BridgeStop,
+    bridge_lifecycle_sync_suffix,
+    bridge_project_sync_warning_suffix,
     browser_fetch_timeout_seconds,
     browser_runner_heartbeat_seconds,
     bridge_runtime_root,
     check_stop_conditions,
     codex_report_is_ready,
+    format_lifecycle_sync_state_note,
+    format_project_sync_warning_note,
+    detect_ic_stop_path,
+    format_operator_stop_note,
+    has_pending_issue_centric_codex_dispatch,
     is_apple_event_timeout_text,
+    is_awaiting_user_supplement,
+    ic_delivery_pending_detail,
+    is_fetch_extended_wait_state,
+    is_fetch_late_completion_state,
+    is_normal_path_state,
     latest_codex_progress_snapshot,
     load_browser_config,
     load_state,
     load_project_config,
     log_text,
     mark_error,
+    format_next_action_note,
+    prepared_request_action,
     project_config_warnings,
     print_project_config_warnings,
+    prepare_issue_centric_runtime_mode,
     present_bridge_handoff,
     present_bridge_status,
     is_retryable_pending_handoff_error,
@@ -32,6 +47,11 @@ from _bridge_common import (
     recover_prepared_request_state,
     recover_report_ready_state,
     recover_codex_report,
+    resolve_issue_centric_route_choice,
+    resolve_runtime_dispatch_plan,
+    resolve_unified_next_action,
+    record_project_sync_alert_if_new,
+    deliver_project_sync_alert_if_pending,
     repo_relative,
     runtime_prompt_path,
     runtime_report_path,
@@ -53,10 +73,18 @@ DEFAULT_CODEX_RUNNING_POLL_SECONDS = 5.0
 
 
 def start_bridge_mode(state: dict[str, Any]) -> str:
-    action = describe_next_action(state)
+    """Return a short human-readable description of the bridge start posture.
+
+    Uses resolve_unified_next_action() (action-view) as the primary signal.
+    mode is only consulted via is_awaiting_user_supplement() for the
+    sub-case where user supplement input is required before proceeding.
+    """
+    action = resolve_unified_next_action(state)
     if action == "request_next_prompt":
-        return "ready issue 参照から始められます"
-    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+        return "issue selection または明示指定の ready issue から始められます"
+    if action == "dispatch_issue_centric_codex_run":
+        return "prepared Codex body をそのまま dispatch できます"
+    if action == "request_prompt_from_report" and is_awaiting_user_supplement(state):
         return "補足を入れて再開できます"
     if is_retryable_pending_handoff_error(state):
         return "同じコマンドで再試行できます"
@@ -67,6 +95,18 @@ def start_bridge_mode(state: dict[str, Any]) -> str:
 
 
 def start_bridge_resume_guidance(args: argparse.Namespace, state: dict[str, Any]) -> tuple[str, str, str]:
+    """Return (status_label, guidance, note) for the initial bridge startup display.
+
+    Routing priority (action-view primary):
+    1. Unarchived report in outbox — route to archive/report flow before any handoff
+    2. Pending handoff not yet sent — resume handoff rotation
+    3. Blocked conditions — operator must resolve before proceeding
+    4. Default — suggested_next_note() based on dispatch plan action
+
+    mode reads are not used here directly; all routing flows through action-view
+    helpers (should_prioritize_unarchived_report, should_rotate_before_next_chat_request,
+    blocked_next_guidance) that encapsulate any required mode compatibility.
+    """
     blocked_guidance = blocked_next_guidance(state)
     stale_codex_running = is_stale_codex_running_candidate("", state)
     status = present_bridge_status(state, blocked=bool(blocked_guidance), stale_codex_running=stale_codex_running)
@@ -162,30 +202,32 @@ def parse_args(argv: list[str] | None = None, project_config: dict[str, object] 
     parser.add_argument("--next-todo", default="", help="report ベース request に渡す next_todo")
     parser.add_argument("--open-questions", default="", help="report ベース request に渡す open_questions")
     parser.add_argument("--current-status", default="", help="report ベース request に渡す CURRENT_STATUS 上書き")
-    parser.add_argument("--ready-issue-ref", default="", help="通常入口で使う current ready issue の参照")
-    parser.add_argument("--request-body", default="", help="例外 / recovery / override 用の初回本文")
+    parser.add_argument("--ready-issue-ref", default="", help="明示指定用の ready issue 参照。初期状態では省略してよい（start_bridge.py が自動で issue selection に入る）")
+    parser.add_argument("--request-body", default="", help="exception / recovery / override 専用の初回本文。通常起動では不要")
+    parser.add_argument("--select-issue", action="store_true", default=False, help="明示的に issue selection から始めるときの補助フラグ。初期状態では start_bridge.py 側が自動処理する")
     parser.add_argument("--entry-script", default="scripts/run_until_stop.py", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
 def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
-    action = describe_next_action(state)
+    action = resolve_unified_next_action(state)
     if action == "request_next_prompt":
         if getattr(args, "request_body", "").strip():
             return (
-                "このあと指定済みの free-form override 本文を使って最初の依頼を送ります。"
-                " 通常入口の ready issue 参照は今回だけ使いません。"
+                "このあと指定済みの exception / recovery / override 本文を使って最初の依頼を送ります。"
+                " --request-body は例外経路専用で、通常起動では不要です。"
             )
         if getattr(args, "ready_issue_ref", "").strip():
             return (
-                "このあと指定済みの current ready issue 参照を使って最初の依頼を組み立てます。"
-                " free-form 初回本文は override 用にだけ残しています。"
+                "このあと明示指定された ready issue 参照を使って最初の依頼を組み立てます。"
+                " --ready-issue-ref は明示指定用の入口です（初期状態では省略可能）。"
             )
         return (
-            "このあと通常は current ready issue の参照を受けて最初の依頼を組み立てます。"
-            " ready issue を使えない時だけ free-form override 本文を入力し、bridge は固定の返答契約だけを足します。"
+            "初期状態のため、このあと issue selection から始まります。"
+            " ChatGPT が open issue から ready issue を選定し、次の手で実装を開始します。"
+            " ready issue が決まっている場合は --ready-issue-ref で明示指定してください。"
         )
-    if action == "request_prompt_from_report" and str(state.get("mode", "")).strip() == "awaiting_user":
+    if action == "request_prompt_from_report" and is_awaiting_user_supplement(state):
         decision = str(state.get("chatgpt_decision", "")).strip()
         if decision == "human_review":
             return "このあと判断結果や方針の補足入力を求め、次の ChatGPT request に添えて送ります。"
@@ -203,9 +245,13 @@ def entry_guidance(state: dict[str, Any], args: argparse.Namespace) -> str:
     if action == "archive_codex_report":
         return "完了報告を archive して次の依頼へ進めます。"
     if action == "request_prompt_from_report":
-        return "完了報告をもとに、同じチャットへ次の依頼を送ります。"
+        # Use shared wording helper for the generic (non-awaiting_user-supplement,
+        # non-handoff-rotation) case so route context is reflected via dispatch plan.
+        return format_next_action_note(state, next_action="request_prompt_from_report", route_choice=resolve_issue_centric_route_choice(state))
     if action == "completed":
-        return "追加の操作は不要です。"
+        _lc = bridge_lifecycle_sync_suffix(state)
+        _pw = bridge_project_sync_warning_suffix(state)
+        return f"追加の操作は不要です。{_lc}{_pw}"
     return "summary と doctor を見て次の 1 手を判断してください。"
 
 
@@ -217,18 +263,6 @@ def print_entry_banner(state: dict[str, Any], args: argparse.Namespace) -> None:
     print(f"- max_execution_count: {args.max_steps}")
     print(f"- 現在の状況: {status.label}")
     print(f"- このあと: {entry_guidance(state, args)}")
-
-
-def is_completed_state(state: dict[str, Any]) -> bool:
-    mode = str(state.get("mode", "idle"))
-    if mode == "completed":
-        return True
-    return (
-        mode == "idle"
-        and not bool(state.get("need_chatgpt_prompt"))
-        and not bool(state.get("need_chatgpt_next"))
-        and not bool(state.get("need_codex_run"))
-    )
 
 
 def is_no_codex_decision_state(state: dict[str, Any]) -> bool:
@@ -245,6 +279,16 @@ def no_codex_decision_reason(state: dict[str, Any]) -> str:
 
 
 def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
+    # Change-detection tuple for the run loop: triggers when state stops changing.
+    # mode / need_* fields here are included for legacy-state change detection ONLY;
+    # they are NOT used for routing decisions.  Routing authority is
+    # resolve_runtime_dispatch_plan().  These fields survive until mode demotion
+    # phase fully removes them from the written state.
+    #
+    # pending_request_* and last_processed_* are included so that a new request
+    # sent during an auto-continue (e.g. initial_selection_stop → ready-issue
+    # request within the same run) is detected as a state change even when mode
+    # stays "waiting_prompt_reply".
     return (
         state.get("mode"),
         bool(state.get("need_chatgpt_prompt")),
@@ -255,30 +299,97 @@ def state_signature(state: dict[str, Any]) -> tuple[Any, ...]:
         str(state.get("last_prompt_file", "")),
         str(state.get("last_report_file", "")),
         int(state.get("cycle", 0)),
+        str(state.get("pending_request_hash", "")),
+        str(state.get("pending_request_source", "")),
+        str(state.get("pending_request_log", "")),
+        str(state.get("pending_request_signal", "")),
+        str(state.get("last_processed_request_hash", "")),
+        str(state.get("last_processed_reply_hash", "")),
     )
 
 
-def describe_next_action(state: dict[str, Any]) -> str:
-    mode = str(state.get("mode", "idle"))
-    if should_prioritize_unarchived_report(state):
-        return "archive_codex_report"
-    if mode == "idle" and bool(state.get("need_chatgpt_prompt")):
-        return "request_next_prompt"
-    if mode in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
-        return "fetch_next_prompt"
-    if mode == "awaiting_user" and str(state.get("chatgpt_decision", "")).strip() in {"human_review", "need_info"}:
-        return "request_prompt_from_report"
-    if mode == "ready_for_codex" and bool(state.get("need_codex_run")):
-        return "launch_codex_once"
-    if mode == "codex_running":
-        return "wait_for_codex_report"
-    if mode == "codex_done":
-        return "archive_codex_report"
-    if mode == "idle" and bool(state.get("need_chatgpt_next")):
-        return "request_prompt_from_report"
-    if is_completed_state(state):
-        return "completed"
-    return "no_action"
+def _should_passthrough_ic_close(state: dict[str, Any]) -> bool:
+    """Return True when the no_action stop should be bypassed for IC close auto-continuation.
+
+    When issue-centric close just succeeded and no human intervention is required,
+    bridge_orchestrator.run() handles the auto-next-selection internally
+    (via _is_ic_close_completed_for_auto_continuation).  run_until_stop must not
+    stop here; instead it should let bridge_orchestrator run so it can proceed to
+    request_next_prompt with --select-issue.
+
+    Conditions that must ALL hold:
+      - last_issue_centric_close_status is "closed" or "already_closed"
+      - chatgpt_decision is an issue_centric: value (confirms IC context)
+      - detect_ic_stop_path returns "" (no initial_selection_stop / human_review_needed)
+    """
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    if close_status not in {"closed", "already_closed"}:
+        return False
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return False
+    return detect_ic_stop_path(state) == ""
+
+
+def _should_passthrough_ic_issue_create(state: dict[str, Any]) -> bool:
+    """Return True when the no_action stop should be bypassed for IC issue_create auto-continuation.
+
+    When issue-centric issue_create just succeeded and no human intervention is required,
+    bridge_orchestrator.run() handles the auto-continuation internally
+    (via _is_ic_issue_create_completed_for_auto_continuation).  run_until_stop must not
+    stop here; instead it should let bridge_orchestrator run so it can proceed to
+    request_next_prompt with --ready-issue-ref <created_issue>.
+
+    Conditions that must ALL hold:
+      - last_issue_centric_created_issue_number is non-empty (an issue was created)
+      - chatgpt_decision is an issue_centric: value (confirms IC context)
+      - last_issue_centric_close_status is NOT "closed" or "already_closed"
+        (close path is handled by _should_passthrough_ic_close; this guard prevents
+        double-trigger on issue_create_then_close combo paths)
+      - detect_ic_stop_path returns "" (no initial_selection_stop / human_review_needed)
+    """
+    created_number = str(state.get("last_issue_centric_created_issue_number", "")).strip()
+    if not created_number:
+        return False
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not chatgpt_decision.startswith("issue_centric:"):
+        return False
+    close_status = str(state.get("last_issue_centric_close_status", "")).strip()
+    if close_status in {"closed", "already_closed"}:
+        return False
+    return detect_ic_stop_path(state) == ""
+
+
+def _should_passthrough_fetch_pending_reply(state: dict[str, Any]) -> bool:
+    """Return True when a fetch_next_prompt state-unchanged cycle should continue.
+
+    When bridge_orchestrator runs fetch_next_prompt and the reply is not yet
+    collected (e.g. correction retry: BridgeStop exits rc=0 with state preserved),
+    state_signature() does not change because pending_request_hash / source / log
+    are intentionally preserved for the next fetch attempt.  Without this guard,
+    run_until_stop would treat the unchanged state as a stuck loop and stop.
+
+    This passthrough allows the loop to re-enter bridge_orchestrator so that
+    fetch_next_prompt can poll for the reply again.
+
+    Conditions that must ALL hold:
+      - mode is waiting_prompt_reply, extended_wait, or await_late_completion
+        (any mode where fetch_next_prompt is the expected action)
+      - pending_request_hash is non-empty (a request has been sent)
+      - pending_request_source is non-empty (request origin is recorded)
+      - no error and no pause flag (would require human intervention)
+      - detect_ic_stop_path returns "" (no initial_selection_stop / human_review_needed)
+    """
+    mode = str(state.get("mode", "")).strip()
+    if mode not in {"waiting_prompt_reply", "extended_wait", "await_late_completion"}:
+        return False
+    if not str(state.get("pending_request_hash", "")).strip():
+        return False
+    if not str(state.get("pending_request_source", "")).strip():
+        return False
+    if state.get("error") or state.get("pause"):
+        return False
+    return detect_ic_stop_path(state) == ""
 
 
 def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
@@ -303,6 +414,8 @@ def build_orchestrator_command(args: argparse.Namespace) -> list[str]:
         command.extend(["--ready-issue-ref", args.ready_issue_ref])
     if args.request_body:
         command.extend(["--request-body", args.request_body])
+    if getattr(args, "select_issue", False):
+        command.append("--select-issue")
     return command
 
 
@@ -314,6 +427,8 @@ def format_runner_command(args: argparse.Namespace) -> str:
         command.extend(["--ready-issue-ref", str(args.ready_issue_ref)])
     if args.request_body:
         command.extend(["--request-body", str(args.request_body)])
+    if getattr(args, "select_issue", False):
+        command.append("--select-issue")
     if args.stop_at_cycle_boundary:
         command.append("--stop-at-cycle-boundary")
     if args.sleep_seconds != DEFAULT_SLEEP_SECONDS:
@@ -355,7 +470,15 @@ def recommended_operator_step(
     *,
     reason: str = "",
 ) -> tuple[str, str]:
-    action = describe_next_action(final_state)
+    """Return (step_label, suggested_command) for the operator.
+
+    Primary authority: resolve_unified_next_action() (action-view / dispatch plan).
+    mode is only accessed via is_awaiting_user_supplement() for the sub-case
+    where the user-supplement resume branch must be distinguished from the
+    standard report-request path.  All other mode reads are delegated to
+    action-key branches.
+    """
+    action = resolve_unified_next_action(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
 
     if runtime_stop_path().exists():
@@ -367,12 +490,22 @@ def recommended_operator_step(
     if has_unarchived_report_conflict(final_state) or stale_codex_running:
         return ("まず状況確認", format_start_bridge_command(args, mode="doctor"))
     if action in {"completed", "no_action"}:
+        # IC stop paths (initial_selection_stop / human_review_needed) surface as no_action
+        # in the dispatch plan but need specific operator steps.  Check them before the
+        # generic "追加操作なし" / "なし" return.
+        _ic_path = detect_ic_stop_path(final_state)
+        if _ic_path == "initial_selection_stop":
+            return ("--ready-issue-ref を指定して再実行", format_start_bridge_command(args, mode="run"))
+        if _ic_path == "human_review_needed":
+            return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
         return ("追加操作なし", "なし")
     if action == "request_next_prompt":
         if getattr(args, "request_body", "").strip():
             return ("override 入力で開始", format_start_bridge_command(args, mode="run"))
-        return ("ready issue 参照で開始", format_start_bridge_command(args, mode="run"))
-    if action == "request_prompt_from_report" and str(final_state.get("mode", "")).strip() == "awaiting_user":
+        if getattr(args, "ready_issue_ref", "").strip():
+            return ("明示指定の ready issue で開始", format_start_bridge_command(args, mode="run"))
+        return ("issue selection から開始", format_start_bridge_command(args, mode="run"))
+    if action == "request_prompt_from_report" and is_awaiting_user_supplement(final_state):
         return ("補足を入れて再開", format_start_bridge_command(args, mode="resume"))
     if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
         return ("handoff 再送を再試行", format_start_bridge_command(args, mode="resume"))
@@ -383,8 +516,38 @@ def suggested_next_command(args: argparse.Namespace, final_state: dict[str, Any]
     return recommended_operator_step(args, final_state)[1]
 
 
+def _build_ic_initial_selection_stop_note(state: dict[str, Any]) -> str | None:
+    """Return an operator-facing note for initial_selection_stop, or None if not applicable.
+
+    Fires when ChatGPT selected a ready issue (selected_ready_issue_ref set) and
+    the chatgpt_decision is an issue_centric: value, indicating that the operator
+    must re-run with --ready-issue-ref to continue.
+
+    Returns the chatgpt_decision_note when available (set by Phase 42's
+    _build_ic_operator_decision_note), otherwise a fallback Japanese sentence.
+    Returns None for any state that does not match the initial_selection_stop pattern.
+    """
+    selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
+    chatgpt_decision = str(state.get("chatgpt_decision", "")).strip()
+    if not selected_ref or not chatgpt_decision.startswith("issue_centric:"):
+        return None
+    note = str(state.get("chatgpt_decision_note", "")).strip()
+    if note:
+        return note
+    return (
+        f"ChatGPT が ready issue {selected_ref} を選定しました。"
+        " --ready-issue-ref でその issue を指定して bridge を再実行してください。"
+    )
+
+
 def suggested_next_note(final_state: dict[str, Any]) -> str:
-    action = describe_next_action(final_state)
+    """Return the suggested next note for the operator.
+
+    Primary vocabulary: action-view / resolve_unified_next_action().
+    is_no_codex_decision_state() handles the ChatGPT-decision terminal cases
+    before falling through to the action-key branches.
+    """
+    action = resolve_unified_next_action(final_state)
     pending_request_signal = str(final_state.get("pending_request_signal", "")).strip()
     if is_no_codex_decision_state(final_state):
         note = str(final_state.get("chatgpt_decision_note", "")).strip()
@@ -392,26 +555,49 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
         if decision == "completed":
             if note:
                 return note
-            return "ChatGPT が完了判断を返したため、追加の Codex 実行は不要です。"
+            _lc = bridge_lifecycle_sync_suffix(final_state)
+            return f"ChatGPT が完了判断を返したため、追加の Codex 実行は不要です。{_lc}"
         if decision == "human_review":
+            _lc = bridge_lifecycle_sync_suffix(final_state)
             base = note or "ChatGPT が人判断待ちと判断しました。"
-            return f"{base} bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。"
+            suffix = f" bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。{_lc}" if not note else " bridge を再実行すると判断結果の補足入力を受けて次 request を送ります。"
+            return f"{base}{suffix}"
         if decision == "need_info":
+            _lc = bridge_lifecycle_sync_suffix(final_state)
             base = note or "ChatGPT が情報不足と判断しました。"
-            return f"{base} bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。"
+            suffix = f" bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。{_lc}" if not note else " bridge を再実行すると不足情報の補足入力を受けて次 request を送ります。"
+            return f"{base}{suffix}"
         return "ChatGPT が Codex 不要と判断しました。人が次の判断を行ってください。"
     if action == "request_next_prompt":
+        _lc = bridge_lifecycle_sync_suffix(final_state)
         return (
             "Safari の current tab を対象チャットに合わせたまま再実行してください。"
-            " 通常は current ready issue の参照で始め、ready issue を使えない時だけ free-form override を入力します。"
+            " 初期状態では自動で issue selection から始まります。"
+            " ready issue が決まっているなら --ready-issue-ref で明示指定してください。"
+            " --request-body は exception / recovery / override 専用で通常起動では不要です。"
+            f"{_lc}"
         )
     if action == "fetch_next_prompt":
+        route_note = issue_centric_route_note(final_state)
+        soft_note = safari_timeout_soft_wait_note(final_state)
+        if route_note and "reply 待ち" in route_note:
+            return f"{route_note}{soft_note}".strip()
         if pending_request_signal == "submitted_unconfirmed":
-            return (
+            return ic_delivery_pending_detail(
                 "新しいチャットへの送信は通った可能性が高いため、"
-                "同じ handoff は再送せず reply を待ってから再実行してください。"
-            )
-        return "CHATGPT_PROMPT_REPLY が同じ current tab に出たら再実行してください。"
+                "同じ handoff は再送せず reply を待ってから再実行してください。",
+                final_state,
+            ) + soft_note
+        return f"issue-centric contract reply が同じ current tab に出たら再実行してください。{soft_note}"
+    if action == "dispatch_issue_centric_codex_run":
+        note = str(final_state.get("chatgpt_decision_note", "")).strip()
+        if note:
+            # Avoid duplicating the dispatch guidance when the note already contains it
+            # (Phase 42 _build_ic_operator_decision_note already embeds "bridge を再実行すると").
+            if "bridge を再実行すると" in note:
+                return note
+            return f"{note} bridge を再実行すると issue-centric codex_run dispatch を進めます。"
+        return "prepared Codex body は保存済みです。bridge を再実行すると issue-centric codex_run dispatch を進めます。"
     if action == "launch_codex_once":
         return (
             "bridge が worker を起動できる状態です。初回導線へ戻らず、"
@@ -423,17 +609,145 @@ def suggested_next_note(final_state: dict[str, Any]) -> str:
     if action == "archive_codex_report":
         return "report はそろっているので、archive と次 request へ進めるため再実行してください。"
     if action == "request_prompt_from_report":
+        _lc = bridge_lifecycle_sync_suffix(final_state)
+        # initial_selection_stop: ChatGPT selected a ready issue; use IC-specific note
+        # rather than the generic "Safari の current tab" guidance.
+        _ic_sel_note = _build_ic_initial_selection_stop_note(final_state)
+        if _ic_sel_note is not None:
+            return _ic_sel_note
         if str(final_state.get("pending_handoff_log", "")).strip() and should_rotate_before_next_chat_request(final_state):
-            return (
+            base = (
                 "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
                 " project ページの composer と送信可否を確認したまま再実行してください。"
             )
-        return "Safari の current tab を対象チャットに合わせたまま再実行してください。"
+            route_note = issue_centric_route_note(final_state)
+            return f"{base}{route_note}{_lc}"
+        base = "Safari の current tab を対象チャットに合わせたまま再実行してください。"
+        route_note = issue_centric_route_note(final_state)
+        return f"{base}{route_note}{_lc}"
     if action == "completed":
-        return "追加の操作は不要です。"
+        _lc = bridge_lifecycle_sync_suffix(final_state)
+        _pw = bridge_project_sync_warning_suffix(final_state)
+        return f"追加の操作は不要です。{_lc}{_pw}"
     if action == "no_action":
+        # IC stop paths: surface chatgpt_decision_note rather than generic doctor text.
+        _ic_path = detect_ic_stop_path(final_state)
+        if _ic_path == "initial_selection_stop":
+            _ic_sel_note = _build_ic_initial_selection_stop_note(final_state)
+            if _ic_sel_note is not None:
+                return _ic_sel_note
+        if _ic_path == "human_review_needed":
+            _ic_note = str(final_state.get("chatgpt_decision_note", "")).strip()
+            if _ic_note:
+                _lc = bridge_lifecycle_sync_suffix(final_state)
+                suffix = " bridge を再実行すると補足入力を受けて次 request を送ります。" if "bridge を再実行" not in _ic_note else ""
+                return f"{_ic_note}{suffix}{_lc}"
         return "summary と doctor を確認し、必要なら原因を解消してから再開してください。"
     return "summary と doctor を確認してから再実行してください。"
+
+
+def issue_centric_route_note(final_state: dict[str, Any]) -> str:
+    runtime_mode, _ = prepare_issue_centric_runtime_mode(final_state)
+    if runtime_mode is None:
+        return ""
+    route_choice = resolve_issue_centric_route_choice(final_state)
+    recovery_status = runtime_mode.recovery_status
+    recovery_source = runtime_mode.recovery_source
+    route_selected = runtime_mode.route_selected
+    target_issue = runtime_mode.target_issue
+    fallback_reason = runtime_mode.fallback_reason or runtime_mode.runtime_mode_reason
+    generation_lifecycle = runtime_mode.generation_lifecycle
+    generation_lifecycle_reason = runtime_mode.generation_lifecycle_reason
+    freshness_status = runtime_mode.freshness_status
+    freshness_reason = runtime_mode.freshness_reason or fallback_reason
+    if runtime_mode.runtime_mode == "issue_centric_unavailable":
+        return (
+            " issue-centric runtime は今回 unavailable のため、safety fallback (legacy) route で続行します。"
+            f" 理由: {fallback_reason or 'issue-centric runtime unavailable'}."
+        )
+    if freshness_status == "issue_centric_invalidated":
+        if target_issue:
+            return (
+                " issue-centric runtime は invalidated のため、safety fallback (legacy) route で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {freshness_reason or 'issue-centric context invalidated'}."
+            )
+        return (
+            " issue-centric runtime は invalidated のため、safety fallback (legacy) route で続行します。"
+            f" 理由: {freshness_reason or 'issue-centric context invalidated'}."
+        )
+    if freshness_status == "issue_centric_stale":
+        if target_issue:
+            return (
+                " issue-centric runtime は stale のため、safety fallback (legacy) route で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {freshness_reason or 'issue-centric context is stale'}."
+            )
+        return (
+            " issue-centric runtime は stale のため、safety fallback (legacy) route で続行します。"
+            f" 理由: {freshness_reason or 'issue-centric context is stale'}."
+        )
+    if recovery_status == "issue_centric_recovered" and route_selected == "issue_centric" and target_issue:
+        source_note = f" ({recovery_source})" if recovery_source else ""
+        return (
+            " 保存済みの issue-centric summary から再構築した文脈を使い、"
+            f"{target_issue} を target_issue として継続します{source_note}。"
+        )
+    if route_selected == "issue_centric" and target_issue and generation_lifecycle == "fresh_pending":
+        return (
+            " issue-centric request は送信済みで reply 待ちです。"
+            f" {target_issue} を target_issue とする generation を pending のまま継続します。"
+            f" 理由: {generation_lifecycle_reason or 'pending request bound to generation'}."
+        )
+    if route_selected == "issue_centric" and target_issue and generation_lifecycle == "fresh_prepared":
+        return (
+            " issue-centric request は prepared 状態です。"
+            f" {target_issue} を target_issue とする generation を再利用できます。"
+            f" 理由: {generation_lifecycle_reason or 'prepared request bound to generation'}."
+        )
+    if runtime_mode.runtime_mode == "issue_centric_degraded_fallback":
+        if target_issue:
+            return (
+                " issue-centric runtime は degraded のため、safety fallback (legacy) route で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {fallback_reason or 'issue-centric degraded fallback'}."
+            )
+        return (
+            " issue-centric runtime は degraded のため、safety fallback (legacy) route で続行します。"
+            f" 理由: {fallback_reason or 'issue-centric degraded fallback'}."
+        )
+    if recovery_status == "issue_centric_recovery_fallback":
+        if target_issue:
+            return (
+                " issue-centric recovery は今回使えず、safety fallback (legacy) route で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {fallback_reason or 'issue-centric recovery fallback'}."
+            )
+        return (
+            " issue-centric recovery は今回使えず、safety fallback (legacy) route で続行します。"
+            f" 理由: {fallback_reason or 'issue-centric recovery fallback'}."
+        )
+    fallback_reason = (
+        str(final_state.get("last_issue_centric_route_fallback_reason", "")).strip()
+        or str(final_state.get("last_issue_centric_next_request_fallback_reason", "")).strip()
+    )
+    if route_choice.route_selected == "issue_centric" and target_issue:
+        return (
+            " 次回 request は issue-centric preferred route を既定で使い、"
+            f"{target_issue} を target_issue として扱います。"
+        )
+    if route_choice.route_selected == "fallback_legacy":
+        if target_issue:
+            return (
+                " issue-centric preferred route を今回使えないため、safety fallback (legacy) route で "
+                f"{target_issue} を target_issue 候補として扱います。"
+                f" 理由: {route_choice.route_reason or fallback_reason or 'route selection fallback'}."
+            )
+        return (
+            " issue-centric preferred route を今回使えないため、safety fallback (legacy) route で続行します。"
+            f" 理由: {route_choice.route_reason or fallback_reason or 'route selection fallback'}."
+        )
+    return ""
 
 
 def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None:
@@ -460,10 +774,17 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 " handoff 再送より先に、その report を archive して ChatGPT 返送導線へ戻してください。"
             )
         elif is_apple_event_timeout_text(error_message):
-            note = (
-                "Safari timeout が起きています。"
-                f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
-            )
+            if bool(final_state.get("safari_timeout_soft_wait_limit_exceeded")):
+                note = (
+                    "Safari AppleEvent timeout の soft wait 上限を超えました。"
+                    f"{safari_timeout_soft_wait_note(final_state)}"
+                    f" {safari_timeout_checklist_text()} 状態を確認してから --clear-error で再開してください。"
+                )
+            else:
+                note = (
+                    "Safari timeout が起きています。"
+                    f" {safari_timeout_checklist_text()} reply が見えてから error を clear して再実行してください。"
+                )
         elif pending_handoff_log:
             note = (
                 "次の ChatGPT request を送る前に使う handoff は回収済みですが、まだ新チャットへ送れていません。"
@@ -472,9 +793,10 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
                 f" handoff_log: {pending_handoff_log}"
             )
         elif str(final_state.get("pending_request_signal", "")).strip() == "submitted_unconfirmed":
-            note = (
+            note = ic_delivery_pending_detail(
                 "新しいチャットへの送信は通った可能性が高いため、"
-                " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。"
+                " clear-error や handoff 再送へ戻らず reply 回収側を優先してください。",
+                final_state,
             )
         else:
             note = "bridge 側の停止要因を解消し、error を clear してから再実行してください。"
@@ -492,7 +814,7 @@ def blocked_next_guidance(final_state: dict[str, Any]) -> tuple[str, str] | None
 
 
 def is_stale_codex_running_candidate(reason: str, final_state: dict[str, Any]) -> bool:
-    if describe_next_action(final_state) != "wait_for_codex_report":
+    if resolve_unified_next_action(final_state) != "wait_for_codex_report":
         return False
 
     if runtime_stop_path().exists():
@@ -512,24 +834,41 @@ def is_stale_codex_running_candidate(reason: str, final_state: dict[str, Any]) -
 
 def stale_codex_running_note() -> str:
     return (
-        "state=codex_running のまま report が無いため、実 worker 継続中か stale runtime かを先に確認してください。"
+        "action=wait_for_codex_report (state=codex_running 互換) のまま report が無いため、"
+        "実 worker 継続中か stale runtime かを先に確認してください。"
         " bridge/outbox/codex_report.md、state.error、state.pause、bridge/STOP を見て、"
         "どれも無く worker も動いていないなら stale です。"
-        " 同じ prompt をやり直すなら ready_for_codex + need_codex_run=true、"
-        "最初から request をやり直すなら idle + need_chatgpt_prompt=true に戻してから再実行してください。"
+        " 同じ prompt をやり直すなら action=launch_codex_once 相当の state"
+        " (ready_for_codex + need_codex_run=true) へ戻してから再実行してください。"
+        " 最初から request をやり直すなら action=request_next_prompt 相当の state"
+        " (idle + need_chatgpt_prompt=true) へ戻してから再実行してください。"
     )
 
 
 def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
+    """Return True when an unarchived report exists in a state that should not have one.
+
+    Returns True only when:
+    - bridge/outbox/codex_report.md is present as an output artifact, AND
+    - the state is waiting for a ChatGPT reply (waiting_prompt_reply /
+      extended_wait / await_late_completion) rather than expecting a report.
+
+    All Codex lifecycle modes (codex_done, codex_running) and idle modes are
+    handled by should_prioritize_unarchived_report(), which returns True —
+    causing this function to return False (i.e., no conflict: the report
+    belongs to the current Codex lifecycle flow).
+
+    mode reads here are limited to Codex lifecycle compatibility guards:
+    codex_done / codex_running are kept as explicit early exits for clarity.
+    """
     if not codex_report_is_ready(runtime_report_path()):
         return False
     if should_prioritize_unarchived_report(state):
         return False
 
+    # Codex lifecycle guard: report is expected and handled by the Codex flow.
     mode = str(state.get("mode", "idle"))
     if mode in {"codex_done", "codex_running"}:
-        return False
-    if mode == "idle" and bool(state.get("need_chatgpt_next")):
         return False
     return True
 
@@ -537,6 +876,8 @@ def has_unarchived_report_conflict(state: dict[str, Any]) -> bool:
 def describe_wait_message(action: str) -> str:
     if action == "fetch_next_prompt":
         return "ChatGPT reply を待っています。"
+    if action == "dispatch_issue_centric_codex_run":
+        return "prepared Codex body の dispatch を進めています。"
     if action == "launch_codex_once":
         return "Codex worker の完了を待っています。"
     if action == "wait_for_codex_report":
@@ -549,6 +890,14 @@ def describe_wait_message(action: str) -> str:
 
 
 def should_include_codex_progress(final_state: dict[str, Any], history: list[str]) -> bool:
+    """Return True when a Codex progress snapshot should appear in the stop summary.
+
+    The mode reads here (ready_for_codex / codex_running / codex_done) are
+    intentional Codex lifecycle compatibility guards — they identify states where
+    a Codex session is active.  They are NOT general-purpose routing decisions.
+    The history fallback resolves cases where the loop completed a Codex step but
+    the final state has already transitioned away from Codex lifecycle modes.
+    """
     mode = str(final_state.get("mode", "")).strip()
     if mode in {"ready_for_codex", "codex_running", "codex_done"}:
         return True
@@ -595,6 +944,20 @@ def fetch_retry_diagnostics(history: list[str]) -> tuple[int, int]:
         timeout_count += entry.count("[retry] fetch_next_prompt で Safari timeout を検知しました。")
         recovery_count += entry.count("[retry] fetch_next_prompt は Safari timeout 後の再試行で回復しました。")
     return timeout_count, recovery_count
+
+
+def safari_timeout_soft_wait_note(state: dict[str, Any]) -> str:
+    count = int(state.get("safari_timeout_soft_wait_count") or 0)
+    if count <= 0:
+        return ""
+    elapsed = int(state.get("safari_timeout_soft_wait_elapsed_seconds") or 0)
+    route = str(state.get("safari_timeout_soft_wait_fetch_route", "")).strip() or "unknown"
+    limit = int(state.get("safari_timeout_soft_wait_max_count") or 0)
+    limit_part = f"/{limit}" if limit > 0 else ""
+    return (
+        " Safari AppleEvent timeout は一時過負荷として soft wait 済みです。"
+        f" count={count}{limit_part} elapsed={elapsed}s fetch_route={route}."
+    )
 
 
 def wait_for_codex_report(
@@ -725,11 +1088,12 @@ def run_command_with_heartbeat(
             if next_heartbeat_at is not None and now >= next_heartbeat_at:
                 wait_suffix = ""
                 if action == "fetch_next_prompt":
-                    current_mode = str(load_state().get("mode", "")).strip()
-                    if current_mode == "extended_wait":
+                    live_state = load_state()
+                    if is_fetch_extended_wait_state(live_state):
                         wait_suffix = " stage=extended_wait"
-                    elif current_mode == "await_late_completion":
+                    elif is_fetch_late_completion_state(live_state):
                         wait_suffix = " stage=late_completion_mode"
+                    wait_suffix += safari_timeout_soft_wait_note(live_state)
                 print(
                     f"[wait] status={status_label} action={action} elapsed={format_elapsed(now - started_at)} "
                     f"{describe_wait_message(action)}{wait_suffix}"
@@ -763,6 +1127,10 @@ def summarize_run(
     blocked_guidance = blocked_next_guidance(final_state)
     stale_codex_running = is_stale_codex_running_candidate(reason, final_state)
     fetch_retry_timeouts, fetch_retry_recoveries = fetch_retry_diagnostics(history)
+    soft_wait_count = int(final_state.get("safari_timeout_soft_wait_count") or 0)
+    soft_wait_elapsed = int(final_state.get("safari_timeout_soft_wait_elapsed_seconds") or 0)
+    soft_wait_route = str(final_state.get("safari_timeout_soft_wait_fetch_route", "")).strip()
+    soft_wait_limit_exceeded = bool(final_state.get("safari_timeout_soft_wait_limit_exceeded"))
     safari_timeout_blocked = bool(final_state.get("error")) and is_apple_event_timeout_text(
         str(final_state.get("error_message", "")).strip()
     )
@@ -800,6 +1168,27 @@ def summarize_run(
     )
     report_reference = handoff_report_reference(final_state)
     codex_snapshot = latest_codex_progress_snapshot() if should_include_codex_progress(final_state, history) else None
+    # Guard: Codex lifecycle states must not reach resolve_runtime_dispatch_plan().
+    # Lifecycle detection is via is_normal_path_state() (which encapsulates
+    # resolve_codex_lifecycle_view() as the sole classification authority) plus
+    # has_pending_issue_centric_codex_dispatch() to exclude pending dispatch states.
+    # This combined check is equivalent to resolve_codex_lifecycle_view(s) is not None,
+    # keeping summarize_run() free of a direct lifecycle view import.
+    # Action comes from resolve_unified_next_action(); detail from present_bridge_status()
+    # (called without blocked/stale flags to get the clean lifecycle status detail).
+    if not is_normal_path_state(final_state) and not has_pending_issue_centric_codex_dispatch(final_state):
+        _summary_next_action: str = resolve_unified_next_action(final_state)
+        _summary_runtime_action: str = "codex_lifecycle_compat"
+        _summary_is_fallback: bool = False
+        _summary_action_stop_note: str = present_bridge_status(final_state).detail
+    else:
+        # Dispatch plan is the primary authority for next_action / runtime_action.
+        # mode is kept in ## debug / state_snapshot as a compatibility field.
+        _plan = resolve_runtime_dispatch_plan(final_state)
+        _summary_next_action = _plan.next_action
+        _summary_runtime_action = _plan.runtime_action
+        _summary_is_fallback = _plan.is_fallback
+        _summary_action_stop_note = format_operator_stop_note(final_state, plan=_plan)
     lines = [
         "# Run Until Stop Summary",
         "",
@@ -811,6 +1200,12 @@ def summarize_run(
         f"- 次に見るもの: {handoff.detail}",
         f"- 次の操作: {suggested_command}",
         f"- 補足: {suggested_note}",
+        f"- next_action: {_summary_next_action}",
+        f"- runtime_action: {_summary_runtime_action}",
+        f"- is_fallback: {_summary_is_fallback}",
+        f"- action_stop_note: {_summary_action_stop_note}",
+        f"- lifecycle_sync_state: {format_lifecycle_sync_state_note(final_state)}",
+        f"- project_sync_warning: {format_project_sync_warning_note(final_state)}",
         "",
         "## run",
         f"- initial_user_status: {initial_status.label}",
@@ -828,13 +1223,17 @@ def summarize_run(
         f"- stale_codex_running_candidate: {stale_codex_running}",
         f"- fetch_retry_timeouts: {fetch_retry_timeouts}",
         f"- fetch_retry_recoveries: {fetch_retry_recoveries}",
+        f"- safari_timeout_soft_wait_count: {soft_wait_count}",
+        f"- safari_timeout_soft_wait_elapsed_seconds: {soft_wait_elapsed}",
+        f"- safari_timeout_soft_wait_fetch_route: {soft_wait_route}",
+        f"- safari_timeout_soft_wait_limit_exceeded: {soft_wait_limit_exceeded}",
         f"- safari_timeout_blocked: {safari_timeout_blocked}",
-        f"- next_action: {describe_next_action(final_state)}",
         f"- report_reference: {report_reference}",
         "",
         "## debug",
         f"- technical_reason: {reason}",
         f"- final_user_status_detail: {final_status.detail}",
+        f"- mode_compat: {str(final_state.get('mode', ''))}",
         "",
     ]
     if codex_snapshot is not None:
@@ -909,6 +1308,14 @@ def finish(
     if suggested_next_command_override == "なし" and recommended_command != "なし":
         suggested_next_command_override = recommended_command
 
+    # Record project sync alert candidate if new (writes payload + updates state.json).
+    # Called before summarize_run so the state update is persisted before summary log.
+    record_project_sync_alert_if_new(final_state)
+    # Deliver pending project sync alert to configured webhook (1 attempt per run).
+    # Delivery failure is NOT a hard error — it does not overwrite the main processing result.
+    _project_config = load_project_config()
+    deliver_project_sync_alert_if_pending(final_state, config=_project_config)
+
     summary = summarize_run(
         args=args,
         reason=reason,
@@ -969,7 +1376,7 @@ def run(argv: list[str] | None = None) -> int:
     if recovered_report is not None:
         history.append(f"- preflight: fallback report を {repo_relative(recovered_report)} から回収しました")
     if recovered_prepared:
-        history.append("- preflight: 送信済み request を waiting 状態へ復旧しました")
+        history.append("- preflight: prepared request を再送可能な状態へ復旧しました")
     if recovered_handoff:
         history.append("- preflight: 回収済み handoff を再利用できる状態へ復旧しました")
     print_entry_banner(initial_state, args)
@@ -988,7 +1395,7 @@ def run(argv: list[str] | None = None) -> int:
             history=history,
         )
 
-    if is_completed_state(initial_state):
+    if resolve_unified_next_action(initial_state) == "completed":
         reason = "completed 相当の状態です。追加の 1 手はありません。"
         if is_no_codex_decision_state(initial_state):
             reason = no_codex_decision_reason(initial_state)
@@ -1021,7 +1428,7 @@ def run(argv: list[str] | None = None) -> int:
         )
 
     if args.dry_run:
-        history.append(f"- dry_run next_action: {describe_next_action(initial_state)}")
+        history.append(f"- dry_run next_action: {resolve_unified_next_action(initial_state)}")
         return finish(
             args=args,
             reason="dry-run のため実行せず停止しました。",
@@ -1057,7 +1464,12 @@ def run(argv: list[str] | None = None) -> int:
                     history=history,
                 )
 
-            if is_completed_state(before):
+            # resolve_unified_next_action() covers both the normal dispatch-plan path and
+            # the Codex lifecycle compatibility branch via a single authority in
+            # _bridge_common.  Resolve action ONCE per iteration and use it for all routing.
+            action = resolve_unified_next_action(before)
+
+            if action == "completed":
                 reason = "completed 相当の状態に到達しました。"
                 if is_no_codex_decision_state(before):
                     reason = no_codex_decision_reason(before)
@@ -1070,24 +1482,31 @@ def run(argv: list[str] | None = None) -> int:
                     final_state=before,
                     history=history,
                 )
-
-            action = describe_next_action(before)
             if action == "no_action":
-                history.append(
-                    f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"
-                )
-                reason = "bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。"
-                if is_no_codex_decision_state(before):
-                    reason = no_codex_decision_reason(before)
-                return finish(
-                    args=args,
-                    reason=reason,
-                    steps=steps,
-                    warnings=warnings,
-                    initial_state=initial_state,
-                    final_state=before,
-                    history=history,
-                )
+                # IC close passthrough: when IC close just completed and no human
+                # intervention is required, bridge_orchestrator.run() handles the
+                # auto-next-selection.  Let it run instead of stopping here.
+                # IC issue_create passthrough: when IC issue_create just completed and no
+                # human intervention is required, bridge_orchestrator.run() handles the
+                # auto-continuation to the created issue's implementation cycle.
+                if _should_passthrough_ic_close(before) or _should_passthrough_ic_issue_create(before):
+                    pass  # fall through to run_command_with_heartbeat
+                else:
+                    history.append(
+                        f"- step {steps + 1}: no_action / status={present_bridge_status(before, blocked=True).label}"
+                    )
+                    reason = "bridge_orchestrator.py で進める次の 1 手が見つかりませんでした。"
+                    if is_no_codex_decision_state(before):
+                        reason = no_codex_decision_reason(before)
+                    return finish(
+                        args=args,
+                        reason=reason,
+                        steps=steps,
+                        warnings=warnings,
+                        initial_state=initial_state,
+                        final_state=before,
+                        history=history,
+                    )
 
             if action == "wait_for_codex_report":
                 before_status = present_bridge_status(before)
@@ -1113,7 +1532,7 @@ def run(argv: list[str] | None = None) -> int:
             before_status = present_bridge_status(before)
             print(f"[step {steps + 1}] status={before_status.label} action={action}")
             interactive = action == "request_next_prompt" or (
-                action == "request_prompt_from_report" and str(before.get("mode", "")).strip() == "awaiting_user"
+                action == "request_prompt_from_report" and is_awaiting_user_supplement(before)
             )
             result, elapsed_seconds = run_command_with_heartbeat(
                 command,
@@ -1179,30 +1598,37 @@ def run(argv: list[str] | None = None) -> int:
                 )
 
             if state_signature(before) == state_signature(after):
-                if action == "wait_for_codex_report":
-                    reason = (
-                        "Codex report 待ちのため停止しました。"
-                        " bridge/outbox/codex_report.md が生成されたら再実行してください。"
-                    )
-                elif action == "request_prompt_from_report" and str(before.get("mode", "")).strip() == "awaiting_user":
-                    reason = (
-                        "再開用の補足入力が空のため送信せず停止しました。"
-                        " 必要な補足を入力して再実行してください。"
-                    )
+                if action == "fetch_next_prompt" and _should_passthrough_fetch_pending_reply(after):
+                    # Reply-pending passthrough: bridge exited rc=0 without collecting the
+                    # reply (e.g. correction retry BridgeStop preserves pending_request_*
+                    # fields intentionally).  Let the loop re-enter bridge_orchestrator
+                    # to poll for the reply again instead of treating this as a stuck loop.
+                    pass  # fall through to next iteration
                 else:
-                    reason = (
-                        "state が変化しなかったため停止しました。"
-                        f" mode={after.get('mode', '')} next_action={describe_next_action(after)}"
+                    if action == "wait_for_codex_report":
+                        reason = (
+                            "Codex report 待ちのため停止しました。"
+                            " bridge/outbox/codex_report.md が生成されたら再実行してください。"
+                        )
+                    elif action == "request_prompt_from_report" and is_awaiting_user_supplement(before):
+                        reason = (
+                            "再開用の補足入力が空のため送信せず停止しました。"
+                            " 必要な補足を入力して再実行してください。"
+                        )
+                    else:
+                        reason = (
+                            "state が変化しなかったため停止しました。"
+                            f" mode={after.get('mode', '')} next_action={resolve_unified_next_action(after)}"
+                        )
+                    return finish(
+                        args=args,
+                        reason=reason,
+                        steps=steps,
+                        warnings=warnings,
+                        initial_state=initial_state,
+                        final_state=after,
+                        history=history,
                     )
-                return finish(
-                    args=args,
-                    reason=reason,
-                    steps=steps,
-                    warnings=warnings,
-                    initial_state=initial_state,
-                    final_state=after,
-                    history=history,
-                )
 
             if args.sleep_seconds > 0 and steps < args.max_steps:
                 time.sleep(args.sleep_seconds)

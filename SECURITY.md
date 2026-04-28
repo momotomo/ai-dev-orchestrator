@@ -50,7 +50,9 @@ This repository does not promise a formal security response SLA.
 
 ## Practical Limits
 
-Because this tool depends heavily on Safari, ChatGPT UI, local automation permissions, and Codex CLI behavior, some “security” failures may really be:
+Because this tool depends heavily on Safari, ChatGPT UI, local automation
+permissions, and the selected execution agent, some “security” failures may
+really be:
 
 - UI drift
 - target-tab confusion

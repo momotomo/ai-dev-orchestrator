@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,7 +15,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import _bridge_common  # noqa: E402
 import fetch_next_prompt  # noqa: E402
 import request_prompt_from_report  # noqa: E402
-from _bridge_common import BridgeError  # noqa: E402
+from _bridge_common import BridgeError, BridgeStop  # noqa: E402
 
 
 class _DummyPage:
@@ -23,6 +24,34 @@ class _DummyPage:
 
 
 class HandoffRotationTests(unittest.TestCase):
+    def test_read_pending_handoff_ignores_placeholder_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "handoff.md"
+            path.write_text(_bridge_common.HANDOFF_REPLY_PLACEHOLDER, encoding="utf-8")
+            state = {"pending_handoff_log": str(path)}
+
+            self.assertEqual(_bridge_common.read_pending_handoff_text(state), "")
+
+    def test_extract_handoff_rejects_placeholder_body(self) -> None:
+        raw = "\n".join(
+            [
+                "あなた:",
+                "handoff request",
+                "ChatGPT:",
+                _bridge_common.HANDOFF_REPLY_START,
+                _bridge_common.HANDOFF_REPLY_PLACEHOLDER,
+                _bridge_common.HANDOFF_REPLY_END,
+            ]
+        )
+
+        with self.assertRaises(BridgeError) as cm:
+            _bridge_common.extract_last_chatgpt_handoff(
+                raw,
+                after_text="handoff request",
+            )
+
+        self.assertIn("プレースホルダ", str(cm.exception))
+
     def test_project_page_send_treats_empty_probe_as_submitted_unconfirmed(self) -> None:
         page = _DummyPage("https://chatgpt.com/g/g-p-demo/project")
 
@@ -32,6 +61,25 @@ class HandoffRotationTests(unittest.TestCase):
 
         with (
             patch.object(_bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                _bridge_common,
+                "ensure_project_page_github_source_ready",
+                return_value={
+                    "composerFound": True,
+                    "plusFound": True,
+                    "plusClicked": True,
+                    "menuOpened": True,
+                    "moreFound": True,
+                    "moreActionPerformed": True,
+                    "submenuOpened": True,
+                    "sourceAddFound": True,
+                    "githubFound": True,
+                    "githubClicked": True,
+                    "githubPillConfirmed": True,
+                    "githubPillRemoveButtonFound": True,
+                    "finalAttachConfirmationKind": "github_pill_remove_button",
+                },
+            ),
             patch.object(
                 _bridge_common,
                 "fill_chatgpt_composer",
@@ -56,6 +104,71 @@ class HandoffRotationTests(unittest.TestCase):
         self.assertIn("空の応答", result["warning"])
         self.assertEqual(result["match_kind"], "preferred_hint")
         self.assertEqual(result["project_name"], "作曲アプリ開発")
+
+    def test_project_page_send_resolves_unconfirmed_conversation_by_request_anchor(self) -> None:
+        page = _DummyPage("https://chatgpt.com/g/g-p-demo/project")
+        resolved_tab = {
+            "url": "https://chatgpt.com/g/g-p-demo/c/resolved",
+            "title": "ChatGPT - Project",
+            "window_index": 1,
+            "tab_index": 2,
+            "conversation_id": "resolved",
+        }
+
+        @contextmanager
+        def fake_open_chatgpt_page(**_: object):
+            yield None, page, {"chat_url_prefix": "https://chatgpt.com/"}, page.front_tab
+
+        with (
+            patch.object(_bridge_common, "open_chatgpt_page", fake_open_chatgpt_page),
+            patch.object(
+                _bridge_common,
+                "ensure_project_page_github_source_ready",
+                return_value={
+                    "composerFound": True,
+                    "plusFound": True,
+                    "plusClicked": True,
+                    "menuOpened": True,
+                    "moreFound": True,
+                    "moreActionPerformed": True,
+                    "submenuOpened": True,
+                    "sourceAddFound": True,
+                    "githubFound": True,
+                    "githubClicked": True,
+                    "githubPillConfirmed": True,
+                    "githubPillRemoveButtonFound": True,
+                    "finalAttachConfirmationKind": "github_pill_remove_button",
+                },
+            ),
+            patch.object(
+                _bridge_common,
+                "fill_chatgpt_composer",
+                return_value={"matchKind": "preferred_hint", "matchedHint": "内の新しいチャット", "projectName": "demo"},
+            ),
+            patch.object(_bridge_common, "submit_chatgpt_message", return_value=None),
+            patch.object(
+                _bridge_common,
+                "_read_post_send_state",
+                side_effect=BridgeError("新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。"),
+            ),
+            patch.object(
+                _bridge_common,
+                "_resolve_request_anchor_conversation_url",
+                return_value=(resolved_tab, _bridge_common.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB),
+            ),
+            patch.object(_bridge_common.time, "time", side_effect=[0, 1, 16]),
+            patch.object(_bridge_common.time, "sleep", return_value=None),
+            patch("builtins.print"),
+        ):
+            result = _bridge_common.send_to_chatgpt_in_current_surface(
+                "handoff body",
+                preferred_hint="内の新しいチャット",
+                project_page_mode=True,
+            )
+
+        self.assertEqual(result["signal"], "submitted_unconfirmed")
+        self.assertEqual(result["url"], "https://chatgpt.com/g/g-p-demo/c/resolved")
+        self.assertEqual(result["send_route"], _bridge_common.FETCH_ROUTE_REQUEST_ANCHOR_CONVERSATION_TAB)
 
     def test_rotate_chat_does_not_resend_after_unconfirmed_submit(self) -> None:
         project_url = "https://chatgpt.com/g/g-p-demo/project"
@@ -95,6 +208,8 @@ class HandoffRotationTests(unittest.TestCase):
             result = _bridge_common.rotate_chat_with_handoff("handoff body")
 
         self.assertEqual(send_mock.call_count, 1)
+        self.assertTrue(send_mock.call_args.kwargs["project_page_mode"])
+        self.assertEqual(send_mock.call_args.kwargs["send_context"], "rotation_handoff")
         self.assertEqual(result["signal"], "submitted_unconfirmed")
         self.assertEqual(result["url"], project_url)
 
@@ -110,31 +225,40 @@ class HandoffWaitTransitionTests(unittest.TestCase):
             "last_processed_request_hash": "",
             "last_processed_reply_hash": "",
         }
-        decision = _bridge_common.ChatGPTReplyDecision(
-            kind="codex_prompt",
-            body="Phase: next prompt",
-            note="",
-            raw_block="===CHATGPT_PROMPT_REPLY===\nPhase: next prompt\n===END_REPLY===",
-        )
 
         with (
             patch.object(fetch_next_prompt, "read_pending_request_text", return_value="request text"),
-            patch.object(fetch_next_prompt, "wait_for_prompt_reply_text", return_value="raw reply text") as wait_mock,
-            patch.object(fetch_next_prompt, "log_text", side_effect=["raw-log", "prompt-log"]),
-            patch.object(fetch_next_prompt, "extract_last_chatgpt_reply", return_value=decision),
+            patch.object(
+                fetch_next_prompt,
+                "wait_for_issue_centric_reply_text",
+                return_value="\n".join(
+                    [
+                        "あなた:",
+                        "request text",
+                        "ChatGPT:",
+                        "===CHATGPT_PROMPT_REPLY===",
+                        "Phase: next prompt",
+                        "===END_REPLY===",
+                    ]
+                ),
+            ) as wait_mock,
+            patch.object(fetch_next_prompt, "log_text", side_effect=["raw-log", "legacy-log"]),
             patch.object(fetch_next_prompt, "runtime_prompt_path", return_value=REPO_ROOT / "tests" / "tmp_prompt.md"),
             patch.object(fetch_next_prompt, "read_text", return_value=""),
             patch.object(fetch_next_prompt, "write_text", return_value=None),
             patch.object(fetch_next_prompt, "save_state", return_value=None) as save_mock,
         ):
-            rc = fetch_next_prompt.run(dict(state), [])
+            with self.assertRaises(BridgeStop) as cm:
+                fetch_next_prompt.run(dict(state), [])
 
-        self.assertEqual(rc, 0)
+        # allow_project_page_wait must be True even though the reply was legacy
         wait_mock.assert_called_once()
         self.assertTrue(wait_mock.call_args.kwargs["allow_project_page_wait"])
+        # State must reflect the legacy-stop (error, not success)
         saved_state = save_mock.call_args.args[0]
-        self.assertEqual(saved_state["mode"], "ready_for_codex")
-        self.assertEqual(saved_state["pending_request_signal"], "")
+        self.assertEqual(saved_state["mode"], "awaiting_user")
+        self.assertTrue(saved_state.get("error"))
+        self.assertIn("legacy", str(cm.exception).lower())
 
     def test_soft_wait_uses_distinct_request_log_prefix(self) -> None:
         state = {
@@ -167,6 +291,12 @@ class HandoffWaitTransitionTests(unittest.TestCase):
                     "title": "ChatGPT",
                     "signal": "submitted_unconfirmed",
                     "warning": "新チャット送信後の状態確認に失敗しました: Safari から空の応答が返りました。",
+                    "github_source_attach_status": "probe_failed",
+                    "github_source_attach_boundary": "composer_more_submenu_not_open",
+                    "github_source_attach_detail": "connector submenu を確認できませんでした。",
+                    "github_source_attach_context": "rotation_handoff",
+                    "github_source_attach_log": "logs/project_page_github_source_attach_rotation.md",
+                    "request_send_continued_without_github_source": True,
                     "match_kind": "preferred_hint",
                     "matched_hint": "作曲アプリ開発 内の新しいチャット",
                     "project_name": "作曲アプリ開発",
@@ -185,6 +315,8 @@ class HandoffWaitTransitionTests(unittest.TestCase):
         self.assertNotIn("sent_prompt_request_from_report", logged_prefixes)
         saved_state = save_mock.call_args.args[0]
         self.assertEqual(saved_state["pending_request_signal"], "submitted_unconfirmed")
+        self.assertEqual(saved_state["github_source_attach_status"], "probe_failed")
+        self.assertTrue(saved_state["request_send_continued_without_github_source"])
 
 
 if __name__ == "__main__":

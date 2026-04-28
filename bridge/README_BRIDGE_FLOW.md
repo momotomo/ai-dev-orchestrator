@@ -37,11 +37,11 @@ copy-response 経路の feasibility verdict は
 - 通常起動は `python3 scripts/start_bridge.py --project-path /path/to/target-repo --max-execution-count 6` の 1 コマンドでよい
 - 初回だけ、bridge は通常入口として current ready issue の参照を受けて最小 request を組み立てる。free-form override を使う時だけ、短い例文を表示して本文入力を求める
 - 2 回目以降は既存どおり Codex 完了報告ベースで継続する
-- Safari fetch 待機は通常運用で 1800 秒前提。未完了なら追加 600 秒待機し、それでも未完了なら late completion mode で書き切りまで監視する
+- Safari fetch 待機は `bridge/browser_config.json` の `fetch_timeout_seconds` 前提。未完了なら `extended_fetch_timeout_seconds` で追加待機し、それでも未完了なら late completion mode で書き切りまで監視する
 - `max_execution_count` は「必ずそこまで進む回数」ではなく上限。ChatGPT が `Codex 不要` を返した時は、その時点で正常停止しうる
 - `run_until_stop.py` は既定で継続実行する。archive 後に次 cycle の request / fetch へ進んでも、同じ report / same request は idempotency guard で再送しない
 - 通常継続では、完了報告をもとに同じチャットへ次 request を送る
-- handoff / chat rotation は、1800 秒 + 600 秒を超えて late completion mode に入った reply を最後まで回収し、その reply を Codex に渡して使い切ったあと、次の ChatGPT request を送る前にだけ走る
+- handoff / chat rotation は、通常待機 + extended wait を超えて late completion mode に入った reply を最後まで回収し、その reply を実行 agent に渡して使い切ったあと、次の ChatGPT request を送る前にだけ走る
 - handoff request は「次チャットへそのまま貼る完成済みの最初のメッセージ」だけを返させる。要約メモや長い引き継ぎ説明は求めない
 - late completion 後の handoff/new-chat 前処理は `handoff_requested` → `handoff_received` → `chat_rotated` → `sent_prompt_request_from_report*` の順で追える
 - `sent_prompt_request_from_report` は確定送信、`sent_prompt_request_from_report_soft_wait` は project ページ送信は通った可能性が高いが post-send 確認が弱かったケースで、どちらも再送より reply wait を優先する
@@ -67,7 +67,7 @@ copy-response 経路の feasibility verdict は
 
 - 入口は `python3 scripts/start_bridge.py --project-path /path/to/target-repo --max-execution-count 6`
 - 通常入口では、`--ready-issue-ref` または起動直後の 1 行入力で current ready issue の参照を渡す
-- bridge はその参照をもとに最小の初回 request を組み立て、送信直前に固定の返答契約だけを追記する
+- bridge はその参照をもとに最小の初回 request を組み立て、送信直前に issue-centric reply contract だけを追記する
 - free-form 初回本文は override を選んだ時だけ使い、bridge は本文を改変しない
 
 ### 通常継続
@@ -77,6 +77,8 @@ copy-response 経路の feasibility verdict は
 - report ベース継続は通常、同じチャットで続ける。左上のグローバル新規チャットは使わない
 - handoff が必要な時だけ、project ページの「＜ChatGPT 上の project 名＞ 内の新しいチャット」composer へローテーションする
 - handoff/new chat 送信中は `/c/` 会話 URL ではなく `/project` ページ自体を有効な対象面として扱い、そこに新規 composer が見つかれば入力へ進む
+- project ページ送信時の GitHub source attach は既定で best-effort。attach 成功判定は composer 上の GitHub pill confirmed を使い、attach 失敗だけでは request 送信を止めず、status / boundary / detail / continued フラグを log と state に残す
+- GitHub source attach を hard requirement に戻したい時だけ、`bridge/browser_config.json` で `require_github_source=true` を使う
 
 ### handoff 再開
 
@@ -87,10 +89,10 @@ copy-response 経路の feasibility verdict は
 
 ## ChatGPT 返答の最小契約
 
-- 通常の返答契約は `===CHATGPT_PROMPT_REPLY=== ... ===END_REPLY===` と `===CHATGPT_NO_CODEX=== ... ===END_NO_CODEX===` の 2 系統だけ
-- Codex に渡す 1 フェーズ prompt がある時は `CHATGPT_PROMPT_REPLY`、今回は渡さない時は `CHATGPT_NO_CODEX` を返す
-- `CHATGPT_NO_CODEX` の先頭行は `completed`、`human_review`、`need_info` のいずれかにする
-- `completed` はもう Codex に渡さず完了、`human_review` は自動継続せず人判断へ渡す、`need_info` は情報不足で人入力待ち
+- current initial request / issue-centric preferred route では `===CHATGPT_DECISION_JSON=== ... ===END_DECISION_JSON===` を先頭に置く issue-centric contract を返す
+- body が必要な場合だけ `CHATGPT_ISSUE_BODY` / `CHATGPT_CODEX_BODY` / `CHATGPT_REVIEW` / `CHATGPT_FOLLOWUP_ISSUE_BODY` の base64 block を続ける
+- legacy visible-text contract `===CHATGPT_PROMPT_REPLY=== ... ===END_REPLY===` と `===CHATGPT_NO_CODEX=== ... ===END_NO_CODEX===` は legacy fallback / older recovery path 用にだけ残る
+- 返答がまだ `思考中` などの未完成状態なら invalid ではなく wait 継続に戻し、assistant final text が完成した後にだけ contract の valid / invalid を判定する
 - blocked や retry 未回復は ChatGPT 返答契約ではなく、bridge 側の `人確認待ち` / `異常` 停止として扱う
 
 ## Codex worker が最初に確認する固定 docs
@@ -118,7 +120,7 @@ copy-response 経路の feasibility verdict は
 ## `idle + need_chatgpt_prompt=true` からの最短導線
 
 1. `python3 scripts/start_bridge.py --project-path /path/to/target-repo --max-execution-count 6` を実行する
-2. bridge が初回だけ、ChatGPT に送る本文の入力を求める。表示される例文をもとに本文を入力すると、bridge が固定の返答契約を付けて送信する
+2. bridge が初回だけ、ChatGPT に送る本文の入力を求める。表示される例文をもとに本文を入力すると、bridge が issue-centric reply contract を付けて送信する
 3. 以後は同じ current tab で fetch、`ready_for_codex`、Codex 実行、archive、次 request まで既存フローのまま進む
 
 state がこの前提と違う場合は、下の `state を見た次の 1 手` を優先する。
@@ -133,7 +135,7 @@ state がこの前提と違う場合は、下の `state を見た次の 1 手` �
 - `python3 scripts/start_bridge.py --doctor` は prompt / report / pending handoff / error / STOP を軽く点検する。runtime は変更しない
 - `python3 scripts/start_bridge.py --clear-error` は bridge 側の error / error_message だけを最小解除する。`--reset` も同じ意味で使える。prompt / report / handoff / logs は消さない
 - live 確認で runtime を一時的に触る前は、`python3 scripts/runtime_snapshot.py backup --dest /tmp/...` で snapshot を作り、確認後に `python3 scripts/runtime_snapshot.py restore --src /tmp/...` で元へ戻す
-- 初回だけ、ユーザーが入力した本文を runtime 入力正本として受け取り、bridge が固定の返答契約だけを追記して ChatGPT へ送る。初回 request の runtime ソースオブトゥルースはその入力本文
+- 初回だけ、ユーザーが入力した本文を runtime 入力正本として受け取り、bridge が issue-centric reply contract だけを追記して ChatGPT へ送る。初回 request の runtime ソースオブトゥルースはその入力本文
 - 2 回目以降は既存どおり Codex の完了報告ベースで次 request を継続生成する
 - `run_until_stop.py` は継続実行してよいが、同じ report / same request は二重送信しない
 - cycle 境界で止めたい時だけ `--stop-at-cycle-boundary` を付ける
@@ -155,7 +157,9 @@ state がこの前提と違う場合は、下の `state を見た次の 1 手` �
 - 通常入口は `python3 scripts/start_bridge.py --project-path /path/to/target-repo --max-execution-count 6` に固定できている
 - 迷った時は `--status`、そのまま再開は `--resume`、先に見るべき時は `--doctor`、bridge 側停止要因だけ片付ける時は `--clear-error` / `--reset` と、役割が分かれている
 - stop 後 summary、`--status`、`--doctor` が同じ `おすすめ 1 コマンド` を出し、内部 state を毎回読まなくても次の 1 手が分かる
-- 初回 user-authored request、report ベース継続、Safari timeout 1800 秒、必要時のみの chat rotation / handoff recovery を維持したまま運用できる
+- 初回 user-authored request、report ベース継続、`browser_config.json` ベースの Safari timeout、必要時のみの chat rotation / handoff recovery を維持したまま運用できる
+- issue-centric runtime の acceptance checklist と operator-facing stop path の対応表は `docs/ISSUE_CENTRIC_RUNTIME_ACCEPTANCE.md` を参照する
+- IC stop path (`initial_selection_stop` / `human_review_needed` / `codex_run_stop`) が `--status` / `--doctor` / stop summary / orchestrator で一貫して表示されている
 
 ## 普段見る状態表示
 
@@ -201,7 +205,7 @@ state がこの前提と違う場合は、下の `state を見た次の 1 手` �
 
 ```text
 対象案件: melody-craft-studio
-対象 repo: /Users/kasuyatomohiro/projects/melody-craft-studio
+対象 repo: /Users/you/projects/melody-craft-studio
 current ready issue: #123 sample browser の apply action 文言整理
 ready issue を今回の実行単位正本として使う
 sample browser 内の軽い UI polish に留め、schema / resolver / preview / playback / export は変えない
@@ -216,14 +220,14 @@ sample browser 内の軽い UI polish に留め、schema / resolver / preview / 
 
 ## 新しい責務分離
 
-- bridge: request、fetch、Codex 起動、archive、次 request、state 更新
+- bridge: request、fetch、実行 agent 起動、archive、次 request、state 更新
 - ChatGPT: 次の 1 フェーズ prompt 生成だけを担当
 - Codex: 1 フェーズ実装と report 記入だけを担当
 - 人: Safari current tab を整える、停止時に原因を見る、必要なら再実行する
 
 ## 自動と手動の境界
 
-- 自動: ChatGPT 送信、prompt 回収、Codex 1 回起動、report archive、state 更新、logs/history 保存
+- 自動: ChatGPT 送信、prompt 回収、実行 agent 1 回起動、report archive、state 更新、logs/history 保存
 - 自動: `run_until_stop.py` は `waiting_prompt_reply` 中の fetch 待ちと、`codex_running` 中の report 待ちを一定時間までは自動で続け、heartbeat を出す
 - 手動: Safari の対象チャットを current tab に合わせること
 - 手動: エラー時に raw dump / log / state を見て原因を直すこと
@@ -248,7 +252,7 @@ sample browser 内の軽い UI polish に留め、schema / resolver / preview / 
 - `python3 scripts/run_until_stop.py --max-steps 6`: `ready_for_codex` 以降を launch / archive / 次 request まで数手まとめて進めたいときに使う
 - `python3 scripts/run_until_stop.py --max-steps 12 --fetch-timeout-seconds 1800`: ChatGPT reply 待ちも含めて、ある程度放置しやすい形で回したいときに使う
 - live 前 checklist はこの文書と `bridge/run_one_cycle.md` を参照する
-- 1 回目起動では `run_until_stop.py` が通常は current ready issue の参照を受け、その参照を runtime provenance にした最小 request と固定の返答契約を ChatGPT へ送り、request / fetch を含めて進む
+- 1 回目起動では `run_until_stop.py` が通常は current ready issue の参照を受け、その参照を runtime provenance にした最小 request と issue-centric reply contract を ChatGPT へ送り、request / fetch を含めて進む
 - `ready_for_codex` で止まったあとは、summary の `suggested_next_command` をそのまま再実行するのが基本
 - summary の `suggested_next_command` が `なし` の場合は再実行より先に、`suggested_next_note` に書かれた blocked 原因を解消する
 - どちらを使う場合も Safari の current tab は途中で切り替えない
@@ -290,7 +294,34 @@ sample browser 内の軽い UI polish に留め、schema / resolver / preview / 
 - 外部 worker repo 向けの最小例は `bridge/project_config.example.json` を参照し、まず `worker_repo_path` だけを書き換える
 - 旧 `repo_path` は後方互換のため `bridge_runtime_root` の alias として読む
 - Codex 実行方法を変えたい場合は `codex_bin`、`codex_model`、`codex_sandbox`、`codex_timeout_seconds` を変える
+- 実行 agent を切り替えたい場合は `execution_agent`（`codex` / `github_copilot`）を変える。デフォルトは `codex`
+- `agent_model` でアクティブな provider のモデルを指定できる。空の場合は provider のデフォルトを使う
 - 毎回の差分は config ではなく、実行時の `--next-todo` や `bridge/inbox/codex_prompt.md` 側に載せる
+
+## 実行 agent の設定
+
+`execution_agent` で Codex と GitHub Copilot CLI のどちらを worker として使うかを選ぶ。
+1 つだけ選択し、起動時に validate される。不正な値の場合は BridgeError で停止する。
+
+| フィールド | 値 | デフォルト | 説明 |
+|---|---|---|---|
+| `execution_agent` | `codex` / `github_copilot` | `codex` | worker の排他選択 |
+| `agent_model` | 任意の文字列 / `""` | `""` (provider デフォルト) | アクティブな provider のモデル指定 |
+| `github_copilot_bin` | コマンド名またはパス | `gh` | GitHub Copilot path の実行バイナリ |
+| `codex_bin` | コマンド名またはパス | `codex` | Codex path の実行バイナリ |
+| `codex_model` | モデル名 / `""` | `""` | `agent_model` が空の場合の Codex 専用フォールバック |
+
+### Codex path (`execution_agent: codex`)
+
+- `agent_model` を Codex のモデル指定として使う。空の場合は `codex_model` にフォールバックする
+- `agent_model` も `codex_model` も空の場合は Codex のデフォルトモデルで動作する
+- 従来どおり `codex_bin`、`codex_sandbox`、`codex_timeout_seconds` も有効
+
+### GitHub Copilot path (`execution_agent: github_copilot`)
+
+- `github_copilot_bin`（デフォルト: `gh`）が `--target=shell` オプション付きで prompt を stdin から受け取る
+- `agent_model` が設定されている場合、**custom wrapper script** には `--model <value>` が渡される
+- **制限事項**: デフォルトの `gh copilot suggest` コマンドには安定した `--model` フラグがまだ存在しない。そのため、デフォルトの `gh` path では `agent_model` は引数に付与されない。`github_copilot_bin` に custom wrapper を指定することで `--model` 転送が使える
 
 ## 外部 worker repo 導入 3 ステップ
 
@@ -302,10 +333,10 @@ sample browser 内の軽い UI polish に留め、schema / resolver / preview / 
 
 ## project config と browser / 環境前提の分け方
 
-- `bridge/project_config.json` で変えるもの: `project_name`、`bridge_runtime_root`、`worker_repo_path`、必要なら `worker_repo_markers`、Codex CLI 設定、report 後 request 既定文
+- `bridge/project_config.json` で変えるもの: `project_name`、`bridge_runtime_root`、`worker_repo_path`、必要なら `worker_repo_markers`、実行 agent 設定、report 後 request 既定文
 - `codex_sandbox` を空のままにすると bridge は `--sandbox` を渡さず、Codex の user / project `.codex/config.toml` 側の解決に委ねる。project ごとに明示上書きしたい時だけ `codex_sandbox` を入れる
 - `bridge/browser_config.json` で変えるもの: `fetch_timeout_seconds`、`extended_fetch_timeout_seconds`、`poll_interval_seconds`、`apple_event_timeout_retry_count`、`apple_event_timeout_retry_delay_seconds`、`runner_heartbeat_seconds`、必要なら `chat_hint` と `project_page_url`
-- 通常運用の Safari fetch 待機は 1800 秒前提で扱い、重い単一チャットでも新しいチャット自動作成には寄せない
+- 通常運用の Safari fetch 待機は `bridge/browser_config.json` の秒数前提で扱い、重い単一チャットでも新しいチャット自動作成には寄せない
 - Safari / browser 側で毎回準備するもの: current tab、ChatGPT ログイン、`Allow JavaScript from Apple Events`、Automation 許可
 - 初回 request 本文は `project_config.json` から自動生成しない。起動時のユーザー入力本文を runtime 入力正本として使い、bridge は固定の返答契約だけを自動付与する
 - `project_config.json` は repo ごとの差分を持つ場所で、Safari の画面状態やログイン状態は持たない

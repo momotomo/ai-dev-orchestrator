@@ -6,7 +6,7 @@ First public experimental release of this repository.
 
 - ChatGPT Projects
 - Safari on macOS
-- Codex CLI
+- Codex CLI or GitHub Copilot selected through `execution_agent`
 
 This repository is intentionally narrow and environment-dependent.
 It is not a generic browser automation framework.
@@ -25,7 +25,7 @@ It is not a generic browser automation framework.
 ## Warnings
 
 - Experimental
-- Strongly dependent on Safari, ChatGPT UI, macOS Automation, and local Codex CLI behavior
+- Strongly dependent on Safari, ChatGPT UI, macOS Automation, and the selected execution-agent behavior
 - Unsupported combinations may or may not work
 - Use at your own risk
 - No warranty
