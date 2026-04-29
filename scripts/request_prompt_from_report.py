@@ -6,9 +6,11 @@ import dataclasses
 import json
 import re
 import sys
+import time
 
 from _bridge_common import (
     BRIDGE_DIR,
+    BridgeError,
     BridgeStop,
     build_chatgpt_handoff_request,
     build_chatgpt_request,
@@ -46,6 +48,9 @@ from _bridge_common import (
 
 DEFAULT_NEXT_TODO = "前回 report を踏まえて、次の 1 フェーズ分の Codex 用 prompt を作成してください。"
 DEFAULT_OPEN_QUESTIONS = "未解決事項があれば安全側で補ってください。"
+SEND_MISSING_SOFT_RETRY_MAX = 6
+SEND_MISSING_SOFT_RETRY_DELAY_SECONDS = 2.0
+SEND_MISSING_SOFT_RETRY_ROUTE = "conversation_url"
 
 _REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_]+):\s+(.+?)\s*$", re.MULTILINE)
 
@@ -461,6 +466,18 @@ def log_wait_event(event: object) -> None:
     print(f"{event_name}: {stage_log}")
 
 
+def _send_retry_reset_diagnostics(prepared_request_status: str = "") -> dict[str, object]:
+    return {
+        "last_send_retry_count": 0,
+        "last_send_retry_elapsed_seconds": 0.0,
+        "last_send_retry_route": "",
+        "last_send_retry_prepared_request_status": prepared_request_status,
+        "last_send_retry_reason": "",
+        "last_send_retry_status": "",
+        "last_send_retry_message": "",
+    }
+
+
 def _stage_prepared_request_state(
     state: dict[str, object],
     *,
@@ -469,7 +486,8 @@ def _stage_prepared_request_state(
     request_log_rel: str,
     issue_centric_runtime_snapshot: object | None,
     status: str = "prepared",
-) -> None:
+    extra_updates: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Build, stage, and save a prepared request state snapshot.
 
     Called for both the initial ``"prepared"`` staging and the
@@ -497,6 +515,7 @@ def _stage_prepared_request_state(
         staged.update(
             _issue_centric_next_request_state_updates(issue_centric_runtime_snapshot, phase="prepared")
         )
+    staged.update(_send_retry_reset_diagnostics(status))
     stage_prepared_request(
         staged,
         request_hash=request_hash,
@@ -504,7 +523,10 @@ def _stage_prepared_request_state(
         request_log=request_log_rel,
         status=status,
     )
+    if extra_updates:
+        staged.update(extra_updates)
     save_state(staged)
+    return staged
 
 
 def _apply_pending_request_state(
@@ -551,6 +573,186 @@ def _apply_pending_request_state(
     save_state(mutable)
 
 
+class _SendMissingSoftRetryHardError(BridgeError):
+    """Raised after send_missing was classified as a hard send failure."""
+
+
+def _is_send_missing_error(exc: BaseException) -> bool:
+    return "send_missing" in str(exc)
+
+
+def _send_missing_retry_diagnostics(
+    *,
+    retry_count: int,
+    elapsed_seconds: float,
+    prepared_request_status: str,
+    status: str,
+    message: str,
+) -> dict[str, object]:
+    return {
+        "last_send_retry_count": retry_count,
+        "last_send_retry_elapsed_seconds": round(max(elapsed_seconds, 0.0), 2),
+        "last_send_retry_route": SEND_MISSING_SOFT_RETRY_ROUTE,
+        "last_send_retry_prepared_request_status": prepared_request_status,
+        "last_send_retry_reason": "send_missing",
+        "last_send_retry_status": status,
+        "last_send_retry_message": message,
+    }
+
+
+def _send_missing_soft_retry_blocker(
+    *,
+    original_state: dict[str, object],
+    prepared_state: dict[str, object],
+    request_text: str,
+    exc: BaseException,
+) -> str:
+    if not _is_send_missing_error(exc):
+        return "send_error_not_send_missing"
+    if not request_text.strip():
+        return "request_body_empty"
+    current_chat_session = str(original_state.get("current_chat_session", "")).strip()
+    if not current_chat_session:
+        return "current_chat_session_missing"
+    if "/c/" not in current_chat_session:
+        return "conversation_url_unknown"
+    if str(original_state.get("pending_request_hash", "")).strip():
+        return "pending_request_hash_present"
+    if not str(prepared_state.get("prepared_request_log", "")).strip():
+        return "prepared_request_log_missing"
+    prepared_status = str(prepared_state.get("prepared_request_status", "")).strip()
+    if prepared_status not in {"prepared", "retry_send"}:
+        return f"prepared_request_status_not_retryable:{prepared_status or '(empty)'}"
+    if not can_reuse_prepared_request(prepared_state):
+        return "prepared_request_not_reusable"
+    return ""
+
+
+def _hard_send_missing_message(blocker: str, *, retry_count: int, elapsed_seconds: float) -> str:
+    if blocker in {
+        "current_chat_session_missing",
+        "conversation_url_unknown",
+        "prepared_request_log_missing",
+        "prepared_request_status_not_retryable",
+        "prepared_request_not_reusable",
+    } or blocker.startswith("prepared_request_status_not_retryable:"):
+        detail = "対象 conversation / composer を安全に特定できません。"
+    elif blocker == "retry_limit_exceeded":
+        detail = "ChatGPT UI / Safari の一時的 UI 未準備が継続しています。"
+    else:
+        detail = "send_missing は retry 条件外です。"
+    return (
+        "Safari 上の送信ボタンを押せませんでした: send_missing. "
+        f"{detail} blocker={blocker} route={SEND_MISSING_SOFT_RETRY_ROUTE} "
+        f"retry_count={retry_count} elapsed={round(max(elapsed_seconds, 0.0), 2)}s"
+    )
+
+
+def _send_to_chatgpt_with_send_missing_soft_retry(
+    *,
+    original_state: dict[str, object],
+    prepared_state: dict[str, object],
+    request_text: str,
+    request_hash: str,
+    request_source: str,
+    request_log_rel: str,
+    issue_centric_runtime_snapshot: object | None,
+) -> dict[str, object]:
+    started_at = time.monotonic()
+    retry_count = 0
+    current_prepared_state = prepared_state
+    while True:
+        try:
+            send_to_chatgpt(request_text)
+            if retry_count == 0:
+                return _send_retry_reset_diagnostics()
+            return _send_missing_retry_diagnostics(
+                retry_count=retry_count,
+                elapsed_seconds=time.monotonic() - started_at,
+                prepared_request_status=str(current_prepared_state.get("prepared_request_status", "")).strip(),
+                status="succeeded",
+                message="send_missing soft retry succeeded",
+            )
+        except Exception as exc:
+            if not _is_send_missing_error(exc):
+                raise
+            blocker = _send_missing_soft_retry_blocker(
+                original_state=original_state,
+                prepared_state=current_prepared_state,
+                request_text=request_text,
+                exc=exc,
+            )
+            if blocker:
+                elapsed = time.monotonic() - started_at
+                diagnostics = _send_missing_retry_diagnostics(
+                    retry_count=retry_count,
+                    elapsed_seconds=elapsed,
+                    prepared_request_status=str(current_prepared_state.get("prepared_request_status", "")).strip(),
+                    status="hard_error",
+                    message=blocker,
+                )
+                current_prepared_state = _stage_prepared_request_state(
+                    original_state,
+                    request_hash=request_hash,
+                    request_source=request_source,
+                    request_log_rel=request_log_rel,
+                    issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+                    status="retry_send",
+                    extra_updates=diagnostics,
+                )
+                raise _SendMissingSoftRetryHardError(
+                    _hard_send_missing_message(blocker, retry_count=retry_count, elapsed_seconds=elapsed)
+                ) from exc
+            if retry_count >= SEND_MISSING_SOFT_RETRY_MAX:
+                blocker = "retry_limit_exceeded"
+                elapsed = time.monotonic() - started_at
+                diagnostics = _send_missing_retry_diagnostics(
+                    retry_count=retry_count,
+                    elapsed_seconds=elapsed,
+                    prepared_request_status=str(current_prepared_state.get("prepared_request_status", "")).strip(),
+                    status="hard_error",
+                    message=blocker,
+                )
+                current_prepared_state = _stage_prepared_request_state(
+                    original_state,
+                    request_hash=request_hash,
+                    request_source=request_source,
+                    request_log_rel=request_log_rel,
+                    issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+                    status="retry_send",
+                    extra_updates=diagnostics,
+                )
+                raise _SendMissingSoftRetryHardError(
+                    _hard_send_missing_message(blocker, retry_count=retry_count, elapsed_seconds=elapsed)
+                ) from exc
+            retry_count += 1
+            elapsed = time.monotonic() - started_at
+            diagnostics = _send_missing_retry_diagnostics(
+                retry_count=retry_count,
+                elapsed_seconds=elapsed,
+                prepared_request_status="retry_send",
+                status="retrying",
+                message="ChatGPT UI / Safari の一時的 UI 未準備として send_missing を再試行します。",
+            )
+            current_prepared_state = _stage_prepared_request_state(
+                original_state,
+                request_hash=request_hash,
+                request_source=request_source,
+                request_log_rel=request_log_rel,
+                issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+                status="retry_send",
+                extra_updates=diagnostics,
+            )
+            print(
+                "request: send_missing を一時的 UI 未準備として再試行します。"
+                f" retry={retry_count}/{SEND_MISSING_SOFT_RETRY_MAX}"
+                f" elapsed={round(max(elapsed, 0.0), 2)}s"
+                f" route={SEND_MISSING_SOFT_RETRY_ROUTE}"
+                f" prepared_request_status=retry_send"
+            )
+            time.sleep(SEND_MISSING_SOFT_RETRY_DELAY_SECONDS)
+
+
 def dispatch_request(
     state: dict[str, object],
     *,
@@ -566,15 +768,26 @@ def dispatch_request(
     prepared_log = log_text(prepared_prefix, request_text)
     prepared_log_rel = repo_relative(prepared_log)
     # state transition — prepared staging
-    _stage_prepared_request_state(
+    prepared_state = _stage_prepared_request_state(
         state,
         request_hash=request_hash,
         request_source=request_source,
         request_log_rel=prepared_log_rel,
         issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
     )
+    send_retry_diagnostics: dict[str, object] = {}
     try:
-        send_to_chatgpt(request_text)
+        send_retry_diagnostics = _send_to_chatgpt_with_send_missing_soft_retry(
+            original_state=state,
+            prepared_state=prepared_state,
+            request_text=request_text,
+            request_hash=request_hash,
+            request_source=request_source,
+            request_log_rel=prepared_log_rel,
+            issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
+        )
+    except _SendMissingSoftRetryHardError:
+        raise
     except Exception:
         # state transition — retry_send fallback staging
         _stage_prepared_request_state(
@@ -594,7 +807,7 @@ def dispatch_request(
         request_source=request_source,
         request_log_path=request_log,
         issue_centric_runtime_snapshot=issue_centric_runtime_snapshot,
-        success_updates=success_updates,
+        success_updates={**(success_updates or {}), **send_retry_diagnostics},
     )
     print(f"sent: {request_log}")
     return 0
