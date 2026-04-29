@@ -2991,6 +2991,186 @@ class ApplyPendingRequestStateTests(unittest.TestCase):
         self.assertEqual(saved["human_review_auto_continue_count"], 0)
 
 
+class SendMissingSoftRetryTests(unittest.TestCase):
+    def _dispatch(self, state: dict) -> int:
+        import request_prompt_from_report as m
+
+        return m.dispatch_request(
+            state,
+            request_text="non-empty request",
+            request_hash="HASH",
+            request_source="report:x.md",
+            prepared_prefix="prepared_prompt_request_from_report",
+            sent_prefix="sent_prompt_request_from_report",
+        )
+
+    def _patch_common(self, *, send_side_effect):
+        import unittest.mock as mock
+        import request_prompt_from_report as m
+
+        saved_states: list[dict] = []
+        patches = [
+            mock.patch.object(
+                m,
+                "log_text",
+                side_effect=[Path("/tmp/prepared.md"), Path("/tmp/sent.md")],
+            ),
+            mock.patch.object(m, "repo_relative", side_effect=lambda p: str(p)),
+            mock.patch.object(m, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            mock.patch.object(m, "send_to_chatgpt", side_effect=send_side_effect),
+            mock.patch.object(m.time, "sleep", return_value=None),
+        ]
+        return saved_states, patches
+
+    def test_send_missing_safe_prepared_request_retries_then_promotes_pending(self) -> None:
+        import unittest.mock as mock
+        import request_prompt_from_report as m
+
+        state = {
+            "mode": "idle",
+            "current_chat_session": "https://chatgpt.com/c/demo",
+            "pending_request_hash": "",
+        }
+        saved_states, patches = self._patch_common(
+            send_side_effect=[
+                _bridge_common.BridgeError("Safari 上の送信ボタンを押せませんでした: send_missing"),
+                None,
+            ]
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as send_mock,
+            patches[4] as sleep_mock,
+            mock.patch.object(m.time, "monotonic", side_effect=[0.0, 1.0, 3.0]),
+        ):
+            result = self._dispatch(state)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(send_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(m.SEND_MISSING_SOFT_RETRY_DELAY_SECONDS)
+        self.assertTrue(any(s.get("prepared_request_status") == "retry_send" for s in saved_states))
+        self.assertEqual(saved_states[-1].get("mode"), "waiting_prompt_reply")
+        self.assertEqual(saved_states[-1].get("pending_request_hash"), "HASH")
+        self.assertEqual(saved_states[-1].get("last_send_retry_status"), "succeeded")
+        self.assertEqual(saved_states[-1].get("last_send_retry_count"), 1)
+
+    def test_send_missing_retry_limit_exceeded_becomes_hard_error(self) -> None:
+        import unittest.mock as mock
+        import request_prompt_from_report as m
+
+        state = {
+            "mode": "idle",
+            "current_chat_session": "https://chatgpt.com/c/demo",
+            "pending_request_hash": "",
+        }
+        err = _bridge_common.BridgeError("Safari 上の送信ボタンを押せませんでした: send_missing")
+        saved_states, patches = self._patch_common(send_side_effect=[err, err, err])
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as send_mock,
+            patches[4],
+            mock.patch.object(m, "SEND_MISSING_SOFT_RETRY_MAX", 2),
+            mock.patch.object(m.time, "monotonic", side_effect=[0.0, 1.0, 2.0, 3.0]),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as cm:
+                self._dispatch(state)
+
+        self.assertEqual(send_mock.call_count, 3)
+        self.assertIn("retry_limit_exceeded", str(cm.exception))
+        self.assertEqual(saved_states[-1].get("prepared_request_status"), "retry_send")
+        self.assertEqual(saved_states[-1].get("last_send_retry_status"), "hard_error")
+        self.assertEqual(saved_states[-1].get("last_send_retry_count"), 2)
+
+    def test_send_missing_does_not_retry_when_pending_request_hash_exists(self) -> None:
+        import unittest.mock as mock
+        import request_prompt_from_report as m
+
+        state = {
+            "mode": "idle",
+            "current_chat_session": "https://chatgpt.com/c/demo",
+            "pending_request_hash": "already-pending",
+        }
+        saved_states, patches = self._patch_common(
+            send_side_effect=[
+                _bridge_common.BridgeError("Safari 上の送信ボタンを押せませんでした: send_missing")
+            ]
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as send_mock,
+            patches[4] as sleep_mock,
+            mock.patch.object(m.time, "monotonic", side_effect=[0.0, 1.0]),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as cm:
+                self._dispatch(state)
+
+        self.assertEqual(send_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+        self.assertIn("pending_request_hash_present", str(cm.exception))
+        self.assertEqual(saved_states[-1].get("last_send_retry_status"), "hard_error")
+
+    def test_send_missing_does_not_retry_without_current_chat_session(self) -> None:
+        import unittest.mock as mock
+        import request_prompt_from_report as m
+
+        state = {"mode": "idle", "current_chat_session": "", "pending_request_hash": ""}
+        saved_states, patches = self._patch_common(
+            send_side_effect=[
+                _bridge_common.BridgeError("Safari 上の送信ボタンを押せませんでした: send_missing")
+            ]
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as send_mock,
+            patches[4] as sleep_mock,
+            mock.patch.object(m.time, "monotonic", side_effect=[0.0, 1.0]),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as cm:
+                self._dispatch(state)
+
+        self.assertEqual(send_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+        self.assertIn("current_chat_session_missing", str(cm.exception))
+        self.assertEqual(saved_states[-1].get("last_send_retry_status"), "hard_error")
+
+    def test_non_send_missing_send_error_is_not_soft_retried(self) -> None:
+        import unittest.mock as mock
+        import request_prompt_from_report as m
+
+        state = {
+            "mode": "idle",
+            "current_chat_session": "https://chatgpt.com/c/demo",
+            "pending_request_hash": "",
+        }
+        saved_states, patches = self._patch_common(
+            send_side_effect=[_bridge_common.BridgeError("Safari の現在タブが ChatGPT の対象会話ではありません。")]
+        )
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3] as send_mock,
+            patches[4] as sleep_mock,
+            mock.patch.object(m.time, "monotonic", return_value=0.0),
+        ):
+            with self.assertRaises(_bridge_common.BridgeError) as cm:
+                self._dispatch(state)
+
+        self.assertEqual(send_mock.call_count, 1)
+        sleep_mock.assert_not_called()
+        self.assertIn("対象会話ではありません", str(cm.exception))
+        self.assertEqual(saved_states[-1].get("prepared_request_status"), "retry_send")
+        self.assertNotEqual(saved_states[-1].get("last_send_retry_status"), "retrying")
+
+
 class ApplyRotatedPendingRequestStateTests(unittest.TestCase):
     """Tests for _apply_rotated_pending_request_state."""
 
