@@ -1432,5 +1432,84 @@ class IcExecutionAgentSwitchingTests(unittest.TestCase):
         self.assertEqual(captured[0], "github_copilot")
 
 
+class LocalVerificationPromptTests(unittest.TestCase):
+    """Tests that build_issue_centric_codex_prompt includes local verification
+    requirements and report fields added in fix/worker-verification-ci-pending-guidance."""
+
+    def _execution(self) -> issue_centric_codex_run.CodexRunExecutionResult:
+        return issue_centric_codex_run.CodexRunExecutionResult(
+            status="completed",
+            resolved_issue=issue_centric_github.ResolvedGitHubIssue(
+                repository="example/repo",
+                issue_number=99,
+                issue_url="https://github.com/example/repo/issues/99",
+                source_ref="#99",
+            ),
+            created_comment=issue_centric_github.CreatedGitHubComment(
+                repository="example/repo",
+                issue_number=99,
+                comment_id=111,
+                url="https://github.com/example/repo/issues/99#issuecomment-111",
+                body="Do the work.\n",
+            ),
+            payload=issue_centric_codex_run.CodexRunExecutionPayload(
+                repo=str(REPO_ROOT),
+                target_issue="https://github.com/example/repo/issues/99",
+                request="Do the work.\n",
+                trigger_comment="https://github.com/example/repo/issues/99#issuecomment-111",
+            ),
+            payload_log_path=REPO_ROOT / "logs" / "payload.json",
+            execution_log_path=REPO_ROOT / "logs" / "execution.json",
+            launch_status="not_implemented",
+            launch_note="Not implemented.",
+            safe_stop_reason="codex_run completed through trigger comment creation.",
+        )
+
+    def _build_prompt(self) -> str:
+        # Re-use the helper from the existing CopilotStabilityPreambleTests pattern
+        prepared = issue_centric_transport.decode_issue_centric_decision(
+            build_codex_decision(
+                "https://github.com/example/repo/issues/99",
+                "Do the work.",
+            )
+        )
+        return issue_centric_codex_launch.build_issue_centric_codex_prompt(
+            prepared, self._execution()
+        )
+
+    def test_local_verification_section_present(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("## Local Verification", prompt)
+
+    def test_local_verification_section_appears_after_request(self) -> None:
+        prompt = self._build_prompt()
+        request_pos = prompt.find("## Request")
+        verification_pos = prompt.find("## Local Verification")
+        report_pos = prompt.find("## Report Handoff")
+        self.assertGreater(request_pos, -1, "## Request not found")
+        self.assertGreater(verification_pos, -1, "## Local Verification not found")
+        self.assertGreater(report_pos, -1, "## Report Handoff not found")
+        self.assertLess(request_pos, verification_pos, "## Local Verification must appear after ## Request")
+        self.assertLess(verification_pos, report_pos, "## Local Verification must appear before ## Report Handoff")
+
+    def test_verification_instructions_present(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("1 つずつ実行", prompt)
+        self.assertIn("scope 内で最小修正", prompt)
+
+    def test_report_handoff_includes_local_verification_field(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("local verification:", prompt)
+
+    def test_report_handoff_includes_ci_status_field(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("ci status:", prompt)
+
+    def test_report_handoff_includes_changed_files_and_commit_sha(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("changed files", prompt)
+        self.assertIn("commit SHA", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
