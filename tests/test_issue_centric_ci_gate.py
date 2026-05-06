@@ -495,5 +495,296 @@ class TestBridgeOrchestratorCiGateIntegration(unittest.TestCase):
         self.assertIsNone(result)
 
 
+# ---------------------------------------------------------------------------
+# DEFAULT_STATE: new last_ci_gate_* context fields
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultStateLastCiGateContextFields(unittest.TestCase):
+    """Verify that DEFAULT_STATE includes the last_ci_gate_* result fields."""
+
+    def test_default_state_has_last_ci_gate_fields(self) -> None:
+        import _bridge_common as bc
+        state = bc.DEFAULT_STATE
+        expected_fields = {
+            "last_ci_gate_run_id",
+            "last_ci_gate_run_url",
+            "last_ci_gate_conclusion",
+            "last_ci_gate_failure_detail",
+        }
+        for field in expected_fields:
+            with self.subTest(field=field):
+                self.assertIn(field, state)
+
+    def test_last_ci_gate_fields_default_empty_string(self) -> None:
+        import _bridge_common as bc
+        for field in ("last_ci_gate_run_id", "last_ci_gate_run_url",
+                      "last_ci_gate_conclusion", "last_ci_gate_failure_detail"):
+            with self.subTest(field=field):
+                self.assertEqual(bc.DEFAULT_STATE[field], "")
+
+
+# ---------------------------------------------------------------------------
+# _poll_ci_gate_until_complete: polling loop behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestPollCiGateUntilComplete(unittest.TestCase):
+    """Unit tests for bridge_orchestrator._poll_ci_gate_until_complete."""
+
+    def _make_state(self, ci_status: str = "", **extra: object) -> dict:
+        import _bridge_common as bc
+        state = dict(bc.DEFAULT_STATE)
+        state["ci_gate_status"] = ci_status
+        state.update(extra)
+        return state
+
+    def _make_run_status(
+        self,
+        status: str = "completed",
+        conclusion: str | None = "success",
+    ) -> "ci_gate.CIRunStatus":
+        return ci_gate.CIRunStatus(
+            run_id="42",
+            repository="owner/repo",
+            status=status,
+            conclusion=conclusion,
+            html_url="https://github.com/owner/repo/actions/runs/42",
+            head_sha="abc123",
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-01T00:01:00Z",
+            name="CI",
+        )
+
+    def _make_result(
+        self,
+        verdict: str,
+        run_status: "ci_gate.CIRunStatus | None" = None,
+    ) -> "ci_gate.CIGateResult":
+        return ci_gate.CIGateResult(
+            verdict=verdict,
+            run_id="42",
+            commit_sha="abc123",
+            checked_at="2024-01-01T00:00:00Z",
+            attempt_count=1,
+            run_status=run_status,
+            note="test",
+        )
+
+    def test_returns_result_immediately_when_not_pending(self) -> None:
+        """Returns (result, False) on first call when verdict is already 'success'."""
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config: dict = {"github_repository": "owner/repo"}
+        run_status = self._make_run_status(status="completed", conclusion="success")
+        success_result = self._make_result("success", run_status)
+
+        with patch.object(bo, "_run_ci_gate_check", return_value=success_result), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "save_state"):
+            outcome = bo._poll_ci_gate_until_complete(state, project_config)
+
+        self.assertIsNotNone(outcome)
+        result, timed_out = outcome  # type: ignore[misc]
+        self.assertEqual(result.verdict, "success")
+        self.assertFalse(timed_out)
+
+    def test_polls_until_success(self) -> None:
+        """Polls while verdict is 'waiting_ci', then returns (result, False) on success."""
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config: dict = {"github_repository": "owner/repo"}
+
+        run_status_pending = self._make_run_status(status="in_progress", conclusion=None)
+        run_status_done = self._make_run_status(status="completed", conclusion="success")
+        pending_result = self._make_result("waiting_ci", run_status_pending)
+        success_result = self._make_result("success", run_status_done)
+        call_results = [pending_result, pending_result, success_result]
+
+        with patch.object(bo, "_run_ci_gate_check", side_effect=call_results), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "save_state"), \
+             patch.object(bo.time, "sleep"), \
+             patch.object(bo.time, "monotonic", side_effect=[0.0, 0.0, 5.0, 5.0, 10.0, 10.0]):
+            outcome = bo._poll_ci_gate_until_complete(state, project_config)
+
+        self.assertIsNotNone(outcome)
+        result, timed_out = outcome  # type: ignore[misc]
+        self.assertEqual(result.verdict, "success")
+        self.assertFalse(timed_out)
+
+    def test_returns_timed_out_when_timeout_elapsed(self) -> None:
+        """Returns (result, True) when elapsed time exceeds timeout."""
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config: dict = {
+            "github_repository": "owner/repo",
+            "ci_gate_timeout_seconds": 90.0,  # > 60 floor in _resolve_ci_gate_poll_config
+        }
+        run_status_pending = self._make_run_status(status="in_progress", conclusion=None)
+        pending_result = self._make_result("waiting_ci", run_status_pending)
+
+        # monotonic: start=0.0, first elapsed check=100.0 (> timeout 90.0)
+        with patch.object(bo, "_run_ci_gate_check", return_value=pending_result), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "save_state"), \
+             patch.object(bo.time, "sleep"), \
+             patch.object(bo.time, "monotonic", side_effect=[0.0, 100.0]):
+            outcome = bo._poll_ci_gate_until_complete(state, project_config)
+
+        self.assertIsNotNone(outcome)
+        result, timed_out = outcome  # type: ignore[misc]
+        self.assertEqual(result.verdict, "waiting_ci")
+        self.assertTrue(timed_out)
+
+    def test_returns_none_when_gate_disabled(self) -> None:
+        """Returns None when _run_ci_gate_check returns None (no repository)."""
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config: dict = {"github_repository": ""}
+
+        with patch.object(bo, "_run_ci_gate_check", return_value=None), \
+             patch.object(bo, "save_state"):
+            outcome = bo._poll_ci_gate_until_complete(state, project_config)
+
+        self.assertIsNone(outcome)
+
+
+# ---------------------------------------------------------------------------
+# _handle_ci_gate_before_report_request: polling integration
+# ---------------------------------------------------------------------------
+
+
+class TestHandleCiGateBeforeReportRequestPolling(unittest.TestCase):
+    """Integration tests for polling path in _handle_ci_gate_before_report_request."""
+
+    def _make_state(self, ci_status: str = "", **extra: object) -> dict:
+        import _bridge_common as bc
+        state = dict(bc.DEFAULT_STATE)
+        state["ci_gate_status"] = ci_status
+        state.update(extra)
+        return state
+
+    def _make_run_status(
+        self,
+        status: str = "completed",
+        conclusion: str | None = "success",
+    ) -> "ci_gate.CIRunStatus":
+        return ci_gate.CIRunStatus(
+            run_id="42",
+            repository="owner/repo",
+            status=status,
+            conclusion=conclusion,
+            html_url="https://github.com/owner/repo/actions/runs/42",
+            head_sha="abc123",
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-01T00:01:00Z",
+            name="CI",
+        )
+
+    def _make_result(
+        self,
+        verdict: str,
+        run_status: "ci_gate.CIRunStatus | None" = None,
+        failure_detail: str = "",
+    ) -> "ci_gate.CIGateResult":
+        return ci_gate.CIGateResult(
+            verdict=verdict,
+            run_id="42",
+            commit_sha="abc123",
+            checked_at="2024-01-01T00:00:00Z",
+            attempt_count=1,
+            run_status=run_status,
+            note="test",
+            failure_detail=failure_detail,
+        )
+
+    def test_pending_then_success_returns_none(self) -> None:
+        """When initial check returns waiting_ci and poll succeeds, handler returns None."""
+        import argparse
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config = {"github_repository": "owner/repo"}
+        args = argparse.Namespace()
+
+        run_status_pending = self._make_run_status(status="in_progress", conclusion=None)
+        run_status_done = self._make_run_status(status="completed", conclusion="success")
+        waiting_result = self._make_result("waiting_ci", run_status_pending)
+        success_result = self._make_result("success", run_status_done)
+
+        # First _run_ci_gate_check returns waiting_ci; _poll_ci_gate_until_complete then
+        # immediately returns (success_result, False) for the poll loop
+        with patch.object(bo, "_run_ci_gate_check", return_value=waiting_result), \
+             patch.object(bo, "_poll_ci_gate_until_complete",
+                          return_value=(success_result, False)), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "clear_ci_gate_state"), \
+             patch.object(bo, "save_state"), \
+             patch.object(bo, "run", return_value=0):
+            result = bo._handle_ci_gate_before_report_request(
+                state, project_config, args
+            )
+
+        self.assertIsNone(result)
+
+    def test_pending_then_failure_returns_none(self) -> None:
+        """CI failure after polling returns None (proceeds to ChatGPT with failure context)."""
+        import argparse
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config = {"github_repository": "owner/repo"}
+        args = argparse.Namespace()
+
+        run_status_pending = self._make_run_status(status="in_progress", conclusion=None)
+        run_status_fail = self._make_run_status(status="completed", conclusion="failure")
+        waiting_result = self._make_result("waiting_ci", run_status_pending)
+        failure_result = self._make_result(
+            "failure", run_status_fail, failure_detail="job A failed"
+        )
+
+        with patch.object(bo, "_run_ci_gate_check", return_value=waiting_result), \
+             patch.object(bo, "_poll_ci_gate_until_complete",
+                          return_value=(failure_result, False)), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "clear_ci_gate_state"), \
+             patch.object(bo, "save_state"):
+            result = bo._handle_ci_gate_before_report_request(
+                state, project_config, args
+            )
+
+        self.assertIsNone(result)
+
+    def test_pending_then_timeout_sets_error(self) -> None:
+        """CI gate timeout sets error=True in state and returns 0."""
+        import argparse
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config = {"github_repository": "owner/repo"}
+        args = argparse.Namespace()
+
+        run_status_pending = self._make_run_status(status="in_progress", conclusion=None)
+        waiting_result = self._make_result("waiting_ci", run_status_pending)
+
+        saved_states: list[dict] = []
+
+        def capture_save(s: dict) -> None:
+            saved_states.append(dict(s))
+
+        with patch.object(bo, "_run_ci_gate_check", return_value=waiting_result), \
+             patch.object(bo, "_poll_ci_gate_until_complete",
+                          return_value=(waiting_result, True)), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "save_state", side_effect=capture_save):
+            result = bo._handle_ci_gate_before_report_request(
+                state, project_config, args
+            )
+
+        self.assertEqual(result, 0)
+        self.assertTrue(len(saved_states) > 0)
+        final = saved_states[-1]
+        self.assertTrue(final.get("error"))
+        self.assertIn("timeout", str(final.get("error_message", "")).lower())
+
+
 if __name__ == "__main__":
     unittest.main()

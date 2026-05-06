@@ -5,6 +5,7 @@ import argparse
 import base64
 import json
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +19,6 @@ from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, browser_fetch_time
 from issue_centric_ci_gate import (
     CIGateResult,
     apply_ci_gate_state,
-    build_ci_failure_continuation_body,
     clear_ci_gate_state,
     evaluate_ci_gate,
     is_waiting_ci,
@@ -555,6 +555,41 @@ def maybe_promote_codex_done(state: dict[str, object]) -> bool:
 # CI gate helpers
 # ---------------------------------------------------------------------------
 
+# Default polling interval (seconds) when waiting for a CI run to complete.
+CI_GATE_POLL_SECONDS: float = 15.0
+# Default maximum time (seconds) to wait for CI completion before giving up.
+CI_GATE_TIMEOUT_SECONDS: float = 1800.0
+
+
+def _resolve_ci_gate_poll_config(
+    project_config: dict[str, object],
+) -> tuple[float, float]:
+    """Return (poll_seconds, timeout_seconds) from project_config or defaults."""
+    try:
+        poll = float(project_config.get("ci_gate_poll_seconds", CI_GATE_POLL_SECONDS))
+    except (TypeError, ValueError):
+        poll = CI_GATE_POLL_SECONDS
+    try:
+        timeout = float(project_config.get("ci_gate_timeout_seconds", CI_GATE_TIMEOUT_SECONDS))
+    except (TypeError, ValueError):
+        timeout = CI_GATE_TIMEOUT_SECONDS
+    return max(5.0, poll), max(60.0, timeout)
+
+
+def _save_ci_gate_context_to_state(
+    mutable_state: dict[str, object],
+    result: CIGateResult,
+) -> None:
+    """Persist CI gate result context into *mutable_state* for downstream request building."""
+    mutable_state["last_ci_gate_run_id"] = result.run_id
+    mutable_state["last_ci_gate_run_url"] = (
+        result.run_status.html_url if result.run_status else ""
+    )
+    mutable_state["last_ci_gate_conclusion"] = (
+        (result.run_status.conclusion or "") if result.run_status else ""
+    )
+    mutable_state["last_ci_gate_failure_detail"] = result.failure_detail
+
 
 def _resolve_ci_gate_report_text(state: dict[str, object]) -> str:
     """Return the text of the most-recent archived Codex report.
@@ -626,30 +661,96 @@ def _run_ci_gate_check(
     )
 
 
+def _poll_ci_gate_until_complete(
+    state: dict[str, object],
+    project_config: dict[str, object],
+    *,
+    current_issue: str = "",
+    report_text: str = "",
+) -> tuple[CIGateResult, bool] | None:
+    """Poll the CI gate synchronously until the run completes or the timeout elapses.
+
+    Each poll sleeps ``ci_gate_poll_seconds`` (default 15 s) and logs a heartbeat
+    line so long runs are visible.  The timeout is ``ci_gate_timeout_seconds``
+    (default 1800 s).  Both values can be overridden in ``project_config``.
+
+    Returns:
+        ``None``                      — gate is disabled (no repository configured).
+        ``(result, False)``           — CI gate verdict is no longer ``"waiting_ci"``
+                                        (success / failure / indeterminate / skipped).
+        ``(result, True)``            — timeout elapsed; ``result`` is the last
+                                        ``"waiting_ci"`` snapshot.
+    """
+    poll_seconds, timeout_seconds = _resolve_ci_gate_poll_config(project_config)
+    started_at = time.monotonic()
+    current_state = dict(state)
+
+    while True:
+        result = _run_ci_gate_check(current_state, project_config, report_text=report_text)
+        if result is None:
+            return None  # gate disabled
+
+        # Persist updated attempt_count / checked_at / run_id to state.
+        new_state = dict(current_state)
+        apply_ci_gate_state(new_state, result, current_issue=current_issue)
+        save_state(new_state)
+        current_state = new_state
+
+        # Done once the verdict is definitive.
+        if result.verdict != "waiting_ci":
+            return result, False
+
+        elapsed = time.monotonic() - started_at
+
+        # Timeout: stop polling, return last pending snapshot with timed_out=True.
+        if elapsed >= timeout_seconds:
+            return result, True
+
+        # Heartbeat log.
+        run_id = result.run_id or "unknown"
+        status_str = result.run_status.status if result.run_status else "in_progress"
+        print(
+            f"CI gate: waiting for run {run_id} status={status_str} elapsed={int(elapsed)}s"
+            f" (next check in {int(poll_seconds)}s)"
+        )
+
+        # Sleep before next poll (but not longer than the remaining timeout).
+        remaining = max(0.0, timeout_seconds - elapsed)
+        time.sleep(min(poll_seconds, remaining))
+
+
 def _handle_waiting_ci_recheck(
     state: dict[str, object],
     project_config: dict[str, object],
     argv: list[str] | None = None,
 ) -> int:
-    """Re-evaluate CI gate for a state already in ``waiting_ci``.
+    """Re-evaluate CI gate for a state already in ``waiting_ci``, polling until done.
 
     Called at the top of ``run()`` when ``ci_gate_status == "waiting_ci"``.
 
+    Polls synchronously until the CI run completes (success / failure /
+    indeterminate) or the configured timeout elapses, then either proceeds to
+    send the next ChatGPT request or stops with a clear reason.
+
     Returns:
-      0  — still waiting (no further action)
-      0  — success: advances to ``request_prompt_from_report``
-      0  — failure: CI failure continuation saved; operator informed
-      0  — indeterminate: saved for human review
+      0  — success path: advances via ``run()`` to ``request_prompt_from_report``
+      0  — failure path: proceeds via ``run()`` to ChatGPT with CI failure context
+      0  — indeterminate: state saved, human review required
+      0  — timeout: ``error`` set in state for a clear CI-timeout stop
     """
     current_issue = str(state.get("ci_gate_current_issue", "")).strip()
-    attempt = int(state.get("ci_gate_attempt_count", 0)) + 1
+    run_id_hint = str(state.get("ci_gate_run_id", "")).strip()
     print(
-        f"CI gate: waiting_ci state detected (attempt #{attempt}, issue={current_issue or 'unknown'}). "
-        "Re-checking CI run status..."
+        f"CI gate: waiting_ci state detected"
+        f" (run={run_id_hint or 'unknown'}, issue={current_issue or 'unknown'})."
+        " Polling CI until complete..."
     )
 
-    result = _run_ci_gate_check(state, project_config)
-    if result is None:
+    poll_result = _poll_ci_gate_until_complete(
+        state, project_config, current_issue=current_issue
+    )
+
+    if poll_result is None:
         # Gate disabled (no repository configured) — clear gate and proceed.
         new_state = dict(state)
         clear_ci_gate_state(new_state)
@@ -657,20 +758,30 @@ def _handle_waiting_ci_recheck(
         print("CI gate: disabled (no github_repository). Cleared waiting_ci state.")
         return 0
 
+    result, timed_out = poll_result
+
+    if timed_out:
+        run_id = result.run_id or "unknown"
+        status_str = result.run_status.status if result.run_status else "in_progress"
+        _, timeout_seconds = _resolve_ci_gate_poll_config(project_config)
+        timeout_msg = (
+            f"CI gate timeout: run {run_id} still {status_str!r} after {int(timeout_seconds)}s."
+            " Bridge will not proceed until CI completes."
+            " Clear this error and re-run once CI finishes."
+        )
+        new_state = dict(state)
+        apply_ci_gate_state(new_state, result, current_issue=current_issue)
+        new_state["error"] = True
+        new_state["error_message"] = timeout_msg
+        save_state(new_state)
+        print(f"CI gate timeout: run {run_id} still {status_str!r} after {int(timeout_seconds)}s")
+        return 0
+
     new_state = dict(state)
     apply_ci_gate_state(new_state, result, current_issue=current_issue)
 
-    if result.verdict == "waiting_ci":
-        save_state(new_state)
-        run_id = result.run_id or "unknown"
-        print(
-            f"CI gate: still {result.run_status.status if result.run_status else 'in_progress'} "
-            f"(run_id={run_id}, attempt={result.attempt_count}). Holding in waiting_ci."
-        )
-        return 0
-
     if result.verdict == "success":
-        # Clear gate and proceed; save_state so next cycle sees no gate.
+        _save_ci_gate_context_to_state(new_state, result)
         clear_ci_gate_state(new_state)
         save_state(new_state)
         print(
@@ -681,9 +792,16 @@ def _handle_waiting_ci_recheck(
         return run(new_state, argv)
 
     if result.verdict == "failure":
+        _save_ci_gate_context_to_state(new_state, result)
+        clear_ci_gate_state(new_state)
         save_state(new_state)
-        _handle_ci_failure_continuation(new_state, result, project_config)
-        return 0
+        print(
+            f"CI gate: failure (run_id={result.run_id},"
+            f" conclusion={result.run_status.conclusion if result.run_status else 'failure'})."
+            " Proceeding to ChatGPT with CI failure context."
+        )
+        # Proceed via run() so ChatGPT receives CI failure info in the request context.
+        return run(new_state, argv)
 
     # indeterminate
     save_state(new_state)
@@ -699,60 +817,139 @@ def _handle_ci_gate_before_report_request(
     project_config: dict[str, object],
     args: argparse.Namespace,
 ) -> int | None:
-    """Check CI gate before sending a report to ChatGPT.
+    """Check CI gate before sending a report to ChatGPT, polling if pending.
 
     Called from ``run()`` immediately before ``request_prompt_from_report``.
+
+    When the CI run is pending (``waiting_ci``), polls synchronously (up to
+    ``ci_gate_timeout_seconds``) rather than stopping immediately.  This
+    prevents run_until_stop from seeing an unchanged state and stopping with
+    the wrong guidance.
 
     Returns:
       None  — gate passed (success / skipped / disabled); caller should proceed
               with request_prompt_from_report normally.
       int   — gate held or failed; return this exit code to the caller.
     """
-    result = _run_ci_gate_check(state, project_config)
-    if result is None:
+    current_issue = (
+        str(state.get("last_issue_centric_current_issue", "")).strip()
+        or str(state.get("last_issue_centric_principal_issue", "")).strip()
+        or str(state.get("last_issue_centric_target_issue", "")).strip()
+    )
+
+    # Do a quick initial check to handle the "skipped / success / already done" cases
+    # cheaply before committing to a potential long-running polling loop.
+    initial_result = _run_ci_gate_check(state, project_config)
+    if initial_result is None:
         # Gate disabled.
         return None
 
-    current_issue = str(state.get("last_issue_centric_current_issue", "")).strip() or \
-                    str(state.get("last_issue_centric_principal_issue", "")).strip() or \
-                    str(state.get("last_issue_centric_target_issue", "")).strip()
-
     new_state = dict(state)
-    apply_ci_gate_state(new_state, result, current_issue=current_issue)
+    apply_ci_gate_state(new_state, initial_result, current_issue=current_issue)
 
-    if result.verdict in ("skipped",):
-        # No CI run found or gate inapplicable — proceed normally.
-        # Do NOT save ci_gate_status so we don't accidentally set it for the
-        # next cycle when it really was "skipped".
+    if initial_result.verdict == "skipped":
+        # No CI run found — proceed normally (do not persist skipped status).
         return None
 
-    if result.verdict == "success":
-        # CI passed — clear gate fields and proceed.
+    if initial_result.verdict == "success":
+        _save_ci_gate_context_to_state(new_state, initial_result)
         clear_ci_gate_state(new_state)
         save_state(new_state)
+        print(
+            f"CI gate: success (run_id={initial_result.run_id}). "
+            "Proceeding to send report to ChatGPT."
+        )
+        return None
+
+    if initial_result.verdict == "indeterminate":
+        save_state(new_state)
+        print(
+            f"CI gate: indeterminate (run_id={initial_result.run_id}). "
+            f"{initial_result.note} Human review required. Not sending report to ChatGPT."
+        )
+        return 0
+
+    if initial_result.verdict == "failure":
+        _save_ci_gate_context_to_state(new_state, initial_result)
+        clear_ci_gate_state(new_state)
+        save_state(new_state)
+        print(
+            f"CI gate: failure (run_id={initial_result.run_id},"
+            f" conclusion={initial_result.run_status.conclusion if initial_result.run_status else 'failure'})."
+            " Proceeding to ChatGPT with CI failure context."
+        )
+        # Return None so request_prompt_from_report runs and ChatGPT receives
+        # the CI failure context via build_request_context_section.
+        return None
+
+    # verdict == "waiting_ci": poll synchronously until complete or timeout.
+    run_id = initial_result.run_id or "unknown"
+    status_str = initial_result.run_status.status if initial_result.run_status else "in_progress"
+    print(
+        f"CI gate: CI run {run_id} is {status_str!r}."
+        " Polling until CI completes (do not stop bridge)..."
+    )
+    # The initial check already saved state; pass the updated state to the poller
+    # so the attempt_count / run_id from the initial check is used.
+    save_state(new_state)
+
+    poll_result = _poll_ci_gate_until_complete(
+        new_state, project_config, current_issue=current_issue
+    )
+
+    if poll_result is None:
+        # Gate became disabled during polling — clear and proceed.
+        final_state = dict(new_state)
+        clear_ci_gate_state(final_state)
+        save_state(final_state)
+        print("CI gate: disabled (no github_repository). Cleared gate state.")
+        return None
+
+    result, timed_out = poll_result
+
+    if timed_out:
+        run_id = result.run_id or "unknown"
+        status_str = result.run_status.status if result.run_status else "in_progress"
+        _, timeout_seconds = _resolve_ci_gate_poll_config(project_config)
+        timeout_msg = (
+            f"CI gate timeout: run {run_id} still {status_str!r} after {int(timeout_seconds)}s."
+            " Bridge will not proceed until CI completes."
+            " Clear this error and re-run once CI finishes."
+        )
+        final_state = dict(new_state)
+        apply_ci_gate_state(final_state, result, current_issue=current_issue)
+        final_state["error"] = True
+        final_state["error_message"] = timeout_msg
+        save_state(final_state)
+        print(f"CI gate timeout: run {run_id} still {status_str!r} after {int(timeout_seconds)}s")
+        return 0
+
+    final_state = dict(new_state)
+    apply_ci_gate_state(final_state, result, current_issue=current_issue)
+
+    if result.verdict == "success":
+        _save_ci_gate_context_to_state(final_state, result)
+        clear_ci_gate_state(final_state)
+        save_state(final_state)
         print(
             f"CI gate: success (run_id={result.run_id}). "
             "Proceeding to send report to ChatGPT."
         )
         return None
 
-    if result.verdict == "waiting_ci":
-        save_state(new_state)
-        run_id = result.run_id or "unknown"
-        status_str = result.run_status.status if result.run_status else "in_progress"
-        print(
-            f"CI gate: CI run {run_id} is {status_str!r}. "
-            "Entering waiting_ci — not sending report to ChatGPT this cycle."
-        )
-        return 0
-
     if result.verdict == "failure":
-        save_state(new_state)
-        _handle_ci_failure_continuation(new_state, result, project_config)
-        return 0
+        _save_ci_gate_context_to_state(final_state, result)
+        clear_ci_gate_state(final_state)
+        save_state(final_state)
+        print(
+            f"CI gate: failure (run_id={result.run_id},"
+            f" conclusion={result.run_status.conclusion if result.run_status else 'failure'})."
+            " Proceeding to ChatGPT with CI failure context."
+        )
+        return None
 
     # indeterminate
-    save_state(new_state)
+    save_state(final_state)
     print(
         f"CI gate: indeterminate (run_id={result.run_id}). "
         f"{result.note} Human review required. Not sending report to ChatGPT."
@@ -760,48 +957,6 @@ def _handle_ci_gate_before_report_request(
     return 0
 
 
-def _handle_ci_failure_continuation(
-    state: dict[str, object],
-    result: CIGateResult,
-    project_config: dict[str, object],
-) -> None:
-    """Create a CI failure fix continuation prompt and save it.
-
-    The continuation body is written to a log file and its path recorded in
-    state so the operator (or the next cycle) can dispatch it.
-
-    This does NOT automatically send to ChatGPT or create a Codex run — it
-    prepares the artifact and informs the operator.
-    """
-    from _bridge_common import log_text, repo_relative
-    issue_ref = str(state.get("ci_gate_current_issue", "")).strip() or "unknown-issue"
-    repository = str(project_config.get("github_repository", "")).strip()
-    run_url = result.run_status.html_url if result.run_status else ""
-    conclusion = result.run_status.conclusion or "failure" if result.run_status else "failure"
-
-    body = build_ci_failure_continuation_body(
-        issue_ref=issue_ref,
-        run_id=result.run_id,
-        run_url=run_url,
-        conclusion=conclusion,
-        failure_detail=result.failure_detail,
-        repository=repository,
-    )
-    log_path = log_text("ci_failure_continuation", body, suffix="md")
-    new_state = dict(state)
-    new_state["ci_gate_status"] = "failure"
-    new_state["last_issue_centric_stop_reason"] = result.note
-    new_state["chatgpt_decision_note"] = (
-        f"CI gate: CI run {result.run_id} failed (conclusion={conclusion}). "
-        f"CI failure fix continuation prepared: {repo_relative(log_path)}. "
-        "Current issue will NOT be closed until CI passes."
-    )
-    save_state(new_state)
-    print(
-        f"CI gate: CI failure detected (run_id={result.run_id}, conclusion={conclusion}). "
-        f"Fix continuation prompt saved to {repo_relative(log_path)}. "
-        "Issue will NOT be closed until CI passes."
-    )
 
 
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:

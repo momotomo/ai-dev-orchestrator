@@ -225,6 +225,11 @@ DEFAULT_STATE: dict[str, Any] = {
     "ci_gate_checked_at": "",       # ISO-8601 timestamp of last check
     "ci_gate_attempt_count": 0,     # number of check attempts (bounded by CI_GATE_MAX_ATTEMPT_COUNT)
     "ci_gate_current_issue": "",    # issue ref that triggered the gate (e.g. "#42")
+    # CI gate context for ChatGPT request injection (set after each resolved CI gate check)
+    "last_ci_gate_run_id": "",          # run ID of the last CI gate check
+    "last_ci_gate_run_url": "",         # HTML URL of the last CI run
+    "last_ci_gate_conclusion": "",      # "success" | "failure" | "cancelled" | etc.
+    "last_ci_gate_failure_detail": "",  # summary of failed jobs (only on failure)
 }
 
 DEFAULT_BROWSER_CONFIG: dict[str, Any] = {
@@ -7155,6 +7160,33 @@ def build_request_context_section(state: Mapping[str, Any]) -> str:
             f"- 直前の contract correction 回数: {correction_count}。"
             "今回は正確な issue-centric contract 形式で返答してください。"
         )
+
+    # --- 8. CI gate context ---
+    # Included when the CI gate produced a result since the last report.
+    # Cleared by clear_ci_gate_context_state() when a new report cycle starts.
+    ci_conclusion = str(state.get("last_ci_gate_conclusion", "")).strip()
+    if ci_conclusion:
+        _CI_FAILURE_CONCLUSIONS = frozenset(
+            {"failure", "cancelled", "timed_out", "action_required", "stale"}
+        )
+        _CI_SUCCESS_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+        ci_run_id = str(state.get("last_ci_gate_run_id", "")).strip()
+        ci_run_url = str(state.get("last_ci_gate_run_url", "")).strip()
+        ci_failure_detail = str(state.get("last_ci_gate_failure_detail", "")).strip()
+        url_part = f" ({ci_run_url})" if ci_run_url else ""
+        if ci_conclusion in _CI_FAILURE_CONCLUSIONS:
+            lines.append(
+                f"- CI gate: run {ci_run_id}{url_part} は失敗しました"
+                f" (conclusion={ci_conclusion})。"
+                " CI が通るまで issue をクローズしないでください。修正が必要か判断してください。"
+            )
+            if ci_failure_detail:
+                lines.append(f"  失敗詳細: {ci_failure_detail}")
+        elif ci_conclusion in _CI_SUCCESS_CONCLUSIONS:
+            lines.append(
+                f"- CI gate: run {ci_run_id}{url_part} は成功しました"
+                f" (conclusion={ci_conclusion})。review / close 判断を進めてください。"
+            )
 
     if not lines:
         return ""
