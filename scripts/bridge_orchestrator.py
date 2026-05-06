@@ -559,6 +559,8 @@ def maybe_promote_codex_done(state: dict[str, object]) -> bool:
 CI_GATE_POLL_SECONDS: float = 15.0
 # Default maximum time (seconds) to wait for CI completion before giving up.
 CI_GATE_TIMEOUT_SECONDS: float = 1800.0
+# Default short wait (seconds) for a just-pushed CI run to appear before treating it as missing.
+CI_GATE_MISSING_RUN_TIMEOUT_SECONDS: float = 60.0
 
 
 def _resolve_ci_gate_poll_config(
@@ -576,6 +578,22 @@ def _resolve_ci_gate_poll_config(
     return max(5.0, poll), max(60.0, timeout)
 
 
+def _resolve_ci_gate_missing_run_timeout_seconds(
+    project_config: dict[str, object],
+) -> float:
+    """Return the short discovery timeout used when no CI run is found yet."""
+    try:
+        timeout = float(
+            project_config.get(
+                "ci_gate_missing_run_timeout_seconds",
+                CI_GATE_MISSING_RUN_TIMEOUT_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        timeout = CI_GATE_MISSING_RUN_TIMEOUT_SECONDS
+    return max(0.0, timeout)
+
+
 def _save_ci_gate_context_to_state(
     mutable_state: dict[str, object],
     result: CIGateResult,
@@ -585,10 +603,58 @@ def _save_ci_gate_context_to_state(
     mutable_state["last_ci_gate_run_url"] = (
         result.run_status.html_url if result.run_status else ""
     )
+    mutable_state["last_ci_gate_workflow"] = (
+        result.run_status.name if result.run_status else ""
+    )
+    mutable_state["last_ci_gate_status"] = (
+        result.run_status.status if result.run_status else ""
+    )
     mutable_state["last_ci_gate_conclusion"] = (
         (result.run_status.conclusion or "") if result.run_status else ""
     )
     mutable_state["last_ci_gate_failure_detail"] = result.failure_detail
+
+
+def _poll_ci_gate_until_run_discovered(
+    state: dict[str, object],
+    project_config: dict[str, object],
+    *,
+    current_issue: str = "",
+    report_text: str = "",
+) -> CIGateResult | None:
+    """Poll briefly while no CI run is found, then return the latest result.
+
+    GitHub Actions runs can appear a few seconds after a push/report is archived.
+    This helper avoids treating that small creation window as a definitive
+    skipped gate while still preserving the existing safe fallback when no run
+    appears within the short discovery timeout.
+    """
+    poll_seconds, _ = _resolve_ci_gate_poll_config(project_config)
+    timeout_seconds = _resolve_ci_gate_missing_run_timeout_seconds(project_config)
+    started_at = time.monotonic()
+    current_state = dict(state)
+
+    while True:
+        result = _run_ci_gate_check(current_state, project_config, report_text=report_text)
+        if result is None:
+            return None
+        if result.verdict != "skipped":
+            return result
+
+        elapsed = time.monotonic() - started_at
+        if elapsed >= timeout_seconds:
+            print(
+                f"CI gate: no CI run found after {int(timeout_seconds)}s. "
+                "Proceeding with existing missing-run fallback."
+            )
+            return result
+
+        print(
+            f"CI gate: no CI run found yet elapsed={int(elapsed)}s"
+            f" (next check in {int(poll_seconds)}s)"
+        )
+        remaining = max(0.0, timeout_seconds - elapsed)
+        time.sleep(min(poll_seconds, remaining))
 
 
 def _resolve_ci_gate_report_text(state: dict[str, object]) -> str:
@@ -848,8 +914,19 @@ def _handle_ci_gate_before_report_request(
     apply_ci_gate_state(new_state, initial_result, current_issue=current_issue)
 
     if initial_result.verdict == "skipped":
-        # No CI run found — proceed normally (do not persist skipped status).
-        return None
+        # No CI run found yet. A just-pushed Actions run can appear shortly
+        # after the report is archived, so poll briefly before using the
+        # existing missing-run fallback.
+        discovered_result = _poll_ci_gate_until_run_discovered(
+            state, project_config, current_issue=current_issue
+        )
+        if discovered_result is None:
+            return None
+        initial_result = discovered_result
+        new_state = dict(state)
+        apply_ci_gate_state(new_state, initial_result, current_issue=current_issue)
+        if initial_result.verdict == "skipped":
+            return None
 
     if initial_result.verdict == "success":
         _save_ci_gate_context_to_state(new_state, initial_result)

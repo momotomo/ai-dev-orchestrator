@@ -357,6 +357,39 @@ class BuildRequestContextSectionTests(unittest.TestCase):
         self.assertIn("再選択してはいけません", result)
         self.assertIn("再選定", result)
 
+    # --- CI gate context ---
+
+    def test_ci_success_context_includes_run_metadata(self) -> None:
+        result = self._section(
+            last_ci_gate_run_id="25440730145",
+            last_ci_gate_run_url="https://github.com/owner/repo/actions/runs/25440730145",
+            last_ci_gate_workflow="ci",
+            last_ci_gate_status="completed",
+            last_ci_gate_conclusion="success",
+        )
+        self.assertIn("CI gate", result)
+        self.assertIn("25440730145", result)
+        self.assertIn("workflow=ci", result)
+        self.assertIn("status=completed", result)
+        self.assertIn("conclusion=success", result)
+        self.assertIn("review / close", result)
+
+    def test_ci_failure_context_includes_failure_detail(self) -> None:
+        result = self._section(
+            last_ci_gate_run_id="25440730145",
+            last_ci_gate_run_url="https://github.com/owner/repo/actions/runs/25440730145",
+            last_ci_gate_workflow="ci",
+            last_ci_gate_status="completed",
+            last_ci_gate_conclusion="failure",
+            last_ci_gate_failure_detail="job='test' conclusion=failure failed_steps=[pytest]",
+        )
+        self.assertIn("CI gate", result)
+        self.assertIn("失敗しました", result)
+        self.assertIn("workflow=ci", result)
+        self.assertIn("status=completed", result)
+        self.assertIn("conclusion=failure", result)
+        self.assertIn("pytest", result)
+
 
 class ComposeReadyIssueRequestTextWithContextTests(unittest.TestCase):
     """compose_ready_issue_request_text includes context_section when provided."""
