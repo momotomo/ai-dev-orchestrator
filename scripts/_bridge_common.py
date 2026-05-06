@@ -6786,7 +6786,11 @@ _LIFECYCLE_ONLY_REQUEST_GUIDANCE = (
     " その場合は close_current_issue=false を返し、新しい codex_run は返さず、summary に 'local verification は通過、CI pending のため close 保留' と短く記載してください。\n"
     "worker report に 'local verification: failed' または 'local verification: partial' が含まれる場合は、scope 内で bounded に codex_run を検討してください。\n"
     "CI status が failure の場合は、scope 内で bounded に codex_run を検討してください。\n"
-    "CI status が success の場合は、通常どおり close 判定へ進んでください。"
+    "CI status が success の場合は、通常どおり close 判定へ進んでください。\n"
+    "CI 確認時は worker report の ci run id / ci run url を優先してください。\n"
+    "ci run id がある場合は、その workflow run を確認対象にしてください。\n"
+    "ci run id がない場合は commit SHA から CI run を探索してください。\n"
+    "run_id も commit SHA からの CI run も確認できない場合は、完了済みとは断定しないでください。"
 )
 
 

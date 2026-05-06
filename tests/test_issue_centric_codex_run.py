@@ -1510,6 +1510,27 @@ class LocalVerificationPromptTests(unittest.TestCase):
         self.assertIn("changed files", prompt)
         self.assertIn("commit SHA", prompt)
 
+    def test_report_handoff_includes_ci_run_id_field(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("ci run id", prompt)
+
+    def test_report_handoff_includes_ci_run_url_field(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("ci run url", prompt)
+
+    def test_report_handoff_includes_ci_workflow_field(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("ci workflow", prompt)
+
+    def test_report_handoff_includes_ci_conclusion_field(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("ci conclusion", prompt)
+
+    def test_report_handoff_ci_run_none_fallback_instruction(self) -> None:
+        prompt = self._build_prompt()
+        self.assertIn("ci run id: none", prompt)
+        self.assertIn("ci run url: none", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
