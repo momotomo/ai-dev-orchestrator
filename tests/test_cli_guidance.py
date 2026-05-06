@@ -6847,3 +6847,20 @@ class LifecycleOnlyGuidanceCIPendingTests(unittest.TestCase):
         guidance = self._guidance()
         self.assertIn("local verification: failed", guidance)
         self.assertIn("bounded に codex_run", guidance)
+
+    def test_ci_run_id_url_priority_guidance(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("ci run id", guidance)
+        self.assertIn("ci run url", guidance)
+
+    def test_ci_run_id_present_use_workflow_run(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("workflow run", guidance)
+
+    def test_ci_run_id_absent_use_commit_sha(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("commit SHA から", guidance)
+
+    def test_no_run_id_no_ci_run_no_deterministic_close(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("完了済みとは断定しないでください", guidance)
