@@ -509,6 +509,8 @@ class TestDefaultStateLastCiGateContextFields(unittest.TestCase):
         expected_fields = {
             "last_ci_gate_run_id",
             "last_ci_gate_run_url",
+            "last_ci_gate_workflow",
+            "last_ci_gate_status",
             "last_ci_gate_conclusion",
             "last_ci_gate_failure_detail",
         }
@@ -519,6 +521,7 @@ class TestDefaultStateLastCiGateContextFields(unittest.TestCase):
     def test_last_ci_gate_fields_default_empty_string(self) -> None:
         import _bridge_common as bc
         for field in ("last_ci_gate_run_id", "last_ci_gate_run_url",
+                      "last_ci_gate_workflow", "last_ci_gate_status",
                       "last_ci_gate_conclusion", "last_ci_gate_failure_detail"):
             with self.subTest(field=field):
                 self.assertEqual(bc.DEFAULT_STATE[field], "")
@@ -648,6 +651,90 @@ class TestPollCiGateUntilComplete(unittest.TestCase):
             outcome = bo._poll_ci_gate_until_complete(state, project_config)
 
         self.assertIsNone(outcome)
+
+
+class TestPollCiGateUntilRunDiscovered(unittest.TestCase):
+    """Unit tests for the short missing-run discovery poll."""
+
+    def _make_state(self, ci_status: str = "", **extra: object) -> dict:
+        import _bridge_common as bc
+        state = dict(bc.DEFAULT_STATE)
+        state["ci_gate_status"] = ci_status
+        state.update(extra)
+        return state
+
+    def _make_run_status(
+        self,
+        status: str = "in_progress",
+        conclusion: str | None = None,
+    ) -> "ci_gate.CIRunStatus":
+        return ci_gate.CIRunStatus(
+            run_id="42",
+            repository="owner/repo",
+            status=status,
+            conclusion=conclusion,
+            html_url="https://github.com/owner/repo/actions/runs/42",
+            head_sha="abc123",
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-01T00:01:00Z",
+            name="CI",
+        )
+
+    def _make_result(
+        self,
+        verdict: str,
+        run_status: "ci_gate.CIRunStatus | None" = None,
+    ) -> "ci_gate.CIGateResult":
+        return ci_gate.CIGateResult(
+            verdict=verdict,
+            run_id="42" if run_status is not None else "",
+            commit_sha="abc123" if run_status is not None else "",
+            checked_at="2024-01-01T00:00:00Z",
+            attempt_count=1,
+            run_status=run_status,
+            note="test",
+        )
+
+    def test_skipped_then_pending_returns_discovered_run(self) -> None:
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config: dict = {
+            "github_repository": "owner/repo",
+            "ci_gate_poll_seconds": 5,
+            "ci_gate_missing_run_timeout_seconds": 30,
+        }
+        skipped = self._make_result("skipped")
+        pending = self._make_result("waiting_ci", self._make_run_status())
+
+        with patch.object(bo, "_run_ci_gate_check", side_effect=[skipped, pending]), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "save_state"), \
+             patch.object(bo.time, "sleep"), \
+             patch.object(bo.time, "monotonic", side_effect=[0.0, 0.0]):
+            result = bo._poll_ci_gate_until_run_discovered(state, project_config)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.verdict, "waiting_ci")  # type: ignore[union-attr]
+
+    def test_missing_run_timeout_returns_skipped(self) -> None:
+        import bridge_orchestrator as bo
+        state = self._make_state()
+        project_config: dict = {
+            "github_repository": "owner/repo",
+            "ci_gate_poll_seconds": 5,
+            "ci_gate_missing_run_timeout_seconds": 10,
+        }
+        skipped = self._make_result("skipped")
+
+        with patch.object(bo, "_run_ci_gate_check", return_value=skipped), \
+             patch.object(bo, "apply_ci_gate_state"), \
+             patch.object(bo, "save_state"), \
+             patch.object(bo.time, "sleep"), \
+             patch.object(bo.time, "monotonic", side_effect=[0.0, 10.0]):
+            result = bo._poll_ci_gate_until_run_discovered(state, project_config)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.verdict, "skipped")  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ Checks GitHub Actions CI run status before allowing the runtime to proceed
 with sending the next ChatGPT request after a post-push Codex report.
 
 CI gate verdicts:
-  "waiting_ci"   — CI is queued or in_progress; hold state, no ChatGPT send
+  "waiting_ci"   — CI is queued or in_progress; caller should poll before ChatGPT send
   "success"      — CI completed successfully; proceed to close/next issue
   "failure"      — CI failed or was cancelled; create fix continuation
   "skipped"      — No CI run found; proceed normally
