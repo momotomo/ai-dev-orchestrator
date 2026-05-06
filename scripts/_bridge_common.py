@@ -218,6 +218,13 @@ DEFAULT_STATE: dict[str, Any] = {
     "error": False,
     "error_message": "",
     "cycle": 0,
+    # CI gate fields (issue_centric_ci_gate.py)
+    "ci_gate_status": "",           # "" | "waiting_ci" | "success" | "failure" | "skipped" | "indeterminate"
+    "ci_gate_run_id": "",           # GitHub Actions run ID being watched
+    "ci_gate_commit_sha": "",       # head commit SHA of the watched run
+    "ci_gate_checked_at": "",       # ISO-8601 timestamp of last check
+    "ci_gate_attempt_count": 0,     # number of check attempts (bounded by CI_GATE_MAX_ATTEMPT_COUNT)
+    "ci_gate_current_issue": "",    # issue ref that triggered the gate (e.g. "#42")
 }
 
 DEFAULT_BROWSER_CONFIG: dict[str, Any] = {

@@ -15,6 +15,14 @@ import launch_github_copilot
 import request_next_prompt
 import request_prompt_from_report
 from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from issue_centric_ci_gate import (
+    CIGateResult,
+    apply_ci_gate_state,
+    build_ci_failure_continuation_body,
+    clear_ci_gate_state,
+    evaluate_ci_gate,
+    is_waiting_ci,
+)
 from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_codex_launch import launch_issue_centric_codex_run
@@ -543,6 +551,259 @@ def maybe_promote_codex_done(state: dict[str, object]) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# CI gate helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_ci_gate_report_text(state: dict[str, object]) -> str:
+    """Return the text of the most-recent archived Codex report.
+
+    Used to extract CI run IDs and commit SHAs when evaluating the CI gate.
+    Returns empty string when no report is available.
+    """
+    from _bridge_common import bridge_runtime_root
+    report_ref = str(state.get("last_report_file", "")).strip()
+    if not report_ref:
+        return ""
+    candidate = (bridge_runtime_root() / report_ref).resolve()
+    if not candidate.exists():
+        # Try relative to ROOT_DIR as well.
+        candidate = (ROOT_DIR / report_ref).resolve()
+    return read_text(candidate, default="")
+
+
+def _run_ci_gate_check(
+    state: dict[str, object],
+    project_config: dict[str, object],
+    *,
+    report_text: str = "",
+) -> CIGateResult | None:
+    """Evaluate the CI gate and return a result, or None when gate is disabled.
+
+    The gate is disabled when ``github_repository`` is not configured, because
+    we need a repository to check Actions runs.
+
+    When the gate is active but the GitHub token is unavailable, returns an
+    ``"indeterminate"`` result rather than raising.
+    """
+    repository = str(project_config.get("github_repository", "")).strip()
+    if not repository:
+        # Gate cannot run without a target repository.
+        return None
+
+    try:
+        from issue_centric_github import resolve_github_token
+        token, _ = resolve_github_token()
+    except Exception as exc:
+        import datetime as _dt
+        indeterminate_at = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        new_state = dict(state)
+        new_state["ci_gate_status"] = "indeterminate"
+        new_state["ci_gate_checked_at"] = indeterminate_at
+        save_state(new_state)
+        print(
+            f"CI gate: GitHub token unavailable ({exc}). "
+            "Marking indeterminate — human review required."
+        )
+        from issue_centric_ci_gate import CIGateResult as _CGR
+        return _CGR(
+            verdict="indeterminate",
+            run_id=str(state.get("ci_gate_run_id", "")),
+            commit_sha=str(state.get("ci_gate_commit_sha", "")),
+            checked_at=indeterminate_at,
+            attempt_count=int(state.get("ci_gate_attempt_count", 0)) + 1,
+            run_status=None,
+            note=f"GitHub token unavailable: {exc}",
+        )
+
+    effective_report_text = report_text or _resolve_ci_gate_report_text(state)
+    return evaluate_ci_gate(
+        report_text=effective_report_text,
+        repository=repository,
+        token=token,
+        prior_state=state,
+    )
+
+
+def _handle_waiting_ci_recheck(
+    state: dict[str, object],
+    project_config: dict[str, object],
+    argv: list[str] | None = None,
+) -> int:
+    """Re-evaluate CI gate for a state already in ``waiting_ci``.
+
+    Called at the top of ``run()`` when ``ci_gate_status == "waiting_ci"``.
+
+    Returns:
+      0  — still waiting (no further action)
+      0  — success: advances to ``request_prompt_from_report``
+      0  — failure: CI failure continuation saved; operator informed
+      0  — indeterminate: saved for human review
+    """
+    current_issue = str(state.get("ci_gate_current_issue", "")).strip()
+    attempt = int(state.get("ci_gate_attempt_count", 0)) + 1
+    print(
+        f"CI gate: waiting_ci state detected (attempt #{attempt}, issue={current_issue or 'unknown'}). "
+        "Re-checking CI run status..."
+    )
+
+    result = _run_ci_gate_check(state, project_config)
+    if result is None:
+        # Gate disabled (no repository configured) — clear gate and proceed.
+        new_state = dict(state)
+        clear_ci_gate_state(new_state)
+        save_state(new_state)
+        print("CI gate: disabled (no github_repository). Cleared waiting_ci state.")
+        return 0
+
+    new_state = dict(state)
+    apply_ci_gate_state(new_state, result, current_issue=current_issue)
+
+    if result.verdict == "waiting_ci":
+        save_state(new_state)
+        run_id = result.run_id or "unknown"
+        print(
+            f"CI gate: still {result.run_status.status if result.run_status else 'in_progress'} "
+            f"(run_id={run_id}, attempt={result.attempt_count}). Holding in waiting_ci."
+        )
+        return 0
+
+    if result.verdict == "success":
+        # Clear gate and proceed; save_state so next cycle sees no gate.
+        clear_ci_gate_state(new_state)
+        save_state(new_state)
+        print(
+            f"CI gate: success (run_id={result.run_id}). "
+            "Proceeding to send report to ChatGPT."
+        )
+        # Re-enter run() with the cleared state so normal dispatch continues.
+        return run(new_state, argv)
+
+    if result.verdict == "failure":
+        save_state(new_state)
+        _handle_ci_failure_continuation(new_state, result, project_config)
+        return 0
+
+    # indeterminate
+    save_state(new_state)
+    print(
+        f"CI gate: indeterminate (run_id={result.run_id}, attempt={result.attempt_count}). "
+        f"{result.note} Human review required."
+    )
+    return 0
+
+
+def _handle_ci_gate_before_report_request(
+    state: dict[str, object],
+    project_config: dict[str, object],
+    args: argparse.Namespace,
+) -> int | None:
+    """Check CI gate before sending a report to ChatGPT.
+
+    Called from ``run()`` immediately before ``request_prompt_from_report``.
+
+    Returns:
+      None  — gate passed (success / skipped / disabled); caller should proceed
+              with request_prompt_from_report normally.
+      int   — gate held or failed; return this exit code to the caller.
+    """
+    result = _run_ci_gate_check(state, project_config)
+    if result is None:
+        # Gate disabled.
+        return None
+
+    current_issue = str(state.get("last_issue_centric_current_issue", "")).strip() or \
+                    str(state.get("last_issue_centric_principal_issue", "")).strip() or \
+                    str(state.get("last_issue_centric_target_issue", "")).strip()
+
+    new_state = dict(state)
+    apply_ci_gate_state(new_state, result, current_issue=current_issue)
+
+    if result.verdict in ("skipped",):
+        # No CI run found or gate inapplicable — proceed normally.
+        # Do NOT save ci_gate_status so we don't accidentally set it for the
+        # next cycle when it really was "skipped".
+        return None
+
+    if result.verdict == "success":
+        # CI passed — clear gate fields and proceed.
+        clear_ci_gate_state(new_state)
+        save_state(new_state)
+        print(
+            f"CI gate: success (run_id={result.run_id}). "
+            "Proceeding to send report to ChatGPT."
+        )
+        return None
+
+    if result.verdict == "waiting_ci":
+        save_state(new_state)
+        run_id = result.run_id or "unknown"
+        status_str = result.run_status.status if result.run_status else "in_progress"
+        print(
+            f"CI gate: CI run {run_id} is {status_str!r}. "
+            "Entering waiting_ci — not sending report to ChatGPT this cycle."
+        )
+        return 0
+
+    if result.verdict == "failure":
+        save_state(new_state)
+        _handle_ci_failure_continuation(new_state, result, project_config)
+        return 0
+
+    # indeterminate
+    save_state(new_state)
+    print(
+        f"CI gate: indeterminate (run_id={result.run_id}). "
+        f"{result.note} Human review required. Not sending report to ChatGPT."
+    )
+    return 0
+
+
+def _handle_ci_failure_continuation(
+    state: dict[str, object],
+    result: CIGateResult,
+    project_config: dict[str, object],
+) -> None:
+    """Create a CI failure fix continuation prompt and save it.
+
+    The continuation body is written to a log file and its path recorded in
+    state so the operator (or the next cycle) can dispatch it.
+
+    This does NOT automatically send to ChatGPT or create a Codex run — it
+    prepares the artifact and informs the operator.
+    """
+    from _bridge_common import log_text, repo_relative
+    issue_ref = str(state.get("ci_gate_current_issue", "")).strip() or "unknown-issue"
+    repository = str(project_config.get("github_repository", "")).strip()
+    run_url = result.run_status.html_url if result.run_status else ""
+    conclusion = result.run_status.conclusion or "failure" if result.run_status else "failure"
+
+    body = build_ci_failure_continuation_body(
+        issue_ref=issue_ref,
+        run_id=result.run_id,
+        run_url=run_url,
+        conclusion=conclusion,
+        failure_detail=result.failure_detail,
+        repository=repository,
+    )
+    log_path = log_text("ci_failure_continuation", body, suffix="md")
+    new_state = dict(state)
+    new_state["ci_gate_status"] = "failure"
+    new_state["last_issue_centric_stop_reason"] = result.note
+    new_state["chatgpt_decision_note"] = (
+        f"CI gate: CI run {result.run_id} failed (conclusion={conclusion}). "
+        f"CI failure fix continuation prepared: {repo_relative(log_path)}. "
+        "Current issue will NOT be closed until CI passes."
+    )
+    save_state(new_state)
+    print(
+        f"CI gate: CI failure detected (run_id={result.run_id}, conclusion={conclusion}). "
+        f"Fix continuation prompt saved to {repo_relative(log_path)}. "
+        "Issue will NOT be closed until CI passes."
+    )
+
+
 def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     project_config = load_project_config()
     args = parse_args(argv, project_config)
@@ -554,6 +815,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     execution_agent = resolve_execution_agent(
         {"execution_agent": args.execution_agent} if args.execution_agent else project_config
     )
+
+    # CI gate: if we are in waiting_ci state, recheck CI before anything else.
+    if is_waiting_ci(state):
+        return _handle_waiting_ci_recheck(state, project_config, argv)
+
     if should_prioritize_unarchived_report(state):
         status = present_bridge_status(state)
         print(f"{status.label}です。未退避 report を先に archive します。")
@@ -663,6 +929,12 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if plan.next_action == "request_next_prompt":
         return request_next_prompt.run(dict(state), build_initial_request_argv(args))
     if plan.next_action == "request_prompt_from_report":
+        # CI gate: check GitHub Actions status before sending the report to ChatGPT.
+        # If CI is still running (queued / in_progress) we hold in waiting_ci state
+        # instead of sending — this prevents the "CI not done, please stop" loop.
+        _ci_gate_rc = _handle_ci_gate_before_report_request(dict(state), project_config, args)
+        if _ci_gate_rc is not None:
+            return _ci_gate_rc
         return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
     if plan.next_action == "fetch_next_prompt":
         # Wrap in a BridgeStop catch so that initial_selection_stop from fetch_next_prompt
