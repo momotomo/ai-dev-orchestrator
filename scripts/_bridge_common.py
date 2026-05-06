@@ -6781,7 +6781,12 @@ _LIFECYCLE_ONLY_REQUEST_GUIDANCE = (
     "CHATGPT_CODEX_BODY は返さないでください。\n"
     "GitHub commit / GitHub diff / GitHub changed files を確認し、変更が target issue scope 内で remaining issues がない場合は close_current_issue=true を検討してください。\n"
     "GitHub repo を直接確認できない場合は未確認として扱い、完了済みとは断定しないでください。\n"
-    "close_current_issue=false の場合は、GitHub repo 確認後に見つかった具体的な未完了理由を summary に書いてください。"
+    "close_current_issue=false の場合は、GitHub repo 確認後に見つかった具体的な未完了理由を summary に書いてください。\n"
+    "worker report に 'local verification: passed' が含まれ、かつ CI status が pending または unknown の場合は、失敗扱いにしないでください。"
+    " その場合は close_current_issue=false を返し、新しい codex_run は返さず、summary に 'local verification は通過、CI pending のため close 保留' と短く記載してください。\n"
+    "worker report に 'local verification: failed' または 'local verification: partial' が含まれる場合は、scope 内で bounded に codex_run を検討してください。\n"
+    "CI status が failure の場合は、scope 内で bounded に codex_run を検討してください。\n"
+    "CI status が success の場合は、通常どおり close 判定へ進んでください。"
 )
 
 

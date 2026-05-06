@@ -6811,3 +6811,39 @@ class ProjectSyncAlertWebhookConfigValidationTests(unittest.TestCase):
         result = bc.deliver_project_sync_alert_if_pending(state, config)
         pathlib.Path(tmp_path).unlink(missing_ok=True)
         self.assertEqual(result, "skipped_already_delivered")
+
+
+class LifecycleOnlyGuidanceCIPendingTests(unittest.TestCase):
+    """Tests that _LIFECYCLE_ONLY_REQUEST_GUIDANCE handles CI pending correctly."""
+
+    def _guidance(self) -> str:
+        import _bridge_common as bc
+        return bc._LIFECYCLE_ONLY_REQUEST_GUIDANCE
+
+    def test_ci_pending_not_treated_as_failure(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("local verification: passed", guidance)
+        self.assertIn("CI pending", guidance)
+
+    def test_ci_pending_instructs_close_false(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("close_current_issue=false", guidance)
+
+    def test_ci_pending_instructs_no_codex_run(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("新しい codex_run は返さず", guidance)
+
+    def test_ci_failure_instructs_codex_run(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("CI status が failure", guidance)
+        self.assertIn("codex_run を検討", guidance)
+
+    def test_ci_success_proceeds_to_close(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("CI status が success", guidance)
+        self.assertIn("close 判定", guidance)
+
+    def test_local_verification_failed_instructs_codex_run(self) -> None:
+        guidance = self._guidance()
+        self.assertIn("local verification: failed", guidance)
+        self.assertIn("bounded に codex_run", guidance)
