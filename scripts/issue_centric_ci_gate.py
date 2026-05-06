@@ -31,7 +31,8 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 # Maximum number of CI-check attempts before declaring "indeterminate".
-CI_GATE_MAX_ATTEMPT_COUNT = 20
+# Raised to accommodate in-process synchronous polling (up to 1800s / 15s = 120 polls).
+CI_GATE_MAX_ATTEMPT_COUNT = 200
 
 # GitHub Actions run status values that mean "still running".
 CI_PENDING_STATUSES: frozenset[str] = frozenset({"queued", "in_progress", "waiting", "requested", "pending"})
