@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -98,6 +99,26 @@ _STALL_RAW = (
     + _REPLY_COMPLETE_TAG
 )
 
+
+def _block(name: str, payload: str) -> str:
+    markers = {
+        "json": (
+            _ic_contract.DECISION_JSON_START,
+            _ic_contract.DECISION_JSON_END,
+        ),
+        "codex": (
+            _ic_contract.CODEX_BODY_START,
+            _ic_contract.CODEX_BODY_END,
+        ),
+    }
+    start_marker, end_marker = markers[name]
+    return f"{start_marker}\n{payload}\n{end_marker}"
+
+
+def _raw_reply(envelope: dict[str, object], *, parts: list[str] | None = None) -> str:
+    contract_parts = parts or [_block("json", json.dumps(envelope, ensure_ascii=True, indent=2))]
+    return "\n".join(["あなた:", "request body", "ChatGPT:", *contract_parts, _REPLY_COMPLETE_TAG])
+
 # Raw text that looks like stalled app metadata (no IC contract, no thinking visible).
 # Classifies as not_ready (no completion tag). Used only for await_late_completion tests
 # where the stall detection promotes it to correction_retry.
@@ -110,8 +131,8 @@ _LATE_STALL_RAW = (
 )
 
 
-class FetchNextPromptSendMissingGuardTests(unittest.TestCase):
-    """Guard: send_missing during correction retry → BridgeStop(reply_still_generating)."""
+class FetchNextPromptCorrectionPreSendGuardTests(unittest.TestCase):
+    """Guard: pending reply blocks correction before send_to_chatgpt."""
 
     def _make_patches(
         self,
@@ -142,51 +163,88 @@ class FetchNextPromptSendMissingGuardTests(unittest.TestCase):
             patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}),
         )
 
-    def test_send_missing_in_await_late_completion_raises_bridge_stop(self) -> None:
-        """send_missing during correction in await_late_completion → BridgeStop with reply_still_generating."""
+    def test_pending_reply_invalid_contract_blocks_before_send(self) -> None:
+        """Invalid contract correction with pending reply must not call send_to_chatgpt."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("await_late_completion")
-        send_error = BridgeError("send_missing: button not found")
         with tempfile.TemporaryDirectory() as tmp:
-            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts, send_side_effect=send_error)
+            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
         self.assertIn("reply_still_generating", str(cm.exception))
-        self.assertIn("send_missing", str(cm.exception))
-        # No text should have been sent
+        self.assertIn("no send attempted", str(cm.exception))
         self.assertEqual(len(sent_texts), 0)
-        # State should be saved with preserved mode
         self.assertTrue(len(saved_states) > 0)
         last_saved = saved_states[-1]
         self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "reply_still_generating")
 
-    def test_send_missing_in_waiting_prompt_reply_raises_bridge_stop(self) -> None:
-        """send_missing during correction in waiting_prompt_reply → BridgeStop with reply_still_generating."""
+    def test_pending_reply_waiting_prompt_reply_blocks_before_send(self) -> None:
+        """waiting_prompt_reply correction is also pre-send blocked."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("waiting_prompt_reply")
-        send_error = BridgeError("send_missing: button disabled")
         with tempfile.TemporaryDirectory() as tmp:
-            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts, send_side_effect=send_error)
+            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
         self.assertIn("reply_still_generating", str(cm.exception))
+        self.assertEqual(len(sent_texts), 0)
 
-    def test_non_send_missing_error_propagates_normally(self) -> None:
-        """Errors other than send_missing during correction are not converted."""
+    def test_pending_reply_binding_mismatch_blocks_before_send_and_preserves_pending_fields(self) -> None:
         saved_states: list[dict] = []
         sent_texts: list[str] = []
-        state = _pending_state("await_late_completion")
-        send_error = BridgeError("browser_automation_error: element not found")
+        state = _pending_state("waiting_prompt_reply")
+        state["pending_request_source"] = "ready_issue:#7"
+        state["pending_request_log"] = "logs/original.md"
+        raw = _raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#99",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "stale issue",
+            }
+        )
         with tempfile.TemporaryDirectory() as tmp:
-            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts, send_side_effect=send_error)
+            patches = self._make_patches(tmp, raw, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                with self.assertRaises(BridgeError) as cm:
+                with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
-        self.assertNotIn("reply_still_generating", str(cm.exception))
+        self.assertIn("reply_still_generating", str(cm.exception))
+        self.assertEqual(len(sent_texts), 0)
+        last_saved = saved_states[-1]
+        self.assertEqual(last_saved.get("pending_request_hash"), "abc123")
+        self.assertEqual(last_saved.get("pending_request_source"), "ready_issue:#7")
+        self.assertEqual(last_saved.get("pending_request_log"), "logs/original.md")
+
+    def test_pending_reply_body_decode_blocks_before_send(self) -> None:
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = _pending_state("waiting_prompt_reply")
+        decision = {
+            "action": "codex_run",
+            "target_issue": "#7",
+            "close_current_issue": False,
+            "create_followup_issue": False,
+            "summary": "run codex",
+        }
+        raw = _raw_reply(
+            decision,
+            parts=[
+                _block("json", json.dumps(decision, ensure_ascii=True, indent=2)),
+                _block("codex", "//8="),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patches(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop) as cm:
+                    fetch_next_prompt.run(state, [])
+        self.assertIn("reply_still_generating", str(cm.exception))
+        self.assertEqual(len(sent_texts), 0)
 
     def test_send_missing_without_pending_hash_propagates_as_bridge_error(self) -> None:
         """send_missing when no pending_request_hash → propagate as BridgeError, not BridgeStop."""
@@ -216,23 +274,20 @@ class FetchNextPromptSendMissingGuardTests(unittest.TestCase):
         self.assertNotIn("reply_still_generating", str(cm.exception))
         self.assertIn("fetch できませんでした", str(cm.exception))
 
-    def test_correction_succeeds_normally_when_send_button_available(self) -> None:
-        """Normal path: correction retry succeeds when send button is available."""
+    def test_pending_reply_correction_blocks_even_when_send_button_available(self) -> None:
+        """Pending reply is a hard boundary, not a send_missing fallback."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("await_late_completion")
-        # No send_side_effect — send succeeds
         with tempfile.TemporaryDirectory() as tmp:
             patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
-        # Correction should have been sent
-        self.assertEqual(len(sent_texts), 1, "correction should be sent when button is available")
-        self.assertNotIn("reply_still_generating", str(cm.exception))
-        # State should have correction count incremented
+        self.assertEqual(len(sent_texts), 0, "correction must be blocked before send_to_chatgpt")
+        self.assertIn("reply_still_generating", str(cm.exception))
         last_saved = saved_states[-1]
-        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_count"), 1)
+        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "reply_still_generating")
 
 
 # ---------------------------------------------------------------------------
@@ -311,8 +366,8 @@ class SendMissingSoftRetryBlockerPendingReplyTests(unittest.TestCase):
 class SendToChGPTWithSendMissingPendingReplyTests(unittest.TestCase):
     """_send_to_chatgpt_with_send_missing_soft_retry raises BridgeStop for reply_still_generating."""
 
-    def test_send_missing_with_pending_reply_raises_bridge_stop(self) -> None:
-        """send_missing when pending_request_hash+await_late_completion → BridgeStop."""
+    def test_pending_reply_blocks_before_send(self) -> None:
+        """pending_request_hash+await_late_completion → BridgeStop before send_to_chatgpt."""
         original_state: dict[str, object] = {
             "mode": "await_late_completion",
             "pending_request_hash": "xyz789",
@@ -322,10 +377,10 @@ class SendToChGPTWithSendMissingPendingReplyTests(unittest.TestCase):
             "prepared_request_status": "prepared",
             "prepared_request_log": "logs/prep.md",
         }
-        with patch.object(
-            request_prompt_from_report,
-            "send_to_chatgpt",
-            side_effect=BridgeError("send_missing: no button"),
+        saved_states: list[dict] = []
+        with (
+            patch.object(request_prompt_from_report, "send_to_chatgpt") as send_mock,
+            patch.object(request_prompt_from_report, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
         ):
             with self.assertRaises(BridgeStop) as cm:
                 request_prompt_from_report._send_to_chatgpt_with_send_missing_soft_retry(
@@ -338,10 +393,11 @@ class SendToChGPTWithSendMissingPendingReplyTests(unittest.TestCase):
                     issue_centric_runtime_snapshot=None,
                 )
         self.assertIn("reply_still_generating", str(cm.exception))
-        self.assertIn("await_late_completion", str(cm.exception))
+        send_mock.assert_not_called()
+        self.assertEqual(saved_states[-1]["pending_request_hash"], "xyz789")
 
-    def test_send_missing_with_waiting_prompt_reply_raises_bridge_stop(self) -> None:
-        """send_missing when waiting_prompt_reply+pending_hash → BridgeStop."""
+    def test_pending_reply_waiting_prompt_reply_blocks_before_send(self) -> None:
+        """waiting_prompt_reply+pending_hash → BridgeStop before send_to_chatgpt."""
         original_state: dict[str, object] = {
             "mode": "waiting_prompt_reply",
             "pending_request_hash": "xyz789",
@@ -351,10 +407,9 @@ class SendToChGPTWithSendMissingPendingReplyTests(unittest.TestCase):
             "prepared_request_status": "prepared",
             "prepared_request_log": "logs/prep.md",
         }
-        with patch.object(
-            request_prompt_from_report,
-            "send_to_chatgpt",
-            side_effect=BridgeError("send_missing: no button"),
+        with (
+            patch.object(request_prompt_from_report, "send_to_chatgpt") as send_mock,
+            patch.object(request_prompt_from_report, "save_state", side_effect=lambda s: None),
         ):
             with self.assertRaises(BridgeStop) as cm:
                 request_prompt_from_report._send_to_chatgpt_with_send_missing_soft_retry(
@@ -367,6 +422,7 @@ class SendToChGPTWithSendMissingPendingReplyTests(unittest.TestCase):
                     issue_centric_runtime_snapshot=None,
                 )
         self.assertIn("reply_still_generating", str(cm.exception))
+        send_mock.assert_not_called()
 
     def test_send_missing_without_pending_reply_raises_hard_error(self) -> None:
         """send_missing when no pending_request_hash (and mode=idle) → hard error, not BridgeStop."""
@@ -405,6 +461,127 @@ class SendToChGPTWithSendMissingPendingReplyTests(unittest.TestCase):
                 self.assertNotIn("reply_still_generating", str(exc))
             except Exception:
                 pass  # Any other exception is acceptable — just not BridgeStop(reply_still_generating)
+
+
+class RequestPromptFromReportPreSendGuardTests(unittest.TestCase):
+    """request_prompt_from_report blocks outbound paths while a reply is pending."""
+
+    def _pending_report_state(self) -> dict[str, object]:
+        return {
+            "mode": "waiting_prompt_reply",
+            "pending_request_hash": "pending-hash",
+            "pending_request_source": "ready_issue:#7",
+            "pending_request_log": "logs/pending.md",
+            "pending_request_signal": "submitted_unconfirmed",
+            "next_request_requires_rotation": True,
+            "next_request_rotation_reason": "late_completion",
+        }
+
+    def test_dispatch_request_pending_reply_blocks_next_send_and_preserves_fields(self) -> None:
+        saved_states: list[dict] = []
+        state = self._pending_report_state()
+        with (
+            patch.object(request_prompt_from_report, "send_to_chatgpt") as send_mock,
+            patch.object(request_prompt_from_report, "log_text") as log_mock,
+            patch.object(request_prompt_from_report, "save_state", side_effect=lambda s: saved_states.append(dict(s))),
+        ):
+            with self.assertRaises(BridgeStop) as cm:
+                request_prompt_from_report.dispatch_request(
+                    state,
+                    request_text="new request",
+                    request_hash="new-hash",
+                    request_source="report:new",
+                    prepared_prefix="prepared",
+                    sent_prefix="sent",
+                )
+        self.assertIn("reply_still_generating", str(cm.exception))
+        send_mock.assert_not_called()
+        log_mock.assert_not_called()
+        last_saved = saved_states[-1]
+        self.assertEqual(last_saved.get("pending_request_hash"), "pending-hash")
+        self.assertEqual(last_saved.get("pending_request_source"), "ready_issue:#7")
+        self.assertEqual(last_saved.get("pending_request_log"), "logs/pending.md")
+        self.assertEqual(last_saved.get("pending_request_signal"), "submitted_unconfirmed")
+        self.assertTrue(last_saved.get("next_request_requires_rotation"))
+
+    def test_pending_reply_blocks_handoff_request_before_send(self) -> None:
+        state = self._pending_report_state()
+        args = MagicMock(next_todo="", open_questions="", current_status="")
+        ic_context = request_prompt_from_report._IcResolvedContext(next_request_section="section")
+        with (
+            patch.object(request_prompt_from_report, "send_to_chatgpt") as send_mock,
+            patch.object(request_prompt_from_report, "build_chatgpt_handoff_request") as build_mock,
+            patch.object(request_prompt_from_report, "save_state", side_effect=lambda s: None),
+        ):
+            with self.assertRaises(BridgeStop):
+                request_prompt_from_report._acquire_rotated_handoff(
+                    state,
+                    args,
+                    "last report",
+                    request_source="report:last",
+                    ic_context=ic_context,
+                )
+        send_mock.assert_not_called()
+        build_mock.assert_not_called()
+
+    def test_pending_reply_blocks_rotation_before_rotate_call(self) -> None:
+        state = self._pending_report_state()
+        ic_context = request_prompt_from_report._IcResolvedContext(next_request_section="section")
+        with (
+            patch.object(request_prompt_from_report, "rotate_chat_with_handoff") as rotate_mock,
+            patch.object(request_prompt_from_report, "save_state", side_effect=lambda s: None),
+        ):
+            with self.assertRaises(BridgeStop):
+                request_prompt_from_report._apply_rotated_request_result(
+                    state,
+                    handoff_text="handoff",
+                    handoff_received_log="logs/handoff.md",
+                    request_source="report:last",
+                    ic_context=ic_context,
+                )
+        rotate_mock.assert_not_called()
+
+    def test_normal_no_pending_dispatch_still_sends(self) -> None:
+        state: dict[str, object] = {
+            "mode": "codex_done",
+            "pending_request_hash": "",
+            "pending_request_source": "",
+            "pending_request_log": "",
+        }
+        logged: list[tuple[str, str]] = []
+        applied: list[dict[str, object]] = []
+
+        def fake_apply(state_arg: dict[str, object], **kwargs: object) -> None:
+            applied.append(dict(kwargs))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+
+            def fake_log_text(prefix: str, text: str) -> Path:
+                logged.append((prefix, text))
+                path = temp_root / f"{prefix}.md"
+                path.write_text(text, encoding="utf-8")
+                return path
+
+            with (
+                patch.object(request_prompt_from_report, "send_to_chatgpt") as send_mock,
+                patch.object(request_prompt_from_report, "log_text", side_effect=fake_log_text),
+                patch.object(request_prompt_from_report, "save_state", side_effect=lambda s: None),
+                patch.object(request_prompt_from_report, "_apply_pending_request_state", side_effect=fake_apply),
+            ):
+                result = request_prompt_from_report.dispatch_request(
+                    state,
+                    request_text="new request",
+                    request_hash="new-hash",
+                    request_source="report:new",
+                    prepared_prefix="prepared",
+                    sent_prefix="sent",
+                )
+        self.assertEqual(result, 0)
+        send_mock.assert_called_once_with("new request")
+        self.assertEqual(logged[0][0], "prepared")
+        self.assertEqual(logged[1][0], "sent")
+        self.assertEqual(applied[0]["request_hash"], "new-hash")
 
 
 # ---------------------------------------------------------------------------
