@@ -2020,6 +2020,29 @@ def is_fetch_late_completion_state(state: Mapping[str, Any]) -> bool:
     return str(state.get("mode", "")).strip() == "await_late_completion"
 
 
+def is_pending_chatgpt_reply_state(state: Mapping[str, Any]) -> bool:
+    """Return True when a ChatGPT reply is pending and no new send should be attempted.
+
+    Guards all send paths (correction retries, handoff requests, rotation sends,
+    and regular next requests) against firing while the bridge is waiting for a
+    ChatGPT reply.
+
+    Three signals are checked (any one is sufficient):
+
+    - ``pending_request_hash`` is non-empty: a request was sent and not yet resolved.
+    - ``mode == "waiting_prompt_reply"``: the bridge is actively polling for a reply.
+    - ``mode == "await_late_completion"``: the bridge is in the late-completion
+      watch mode; ChatGPT may still be generating.
+
+    This is the single authority for "is a ChatGPT reply outstanding?" decisions.
+    Callers that need to block sends, rotation, or handoff while waiting for a reply
+    should use this helper rather than scattering direct mode / hash reads.
+    """
+    return bool(str(state.get("pending_request_hash", "")).strip()) or str(
+        state.get("mode", "")
+    ).strip() in {"waiting_prompt_reply", "await_late_completion"}
+
+
 def is_issue_centric_delivery_pending_state(
     state: Mapping[str, Any],
 ) -> tuple[bool, str]:
