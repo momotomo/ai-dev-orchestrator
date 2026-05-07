@@ -40,6 +40,7 @@ from _bridge_common import (
     send_to_chatgpt,
     save_state,
     stage_prepared_request,
+    is_pending_chatgpt_reply_state,
     stable_text_hash,
     should_prioritize_unarchived_report,
     should_rotate_before_next_chat_request,
@@ -53,6 +54,22 @@ SEND_MISSING_SOFT_RETRY_DELAY_SECONDS = 2.0
 SEND_MISSING_SOFT_RETRY_ROUTE = "conversation_url"
 
 _REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_]+):\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _stop_send_if_pending_chatgpt_reply(
+    state: dict[str, object],
+    *,
+    send_path: str,
+) -> None:
+    if not is_pending_chatgpt_reply_state(state):
+        return
+    preserved_state = clear_error_fields(dict(state))
+    save_state(preserved_state)
+    raise BridgeStop(
+        "ChatGPT reply is still generating; no send attempted.\n"
+        "reply_still_generating: pending ChatGPT reply exists; "
+        f"no send attempted ({send_path})"
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -664,6 +681,7 @@ def _send_to_chatgpt_with_send_missing_soft_retry(
     request_log_rel: str,
     issue_centric_runtime_snapshot: object | None,
 ) -> dict[str, object]:
+    _stop_send_if_pending_chatgpt_reply(original_state, send_path="next request send")
     started_at = time.monotonic()
     retry_count = 0
     current_prepared_state = prepared_state
@@ -780,6 +798,7 @@ def dispatch_request(
     issue_centric_runtime_snapshot: object | None = None,
     success_updates: dict[str, object] | None = None,
 ) -> int:
+    _stop_send_if_pending_chatgpt_reply(state, send_path="next request send")
     # log
     prepared_log = log_text(prepared_prefix, request_text)
     prepared_log_rel = repo_relative(prepared_log)
@@ -1083,6 +1102,7 @@ def _acquire_rotated_handoff(
     * **Fresh acquisition** — builds and sends a handoff request, waits for the
       reply, extracts the handoff text, and persists the pending handoff state.
     """
+    _stop_send_if_pending_chatgpt_reply(state, send_path="handoff request")
     if _can_reuse_pending_handoff_for_rotation(state, request_source):
         pending_handoff_text = read_pending_handoff_text(state)
         print("next step: 次の ChatGPT request を送る前に、回収済み handoff で新チャット送信を再試行します。")
@@ -1208,6 +1228,7 @@ def _apply_rotated_request_result(
     fields and IC context, saves state, and prints the rotation result.
     Returns 0.
     """
+    _stop_send_if_pending_chatgpt_reply(state, send_path="chat rotation handoff")
     # log
     rotated_chat = rotate_chat_with_handoff(handoff_text)
     rotation_signal = str(rotated_chat.get("signal", "")).strip()
@@ -1371,6 +1392,10 @@ def _execute_resume_request_plan(plan: "_ResumeRequestPlan") -> int:
     2. Guard against duplicate pending request (early return 0).
     3. Dispatch the request.
     """
+    _stop_send_if_pending_chatgpt_reply(
+        plan.state,
+        send_path="prepared request reuse send" if plan.prepared_status is not None else "next request send",
+    )
     if plan.prepared_status is not None:
         _log_prepared_request_reuse(plan.prepared_status, plan.ic_context.route_selected)
     if _is_duplicate_pending_request(plan.state, plan.request_source):
@@ -1453,6 +1478,7 @@ def _execute_rotated_request_plan(plan: "_RotatedRequestPlan") -> int:
     Delegates to ``_apply_rotated_request_result`` which handles chat rotation,
     state transition, and result printing.
     """
+    _stop_send_if_pending_chatgpt_reply(plan.state, send_path="chat rotation handoff")
     return _apply_rotated_request_result(
         plan.state,
         handoff_text=plan.handoff_text,
