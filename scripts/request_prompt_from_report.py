@@ -617,6 +617,12 @@ def _send_missing_soft_retry_blocker(
     if "/c/" not in current_chat_session:
         return "conversation_url_unknown"
     if str(original_state.get("pending_request_hash", "")).strip():
+        # If the state is already in a pending-reply mode, the send button may
+        # be disabled because ChatGPT is still generating the pending reply.
+        # Classify as reply_still_generating rather than a hard "Safari UI" error.
+        _pending_mode = str(original_state.get("mode", "")).strip()
+        if _pending_mode in {"waiting_prompt_reply", "await_late_completion"}:
+            return "reply_still_generating"
         return "pending_request_hash_present"
     if not str(prepared_state.get("prepared_request_log", "")).strip():
         return "prepared_request_log_missing"
@@ -684,6 +690,16 @@ def _send_to_chatgpt_with_send_missing_soft_retry(
             )
             if blocker:
                 elapsed = time.monotonic() - started_at
+                # reply_still_generating: pending reply detected — raise BridgeStop
+                # to preserve pending state rather than marking a hard error.
+                if blocker == "reply_still_generating":
+                    _pending_mode = str(original_state.get("mode", "")).strip()
+                    raise BridgeStop(
+                        "ChatGPT reply is still generating; no send attempted.\n"
+                        "reply_still_generating: "
+                        f"mode={_pending_mode}, pending_request_hash present,"
+                        " send_missing detected during pending reply."
+                    )
                 diagnostics = _send_missing_retry_diagnostics(
                     retry_count=retry_count,
                     elapsed_seconds=elapsed,

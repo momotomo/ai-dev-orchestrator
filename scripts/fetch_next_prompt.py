@@ -14,6 +14,7 @@ from _bridge_common import (
     clear_error_fields,
     clear_pending_request_fields,
     guarded_main,
+    is_pending_chatgpt_reply_state,
     load_project_config,
     load_state,
     log_text,
@@ -1785,7 +1786,24 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         if correction_count < _MAX_CONTRACT_CORRECTIONS:
             correction_text = _build_contract_correction_request(readiness.reason)
             correction_log = log_text("contract_correction_request", correction_text, suffix="md")
-            send_to_chatgpt(correction_text)
+            # Guard: if the send button is unavailable (ChatGPT still generating),
+            # convert send_missing to BridgeStop with reply_still_generating reason
+            # instead of propagating as a hard error.  This is most likely to happen
+            # when late_completion_observed is True and the IC contract is absent.
+            try:
+                send_to_chatgpt(correction_text)
+            except BridgeError as _send_exc:
+                if "send_missing" in str(_send_exc) and is_pending_chatgpt_reply_state(state):
+                    _stall_state = clear_error_fields(dict(state))
+                    _stall_state["mode"] = "await_late_completion" if late_completion_observed else str(state.get("mode", "")).strip()
+                    _stall_state["last_issue_centric_contract_correction_reason"] = "reply_still_generating"
+                    save_state(_stall_state)
+                    raise BridgeStop(
+                        "ChatGPT reply is still generating; no send attempted.\n"
+                        "reply_still_generating: send_missing during pending reply,"
+                        f" mode={_stall_state['mode']}, readiness={readiness.status}"
+                    ) from _send_exc
+                raise
             correction_state = clear_error_fields(dict(state))
             # Preserve pending_request_hash / source / log so the next fetch picks up the reply.
             correction_state["last_issue_centric_contract_correction_count"] = correction_count + 1
@@ -1875,7 +1893,19 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     ready_issue_binding_error, current_ready_issue_ref
                 )
                 correction_log = log_text("contract_correction_request", correction_text, suffix="md")
-                send_to_chatgpt(correction_text)
+                try:
+                    send_to_chatgpt(correction_text)
+                except BridgeError as _send_exc:
+                    if "send_missing" in str(_send_exc) and is_pending_chatgpt_reply_state(state):
+                        _stall_state = clear_error_fields(dict(state))
+                        _stall_state["last_issue_centric_contract_correction_reason"] = "reply_still_generating"
+                        save_state(_stall_state)
+                        raise BridgeStop(
+                            "ChatGPT reply is still generating; no send attempted.\n"
+                            "reply_still_generating: send_missing during pending reply (binding mismatch),"
+                            f" mode={str(state.get('mode', '')).strip()}"
+                        ) from _send_exc
+                    raise
                 correction_state = clear_error_fields(dict(state))
                 correction_state["last_issue_centric_contract_correction_count"] = binding_correction_count + 1
                 correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
@@ -1923,7 +1953,19 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             if body_correction_count < _MAX_CONTRACT_CORRECTIONS:
                 correction_text = _build_contract_correction_request(body_decode_reason)
                 correction_log = log_text("contract_correction_request", correction_text, suffix="md")
-                send_to_chatgpt(correction_text)
+                try:
+                    send_to_chatgpt(correction_text)
+                except BridgeError as _send_exc:
+                    if "send_missing" in str(_send_exc) and is_pending_chatgpt_reply_state(state):
+                        _stall_state = clear_error_fields(dict(state))
+                        _stall_state["last_issue_centric_contract_correction_reason"] = "reply_still_generating"
+                        save_state(_stall_state)
+                        raise BridgeStop(
+                            "ChatGPT reply is still generating; no send attempted.\n"
+                            "reply_still_generating: send_missing during pending reply (body decode error),"
+                            f" mode={str(state.get('mode', '')).strip()}"
+                        ) from _send_exc
+                    raise
                 correction_state = clear_error_fields(dict(state))
                 correction_state["last_issue_centric_contract_correction_count"] = body_correction_count + 1
                 correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
