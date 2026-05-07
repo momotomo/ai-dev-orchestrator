@@ -119,15 +119,22 @@ def _raw_reply(envelope: dict[str, object], *, parts: list[str] | None = None) -
     contract_parts = parts or [_block("json", json.dumps(envelope, ensure_ascii=True, indent=2))]
     return "\n".join(["あなた:", "request body", "ChatGPT:", *contract_parts, _REPLY_COMPLETE_TAG])
 
-# Raw text that looks like stalled app metadata (no IC contract, no thinking visible).
-# Classifies as not_ready (no completion tag). Used only for await_late_completion tests
-# where the stall detection promotes it to correction_retry.
-_LATE_STALL_RAW = (
+_PARTIAL_BODY_RAW = (
     "あなた:\nrequest body\nChatGPT:\n"
-    "Received app response\n"
-    "Thought for 16s\n"
-    "拡張\n"
-    "GitHub"
+    + _block(
+        "json",
+        json.dumps(
+            {
+                "action": "codex_run",
+                "target_issue": "#7",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "still writing body",
+            },
+            ensure_ascii=True,
+        ),
+    )
+    + "\n===CHATGPT_CODEX_BODY===\naGVs"
 )
 
 
@@ -163,8 +170,8 @@ class FetchNextPromptCorrectionPreSendGuardTests(unittest.TestCase):
             patch.object(fetch_next_prompt, "load_project_config", return_value={"github_repository": "example/repo"}),
         )
 
-    def test_pending_reply_invalid_contract_blocks_before_send(self) -> None:
-        """Invalid contract correction with pending reply must not call send_to_chatgpt."""
+    def test_complete_no_marker_reply_allows_correction_send(self) -> None:
+        """Completed invalid contract with pending state may send correction."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("await_late_completion")
@@ -173,27 +180,26 @@ class FetchNextPromptCorrectionPreSendGuardTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
-        self.assertIn("reply_still_generating", str(cm.exception))
-        self.assertIn("no send attempted", str(cm.exception))
-        self.assertEqual(len(sent_texts), 0)
+        self.assertIn("issue-centric contract reply", str(cm.exception))
+        self.assertEqual(len(sent_texts), 1)
         self.assertTrue(len(saved_states) > 0)
         last_saved = saved_states[-1]
-        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "reply_still_generating")
+        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_count"), 1)
 
     def test_pending_reply_waiting_prompt_reply_blocks_before_send(self) -> None:
-        """waiting_prompt_reply correction is also pre-send blocked."""
+        """waiting_prompt_reply with incomplete partial body blocks before send."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("waiting_prompt_reply")
         with tempfile.TemporaryDirectory() as tmp:
-            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts)
+            patches = self._make_patches(tmp, _PARTIAL_BODY_RAW, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                with self.assertRaises(BridgeStop) as cm:
+                with self.assertRaises(BridgeError) as cm:
                     fetch_next_prompt.run(state, [])
-        self.assertIn("reply_still_generating", str(cm.exception))
+        self.assertIn("completion tag", str(cm.exception))
         self.assertEqual(len(sent_texts), 0)
 
-    def test_pending_reply_binding_mismatch_blocks_before_send_and_preserves_pending_fields(self) -> None:
+    def test_complete_binding_mismatch_allows_correction_and_preserves_pending_fields(self) -> None:
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("waiting_prompt_reply")
@@ -213,14 +219,17 @@ class FetchNextPromptCorrectionPreSendGuardTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
-        self.assertIn("reply_still_generating", str(cm.exception))
-        self.assertEqual(len(sent_texts), 0)
+        self.assertIn("ready issue binding", str(cm.exception))
+        self.assertEqual(len(sent_texts), 1)
+        self.assertIn("#7", sent_texts[0])
+        self.assertIn("#99", sent_texts[0])
         last_saved = saved_states[-1]
         self.assertEqual(last_saved.get("pending_request_hash"), "abc123")
         self.assertEqual(last_saved.get("pending_request_source"), "ready_issue:#7")
         self.assertEqual(last_saved.get("pending_request_log"), "logs/original.md")
+        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_count"), 1)
 
-    def test_pending_reply_body_decode_blocks_before_send(self) -> None:
+    def test_complete_body_decode_error_allows_correction_send(self) -> None:
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("waiting_prompt_reply")
@@ -243,8 +252,9 @@ class FetchNextPromptCorrectionPreSendGuardTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop) as cm:
                     fetch_next_prompt.run(state, [])
-        self.assertIn("reply_still_generating", str(cm.exception))
-        self.assertEqual(len(sent_texts), 0)
+        self.assertIn("BODY block payload", str(cm.exception))
+        self.assertEqual(len(sent_texts), 1)
+        self.assertEqual(saved_states[-1].get("last_issue_centric_contract_correction_count"), 1)
 
     def test_send_missing_without_pending_hash_propagates_as_bridge_error(self) -> None:
         """send_missing when no pending_request_hash → propagate as BridgeError, not BridgeStop."""
@@ -275,19 +285,18 @@ class FetchNextPromptCorrectionPreSendGuardTests(unittest.TestCase):
         self.assertIn("fetch できませんでした", str(cm.exception))
 
     def test_pending_reply_correction_blocks_even_when_send_button_available(self) -> None:
-        """Pending reply is a hard boundary, not a send_missing fallback."""
+        """Incomplete partial body is a hard boundary, not a send_missing fallback."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = _pending_state("await_late_completion")
         with tempfile.TemporaryDirectory() as tmp:
-            patches = self._make_patches(tmp, _STALL_RAW, saved_states, sent_texts)
+            patches = self._make_patches(tmp, _PARTIAL_BODY_RAW, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                with self.assertRaises(BridgeStop) as cm:
+                with self.assertRaises(BridgeError) as cm:
                     fetch_next_prompt.run(state, [])
         self.assertEqual(len(sent_texts), 0, "correction must be blocked before send_to_chatgpt")
-        self.assertIn("reply_still_generating", str(cm.exception))
-        last_saved = saved_states[-1]
-        self.assertEqual(last_saved.get("last_issue_centric_contract_correction_reason"), "reply_still_generating")
+        self.assertIn("completion tag", str(cm.exception))
+        self.assertEqual(saved_states, [])
 
 
 # ---------------------------------------------------------------------------

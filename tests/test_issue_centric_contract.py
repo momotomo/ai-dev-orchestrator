@@ -3192,13 +3192,22 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
     # Helper: a raw reply text that has no completion tag → reply_not_ready
     _NOT_READY_RAW = "あなた:\nrequest body\nChatGPT:\nまだ考え中です。"
 
-    # Helper: app/tool UI finished without the canonical reply contract.
-    _LATE_STALLED_APP_RAW = (
+    _PARTIAL_BODY_RAW = (
         "あなた:\nrequest body\nChatGPT:\n"
-        "Received app response\n"
-        "Thought for 16s\n"
-        "拡張\n"
-        "GitHub"
+        + block(
+            "json",
+            json.dumps(
+                {
+                    "action": "codex_run",
+                    "target_issue": "#5",
+                    "close_current_issue": False,
+                    "create_followup_issue": False,
+                    "summary": "still writing body",
+                },
+                ensure_ascii=True,
+            ),
+        )
+        + "\n===CHATGPT_CODEX_BODY===\naGVs"
     )
 
     def _base_state(self, *, correction_count: int = 0) -> dict[str, object]:
@@ -3245,7 +3254,7 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_first_retry_sends_correction_request(self) -> None:
-        """1st attempt while pending: correction is blocked before send_to_chatgpt."""
+        """1st completed invalid reply while pending: correction is sent."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -3253,13 +3262,12 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(self._base_state(correction_count=0), [])
-        self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must not be called while reply is pending")
-        self.assertEqual(len(saved_states), 1)
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
-        self.assertEqual(saved_states[0]["mode"], "waiting_prompt_reply")
+        self.assertEqual(len(sent_texts), 1, "send_to_chatgpt must be called for a complete invalid reply")
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 1)
+        self.assertEqual(saved_states[-1]["mode"], "waiting_prompt_reply")
 
     def test_second_retry_sends_correction_request(self) -> None:
-        """2nd attempt while pending: correction is blocked before send_to_chatgpt."""
+        """2nd completed invalid reply while pending: correction is sent."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -3267,9 +3275,8 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(self._base_state(correction_count=1), [])
-        self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must not be called while reply is pending")
-        self.assertEqual(len(saved_states), 1)
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
+        self.assertEqual(len(sent_texts), 1, "send_to_chatgpt must be called for a complete invalid reply")
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 2)
 
     def test_third_attempt_hard_stops_without_send(self) -> None:
         """3rd attempt (count=2 == _MAX): no send, BridgeError (hard stop) raised."""
@@ -3300,18 +3307,18 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must NOT be called for reply_not_ready")
 
     def test_late_completion_stalled_app_response_blocks_correction_send(self) -> None:
-        """await_late_completion + stalled app metadata must not send while pending."""
+        """await_late_completion + incomplete partial body must not send while pending."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         state = self._base_state(correction_count=0)
         state["mode"] = "await_late_completion"
         with tempfile.TemporaryDirectory() as tmp:
-            patches = self._make_patched_context(tmp, self._LATE_STALLED_APP_RAW, saved_states, sent_texts)
+            patches = self._make_patched_context(tmp, self._PARTIAL_BODY_RAW, saved_states, sent_texts)
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                with self.assertRaises(BridgeStop):
+                with self.assertRaises(BridgeError):
                     fetch_next_prompt.run(state, [])
-        self.assertEqual(len(sent_texts), 0, "late stalled no-contract must not send while pending")
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
+        self.assertEqual(len(sent_texts), 0, "partial body must not send while pending")
+        self.assertEqual(saved_states, [])
 
     # ------------------------------------------------------------------
     # ready_issue_binding_error retry
@@ -3329,8 +3336,8 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             }
         )
 
-    def test_binding_mismatch_first_retry_blocks_correction_send(self) -> None:
-        """ready_issue_binding_error with count=0: send_to_chatgpt is not called while pending."""
+    def test_binding_mismatch_first_retry_sends_correction(self) -> None:
+        """ready_issue_binding_error with count=0 after complete reply: correction is sent."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -3338,11 +3345,13 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(self._base_state(correction_count=0), [])
-        self.assertEqual(len(sent_texts), 0, "binding mismatch: send_to_chatgpt must not be called while pending")
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
+        self.assertEqual(len(sent_texts), 1, "binding mismatch correction must be sent after a complete reply")
+        self.assertIn("#5", sent_texts[0])
+        self.assertIn("#99", sent_texts[0])
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 1)
 
-    def test_binding_mismatch_correction_blocks_before_send(self) -> None:
-        """The binding mismatch correction path must stop before send_to_chatgpt."""
+    def test_binding_mismatch_correction_includes_target_guidance(self) -> None:
+        """The binding mismatch correction path includes expected target guidance."""
         sent_texts: list[str] = []
         saved_states: list[dict] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -3350,8 +3359,10 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(self._base_state(correction_count=0), [])
-        self.assertEqual(len(sent_texts), 0)
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
+        self.assertEqual(len(sent_texts), 1)
+        self.assertIn("target_issue", sent_texts[0])
+        self.assertIn("#5", sent_texts[0])
+        self.assertIn("#99", sent_texts[0])
 
     def test_binding_mismatch_hard_stop_at_max_corrections(self) -> None:
         """ready_issue_binding_error with count=2: no send, BridgeError raised."""
@@ -3420,8 +3431,8 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             readiness=readiness,
         )
 
-    def test_early_exception_first_retry_blocks_correction_send(self) -> None:
-        """IssueCentricReplyInvalid from wait_for_plan_a: count=0 → no send while pending."""
+    def test_early_exception_first_retry_sends_correction(self) -> None:
+        """IssueCentricReplyInvalid from wait_for_plan_a: count=0 → send correction."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         exc = self._make_early_invalid_exc()
@@ -3430,12 +3441,12 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(self._base_state(correction_count=0), [])
-        self.assertEqual(len(sent_texts), 0, "send_to_chatgpt must not be called while reply is pending")
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
-        self.assertEqual(saved_states[0]["mode"], "waiting_prompt_reply")
+        self.assertEqual(len(sent_texts), 1, "send_to_chatgpt must be called for a complete invalid reply")
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 1)
+        self.assertEqual(saved_states[-1]["mode"], "waiting_prompt_reply")
 
-    def test_early_exception_second_retry_blocks_correction_send(self) -> None:
-        """IssueCentricReplyInvalid from wait_for_plan_a: count=1 → no send while pending."""
+    def test_early_exception_second_retry_sends_correction(self) -> None:
+        """IssueCentricReplyInvalid from wait_for_plan_a: count=1 → send correction."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
         exc = self._make_early_invalid_exc()
@@ -3444,8 +3455,8 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(self._base_state(correction_count=1), [])
-        self.assertEqual(len(sent_texts), 0)
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
+        self.assertEqual(len(sent_texts), 1)
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 2)
 
     def test_early_exception_hard_stop_at_max_count(self) -> None:
         """IssueCentricReplyInvalid from wait_for_plan_a: count=2 → no send, hard BridgeError."""
@@ -3534,7 +3545,7 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertIn("ChatGPT からの新しい assistant turn", str(ctx.exception))
 
     def test_resend_guard_allows_when_new_assistant_turn_appears(self) -> None:
-        """Guard: even after a new invalid assistant turn, pending state blocks correction send."""
+        """Guard: a new complete invalid assistant turn allows one more correction send."""
         saved_states: list[dict] = []
         sent_texts: list[str] = []
 
@@ -3561,8 +3572,8 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
                 with self.assertRaises(BridgeStop):
                     fetch_next_prompt.run(state, [])
 
-        self.assertEqual(len(sent_texts), 0, "pending reply guard must block correction send")
-        self.assertEqual(saved_states[0]["last_issue_centric_contract_correction_reason"], "reply_still_generating")
+        self.assertEqual(len(sent_texts), 1, "new complete invalid assistant turn may receive correction")
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 2)
 
     def test_valid_contract_clears_correction_request_text(self) -> None:
         """After a valid contract is processed, last_issue_centric_correction_request_text is cleared."""

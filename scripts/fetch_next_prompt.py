@@ -145,6 +145,8 @@ def _stop_correction_send_if_pending_reply(
 ) -> None:
     if not is_pending_chatgpt_reply_state(state):
         return
+    if readiness_status.startswith("reply_complete_"):
+        return
     stall_state = clear_error_fields(dict(state))
     if mode is not None:
         stall_state["mode"] = mode
@@ -1924,6 +1926,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 _stop_correction_send_if_pending_reply(
                     state,
                     detail="binding mismatch correction",
+                    readiness_status=readiness.status,
                 )
                 try:
                     send_to_chatgpt(correction_text)
@@ -1988,6 +1991,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 _stop_correction_send_if_pending_reply(
                     state,
                     detail="body decode correction",
+                    readiness_status=readiness.status,
                 )
                 try:
                     send_to_chatgpt(correction_text)
