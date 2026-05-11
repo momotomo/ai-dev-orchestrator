@@ -121,6 +121,17 @@ def extract_commit_shas_from_text(text: str) -> list[str]:
     return _COMMIT_SHA_RE.findall(text)
 
 
+def report_mentions_ci_in_progress(text: str) -> bool:
+    """Return True when text plainly says CI is still in progress.
+
+    This is intentionally narrow. It is only a secondary guard against allowing
+    an unrelated cached run success through when the report itself carries a
+    direct pending-CI signal.
+    """
+    lowered = text.lower()
+    return "ci" in lowered and ("in_progress" in lowered or "in progress" in lowered)
+
+
 # ---------------------------------------------------------------------------
 # GitHub API helpers
 # ---------------------------------------------------------------------------
@@ -264,14 +275,15 @@ def evaluate_ci_gate(
     token: str,
     prior_state: Mapping[str, Any],
     branch: str = "",
+    current_issue: str = "",
 ) -> CIGateResult:
     """Evaluate the CI gate and return a verdict.
 
     Resolution priority (first match wins):
-      1. ``ci_gate_run_id`` from *prior_state* — recheck the same run when
-         the gate was already entered (``waiting_ci`` cycle continuation).
-      2. GitHub Actions run URLs extracted from *report_text*.
-      3. Commit SHAs extracted from *report_text* → look up run by ``head_sha``.
+      1. GitHub Actions run URLs extracted from *report_text*.
+      2. Commit SHAs extracted from *report_text* → look up run by ``head_sha``.
+      3. ``ci_gate_run_id`` from *prior_state*, but only when
+         ``ci_gate_current_issue`` matches *current_issue*.
       4. Latest run for *repository*/*branch* (fallback).
       5. No run found → ``"skipped"``.
 
@@ -285,6 +297,14 @@ def evaluate_ci_gate(
 
     prior_run_id = str(prior_state.get("ci_gate_run_id", "")).strip()
     prior_commit_sha = str(prior_state.get("ci_gate_commit_sha", "")).strip()
+    prior_current_issue = str(prior_state.get("ci_gate_current_issue", "")).strip()
+    current_issue = current_issue.strip()
+    can_reuse_prior_run = bool(
+        prior_run_id
+        and prior_current_issue
+        and current_issue
+        and prior_current_issue == current_issue
+    )
 
     # Hard limit: bounded polling.
     if attempt_count > CI_GATE_MAX_ATTEMPT_COUNT:
@@ -304,13 +324,87 @@ def evaluate_ci_gate(
     run_id = ""
     commit_sha = ""
     run_status: CIRunStatus | None = None
+    shas = extract_commit_shas_from_text(report_text)
+    report_commit_sha = shas[-1] if shas else ""
+    report_has_pending_ci = report_mentions_ci_in_progress(report_text)
 
-    # 1. Recheck a saved run from a prior waiting_ci cycle.
-    if prior_run_id:
+    def _head_sha_matches_report(run: CIRunStatus) -> bool:
+        return (
+            not report_commit_sha
+            or run.head_sha.lower() == report_commit_sha.lower()
+        )
+
+    def _sha_mismatch_result(run: CIRunStatus, resolved_run_id: str) -> CIGateResult:
+        return CIGateResult(
+            verdict="indeterminate",
+            run_id=resolved_run_id,
+            commit_sha=run.head_sha,
+            checked_at=checked_at,
+            attempt_count=attempt_count,
+            run_status=run,
+            note=(
+                f"CI run {resolved_run_id} head_sha={run.head_sha!r} does not match "
+                f"report commit SHA {report_commit_sha!r}. Human review required."
+            ),
+        )
+
+    # 1. Extract run ID from report text.
+    run_ids_from_text = extract_ci_run_ids_from_text(report_text)
+    if run_ids_from_text:
+        # Use the last (most recent) URL found.
+        repo_from_text, run_id_from_text = run_ids_from_text[-1]
+        eff_repo = repository or repo_from_text
+        try:
+            candidate = fetch_ci_run_by_id(eff_repo, run_id_from_text, token)
+            if not _head_sha_matches_report(candidate):
+                return _sha_mismatch_result(candidate, run_id_from_text)
+            run_status = candidate
+            run_id = run_id_from_text
+            commit_sha = run_status.head_sha
+            repository = eff_repo
+        except CIGateError:
+            run_id = ""
+            run_status = None
+
+    # 2. Extract commit SHA from report text and look up run.
+    if not run_status and report_commit_sha:
+        commit_sha = report_commit_sha
+        try:
+            candidate = fetch_latest_ci_run(
+                repository, token,
+                commit_sha=commit_sha,
+                branch=branch,
+            )
+            if candidate is not None:
+                if not _head_sha_matches_report(candidate):
+                    return _sha_mismatch_result(candidate, candidate.run_id)
+                run_status = candidate
+                run_id = run_status.run_id
+        except CIGateError:
+            pass
+
+    # 3. Recheck a saved run from a prior waiting_ci cycle only for the same issue.
+    if not run_status and can_reuse_prior_run:
         run_id = prior_run_id
         commit_sha = prior_commit_sha
         try:
-            run_status = fetch_ci_run_by_id(repository, run_id, token)
+            candidate = fetch_ci_run_by_id(repository, run_id, token)
+            if not _head_sha_matches_report(candidate):
+                return _sha_mismatch_result(candidate, run_id)
+            if report_has_pending_ci and candidate.is_success():
+                return CIGateResult(
+                    verdict="indeterminate",
+                    run_id=run_id,
+                    commit_sha=candidate.head_sha,
+                    checked_at=checked_at,
+                    attempt_count=attempt_count,
+                    run_status=candidate,
+                    note=(
+                        f"Report text says CI is in progress, but CI run {run_id} "
+                        "is completed successfully. Human review required."
+                    ),
+                )
+            run_status = candidate
         except CIGateError as exc:
             return CIGateResult(
                 verdict="indeterminate",
@@ -321,51 +415,35 @@ def evaluate_ci_gate(
                 run_status=None,
                 note=f"Failed to re-fetch CI run {run_id}: {exc}",
             )
-    else:
-        # 2. Extract run ID from report text.
-        run_ids_from_text = extract_ci_run_ids_from_text(report_text)
-        if run_ids_from_text:
-            # Use the last (most recent) URL found.
-            repo_from_text, run_id_from_text = run_ids_from_text[-1]
-            eff_repo = repository or repo_from_text
-            try:
-                run_status = fetch_ci_run_by_id(eff_repo, run_id_from_text, token)
-                run_id = run_id_from_text
-                commit_sha = run_status.head_sha
-                repository = eff_repo
-            except CIGateError:
-                run_id = ""
-                run_status = None
 
-        # 3. Extract commit SHA from report text and look up run.
-        if not run_status:
-            shas = extract_commit_shas_from_text(report_text)
-            if shas:
-                commit_sha = shas[-1]  # use last SHA
-                try:
-                    candidate = fetch_latest_ci_run(
-                        repository, token,
-                        commit_sha=commit_sha,
-                        branch=branch,
+    # 4. Fall back to latest run for the repository.
+    if not run_status:
+        try:
+            candidate = fetch_latest_ci_run(
+                repository, token, branch=branch
+            )
+            if candidate is not None:
+                if not _head_sha_matches_report(candidate):
+                    return _sha_mismatch_result(candidate, candidate.run_id)
+                if report_has_pending_ci and candidate.is_success():
+                    return CIGateResult(
+                        verdict="indeterminate",
+                        run_id=candidate.run_id,
+                        commit_sha=candidate.head_sha,
+                        checked_at=checked_at,
+                        attempt_count=attempt_count,
+                        run_status=candidate,
+                        note=(
+                            "Report text says CI is in progress, but latest CI run "
+                            f"{candidate.run_id} is completed successfully. "
+                            "Human review required."
+                        ),
                     )
-                    if candidate is not None:
-                        run_status = candidate
-                        run_id = run_status.run_id
-                except CIGateError:
-                    pass
-
-        # 4. Fall back to latest run for the repository.
-        if not run_status:
-            try:
-                candidate = fetch_latest_ci_run(
-                    repository, token, branch=branch
-                )
-                if candidate is not None:
-                    run_status = candidate
-                    run_id = run_status.run_id
-                    commit_sha = run_status.head_sha
-            except CIGateError:
-                pass
+                run_status = candidate
+                run_id = run_status.run_id
+                commit_sha = run_status.head_sha
+        except CIGateError:
+            pass
 
     # 5. No CI run found → skip the gate.
     if run_status is None:

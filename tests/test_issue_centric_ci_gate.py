@@ -85,6 +85,7 @@ def make_run(
     conclusion: str | None = None,
     run_id: str = "12345",
     repository: str = "owner/repo",
+    head_sha: str = "a" * 40,
 ) -> ci_gate.CIRunStatus:
     return ci_gate.CIRunStatus(
         run_id=run_id,
@@ -92,7 +93,7 @@ def make_run(
         status=status,
         conclusion=conclusion,
         html_url=f"https://github.com/{repository}/actions/runs/{run_id}",
-        head_sha="a" * 40,
+        head_sha=head_sha,
         created_at="2026-01-01T00:00:00Z",
         updated_at="2026-01-01T00:00:00Z",
         name="CI",
@@ -146,6 +147,7 @@ class TestEvaluateCiGate(unittest.TestCase):
         prior_state: dict | None = None,
         fetch_by_id: ci_gate.CIRunStatus | Exception | None = None,
         fetch_latest: ci_gate.CIRunStatus | None | Exception | None = None,
+        current_issue: str = "",
     ) -> ci_gate.CIGateResult:
         state = prior_state or {}
 
@@ -173,6 +175,7 @@ class TestEvaluateCiGate(unittest.TestCase):
                 repository="owner/repo",
                 token="fake-token",
                 prior_state=state,
+                current_issue=current_issue,
             )
 
     # --- verdict: waiting_ci ---
@@ -193,10 +196,50 @@ class TestEvaluateCiGate(unittest.TestCase):
 
     def test_in_progress_recheck_from_prior_run_id(self) -> None:
         run = make_run("in_progress", run_id="55")
-        state = {"ci_gate_run_id": "55", "ci_gate_attempt_count": 2}
-        result = self._call(prior_state=state, fetch_by_id=run)
+        state = {
+            "ci_gate_run_id": "55",
+            "ci_gate_attempt_count": 2,
+            "ci_gate_current_issue": "#479",
+        }
+        result = self._call(
+            prior_state=state,
+            fetch_by_id=run,
+            current_issue="#479",
+        )
         self.assertEqual(result.verdict, "waiting_ci")
         self.assertEqual(result.attempt_count, 3)
+
+    def test_stale_prior_run_ignored_when_issue_mismatch(self) -> None:
+        old_run = make_run("completed", "success", run_id="old")
+        current_run = make_run("in_progress", run_id="479")
+        state = {
+            "ci_gate_run_id": "old",
+            "ci_gate_attempt_count": 2,
+            "ci_gate_current_issue": "#472",
+        }
+        report = "CI: https://github.com/owner/repo/actions/runs/479"
+
+        def _fake_fetch_by_id(repo: str, run_id: str, token: str) -> ci_gate.CIRunStatus:
+            if run_id == "old":
+                return old_run
+            if run_id == "479":
+                return current_run
+            raise ci_gate.CIGateError("unexpected run")
+
+        with (
+            patch.object(ci_gate, "fetch_ci_run_by_id", side_effect=_fake_fetch_by_id),
+            patch.object(ci_gate, "fetch_latest_ci_run", return_value=None),
+        ):
+            result = ci_gate.evaluate_ci_gate(
+                report_text=report,
+                repository="owner/repo",
+                token="fake",
+                prior_state=state,
+                current_issue="#479",
+            )
+
+        self.assertEqual(result.verdict, "waiting_ci")
+        self.assertEqual(result.run_id, "479")
 
     # --- verdict: success ---
 
@@ -252,10 +295,15 @@ class TestEvaluateCiGate(unittest.TestCase):
         self.assertIn("maximum", result.note)
 
     def test_indeterminate_when_fetch_by_id_fails_for_prior_run(self) -> None:
-        state = {"ci_gate_run_id": "11", "ci_gate_attempt_count": 1}
+        state = {
+            "ci_gate_run_id": "11",
+            "ci_gate_attempt_count": 1,
+            "ci_gate_current_issue": "#11",
+        }
         result = self._call(
             prior_state=state,
             fetch_by_id=ci_gate.CIGateError("not found"),
+            current_issue="#11",
         )
         self.assertEqual(result.verdict, "indeterminate")
 
@@ -269,7 +317,7 @@ class TestEvaluateCiGate(unittest.TestCase):
 
     def test_uses_commit_sha_when_no_run_url(self) -> None:
         sha = "b" * 40
-        run = make_run("completed", "success", run_id="321")
+        run = make_run("completed", "success", run_id="321", head_sha=sha)
         report = f"Pushed commit {sha} to main."
 
         def _fake_fetch_latest(
@@ -296,6 +344,24 @@ class TestEvaluateCiGate(unittest.TestCase):
             )
         self.assertEqual(result.verdict, "success")
         self.assertEqual(result.run_id, "321")
+
+    def test_head_sha_mismatch_does_not_pass_success(self) -> None:
+        report_sha = "b" * 40
+        run = make_run("completed", "success", run_id="777", head_sha="a" * 40)
+        report = (
+            f"Merge SHA: {report_sha}\n"
+            "CI: https://github.com/owner/repo/actions/runs/777"
+        )
+        result = self._call(report_text=report, fetch_by_id=run)
+        self.assertEqual(result.verdict, "indeterminate")
+        self.assertIn("does not match", result.note)
+
+    def test_ci_in_progress_text_prevents_unrelated_latest_success(self) -> None:
+        run = make_run("completed", "success", run_id="old")
+        report = "Local verification passed. CI status: in_progress."
+        result = self._call(report_text=report, fetch_latest=run)
+        self.assertEqual(result.verdict, "indeterminate")
+        self.assertIn("in progress", result.note)
 
     # --- attempt_count incremented ---
 
@@ -871,6 +937,68 @@ class TestHandleCiGateBeforeReportRequestPolling(unittest.TestCase):
         final = saved_states[-1]
         self.assertTrue(final.get("error"))
         self.assertIn("timeout", str(final.get("error_message", "")).lower())
+
+
+class TestBridgeOrchestratorReportRequestStateRefresh(unittest.TestCase):
+    def test_report_request_receives_reloaded_state_after_ci_gate(self) -> None:
+        import bridge_orchestrator as bo
+        stale_state = {
+            "ci_gate_run_id": "old",
+            "ci_gate_current_issue": "#472",
+        }
+        refreshed_state = {
+            "ci_gate_run_id": "",
+            "ci_gate_current_issue": "",
+            "last_ci_gate_run_id": "current",
+        }
+        plan = SimpleNamespace(next_action="request_prompt_from_report", note="send")
+        status = SimpleNamespace(label="ChatGPTへ依頼準備中")
+        captured_states: list[dict] = []
+
+        def capture_request_run(state: dict, argv: list[str]) -> int:
+            captured_states.append(dict(state))
+            return 0
+
+        with (
+            patch.object(bo, "load_project_config", return_value={"github_repository": "owner/repo"}),
+            patch.object(bo, "print_project_config_warnings"),
+            patch.object(bo, "resolve_execution_agent", return_value="github_copilot"),
+            patch.object(bo, "is_waiting_ci", return_value=False),
+            patch.object(bo, "should_prioritize_unarchived_report", return_value=False),
+            patch.object(bo, "has_pending_issue_centric_codex_dispatch", return_value=False),
+            patch.object(bo, "is_blocked_codex_lifecycle_state", return_value=False),
+            patch.object(bo, "resolve_unified_next_action", return_value="request_prompt_from_report"),
+            patch.object(bo, "present_bridge_status", return_value=status),
+            patch.object(bo, "resolve_runtime_dispatch_plan", return_value=plan),
+            patch.object(bo, "detect_ic_stop_path", return_value=""),
+            patch.object(bo, "_handle_ci_gate_before_report_request", return_value=None),
+            patch.object(bo, "load_state", return_value=refreshed_state),
+            patch.object(bo.request_prompt_from_report, "run", side_effect=capture_request_run),
+        ):
+            result = bo.run(stale_state, [])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(captured_states, [refreshed_state])
+
+
+class TestReportSummaryFieldParsing(unittest.TestCase):
+    def test_spaced_ci_keys_are_normalized_to_snake_case(self) -> None:
+        import request_prompt_from_report as rpr
+        sha = "c" * 40
+        report = (
+            "- ci run id: 123\n"
+            "- ci run url: https://github.com/owner/repo/actions/runs/123\n"
+            "- ci status: in_progress\n"
+            f"- commit SHA: {sha}\n"
+        )
+        fields = rpr._parse_report_summary_fields(report)
+        self.assertEqual(fields["ci_run_id"], "123")
+        self.assertEqual(
+            fields["ci_run_url"],
+            "https://github.com/owner/repo/actions/runs/123",
+        )
+        self.assertEqual(fields["ci_status"], "in_progress")
+        self.assertEqual(fields["commit_sha"], sha)
 
 
 if __name__ == "__main__":

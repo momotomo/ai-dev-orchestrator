@@ -53,7 +53,7 @@ SEND_MISSING_SOFT_RETRY_MAX = 6
 SEND_MISSING_SOFT_RETRY_DELAY_SECONDS = 2.0
 SEND_MISSING_SOFT_RETRY_ROUTE = "conversation_url"
 
-_REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_]+):\s+(.+?)\s*$", re.MULTILINE)
+_REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_][A-Za-z0-9_ ]*):\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _stop_send_if_pending_chatgpt_reply(
@@ -146,7 +146,7 @@ def build_report_request_source(state: dict[str, object], resume_note: str) -> s
 def _parse_report_summary_fields(report_text: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for match in _REPORT_SUMMARY_FIELD_RE.finditer(report_text):
-        key = str(match.group(1)).strip().lower()
+        key = re.sub(r"\s+", "_", str(match.group(1)).strip().lower())
         value = str(match.group(2)).strip()
         if key and value and key not in fields:
             fields[key] = value

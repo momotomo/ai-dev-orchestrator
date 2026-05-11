@@ -635,7 +635,12 @@ def _poll_ci_gate_until_run_discovered(
     current_state = dict(state)
 
     while True:
-        result = _run_ci_gate_check(current_state, project_config, report_text=report_text)
+        result = _run_ci_gate_check(
+            current_state,
+            project_config,
+            report_text=report_text,
+            current_issue=current_issue,
+        )
         if result is None:
             return None
         if result.verdict != "skipped":
@@ -679,6 +684,7 @@ def _run_ci_gate_check(
     project_config: dict[str, object],
     *,
     report_text: str = "",
+    current_issue: str = "",
 ) -> CIGateResult | None:
     """Evaluate the CI gate and return a result, or None when gate is disabled.
 
@@ -724,6 +730,7 @@ def _run_ci_gate_check(
         repository=repository,
         token=token,
         prior_state=state,
+        current_issue=current_issue,
     )
 
 
@@ -752,7 +759,12 @@ def _poll_ci_gate_until_complete(
     current_state = dict(state)
 
     while True:
-        result = _run_ci_gate_check(current_state, project_config, report_text=report_text)
+        result = _run_ci_gate_check(
+            current_state,
+            project_config,
+            report_text=report_text,
+            current_issue=current_issue,
+        )
         if result is None:
             return None  # gate disabled
 
@@ -905,7 +917,11 @@ def _handle_ci_gate_before_report_request(
 
     # Do a quick initial check to handle the "skipped / success / already done" cases
     # cheaply before committing to a potential long-running polling loop.
-    initial_result = _run_ci_gate_check(state, project_config)
+    initial_result = _run_ci_gate_check(
+        state,
+        project_config,
+        current_issue=current_issue,
+    )
     if initial_result is None:
         # Gate disabled.
         return None
@@ -1167,7 +1183,8 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
         _ci_gate_rc = _handle_ci_gate_before_report_request(dict(state), project_config, args)
         if _ci_gate_rc is not None:
             return _ci_gate_rc
-        return request_prompt_from_report.run(dict(state), build_report_request_argv(args))
+        refreshed_state = load_state()
+        return request_prompt_from_report.run(dict(refreshed_state), build_report_request_argv(args))
     if plan.next_action == "fetch_next_prompt":
         # Wrap in a BridgeStop catch so that initial_selection_stop from fetch_next_prompt
         # can be handled as an in-run auto-continuation rather than propagating to
