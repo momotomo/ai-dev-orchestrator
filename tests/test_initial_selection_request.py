@@ -395,6 +395,22 @@ class BuildRequestContextSectionTests(unittest.TestCase):
         self.assertIn("CHATGPT_CODEX_BODY", result)
         self.assertIn("CI run URL", result)
 
+    def test_ci_disabled_context_explains_local_checks_are_basis(self) -> None:
+        result = self._section(
+            ci_gate_disabled_by_project_config=True,
+            last_ci_gate_run_id="25440730145",
+            last_ci_gate_status="completed",
+            last_ci_gate_conclusion="failure",
+            last_ci_gate_failure_detail="billing blocked",
+        )
+        self.assertIn("GitHub Actions CI gate is disabled by project config", result)
+        self.assertIn("billing or spending limit", result)
+        self.assertIn("Do not inspect or rely on GitHub Actions CI status", result)
+        self.assertIn("Do not treat GitHub Actions pending/failure as a close blocker", result)
+        self.assertIn("worker-reported local checks", result)
+        self.assertIn("normal review/close judgment", result)
+        self.assertNotIn("Prefer action=codex_run", result)
+
 
 class ComposeReadyIssueRequestTextWithContextTests(unittest.TestCase):
     """compose_ready_issue_request_text includes context_section when provided."""

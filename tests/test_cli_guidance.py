@@ -5931,6 +5931,11 @@ class ProjectSyncAlertWebhookDeliveryTests(unittest.TestCase):
         )
         self.assertEqual(bc.DEFAULT_PROJECT_CONFIG["project_sync_alert_webhook_url"], "")
 
+    def test_default_project_config_enables_ci_gate(self) -> None:
+        import _bridge_common as bc
+        self.assertIn("ci_gate_enabled", bc.DEFAULT_PROJECT_CONFIG)
+        self.assertTrue(bc.DEFAULT_PROJECT_CONFIG["ci_gate_enabled"])
+
     # ------------------------------------------------------------------
     # doctor output includes delivery line
     # ------------------------------------------------------------------

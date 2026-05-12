@@ -942,6 +942,46 @@ class TestHandleCiGateBeforeReportRequestPolling(unittest.TestCase):
         self.assertTrue(final.get("error"))
         self.assertIn("timeout", str(final.get("error_message", "")).lower())
 
+    def test_disabled_config_skips_lookup_and_clears_stale_blockers(self) -> None:
+        import argparse
+        import bridge_orchestrator as bo
+        state = self._make_state(
+            ci_gate_status="failure",
+            ci_gate_run_id="old",
+            ci_gate_commit_sha="abc123",
+            ci_gate_checked_at="2024-01-01T00:00:00Z",
+            ci_gate_attempt_count=3,
+            ci_gate_current_issue="#42",
+            last_ci_gate_status="completed",
+            last_ci_gate_conclusion="failure",
+            last_ci_gate_failure_detail="job failed",
+            last_issue_centric_wait_reason="ci_failure_fix",
+        )
+        project_config = {"github_repository": "owner/repo", "ci_gate_enabled": False}
+        args = argparse.Namespace()
+        saved_states: list[dict] = []
+
+        def capture_save(s: dict) -> None:
+            saved_states.append(dict(s))
+
+        with patch.object(bo, "_run_ci_gate_check") as run_check, \
+             patch.object(bo, "save_state", side_effect=capture_save):
+            result = bo._handle_ci_gate_before_report_request(
+                state, project_config, args
+            )
+
+        self.assertIsNone(result)
+        run_check.assert_not_called()
+        self.assertTrue(saved_states)
+        final = saved_states[-1]
+        self.assertEqual(final["ci_gate_status"], "")
+        self.assertEqual(final["ci_gate_run_id"], "")
+        self.assertEqual(final["ci_gate_attempt_count"], 0)
+        self.assertEqual(final["last_ci_gate_conclusion"], "")
+        self.assertEqual(final["last_ci_gate_failure_detail"], "")
+        self.assertEqual(final["last_issue_centric_wait_reason"], "")
+        self.assertTrue(final["ci_gate_disabled_by_project_config"])
+
 
 class TestBridgeOrchestratorReportRequestStateRefresh(unittest.TestCase):
     def test_report_request_receives_reloaded_state_after_ci_gate(self) -> None:
@@ -983,6 +1023,53 @@ class TestBridgeOrchestratorReportRequestStateRefresh(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(captured_states, [refreshed_state])
+
+    def test_disabled_ci_gate_proceeds_to_report_request_without_lookup(self) -> None:
+        import bridge_orchestrator as bo
+        stale_state = {
+            "ci_gate_status": "failure",
+            "ci_gate_run_id": "old",
+            "last_ci_gate_conclusion": "failure",
+            "last_issue_centric_wait_reason": "ci_failure_fix",
+        }
+        plan = SimpleNamespace(next_action="request_prompt_from_report", note="send")
+        status = SimpleNamespace(label="ChatGPTへ依頼準備中")
+        saved_states: list[dict] = []
+        captured_states: list[dict] = []
+
+        def capture_save(s: dict) -> None:
+            saved_states.append(dict(s))
+
+        def load_saved_state() -> dict:
+            return dict(saved_states[-1])
+
+        def capture_request_run(state: dict, argv: list[str]) -> int:
+            captured_states.append(dict(state))
+            return 0
+
+        with (
+            patch.object(bo, "load_project_config", return_value={"github_repository": "owner/repo", "ci_gate_enabled": False}),
+            patch.object(bo, "print_project_config_warnings"),
+            patch.object(bo, "resolve_execution_agent", return_value="github_copilot"),
+            patch.object(bo, "should_prioritize_unarchived_report", return_value=False),
+            patch.object(bo, "has_pending_issue_centric_codex_dispatch", return_value=False),
+            patch.object(bo, "is_blocked_codex_lifecycle_state", return_value=False),
+            patch.object(bo, "resolve_unified_next_action", return_value="request_prompt_from_report"),
+            patch.object(bo, "present_bridge_status", return_value=status),
+            patch.object(bo, "resolve_runtime_dispatch_plan", return_value=plan),
+            patch.object(bo, "detect_ic_stop_path", return_value=""),
+            patch.object(bo, "_run_ci_gate_check") as run_check,
+            patch.object(bo, "save_state", side_effect=capture_save),
+            patch.object(bo, "load_state", side_effect=load_saved_state),
+            patch.object(bo.request_prompt_from_report, "run", side_effect=capture_request_run),
+        ):
+            result = bo.run(stale_state, [])
+
+        self.assertEqual(result, 0)
+        run_check.assert_not_called()
+        self.assertEqual(len(captured_states), 1)
+        self.assertTrue(captured_states[0]["ci_gate_disabled_by_project_config"])
+        self.assertEqual(captured_states[0]["last_ci_gate_conclusion"], "")
 
 
 class TestReportSummaryFieldParsing(unittest.TestCase):

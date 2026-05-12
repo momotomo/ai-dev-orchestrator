@@ -15,7 +15,7 @@ import launch_codex_once
 import launch_github_copilot
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, browser_fetch_timeout_seconds, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, apply_ci_gate_project_config_state, browser_fetch_timeout_seconds, ci_gate_enabled, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
 from issue_centric_ci_gate import (
     CIGateResult,
     apply_ci_gate_state,
@@ -618,6 +618,20 @@ def _save_ci_gate_context_to_state(
     )
 
 
+def _skip_ci_gate_if_disabled(
+    state: dict[str, object],
+    project_config: dict[str, object],
+) -> dict[str, object] | None:
+    if ci_gate_enabled(project_config):
+        return None
+    new_state = dict(state)
+    changed = apply_ci_gate_project_config_state(new_state, project_config)
+    if changed:
+        save_state(new_state)
+    print("CI gate: disabled by project config. Skipping GitHub Actions check.")
+    return new_state
+
+
 def _poll_ci_gate_until_run_discovered(
     state: dict[str, object],
     project_config: dict[str, object],
@@ -697,6 +711,9 @@ def _run_ci_gate_check(
     When the gate is active but the GitHub token is unavailable, returns an
     ``"indeterminate"`` result rather than raising.
     """
+    if not ci_gate_enabled(project_config):
+        return None
+
     repository = str(project_config.get("github_repository", "")).strip()
     if not repository:
         # Gate cannot run without a target repository.
@@ -819,6 +836,10 @@ def _handle_waiting_ci_recheck(
       0  — indeterminate: state saved, human review required
       0  — timeout: ``error`` set in state for a clear CI-timeout stop
     """
+    disabled_state = _skip_ci_gate_if_disabled(state, project_config)
+    if disabled_state is not None:
+        return run(disabled_state, argv)
+
     current_issue = str(state.get("ci_gate_current_issue", "")).strip()
     run_id_hint = str(state.get("ci_gate_run_id", "")).strip()
     print(
@@ -912,6 +933,9 @@ def _handle_ci_gate_before_report_request(
               with request_prompt_from_report normally.
       int   — gate held or failed; return this exit code to the caller.
     """
+    if _skip_ci_gate_if_disabled(state, project_config) is not None:
+        return None
+
     current_issue = (
         str(state.get("last_issue_centric_current_issue", "")).strip()
         or str(state.get("last_issue_centric_principal_issue", "")).strip()
@@ -1059,6 +1083,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     project_config = load_project_config()
     args = parse_args(argv, project_config)
     print_project_config_warnings(project_config)
+    was_waiting_ci = is_waiting_ci(state)
+    normalized_state = dict(state)
+    if apply_ci_gate_project_config_state(normalized_state, project_config):
+        save_state(normalized_state)
+        state = normalized_state
+        if was_waiting_ci and not ci_gate_enabled(project_config):
+            print("CI gate: disabled by project config. Skipping GitHub Actions check.")
 
     # Resolve the active execution agent from CLI arg / config.
     # Valid values: "codex" | "github_copilot".

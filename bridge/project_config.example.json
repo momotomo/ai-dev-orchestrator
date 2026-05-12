@@ -55,6 +55,7 @@
   "codex_model": "",
   "codex_sandbox": "",
   "codex_timeout_seconds": 7200,
+  "ci_gate_enabled": true,
   "report_request_next_todo": "前回 report を踏まえて、対象 repo の次の 1 フェーズ分の Codex 用 prompt を作成してください。",
   "report_request_open_questions": "未解決事項があれば安全側で補ってください。",
   "_notes_project_sync_alert_webhook": {

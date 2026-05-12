@@ -232,6 +232,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_ci_gate_status": "",          # "completed" | "in_progress" | etc.
     "last_ci_gate_conclusion": "",      # "success" | "failure" | "cancelled" | etc.
     "last_ci_gate_failure_detail": "",  # summary of failed jobs (only on failure)
+    "ci_gate_disabled_by_project_config": False,
 }
 
 DEFAULT_BROWSER_CONFIG: dict[str, Any] = {
@@ -266,6 +267,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "codex_model": "",
     "codex_sandbox": "",
     "codex_timeout_seconds": 7200,
+    "ci_gate_enabled": True,
     "ci_gate_poll_seconds": 15,
     "ci_gate_timeout_seconds": 1800,
     "ci_gate_missing_run_timeout_seconds": 60,
@@ -3034,6 +3036,88 @@ def _validate_project_timeout(config: dict[str, Any]) -> None:
     config["codex_timeout_seconds"] = timeout
 
 
+def _validate_ci_gate_enabled(config: dict[str, Any]) -> None:
+    raw_value = config.get("ci_gate_enabled", DEFAULT_PROJECT_CONFIG["ci_gate_enabled"])
+    if not isinstance(raw_value, bool):
+        raise BridgeError(
+            f"{repo_relative(PROJECT_CONFIG_PATH)} の `ci_gate_enabled` は true / false で指定してください。"
+        )
+    config["ci_gate_enabled"] = raw_value
+
+
+def ci_gate_enabled(project_config: Mapping[str, Any]) -> bool:
+    return bool(project_config.get("ci_gate_enabled", DEFAULT_PROJECT_CONFIG["ci_gate_enabled"]))
+
+
+CI_GATE_DISABLED_CONTEXT = (
+    "GitHub Actions CI gate is disabled by project config.\n"
+    "Reason: this project currently does not use paid GitHub Actions / CI may be blocked by billing or spending limit.\n"
+    "Do not inspect or rely on GitHub Actions CI status.\n"
+    "Do not treat GitHub Actions pending/failure as a close blocker.\n"
+    "Use worker-reported local checks such as lint/typecheck/diff-check as the verification basis.\n"
+    "If local checks passed and the issue scope is satisfied, you may proceed with normal review/close judgment."
+)
+
+
+CI_GATE_ACTIVE_STATE_FIELDS: tuple[str, ...] = (
+    "ci_gate_status",
+    "ci_gate_run_id",
+    "ci_gate_commit_sha",
+    "ci_gate_checked_at",
+    "ci_gate_attempt_count",
+    "ci_gate_current_issue",
+)
+
+
+CI_GATE_CONTEXT_STATE_FIELDS: tuple[str, ...] = (
+    "last_ci_gate_run_id",
+    "last_ci_gate_run_url",
+    "last_ci_gate_workflow",
+    "last_ci_gate_status",
+    "last_ci_gate_conclusion",
+    "last_ci_gate_failure_detail",
+)
+
+
+def apply_ci_gate_project_config_state(
+    mutable_state: dict[str, Any],
+    project_config: Mapping[str, Any],
+) -> bool:
+    """Apply project-level CI gate config to runtime state.
+
+    Returns True when *mutable_state* was changed.  When the gate is disabled,
+    only active/blocking CI gate fields are cleared; historical logs/files are
+    untouched.
+    """
+    changed = False
+    if ci_gate_enabled(project_config):
+        if bool(mutable_state.get("ci_gate_disabled_by_project_config")):
+            mutable_state["ci_gate_disabled_by_project_config"] = False
+            changed = True
+        return changed
+
+    for key in CI_GATE_ACTIVE_STATE_FIELDS:
+        default_value = 0 if key == "ci_gate_attempt_count" else ""
+        if mutable_state.get(key) != default_value:
+            mutable_state[key] = default_value
+            changed = True
+
+    for key in CI_GATE_CONTEXT_STATE_FIELDS:
+        if str(mutable_state.get(key, "")).strip():
+            mutable_state[key] = ""
+            changed = True
+
+    if str(mutable_state.get("last_issue_centric_wait_reason", "")).strip() == "ci_failure_fix":
+        mutable_state["last_issue_centric_wait_reason"] = ""
+        changed = True
+
+    if mutable_state.get("ci_gate_disabled_by_project_config") is not True:
+        mutable_state["ci_gate_disabled_by_project_config"] = True
+        changed = True
+
+    return changed
+
+
 def load_project_config() -> dict[str, Any]:
     config = DEFAULT_PROJECT_CONFIG.copy()
     if PROJECT_CONFIG_PATH.exists():
@@ -3055,6 +3139,12 @@ def load_project_config() -> dict[str, Any]:
     _require_project_config_text(config, "github_repository", allow_empty=True)
     _require_project_config_text(config, "github_project_url", allow_empty=True)
     _validate_project_timeout(config)
+    _validate_ci_gate_enabled(config)
+    if not ci_gate_enabled(config):
+        _add_project_config_warning(
+            config,
+            "CI gate is disabled by project config; GitHub Actions status will not block issue lifecycle.",
+        )
     _require_project_config_text(config, "report_request_next_todo")
     _require_project_config_text(config, "report_request_open_questions")
 
@@ -7116,6 +7206,10 @@ def build_request_context_section(state: Mapping[str, Any]) -> str:
 
     lines: list[str] = []
 
+    # --- 0. Project-level CI gate override ---
+    if bool(state.get("ci_gate_disabled_by_project_config")):
+        lines.append(CI_GATE_DISABLED_CONTEXT)
+
     # --- 1. Close context ---
     # After close, explicitly identify the closed issue and prohibit re-selection.
     if close_status in _REQUEST_CONTEXT_CLOSE_STATUSES:
@@ -7192,7 +7286,11 @@ def build_request_context_section(state: Mapping[str, Any]) -> str:
     # --- 8. CI gate context ---
     # Included when the CI gate produced a result since the last report.
     # Cleared by clear_ci_gate_context_state() when a new report cycle starts.
-    ci_conclusion = str(state.get("last_ci_gate_conclusion", "")).strip()
+    ci_conclusion = (
+        ""
+        if bool(state.get("ci_gate_disabled_by_project_config"))
+        else str(state.get("last_ci_gate_conclusion", "")).strip()
+    )
     if ci_conclusion:
         _CI_FAILURE_CONCLUSIONS = frozenset(
             {"failure", "cancelled", "timed_out", "action_required", "stale"}

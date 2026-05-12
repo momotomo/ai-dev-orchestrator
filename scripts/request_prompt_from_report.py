@@ -12,6 +12,8 @@ from _bridge_common import (
     BRIDGE_DIR,
     BridgeError,
     BridgeStop,
+    CI_GATE_DISABLED_CONTEXT,
+    apply_ci_gate_project_config_state,
     build_chatgpt_handoff_request,
     build_chatgpt_request,
     build_pinned_ready_issue_ic_section,
@@ -185,6 +187,8 @@ def _is_ready_bounded_continuation(state: dict[str, object]) -> bool:
 
 
 def _has_ci_failure_context(state: dict[str, object]) -> bool:
+    if bool(state.get("ci_gate_disabled_by_project_config")):
+        return False
     conclusion = str(state.get("last_ci_gate_conclusion", "")).strip().lower()
     return conclusion in {
         "failure",
@@ -494,6 +498,11 @@ def load_retryable_prepared_request(state: dict[str, object]) -> tuple[str, str,
         return None
     prepared_text = read_prepared_request_text(state)
     if not prepared_text:
+        return None
+    if bool(state.get("ci_gate_disabled_by_project_config")) and (
+        "CI failure is a bounded fix continuation" in prepared_text
+        or "Prefer action=codex_run" in prepared_text
+    ):
         return None
     return prepared_text, prepared_hash or stable_text_hash(prepared_text), prepared_source
 
@@ -1382,6 +1391,13 @@ def _resolve_resume_request_plan(
                 if effective_section
                 else _context_block
             )
+    elif bool(state.get("ci_gate_disabled_by_project_config")):
+        _context_block = "状況:\n" + CI_GATE_DISABLED_CONTEXT
+        effective_section = (
+            effective_section.rstrip() + "\n\n" + _context_block
+            if effective_section
+            else _context_block
+        )
     request_text, request_hash, request_source, prepared_status = _resolve_resume_request_payload(
         state,
         retryable_request=retryable_request,
@@ -1728,6 +1744,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             "bridge/outbox/codex_report.md に未退避 report が残っているため、"
             "handoff / 新チャット送信へは進みません。先に report archive から再開してください。"
         )
+    project_config = load_project_config()
+    normalized_state = dict(state)
+    if apply_ci_gate_project_config_state(normalized_state, project_config):
+        save_state(normalized_state)
+        state = normalized_state
     # 2. args
     args = parse_args(argv)
     # 3. recovery decision → entry plan
