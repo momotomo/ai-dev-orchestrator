@@ -806,6 +806,153 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
     )
 
 
+_CI_FAILURE_CONCLUSIONS = frozenset(
+    {"failure", "cancelled", "timed_out", "action_required", "stale"}
+)
+
+
+def _has_ci_failure_context(state: dict[str, object]) -> bool:
+    conclusion = str(state.get("last_ci_gate_conclusion", "")).strip().lower()
+    return conclusion in _CI_FAILURE_CONCLUSIONS
+
+
+def _is_fixable_ci_failure_continuation(state: dict[str, object]) -> bool:
+    if not _has_ci_failure_context(state):
+        return False
+    return bool(
+        str(state.get("last_ci_gate_run_id", "")).strip()
+        and str(state.get("last_ci_gate_failure_detail", "")).strip()
+    )
+
+
+def _build_ci_failure_semantic_correction_request(
+    decision: IssueCentricDecision,
+    state: dict[str, object],
+    *,
+    reason: str,
+) -> str:
+    ready_issue_ref = str(state.get("current_ready_issue_ref", "")).split(maxsplit=1)[0].strip()
+    target_issue = decision.target_issue or ready_issue_ref or "none"
+    run_id = str(state.get("last_ci_gate_run_id", "")).strip()
+    run_url = str(state.get("last_ci_gate_run_url", "")).strip()
+    workflow = str(state.get("last_ci_gate_workflow", "")).strip()
+    conclusion = str(state.get("last_ci_gate_conclusion", "")).strip()
+    failure_detail = str(state.get("last_ci_gate_failure_detail", "")).strip()
+    action_guidance = (
+        "- Return `action=codex_run`.\n"
+        "- Include a `CHATGPT_CODEX_BODY` with a minimal CI-fix prompt.\n"
+        if _is_fixable_ci_failure_continuation(state)
+        else (
+            "- If failure details are still missing/unclear or the fix is unsafe, "
+            "`human_review_needed` is allowed.\n"
+            "- In all cases set `close_current_issue=false` while CI is failed.\n"
+        )
+    )
+    return (
+        "前回の返答は CI failure continuation として安全に実行できません。\n"
+        f"Reason: {reason}\n\n"
+        "CI failure is a bounded fix continuation.\n"
+        "Do not close the current issue until CI passes.\n"
+        "Do not create a follow-up issue unless explicitly needed.\n"
+        "Do not return human_review_needed unless the failure details are missing/unclear "
+        "or the fix is unsafe.\n"
+        "Prefer action=codex_run when the failed job/step details are present.\n\n"
+        "Known CI context:\n"
+        f"- target issue: {target_issue}\n"
+        f"- CI run id: {run_id or 'missing'}\n"
+        f"- CI run URL: {run_url or 'missing'}\n"
+        f"- workflow name: {workflow or 'missing'}\n"
+        f"- conclusion: {conclusion or 'missing'}\n"
+        f"- failed job / failed step summary: {failure_detail or 'missing'}\n\n"
+        "Please re-emit the canonical issue-centric contract only. No explanation, apology, or extra comments.\n"
+        + action_guidance
+        + "- Set `close_current_issue=false`.\n"
+        "- Set `create_followup_issue=false` unless explicitly needed for a blocked/unsafe case.\n"
+        "- The CODEX body must stay bounded to fixing only the CI failure caused by this issue, "
+        "must not broaden unrelated code, and should ask the worker to rerun focused checks if possible.\n\n"
+        + _DECISION_JSON_REGENERATE_INSTRUCTION
+        + "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        + _BODY_TAG_LIST
+        + _ENGLISH_BODY_GUIDANCE
+    )
+
+
+def _ci_failure_semantic_correction_reason(
+    decision: IssueCentricDecision,
+    state: dict[str, object],
+) -> str:
+    if not _has_ci_failure_context(state):
+        return ""
+    if decision.close_current_issue:
+        return "close_current_issue=true is not accepted while the CI gate has failed."
+    if (
+        decision.action is IssueCentricAction.HUMAN_REVIEW_NEEDED
+        and _is_fixable_ci_failure_continuation(state)
+    ):
+        return (
+            "human_review_needed is not accepted for a fixable CI failure continuation "
+            "with failure details present."
+        )
+    return ""
+
+
+def _send_ci_failure_semantic_correction(
+    state: dict[str, object],
+    *,
+    decision: IssueCentricDecision,
+    reason: str,
+    raw_text: str,
+    readiness_status: str,
+) -> None:
+    correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+    _guard_correction_resend(state, raw_text)
+    if correction_count >= _MAX_CONTRACT_CORRECTIONS:
+        raise BridgeError(
+            "CI failure continuation correction limit reached. "
+            f"Last semantic error: {reason}"
+        )
+    correction_text = _build_ci_failure_semantic_correction_request(
+        decision,
+        state,
+        reason=reason,
+    )
+    correction_log = log_text(
+        "ci_failure_contract_correction_request",
+        correction_text,
+        suffix="md",
+    )
+    _stop_correction_send_if_pending_reply(
+        state,
+        detail="CI failure semantic correction",
+        readiness_status=readiness_status,
+    )
+    try:
+        send_to_chatgpt(correction_text)
+    except BridgeError as send_exc:
+        if "send_missing" in str(send_exc) and is_pending_chatgpt_reply_state(state):
+            stall_state = clear_error_fields(dict(state))
+            stall_state["last_issue_centric_contract_correction_reason"] = "reply_still_generating"
+            save_state(stall_state)
+            raise BridgeStop(
+                "ChatGPT reply is still generating; no send attempted.\n"
+                "reply_still_generating: send_missing during pending reply (CI failure semantic correction),"
+                f" mode={str(state.get('mode', '')).strip()}"
+            ) from send_exc
+        raise
+    correction_state = clear_error_fields(dict(state))
+    correction_state["last_issue_centric_contract_correction_count"] = correction_count + 1
+    correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
+    correction_state["last_issue_centric_contract_correction_reason"] = reason
+    correction_state["last_issue_centric_correction_request_text"] = correction_text
+    correction_state["mode"] = "waiting_prompt_reply"
+    save_state(correction_state)
+    raise BridgeStop(
+        f"問題: CI failure continuation として不正な action でした（{correction_count + 1} 回目）。\n"
+        "対応: 同じチャットに CI fix continuation の修正依頼を再送しました。返答後に fetch を再実行してください。\n"
+        f"詳細: correction log: {repo_relative(correction_log)} / reason: {reason}"
+    )
+
+
 def _effective_after_text(
     state: dict[str, object],
     request_text: str | None,
@@ -1963,6 +2110,18 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 raw_log_path=raw_log,
                 readiness=readiness,
                 correction_count=binding_correction_count,
+            )
+        ci_failure_correction_reason = _ci_failure_semantic_correction_reason(
+            contract_decision,
+            state,
+        )
+        if ci_failure_correction_reason:
+            _send_ci_failure_semantic_correction(
+                state,
+                decision=contract_decision,
+                reason=ci_failure_correction_reason,
+                raw_text=raw_text,
+                readiness_status=readiness.status,
             )
         decision_log = log_text(
             "extracted_issue_centric_contract",

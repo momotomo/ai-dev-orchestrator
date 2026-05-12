@@ -52,6 +52,19 @@ DEFAULT_OPEN_QUESTIONS = "未解決事項があれば安全側で補ってくだ
 SEND_MISSING_SOFT_RETRY_MAX = 6
 SEND_MISSING_SOFT_RETRY_DELAY_SECONDS = 2.0
 SEND_MISSING_SOFT_RETRY_ROUTE = "conversation_url"
+CI_FAILURE_REQUEST_GUIDANCE = (
+    "CI failure is a bounded fix continuation.\n"
+    "Do not return human_review_needed unless the failure details are missing/unclear "
+    "or the fix is unsafe.\n"
+    "Prefer action=codex_run.\n"
+    "Return CHATGPT_CODEX_BODY with a minimal CI-fix prompt.\n"
+    "Do not close the current issue until CI passes.\n"
+    "Do not create a follow-up issue unless explicitly needed.\n"
+    "The CHATGPT_CODEX_BODY should include: target issue, CI run id, CI run URL, "
+    "workflow name, conclusion, failed job / failed step summary when available, "
+    "scope boundary: fix only the CI failure caused by this issue, "
+    "do not broaden unrelated code, and rerun focused checks if possible."
+)
 
 _REPORT_SUMMARY_FIELD_RE = re.compile(r"^\s*-\s+([A-Za-z0-9_]+):\s+(.+?)\s*$", re.MULTILINE)
 
@@ -169,6 +182,17 @@ def _is_ready_bounded_continuation(state: dict[str, object]) -> bool:
     if not ready_issue_ref:
         return False
     return "ready:" in ready_issue_ref.lower()
+
+
+def _has_ci_failure_context(state: dict[str, object]) -> bool:
+    conclusion = str(state.get("last_ci_gate_conclusion", "")).strip().lower()
+    return conclusion in {
+        "failure",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "stale",
+    }
 
 
 @dataclasses.dataclass(frozen=True)
@@ -983,15 +1007,16 @@ def _resolve_resume_request_payload(
         prepared_status: str | None = str(state.get("prepared_request_status", "")).strip()
         return request_text, request_hash, request_source, prepared_status
     template_path = BRIDGE_DIR / "chatgpt_prompt_request_template.md"
-    _request_guidance = (
-        _LIFECYCLE_ONLY_REQUEST_GUIDANCE
-        if _is_ready_bounded_completion_followup_request(
-            state,
-            effective_next_todo=effective_next_todo,
-            original_next_todo=args.next_todo,
-        )
-        else None
-    )
+    if _has_ci_failure_context(state):
+        _request_guidance = CI_FAILURE_REQUEST_GUIDANCE
+    elif _is_ready_bounded_completion_followup_request(
+        state,
+        effective_next_todo=effective_next_todo,
+        original_next_todo=args.next_todo,
+    ):
+        _request_guidance = _LIFECYCLE_ONLY_REQUEST_GUIDANCE
+    else:
+        _request_guidance = None
     request_text = build_chatgpt_request(
         state=state,
         template_path=template_path,

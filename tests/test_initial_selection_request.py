@@ -389,6 +389,11 @@ class BuildRequestContextSectionTests(unittest.TestCase):
         self.assertIn("status=completed", result)
         self.assertIn("conclusion=failure", result)
         self.assertIn("pytest", result)
+        self.assertIn("Prefer action=codex_run", result)
+        self.assertIn("Do not return human_review_needed unless", result)
+        self.assertIn("Do not close the current issue until CI passes", result)
+        self.assertIn("CHATGPT_CODEX_BODY", result)
+        self.assertIn("CI run URL", result)
 
 
 class ComposeReadyIssueRequestTextWithContextTests(unittest.TestCase):

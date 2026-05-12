@@ -613,6 +613,9 @@ def _save_ci_gate_context_to_state(
         (result.run_status.conclusion or "") if result.run_status else ""
     )
     mutable_state["last_ci_gate_failure_detail"] = result.failure_detail
+    mutable_state["last_issue_centric_wait_reason"] = (
+        "ci_failure_fix" if result.verdict == "failure" else ""
+    )
 
 
 def _poll_ci_gate_until_run_discovered(

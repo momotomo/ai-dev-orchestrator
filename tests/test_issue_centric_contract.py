@@ -3266,6 +3266,197 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 1)
         self.assertEqual(saved_states[-1]["mode"], "waiting_prompt_reply")
 
+    def test_ci_failure_human_review_needed_sends_codex_run_correction(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "human_review_needed",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Needs review.",
+            },
+            parts=[
+                block("review", b64("## Review\n\nCI failed, please inspect.")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "human_review_needed",
+                            "target_issue": "#5",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Needs review.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=0)
+        state.update(
+            {
+                "last_ci_gate_run_id": "25726247186",
+                "last_ci_gate_run_url": "https://github.com/owner/repo/actions/runs/25726247186",
+                "last_ci_gate_workflow": "ci",
+                "last_ci_gate_status": "completed",
+                "last_ci_gate_conclusion": "failure",
+                "last_ci_gate_failure_detail": "job='test' conclusion=failure failed_steps=[pytest]",
+                "last_issue_centric_wait_reason": "ci_failure_fix",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(state, [])
+        self.assertEqual(len(sent_texts), 1)
+        self.assertIn("Return `action=codex_run`", sent_texts[0])
+        self.assertIn("25726247186", sent_texts[0])
+        self.assertIn("pytest", sent_texts[0])
+        self.assertEqual(saved_states[-1]["mode"], "waiting_prompt_reply")
+
+    def test_ci_failure_codex_run_still_reaches_codex_run_stop(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "codex_run",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Fix CI.",
+            },
+            parts=[
+                block("codex", b64("Fix only the CI failure for #5.")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "codex_run",
+                            "target_issue": "#5",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Fix CI.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=0)
+        state.update(
+            {
+                "last_ci_gate_run_id": "25726247186",
+                "last_ci_gate_run_url": "https://github.com/owner/repo/actions/runs/25726247186",
+                "last_ci_gate_workflow": "ci",
+                "last_ci_gate_status": "completed",
+                "last_ci_gate_conclusion": "failure",
+                "last_ci_gate_failure_detail": "job='test' conclusion=failure failed_steps=[pytest]",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaisesRegex(BridgeStop, "prepared Codex body"):
+                    fetch_next_prompt.run(state, [])
+        self.assertEqual(sent_texts, [])
+        self.assertEqual(saved_states[-1]["chatgpt_decision"], "issue_centric:codex_run")
+
+    def test_ci_failure_close_current_issue_sends_correction_before_dispatch(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#5",
+                "close_current_issue": True,
+                "create_followup_issue": False,
+                "summary": "Close it.",
+            }
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=0)
+        state.update(
+            {
+                "last_ci_gate_run_id": "25726247186",
+                "last_ci_gate_run_url": "https://github.com/owner/repo/actions/runs/25726247186",
+                "last_ci_gate_workflow": "ci",
+                "last_ci_gate_status": "completed",
+                "last_ci_gate_conclusion": "failure",
+                "last_ci_gate_failure_detail": "job='test' conclusion=failure failed_steps=[pytest]",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                fetch_next_prompt,
+                "dispatch_issue_centric_execution",
+                side_effect=AssertionError("close dispatch should not run"),
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(state, [])
+        self.assertEqual(len(sent_texts), 1)
+        self.assertIn("close_current_issue=true is not accepted", sent_texts[0])
+        self.assertIn("Set `close_current_issue=false`", sent_texts[0])
+
+    def test_ci_failure_missing_details_allows_human_review_needed(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "human_review_needed",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "CI details are missing.",
+            },
+            parts=[
+                block("review", b64("## Review\n\nCI failure details were unavailable.")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "human_review_needed",
+                            "target_issue": "#5",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "CI details are missing.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        state = self._base_state(correction_count=0)
+        state.update(
+            {
+                "last_ci_gate_run_id": "25726247186",
+                "last_ci_gate_run_url": "https://github.com/owner/repo/actions/runs/25726247186",
+                "last_ci_gate_workflow": "ci",
+                "last_ci_gate_status": "completed",
+                "last_ci_gate_conclusion": "failure",
+                "last_ci_gate_failure_detail": "",
+            }
+        )
+        fake_dispatch = MagicMock(
+            return_value=MagicMock(
+                final_state={"mode": "awaiting_user", "chatgpt_decision": "issue_centric:human_review_needed"},
+                stop_message="human review allowed",
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                fetch_next_prompt,
+                "dispatch_issue_centric_execution",
+                fake_dispatch,
+            ):
+                with self.assertRaisesRegex(BridgeStop, "human review allowed"):
+                    fetch_next_prompt.run(state, [])
+        self.assertEqual(sent_texts, [])
+        self.assertEqual(fake_dispatch.call_count, 1)
+
     def test_second_retry_sends_correction_request(self) -> None:
         """2nd completed invalid reply while pending: correction is sent."""
         saved_states: list[dict] = []
