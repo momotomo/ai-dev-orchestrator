@@ -376,13 +376,17 @@ class TestBuildCiFailureContinuationBody(unittest.TestCase):
             conclusion="failure",
             failure_detail="job='test' conclusion=failure failed_steps=[pytest]",
             repository="owner/repo",
+            workflow_name="ci",
         )
         self.assertIn("#42", body)
         self.assertIn("12345", body)
+        self.assertIn("ci", body)
         self.assertIn("failure", body)
         self.assertIn("pytest", body)
         self.assertIn("Task", body)
         self.assertIn("Do NOT close", body)
+        self.assertIn("Fix only the CI failure", body)
+        self.assertIn("Rerun focused checks", body)
 
     def test_no_failure_detail_omits_section(self) -> None:
         body = ci_gate.build_ci_failure_continuation_body(

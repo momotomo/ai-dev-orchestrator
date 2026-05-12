@@ -490,6 +490,7 @@ def build_ci_failure_continuation_body(
     conclusion: str,
     failure_detail: str,
     repository: str,
+    workflow_name: str = "",
 ) -> str:
     """Build a Codex continuation body focused on fixing CI failures.
 
@@ -513,6 +514,8 @@ def build_ci_failure_continuation_body(
     ]
     if run_url:
         lines.append(f"- **URL**: {run_url}")
+    if workflow_name:
+        lines.append(f"- **Workflow**: `{workflow_name}`")
     lines += [
         f"- **Conclusion**: `{conclusion}`",
         "",
@@ -530,6 +533,8 @@ def build_ci_failure_continuation_body(
         (
             "Investigate and fix the CI failures listed above. "
             "Focus on the failing jobs and steps. "
+            "Fix only the CI failure caused by this issue, and do not broaden unrelated code. "
+            "Rerun focused checks locally when possible. "
             "**Do NOT close this issue until CI passes.**"
         ),
         "",

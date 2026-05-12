@@ -7210,10 +7210,22 @@ def build_request_context_section(state: Mapping[str, Any]) -> str:
             lines.append(
                 f"- CI gate: run {ci_run_id}{url_part}{workflow_part}{status_part} は失敗しました"
                 f" conclusion={ci_conclusion}。"
-                " CI が通るまで issue をクローズしないでください。修正が必要か判断してください。"
+                " CI failure is a bounded fix continuation."
+                " Prefer action=codex_run."
+                " Do not return human_review_needed unless the failure details are missing/unclear"
+                " or the fix is unsafe."
+                " Return CHATGPT_CODEX_BODY with a minimal CI-fix prompt."
+                " Do not close the current issue until CI passes."
+                " Do not create a follow-up issue unless explicitly needed."
             )
             if ci_failure_detail:
                 lines.append(f"  失敗詳細: {ci_failure_detail}")
+            lines.append(
+                "  CHATGPT_CODEX_BODY には target issue、CI run id、CI run URL、workflow name、"
+                "conclusion、利用可能なら failed job / failed step summary、"
+                "scope boundary: fix only the CI failure caused by this issue、"
+                "do not broaden unrelated code、rerun focused checks if possible を含めてください。"
+            )
         elif ci_conclusion in _CI_SUCCESS_CONCLUSIONS:
             lines.append(
                 f"- CI gate: run {ci_run_id}{url_part}{workflow_part}{status_part} は成功しました"
