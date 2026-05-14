@@ -12,7 +12,7 @@ from issue_centric_github import (
     CreatedGitHubIssue,
     IssueCentricGitHubError,
     ResolvedGitHubIssue,
-    resolve_github_repository,
+    resolve_active_github_repository,
     resolve_target_issue,
 )
 from issue_centric_issue_create import (
@@ -123,7 +123,8 @@ def execute_followup_issue_action(
             raise IssueCentricFollowupIssueError(
                 "create_followup_issue=true requires a decoded CHATGPT_FOLLOWUP_ISSUE_BODY artifact."
             )
-        repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
+        active_repository = resolve_active_github_repository(project_config=project_config, repo_path=str(repo_path))
+        repository = active_repository.repository
         parent_issue = resolve_followup_parent_issue(
             prepared,
             prior_state=prior_state,

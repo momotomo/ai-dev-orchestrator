@@ -13,7 +13,11 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 
 from _bridge_common import BridgeError, resolve_execution_agent  # noqa: E402
 import bridge_orchestrator  # noqa: E402
+import fetch_next_prompt  # noqa: E402
+import issue_centric_github  # noqa: E402
 import launch_github_copilot  # noqa: E402
+from issue_centric_contract import IssueCentricAction, IssueCentricDecision  # noqa: E402
+from issue_centric_github import ResolvedGitHubRepository  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -2510,6 +2514,113 @@ class SelectedReadyIssueAutoContinueValidationTests(unittest.TestCase):
             result = bridge_orchestrator.validate_selected_ready_issue_for_auto_continue("#42 valid issue", {})
 
         self.assertTrue(result.ok)
+
+    def test_relative_ref_uses_active_repo_path_over_stale_config(self) -> None:
+        fetched: list[tuple[str, int]] = []
+
+        def fake_fetch(repository: str, issue_number: int, token: str) -> MagicMock:
+            fetched.append((repository, issue_number))
+            issue = MagicMock()
+            issue.state = "open"
+            issue.url = f"https://github.com/{repository}/issues/{issue_number}"
+            return issue
+
+        active_repository = ResolvedGitHubRepository(
+            repository="momotomo/english-reader-app",
+            source="project_path",
+            diagnostic=(
+                "active_repo_config_mismatch:"
+                " active_repository=momotomo/english-reader-app"
+                " configured_repository=momotomo/melody-craft-studio"
+            ),
+        )
+        stale_config = self._config()
+        stale_config["github_repository"] = "momotomo/melody-craft-studio"
+        stdout = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=stale_config),
+            patch("bridge_orchestrator.resolve_active_github_repository", return_value=active_repository),
+            patch("bridge_orchestrator.resolve_github_token", return_value=("token", "test")),
+            patch("bridge_orchestrator.fetch_github_issue", side_effect=fake_fetch),
+            redirect_stdout(stdout),
+        ):
+            result = bridge_orchestrator.validate_selected_ready_issue_for_auto_continue(
+                "#1",
+                {},
+                active_repo_path="/tmp/english-reader-app",
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(fetched, [("momotomo/english-reader-app", 1)])
+        self.assertIn("active_repo_config_mismatch", stdout.getvalue())
+
+
+class ActiveGithubRepositoryResolutionTests(unittest.TestCase):
+    def test_active_path_remote_overrides_stale_config(self) -> None:
+        completed = MagicMock()
+        completed.stdout = "git@github.com:momotomo/english-reader-app.git\n"
+        with patch("issue_centric_github.subprocess.run", return_value=completed) as run_mock:
+            resolved = issue_centric_github.resolve_active_github_repository(
+                project_config={"github_repository": "momotomo/melody-craft-studio"},
+                repo_path="/tmp/english-reader-app",
+            )
+
+        self.assertEqual(resolved.repository, "momotomo/english-reader-app")
+        self.assertEqual(resolved.source, "project_path")
+        self.assertIn("active_repo_config_mismatch", resolved.diagnostic)
+        run_mock.assert_called_once()
+
+    def test_missing_active_context_does_not_guess_repository(self) -> None:
+        with self.assertRaises(issue_centric_github.IssueCentricGitHubError) as ctx:
+            issue_centric_github.resolve_active_github_repository(
+                project_config={},
+                repo_path="",
+            )
+
+        self.assertIn("active project path is unavailable", str(ctx.exception))
+
+
+class ReadyIssueBindingValidationTests(unittest.TestCase):
+    def _decision(self, target_issue: str) -> IssueCentricDecision:
+        return IssueCentricDecision(
+            action=IssueCentricAction.NO_ACTION,
+            target_issue=target_issue,
+            close_current_issue=False,
+            create_followup_issue=False,
+            summary="",
+            issue_body_base64=None,
+            codex_body_base64=None,
+            review_base64=None,
+            followup_issue_body_base64=None,
+            raw_json="{}",
+            raw_segment="",
+        )
+
+    def test_relative_reply_binding_uses_active_repo_over_stale_config(self) -> None:
+        active_repository = ResolvedGitHubRepository(
+            repository="momotomo/english-reader-app",
+            source="project_path",
+            diagnostic=(
+                "active_repo_config_mismatch:"
+                " active_repository=momotomo/english-reader-app"
+                " configured_repository=momotomo/melody-craft-studio"
+            ),
+        )
+        stdout = io.StringIO()
+        with (
+            patch("fetch_next_prompt.load_project_config", return_value={"github_repository": "momotomo/melody-craft-studio"}),
+            patch("fetch_next_prompt.resolve_active_github_repository", return_value=active_repository),
+            redirect_stdout(stdout),
+        ):
+            error = fetch_next_prompt._validate_ready_issue_target_binding(
+                self._decision("#1"),
+                state={"current_ready_issue_ref": "#1 implement"},
+                pending_request_source="ready_issue:test",
+                active_repo_path="/tmp/english-reader-app",
+            )
+
+        self.assertIsNone(error)
+        self.assertIn("active_repo_config_mismatch", stdout.getvalue())
 
 
 # ---------------------------------------------------------------------------

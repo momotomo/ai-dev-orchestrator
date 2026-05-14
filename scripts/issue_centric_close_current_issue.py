@@ -19,7 +19,7 @@ from issue_centric_github import (
     fetch_open_prs_for_issue,
     fetch_pr_detail,
     merge_github_pr,
-    resolve_github_repository,
+    resolve_active_github_repository,
     resolve_github_token,
     resolve_target_issue,
 )
@@ -89,7 +89,17 @@ def execute_close_current_issue(
     )
 
     try:
-        repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
+        decision_target = str(prepared.decision.target_issue or "").strip()
+        state_resolved = str(prior_state.get("last_issue_centric_resolved_issue", "")).strip()
+        state_target = str(prior_state.get("last_issue_centric_target_issue", "")).strip()
+        has_decision_target = bool(decision_target and decision_target != "none")
+        has_state_target = bool(state_target and state_target != "none")
+        if not (has_decision_target or state_resolved or has_state_target):
+            raise IssueCentricCloseCurrentIssueError(
+                "close_current_issue could not resolve the current issue from target_issue or existing issue-centric state."
+            )
+        active_repository = resolve_active_github_repository(project_config=project_config, repo_path=str(repo_path))
+        repository = active_repository.repository
 
         resolved_issue = resolve_close_target_issue(
             prepared,

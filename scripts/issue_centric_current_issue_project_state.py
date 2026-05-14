@@ -17,7 +17,7 @@ from issue_centric_github import (
     fetch_github_issue,
     resolve_github_project_item_for_issue,
     resolve_github_project_state,
-    resolve_github_repository,
+    resolve_active_github_repository,
     resolve_github_token,
     resolve_target_issue,
     set_github_project_item_state,
@@ -82,7 +82,8 @@ def execute_current_issue_project_state_sync(
             safe_stop_reason = "No GitHub Project is configured for current-issue lifecycle state sync."
             execution_status = "not_requested"
         else:
-            repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
+            active_repository = resolve_active_github_repository(project_config=project_config, repo_path=str(repo_path))
+            repository = active_repository.repository
             token, token_source = resolve_github_token(env=env)
             state_field_name = str(project_config.get("github_project_state_field_name", "State")).strip() or "State"
             state_value_name = _resolve_lifecycle_state_value(project_config, lifecycle_stage)

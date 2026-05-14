@@ -16,7 +16,7 @@ from issue_centric_github import (
     add_issue_to_github_project,
     create_github_issue,
     resolve_github_project_state,
-    resolve_github_repository,
+    resolve_active_github_repository,
     resolve_github_token,
     set_github_project_item_state,
 )
@@ -174,7 +174,8 @@ def execute_issue_create_draft(
             "md",
         )
 
-        repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
+        active_repository = resolve_active_github_repository(project_config=project_config, repo_path=str(repo_path))
+        repository = active_repository.repository
         token, token_source = resolve_github_token(env=env)
         configured_project_url = str(project_config.get("github_project_url", "")).strip()
         project_state_field_name = str(project_config.get("github_project_state_field_name", "State")).strip() or "State"

@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -40,6 +41,13 @@ class ResolvedGitHubIssue:
     issue_number: int
     issue_url: str
     source_ref: str
+
+
+@dataclass(frozen=True)
+class ResolvedGitHubRepository:
+    repository: str
+    source: str
+    diagnostic: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,6 +132,70 @@ def resolve_github_repository(
             f"Origin remote is not a supported GitHub remote URL: {remote_url}"
         )
     return match.group(1)
+
+
+def resolve_github_repository_from_path(repo_path: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise IssueCentricGitHubError(
+            "GitHub repository could not be resolved from the active project path. "
+            "Set --project-path to a GitHub checkout with an origin remote."
+        ) from exc
+
+    remote_url = completed.stdout.strip()
+    if not remote_url:
+        raise IssueCentricGitHubError(
+            "GitHub repository could not be resolved because the active project path origin remote is empty."
+        )
+    match = re.match(r"^(?:https://github\.com/|git@github\.com:)([^/]+/[^/]+?)(?:\.git)?$", remote_url)
+    if not match:
+        raise IssueCentricGitHubError(
+            f"Active project path origin remote is not a supported GitHub remote URL: {remote_url}"
+        )
+    return match.group(1)
+
+
+def resolve_active_github_repository(
+    *,
+    project_config: Mapping[str, Any],
+    repo_path: str,
+) -> ResolvedGitHubRepository:
+    """Resolve the repository for relative issue refs from the active project path.
+
+    ``github_repository`` is intentionally not allowed to override ``repo_path`` here:
+    relative refs like ``#1`` must bind to the currently active worker repo.  A
+    configured repository is only used when no active path was provided.
+    """
+    active_path = str(repo_path or "").strip()
+    configured = str(project_config.get("github_repository", "")).strip()
+    if active_path:
+        bridge_repo_root = Path(__file__).resolve().parents[1]
+        try:
+            is_bridge_repo_path = Path(active_path).expanduser().resolve() == bridge_repo_root
+        except OSError:
+            is_bridge_repo_path = False
+        if is_bridge_repo_path and configured:
+            return ResolvedGitHubRepository(repository=configured, source="project_config_bridge_repo_path")
+        repository = resolve_github_repository_from_path(active_path)
+        diagnostic = ""
+        if configured and configured != repository:
+            diagnostic = (
+                "active_repo_config_mismatch:"
+                f" active_repository={repository}"
+                f" configured_repository={configured}"
+            )
+        return ResolvedGitHubRepository(repository=repository, source="project_path", diagnostic=diagnostic)
+    if configured:
+        return ResolvedGitHubRepository(repository=configured, source="project_config")
+    raise IssueCentricGitHubError(
+        "GitHub repository could not be resolved for a relative issue reference: active project path is unavailable."
+    )
 
 
 def resolve_github_token(*, env: Mapping[str, str] | None = None) -> tuple[str, str]:

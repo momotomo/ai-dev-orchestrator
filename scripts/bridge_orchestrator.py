@@ -31,7 +31,7 @@ from issue_centric_contract import IssueCentricAction, IssueCentricDecision, may
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
-from issue_centric_github import IssueCentricGitHubError, fetch_github_issue, resolve_github_token, resolve_target_issue
+from issue_centric_github import IssueCentricGitHubError, fetch_github_issue, resolve_active_github_repository, resolve_github_token, resolve_target_issue
 from issue_centric_human_review import execute_human_review_action
 from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import MaterializedIssueCentricDecision, decode_issue_centric_decision
@@ -166,6 +166,8 @@ def build_fetch_argv(args: argparse.Namespace) -> list[str]:
     fetch_argv: list[str] = []
     if args.fetch_timeout_seconds > 0:
         fetch_argv.extend(["--timeout-seconds", str(args.fetch_timeout_seconds)])
+    if args.worker_repo_path:
+        fetch_argv.extend(["--project-path", args.worker_repo_path])
     return fetch_argv
 
 
@@ -390,6 +392,7 @@ def validate_selected_ready_issue_for_auto_continue(
     state: dict[str, object],
     *,
     prior_state: dict[str, object] | None = None,
+    active_repo_path: str = "",
 ) -> ReadyIssueAutoContinueValidation:
     """Validate a selected ready issue immediately before auto-continuing.
 
@@ -402,9 +405,14 @@ def validate_selected_ready_issue_for_auto_continue(
         return ReadyIssueAutoContinueValidation(False, "selected_ready_issue_ref から issue ref を抽出できませんでした。")
 
     project_config = load_project_config()
-    default_repository = str(project_config.get("github_repository", "")).strip()
     try:
-        resolved = resolve_target_issue(selected_token, default_repository=default_repository)
+        active_repository = resolve_active_github_repository(
+            project_config=project_config,
+            repo_path=active_repo_path,
+        )
+        if active_repository.diagnostic:
+            print(f"issue ref repo diagnostic: {active_repository.diagnostic}", flush=True)
+        resolved = resolve_target_issue(selected_token, default_repository=active_repository.repository)
     except IssueCentricGitHubError as exc:
         return ReadyIssueAutoContinueValidation(False, f"selected ready issue ref を解決できませんでした: {exc}")
 
@@ -1167,7 +1175,11 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
     if _ic_stop == "initial_selection_stop":
         _selected_ref = str(state.get("selected_ready_issue_ref", "")).strip()
         if _selected_ref:
-            _validation = validate_selected_ready_issue_for_auto_continue(_selected_ref, state)
+            _validation = validate_selected_ready_issue_for_auto_continue(
+                _selected_ref,
+                state,
+                active_repo_path=args.worker_repo_path,
+            )
             if not _validation.ok:
                 _print_selected_ready_issue_validation_stop(_selected_ref, _validation)
                 # Clear the invalidated selection so run_until_stop.py stop summary does not
@@ -1235,6 +1247,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     _is_ref,
                     _post_fetch_state,
                     prior_state=state,
+                    active_repo_path=args.worker_repo_path,
                 )
                 if not _validation.ok:
                     _print_selected_ready_issue_validation_stop(_is_ref, _validation)

@@ -60,7 +60,7 @@ from issue_centric_contract import (
 from issue_centric_codex_run import execute_codex_run_action
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
-from issue_centric_github import IssueCentricGitHubError, resolve_target_issue
+from issue_centric_github import IssueCentricGitHubError, resolve_active_github_repository, resolve_target_issue
 from issue_centric_issue_create import execute_issue_create_action
 from issue_centric_transport import (
     IssueCentricBodyDecodeError,
@@ -1279,6 +1279,7 @@ def _validate_ready_issue_target_binding(
     *,
     state: dict[str, object],
     pending_request_source: str,
+    active_repo_path: str = "",
 ) -> str | None:
     if not pending_request_source.startswith("ready_issue:"):
         return None
@@ -1296,10 +1297,15 @@ def _validate_ready_issue_target_binding(
         )
 
     project_config = load_project_config()
-    default_repository = str(project_config.get("github_repository", "")).strip()
     try:
-        expected_issue = resolve_target_issue(expected_issue_ref, default_repository=default_repository)
-        actual_issue = resolve_target_issue(raw_target_issue, default_repository=default_repository)
+        active_repository = resolve_active_github_repository(
+            project_config=project_config,
+            repo_path=active_repo_path,
+        )
+        if active_repository.diagnostic:
+            print(f"issue ref repo diagnostic: {active_repository.diagnostic}", flush=True)
+        expected_issue = resolve_target_issue(expected_issue_ref, default_repository=active_repository.repository)
+        actual_issue = resolve_target_issue(raw_target_issue, default_repository=active_repository.repository)
     except IssueCentricGitHubError as exc:
         return f"ready issue binding validation failed: {exc}"
 
@@ -1791,6 +1797,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="Safari から返答を待つ最大秒数。0 の場合は browser_config.json を使う",
     )
+    parser.add_argument(
+        "--project-path",
+        "--repo-path",
+        dest="worker_repo_path",
+        default="",
+        help="relative issue ref 解決に使う active worker repo root",
+    )
     return parser.parse_args(argv)
 
 
@@ -2058,6 +2071,7 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             contract_decision,
             state=state,
             pending_request_source=pending_request_source,
+            active_repo_path=args.worker_repo_path,
         )
         if ready_issue_binding_error:
             binding_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)

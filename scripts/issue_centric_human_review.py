@@ -16,7 +16,7 @@ from issue_centric_github import (
     ResolvedGitHubIssue,
     create_github_issue_comment,
     fetch_github_issue,
-    resolve_github_repository,
+    resolve_active_github_repository,
     resolve_github_token,
     resolve_target_issue,
 )
@@ -94,7 +94,8 @@ def execute_human_review_action(
         if _lc:
             review_text = review_text.rstrip("\n") + "\n" + _lc.strip()
 
-        repository = resolve_github_repository(project_config=project_config, repo_path=str(repo_path))
+        active_repository = resolve_active_github_repository(project_config=project_config, repo_path=str(repo_path))
+        repository = active_repository.repository
         resolved_issue = resolve_review_target_issue(
             prepared,
             prior_state=prior_state,
