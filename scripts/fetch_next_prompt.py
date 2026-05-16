@@ -61,7 +61,11 @@ from issue_centric_codex_run import execute_codex_run_action
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
 from issue_centric_github import IssueCentricGitHubError, resolve_active_github_repository, resolve_target_issue
-from issue_centric_issue_create import execute_issue_create_action
+from issue_centric_issue_create import (
+    IssueCentricIssueCreateError,
+    execute_issue_create_action,
+    materialize_issue_draft_text,
+)
 from issue_centric_transport import (
     IssueCentricBodyDecodeError,
     IssueCentricTransportError,
@@ -695,6 +699,8 @@ def _classify_correction_reason(reason: str) -> str:
     Returns one of: 'base64', 'utf8', 'marker', 'generic'.
     """
     r = reason.lower()
+    if r.startswith("issue_body_missing_h1"):
+        return "issue_body_missing_h1"
     if "not valid base64" in r or (
         "base64" in r and any(k in r for k in ("invalid", "excess", "padding", "incorrect"))
     ):
@@ -714,6 +720,24 @@ def _build_generic_correction_request(reason: str) -> str:
         "canonical 形式で contract のみを再出力してください。余計な説明・謝罪・コメントは付けないこと。\n\n"
         + _DECISION_JSON_REGENERATE_INSTRUCTION
         + "- BODY block が必要な場合のみ、以下の canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
+        + _BODY_TAG_LIST
+        + _ENGLISH_BODY_GUIDANCE
+    )
+
+
+def _build_issue_body_h1_correction_request(reason: str) -> str:
+    """Structured correction request for decoded issue draft H1 validation."""
+    return (
+        "[ISSUE_BODY heading error]\n"
+        "前回の返答の decoded issue BODY が issue draft rule に違反していました。\n"
+        f"Error detail: {reason}\n\n"
+        "以下を必ず守って、issue-centric contract 全体だけを再出力してください。"
+        "前置き・説明・謝罪・コードフェンスは付けないこと。\n\n"
+        "- `CHATGPT_ISSUE_BODY` の最初の空でない行は必ず `# Title` 形式の level-1 heading で始めること\n"
+        "- `## Goal` や本文、箇条書き、説明文から始めてはいけないこと\n"
+        "- `create_followup_issue=true` で `CHATGPT_FOLLOWUP_ISSUE_BODY` を出す場合も、最初の空でない行は必ず `# Title` で始めること\n"
+        + _DECISION_JSON_UNCHANGED_INSTRUCTION
+        + "- BODY block は canonical tag と valid base64 payload（padding 含む）で出力すること:\n"
         + _BODY_TAG_LIST
         + _ENGLISH_BODY_GUIDANCE
     )
@@ -782,6 +806,8 @@ def _build_contract_correction_request(reason: str) -> str:
         return _build_utf8_correction_request(reason)
     if category == "marker":
         return _build_marker_correction_request(reason)
+    if category == "issue_body_missing_h1":
+        return _build_issue_body_h1_correction_request(reason)
     return _build_generic_correction_request(reason)
 
 
@@ -804,6 +830,43 @@ def _build_binding_mismatch_correction_request(reason: str, current_ready_issue_
         + _BODY_TAG_LIST
         + _ENGLISH_BODY_GUIDANCE
     )
+
+
+def _issue_body_missing_h1_reason(block_name: str, detail: str) -> str:
+    return f"issue_body_missing_h1: {block_name} first non-empty line must start with `# Title`. {detail}"
+
+
+def _draft_h1_validation_correction_reason(materialized: object) -> str:
+    """Return a retryable correction reason for issue body H1 draft failures."""
+    prepared = getattr(materialized, "prepared", None)
+    if prepared is None:
+        return ""
+
+    bodies = []
+    decision = getattr(prepared, "decision", None)
+    action = getattr(decision, "action", None)
+    create_followup_issue = bool(getattr(decision, "create_followup_issue", False))
+    if action is IssueCentricAction.ISSUE_CREATE:
+        primary_body = getattr(prepared, "primary_body", None)
+        if primary_body is not None:
+            bodies.append(primary_body)
+    if create_followup_issue:
+        followup_body = getattr(prepared, "followup_issue_body", None)
+        if followup_body is not None and all(followup_body is not body for body in bodies):
+            bodies.append(followup_body)
+
+    for body in bodies:
+        try:
+            materialize_issue_draft_text(
+                getattr(body, "decoded_text", ""),
+                source_artifact_path=getattr(body, "block_name", "issue_body"),
+            )
+        except IssueCentricIssueCreateError as exc:
+            detail = str(exc)
+            if "level-1 heading" in detail and "first non-empty line" in detail:
+                return _issue_body_missing_h1_reason(getattr(body, "block_name", "issue_body"), detail)
+            raise
+    return ""
 
 
 _CI_FAILURE_CONCLUSIONS = frozenset(
@@ -2205,6 +2268,54 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
             )
         except IssueCentricTransportError as exc:
             raise BridgeError(f"issue-centric contract transport を準備できませんでした: {exc}") from exc
+
+        issue_body_h1_reason = _draft_h1_validation_correction_reason(materialized)
+        if issue_body_h1_reason:
+            issue_body_h1_correction_count = int(state.get("last_issue_centric_contract_correction_count") or 0)
+            _guard_correction_resend(state, raw_text)
+            if issue_body_h1_correction_count < _MAX_CONTRACT_CORRECTIONS:
+                correction_text = _build_contract_correction_request(issue_body_h1_reason)
+                correction_log = log_text("contract_correction_request", correction_text, suffix="md")
+                _stop_correction_send_if_pending_reply(
+                    state,
+                    detail="issue body H1 correction",
+                    readiness_status=readiness.status,
+                )
+                try:
+                    send_to_chatgpt(correction_text)
+                except BridgeError as _send_exc:
+                    if "send_missing" in str(_send_exc) and is_pending_chatgpt_reply_state(state):
+                        _stall_state = clear_error_fields(dict(state))
+                        _stall_state["last_issue_centric_contract_correction_reason"] = "reply_still_generating"
+                        save_state(_stall_state)
+                        raise BridgeStop(
+                            "ChatGPT reply is still generating; no send attempted.\n"
+                            "reply_still_generating: send_missing during pending reply (issue body H1 error),"
+                            f" mode={str(state.get('mode', '')).strip()}"
+                        ) from _send_exc
+                    raise
+                correction_state = clear_error_fields(dict(state))
+                correction_state["last_issue_centric_contract_correction_count"] = issue_body_h1_correction_count + 1
+                correction_state["last_issue_centric_contract_correction_log"] = repo_relative(correction_log)
+                correction_state["last_issue_centric_contract_correction_reason"] = "issue_body_missing_h1"
+                correction_state["last_issue_centric_correction_request_text"] = correction_text
+                correction_state["mode"] = "waiting_prompt_reply"
+                save_state(correction_state)
+                raise BridgeStop(
+                    f"問題: ISSUE_BODY の先頭見出しが不正でした（{issue_body_h1_correction_count + 1} 回目）。\n"
+                    f"対応: 同じチャットに修正依頼を再送しました。返答後に fetch を再実行してください。\n"
+                    f"詳細: correction log: {repo_relative(correction_log)}"
+                    " / reason: issue_body_missing_h1"
+                )
+            stop_for_invalid_issue_centric_contract(
+                dict(state),
+                raw_text=raw_text,
+                detail=issue_body_h1_reason,
+                pending_request_source=pending_request_source,
+                raw_log_path=raw_log,
+                readiness=readiness,
+                correction_count=issue_body_h1_correction_count,
+            )
 
         # ── Build fetch handoff snapshot ────────────────────────────────────
         handoff = _build_ic_fetch_handoff_state(

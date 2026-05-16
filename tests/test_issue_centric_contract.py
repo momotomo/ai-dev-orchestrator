@@ -3266,6 +3266,153 @@ class ContractCorrectionRetryBehaviorTests(unittest.TestCase):
         self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 1)
         self.assertEqual(saved_states[-1]["mode"], "waiting_prompt_reply")
 
+    def test_issue_body_missing_h1_sends_correction_request(self) -> None:
+        """issue_create BODY starting with ## Goal is retryable contract correction."""
+        raw = build_raw_reply(
+            {
+                "action": "issue_create",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Create the next issue.",
+            },
+            parts=[
+                block("issue", b64("## Goal\n\nBody starts below a level-2 heading.")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "issue_create",
+                            "target_issue": "#5",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Create the next issue.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                fetch_next_prompt,
+                "dispatch_issue_centric_execution",
+                side_effect=AssertionError("dispatch must not run before corrected issue body"),
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+
+        self.assertEqual(len(sent_texts), 1)
+        self.assertIn("issue_body_missing_h1", saved_states[-1]["last_issue_centric_contract_correction_reason"])
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_count"], 1)
+        self.assertIn("`CHATGPT_ISSUE_BODY` の最初の空でない行は必ず `# Title`", sent_texts[0])
+        self.assertIn("`## Goal` や本文", sent_texts[0])
+        self.assertIn("issue-centric contract 全体だけを再出力", sent_texts[0])
+        self.assertIn("前置き・説明・謝罪・コードフェンスは付けないこと", sent_texts[0])
+
+    def test_followup_issue_body_missing_h1_sends_correction_request(self) -> None:
+        """create_followup_issue BODY starting with ## Goal is retryable correction."""
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": True,
+                "summary": "Create a follow-up issue.",
+            },
+            parts=[
+                block("followup", b64("## Goal\n\nFollow-up body starts below a level-2 heading.")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "no_action",
+                            "target_issue": "#5",
+                            "close_current_issue": False,
+                            "create_followup_issue": True,
+                            "summary": "Create a follow-up issue.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                fetch_next_prompt,
+                "dispatch_issue_centric_execution",
+                side_effect=AssertionError("dispatch must not run before corrected follow-up body"),
+            ):
+                with self.assertRaises(BridgeStop):
+                    fetch_next_prompt.run(self._base_state(correction_count=0), [])
+
+        self.assertEqual(len(sent_texts), 1)
+        self.assertEqual(saved_states[-1]["last_issue_centric_contract_correction_reason"], "issue_body_missing_h1")
+        self.assertIn("`CHATGPT_FOLLOWUP_ISSUE_BODY`", sent_texts[0])
+        self.assertIn("最初の空でない行は必ず `# Title`", sent_texts[0])
+
+    def test_valid_issue_body_after_h1_correction_continues_to_dispatch(self) -> None:
+        """A regenerated issue_create BODY with # Title clears correction state and dispatches."""
+        raw = build_raw_reply(
+            {
+                "action": "issue_create",
+                "target_issue": "#5",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Create the next issue.",
+            },
+            parts=[
+                block("issue", b64("# Ready title\n\nBody is now valid.")),
+                block(
+                    "json",
+                    json.dumps(
+                        {
+                            "action": "issue_create",
+                            "target_issue": "#5",
+                            "close_current_issue": False,
+                            "create_followup_issue": False,
+                            "summary": "Create the next issue.",
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            ],
+            after_text="request body\nあなた:\nprevious correction request",
+        )
+        saved_states: list[dict] = []
+        sent_texts: list[str] = []
+        fake_dispatch = MagicMock(
+            return_value=MagicMock(
+                final_state={"mode": "awaiting_user", "chatgpt_decision": "issue_centric:issue_create"},
+                stop_message="issue create dispatched",
+            )
+        )
+        state = self._base_state(correction_count=1)
+        state["last_issue_centric_contract_correction_reason"] = "issue_body_missing_h1"
+        state["last_issue_centric_correction_request_text"] = "previous correction request"
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = self._make_patched_context(tmp, raw, saved_states, sent_texts)
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                fetch_next_prompt,
+                "dispatch_issue_centric_execution",
+                fake_dispatch,
+            ):
+                with self.assertRaisesRegex(BridgeStop, "issue create dispatched"):
+                    fetch_next_prompt.run(state, [])
+
+        self.assertEqual(sent_texts, [])
+        self.assertEqual(fake_dispatch.call_count, 1)
+        dispatch_state = fake_dispatch.call_args.kwargs["mutable_state"]
+        self.assertEqual(dispatch_state["last_issue_centric_contract_correction_count"], 0)
+        self.assertEqual(dispatch_state["last_issue_centric_contract_correction_reason"], "")
+        self.assertEqual(dispatch_state["last_issue_centric_correction_request_text"], "")
+
     def test_ci_failure_human_review_needed_sends_codex_run_correction(self) -> None:
         raw = build_raw_reply(
             {
