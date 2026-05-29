@@ -119,6 +119,7 @@ class IssueCentricReplyReadiness:
     # complete contract was found by scanning raw_text directly.
     reply_source: str = "assistant_segment"
     decision: IssueCentricDecision | None = None
+    contract_candidate_skip_reasons: tuple[str, ...] = ()
 
 
 class IssueCentricReplyNotReady(BridgeError):
@@ -138,6 +139,7 @@ class IssueCentricReplyNotReady(BridgeError):
         self.open_body_blocks = readiness.open_body_blocks
         self.reply_complete_tag_present = readiness.reply_complete_tag_present
         self.reply_source = readiness.reply_source
+        self.contract_candidate_skip_reasons = readiness.contract_candidate_skip_reasons
 
 
 def _stop_correction_send_if_pending_reply(
@@ -234,6 +236,70 @@ _BODY_BLOCK_PAIRS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _iter_lines_with_offsets(text: str, *, start: int = 0):
+    offset = start
+    for raw_line in text[start:].splitlines(keepends=True):
+        yield offset, raw_line
+        offset += len(raw_line)
+
+
+@dataclass(frozen=True)
+class _LineOnlyMarker:
+    line_start: int
+    marker_start: int
+    marker_end: int
+    line_end: int
+
+
+def _iter_line_only_marker_positions(
+    text: str,
+    marker: str,
+    *,
+    start: int = 0,
+):
+    for line_start, raw_line in _iter_lines_with_offsets(text, start=start):
+        line_body = raw_line.rstrip("\r\n")
+        if line_body != marker:
+            continue
+        yield _LineOnlyMarker(
+            line_start=line_start,
+            marker_start=line_start,
+            marker_end=line_start + len(marker),
+            line_end=line_start + len(raw_line),
+        )
+
+
+def _has_line_only_marker(text: str, marker: str, *, start: int = 0) -> bool:
+    return next(_iter_line_only_marker_positions(text, marker, start=start), None) is not None
+
+
+def _first_non_empty_content(raw_body: str) -> str:
+    for line in raw_body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def _remember_skip_reason(reasons: list[str] | None, reason: str) -> None:
+    if reasons is not None and reason not in reasons:
+        reasons.append(reason)
+
+
+def _record_inline_contract_marker_skips(
+    raw_text: str,
+    *,
+    search_start: int,
+    reasons: list[str] | None,
+) -> None:
+    markers = (DECISION_JSON_START, DECISION_JSON_END, REPLY_COMPLETE_TAG)
+    for _line_start, raw_line in _iter_lines_with_offsets(raw_text, start=search_start):
+        line_body = raw_line.rstrip("\r\n")
+        if any(marker in line_body for marker in markers) and line_body not in markers:
+            _remember_skip_reason(reasons, "skip_inline_contract_marker")
+            return
+
+
 def _detect_partial_body_blocks(
     segment: str,
 ) -> tuple[list[str], list[str]]:
@@ -246,8 +312,8 @@ def _detect_partial_body_blocks(
     open_blocks: list[str] = []
     closed_blocks: list[str] = []
     for start, end in _BODY_BLOCK_PAIRS:
-        if start in segment:
-            if end in segment:
+        if _has_line_only_marker(segment, start):
+            if _has_line_only_marker(segment, end):
                 closed_blocks.append(start)
             else:
                 open_blocks.append(start)
@@ -367,12 +433,18 @@ def _split_meta_content_lines(
     return meta, content
 
 
-def _find_last_complete_ic_contract_in_raw(raw_text: str, *, search_start: int = 0) -> str | None:
+def _find_last_complete_ic_contract_in_raw(
+    raw_text: str,
+    *,
+    search_start: int = 0,
+    skip_reasons: list[str] | None = None,
+) -> str | None:
     """Return the last complete IC contract slice starting at or after search_start.
 
     A contract is considered complete when:
-    - DECISION_JSON_START … DECISION_JSON_END block is present
-    - REPLY_COMPLETE_TAG appears after DECISION_JSON_END
+    - DECISION_JSON_START … DECISION_JSON_END are line-only markers
+    - the first non-empty decision content starts with a JSON object ("{")
+    - REPLY_COMPLETE_TAG appears as a line-only marker after DECISION_JSON_END
 
     search_start limits the scan to raw_text[search_start:] so that stale
     contracts from previous chat turns are not misidentified as the current
@@ -383,26 +455,55 @@ def _find_last_complete_ic_contract_in_raw(raw_text: str, *, search_start: int =
     DECISION_JSON_START and ending at the next USER_TURN_MARKER or end-of-text.
     Returns None if no complete contract is found within the window.
     """
-    last_valid_start = -1
-    search_from = search_start
-    while True:
-        pos = raw_text.find(DECISION_JSON_START, search_from)
-        if pos == -1:
-            break
-        end_pos = raw_text.find(DECISION_JSON_END, pos + len(DECISION_JSON_START))
-        if end_pos != -1:
-            after_end = end_pos + len(DECISION_JSON_END)
-            if REPLY_COMPLETE_TAG in raw_text[after_end:]:
-                last_valid_start = pos
-        search_from = pos + 1
+    _record_inline_contract_marker_skips(
+        raw_text, search_start=search_start, reasons=skip_reasons
+    )
+    end_lines = list(
+        _iter_line_only_marker_positions(
+            raw_text, DECISION_JSON_END, start=search_start
+        )
+    )
+    complete_lines = list(
+        _iter_line_only_marker_positions(
+            raw_text, REPLY_COMPLETE_TAG, start=search_start
+        )
+    )
+    last_valid_slice: str | None = None
+    last_invalid_slice: str | None = None
 
-    if last_valid_start == -1:
-        return None
+    for start_line in _iter_line_only_marker_positions(
+        raw_text, DECISION_JSON_START, start=search_start
+    ):
+        end_line = next(
+            (line for line in end_lines if line.line_start >= start_line.line_end),
+            None,
+        )
+        if end_line is None:
+            continue
+        next_user = raw_text.find(USER_TURN_MARKER, start_line.marker_start)
+        has_complete = any(
+            line.marker_start >= end_line.marker_end
+            and (next_user == -1 or line.marker_start < next_user)
+            for line in complete_lines
+        )
+        if not has_complete:
+            continue
+        slice_end = next_user if next_user != -1 else len(raw_text)
+        candidate_slice = raw_text[start_line.marker_start:slice_end]
+        raw_body = raw_text[start_line.line_end:end_line.line_start]
+        if not _first_non_empty_content(raw_body).startswith("{"):
+            _remember_skip_reason(skip_reasons, "skip_decision_json_not_object")
+            last_invalid_slice = candidate_slice
+            continue
+        last_valid_slice = candidate_slice
 
-    # Slice from last_valid_start to the next USER_TURN_MARKER or end of text.
-    next_user = raw_text.find(USER_TURN_MARKER, last_valid_start)
-    slice_end = next_user if next_user != -1 else len(raw_text)
-    return raw_text[last_valid_start:slice_end]
+    if last_valid_slice is not None:
+        return last_valid_slice
+
+    if last_invalid_slice is not None:
+        return last_invalid_slice
+
+    return None
 
 
 def classify_issue_centric_reply_readiness(
@@ -412,6 +513,7 @@ def classify_issue_centric_reply_readiness(
 ) -> IssueCentricReplyReadiness:
     assistant_segment = _assistant_segment_after_text(raw_text, after_text)
     reply_source = "assistant_segment"
+    candidate_skip_reasons: list[str] = []
 
     # ── Raw-text fallback: role marker absent but contract present in raw_text ──
     # When the browser DOM does not emit the "ChatGPT:" role label, the
@@ -425,7 +527,9 @@ def classify_issue_centric_reply_readiness(
     if not assistant_segment:
         _fallback_start = _reply_search_start_index(raw_text, after_text)
         _fallback = _find_last_complete_ic_contract_in_raw(
-            raw_text, search_start=_fallback_start
+            raw_text,
+            search_start=_fallback_start,
+            skip_reasons=candidate_skip_reasons,
         )
         if _fallback is not None:
             assistant_segment = _fallback
@@ -452,9 +556,9 @@ def classify_issue_centric_reply_readiness(
     thinking_visible = any(
         any(marker in line for marker in _THINKING_MARKERS) for line in assistant_lines
     )
-    decision_marker_present = "===CHATGPT_DECISION_JSON===" in assistant_segment
+    decision_marker_present = _has_line_only_marker(assistant_segment, DECISION_JSON_START)
     legacy_marker_present = any(marker in assistant_segment for marker in _LEGACY_REPLY_MARKERS)
-    reply_complete_tag_present = REPLY_COMPLETE_TAG in assistant_segment
+    reply_complete_tag_present = _has_line_only_marker(assistant_segment, REPLY_COMPLETE_TAG)
 
     # Always compute body block state so diagnostic fields are accurate even
     # when returning early via the terminal tag gate.
@@ -476,6 +580,7 @@ def classify_issue_centric_reply_readiness(
             assistant_meta_only=False,
             reply_complete_tag_present=False,
             reply_source=reply_source,
+            contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
         )
 
     # ── Gate 1b: legacy contract detection — detect-only, explicit-stop ───
@@ -496,6 +601,7 @@ def classify_issue_centric_reply_readiness(
             assistant_meta_only=assistant_meta_only,
             reply_complete_tag_present=reply_complete_tag_present,
             reply_source=reply_source,
+            contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
         )
 
     # ── Gate 2 (PRIMARY): terminal tag absent → always not-ready ───────────
@@ -526,6 +632,7 @@ def classify_issue_centric_reply_readiness(
             open_body_blocks=tuple(open_blocks),
             reply_complete_tag_present=False,
             reply_source=reply_source,
+            contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
         )
 
     # ── Terminal tag is present — proceed to parse / validate ───────────────
@@ -542,6 +649,7 @@ def classify_issue_centric_reply_readiness(
             assistant_meta_only=assistant_meta_only,
             reply_complete_tag_present=True,
             reply_source=reply_source,
+            contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
         )
 
     try:
@@ -561,6 +669,7 @@ def classify_issue_centric_reply_readiness(
             partial_body_block_detected=False,
             reply_complete_tag_present=True,
             reply_source=reply_source,
+            contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
         )
     except IssueCentricContractError as exc:
         return IssueCentricReplyReadiness(
@@ -577,6 +686,7 @@ def classify_issue_centric_reply_readiness(
             partial_body_block_detected=False,
             reply_complete_tag_present=True,
             reply_source=reply_source,
+            contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
         )
 
     return IssueCentricReplyReadiness(
@@ -594,6 +704,7 @@ def classify_issue_centric_reply_readiness(
         reply_complete_tag_present=True,
         reply_source=reply_source,
         decision=decision,
+        contract_candidate_skip_reasons=tuple(candidate_skip_reasons),
     )
 
 
@@ -1074,8 +1185,8 @@ def _guard_correction_resend(
     # or REPLY_COMPLETE_TAG) as evidence that a new assistant turn has appeared.
     has_new_reply = (
         raw_text.find(CHATGPT_TURN_MARKER, search_start) != -1
-        or raw_text.find(DECISION_JSON_START, search_start) != -1
-        or raw_text.find(REPLY_COMPLETE_TAG, search_start) != -1
+        or _has_line_only_marker(raw_text, DECISION_JSON_START, start=search_start)
+        or _has_line_only_marker(raw_text, REPLY_COMPLETE_TAG, start=search_start)
     )
     if not has_new_reply:
         raise BridgeStop(
@@ -1102,6 +1213,11 @@ def _build_not_ready_bridge_error(readiness: IssueCentricReplyReadiness) -> Brid
             lines.append(f"  open_body_block: {block}")
     if readiness.partial_body_block_detected:
         lines.append("  partial_body_block_detected: true")
+    if readiness.contract_candidate_skip_reasons:
+        lines.append(
+            "  contract_candidate_skip_reasons: "
+            f"{list(readiness.contract_candidate_skip_reasons)}"
+        )
     return BridgeError("\n".join(lines))
 
 
@@ -1166,6 +1282,7 @@ def stop_for_invalid_issue_centric_contract(
                 f"- partial_body_block_detected: {readiness.partial_body_block_detected}",
                 f"- open_body_blocks: {list(readiness.open_body_blocks)}",
                 f"- contract_parse_attempted: {readiness.contract_parse_attempted}",
+                f"- contract_candidate_skip_reasons: {list(readiness.contract_candidate_skip_reasons)}",
             ]
         )
     invalid_summary = "\n".join(
@@ -1220,6 +1337,9 @@ def stop_for_invalid_issue_centric_contract(
             "open_body_blocks": list(readiness.open_body_blocks) if readiness is not None else [],
             "contract_parse_attempted": readiness.contract_parse_attempted if readiness is not None else False,
             "reply_complete_tag_present": readiness.reply_complete_tag_present if readiness is not None else False,
+            "contract_candidate_skip_reasons": (
+                list(readiness.contract_candidate_skip_reasons) if readiness is not None else []
+            ),
         }
     )
     save_state(failed_state)
@@ -1935,6 +2055,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     "partial_body_block_detected": bool(event_details.get("partial_body_block_detected", False)),
                     "open_body_blocks": list(event_details.get("open_body_blocks", [])),
                     "contract_parse_attempted": bool(event_details.get("contract_parse_attempted", False)),
+                    "contract_candidate_skip_reasons": list(
+                        event_details.get("contract_candidate_skip_reasons", [])
+                    ),
                 }
             )
         elif event_name in {"safari_timeout_soft_wait", "safari_timeout_soft_wait_limit"}:

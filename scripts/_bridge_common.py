@@ -6749,6 +6749,9 @@ def _wait_for_chatgpt_reply_text(
                         "reply_complete_tag_present": bool(
                             getattr(exc, "reply_complete_tag_present", False)
                         ),
+                        "contract_candidate_skip_reasons": list(
+                            getattr(exc, "contract_candidate_skip_reasons", []) or []
+                        ),
                     }
                     signature = "|".join(
                         [
@@ -6765,6 +6768,7 @@ def _wait_for_chatgpt_reply_text(
                             str(readiness_details["open_body_blocks"]),
                             str(readiness_details["contract_parse_attempted"]),
                             str(readiness_details["reply_complete_tag_present"]),
+                            str(readiness_details["contract_candidate_skip_reasons"]),
                         ]
                     )
                     if (

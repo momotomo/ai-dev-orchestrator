@@ -159,6 +159,70 @@ class _LocatedMatch:
     raw_body: str
 
 
+@dataclass(frozen=True)
+class _LineOnlyMarker:
+    line_start: int
+    marker_start: int
+    marker_end: int
+    line_end: int
+
+
+def _iter_lines_with_offsets(text: str, *, start: int = 0):
+    offset = start
+    for raw_line in text[start:].splitlines(keepends=True):
+        yield offset, raw_line
+        offset += len(raw_line)
+
+
+def _iter_line_only_marker_positions(
+    text: str,
+    marker: str,
+    *,
+    start: int = 0,
+):
+    for line_start, raw_line in _iter_lines_with_offsets(text, start=start):
+        line_body = raw_line.rstrip("\r\n")
+        if line_body != marker:
+            continue
+        yield _LineOnlyMarker(
+            line_start=line_start,
+            marker_start=line_start,
+            marker_end=line_start + len(marker),
+            line_end=line_start + len(raw_line),
+        )
+
+
+def _find_line_only_block(
+    text: str,
+    start_marker: str,
+    end_marker: str,
+    *,
+    search_start: int = 0,
+):
+    end_lines = list(
+        _iter_line_only_marker_positions(text, end_marker, start=search_start)
+    )
+    for start_line in _iter_line_only_marker_positions(
+        text, start_marker, start=search_start
+    ):
+        end_line = next(
+            (line for line in end_lines if line.line_start >= start_line.line_end),
+            None,
+        )
+        if end_line is None:
+            continue
+        raw_body = text[start_line.line_end:end_line.line_start]
+        yield start_line, end_line, raw_body
+
+
+def _first_non_empty_content(raw_body: str) -> str:
+    for line in raw_body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
 def _rfind_compact_text_end(raw_text: str, after_text: str) -> int:
     """Find after_text's end in raw_text while ignoring whitespace differences.
 
@@ -210,26 +274,48 @@ def _select_assistant_match(
     after_text: str | None = None,
 ) -> _LocatedMatch:
     search_start = _search_start_index(raw_text, after_text)
-    pattern = re.compile(
-        rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
-        re.DOTALL,
-    )
     assistant_matches: list[_LocatedMatch] = []
     fallback_matches: list[_LocatedMatch] = []
-    for match in pattern.finditer(raw_text, search_start):
-        assistant_index = raw_text.rfind(CHATGPT_TURN_MARKER, search_start, match.start())
-        user_index = raw_text.rfind(USER_TURN_MARKER, search_start, match.start())
-        located = _LocatedMatch(
-            start=match.start(),
-            end=match.end(),
-            assistant_start=assistant_index if assistant_index != -1 else search_start,
-            raw_body=match.group(1),
+    invalid_assistant_matches: list[_LocatedMatch] = []
+    invalid_fallback_matches: list[_LocatedMatch] = []
+    for start_line, end_line, raw_body in _find_line_only_block(
+        raw_text,
+        start_marker,
+        end_marker,
+        search_start=search_start,
+    ):
+        assistant_index = raw_text.rfind(
+            CHATGPT_TURN_MARKER, search_start, start_line.marker_start
         )
-        fallback_matches.append(located)
-        if assistant_index > user_index:
-            assistant_matches.append(located)
+        user_index = raw_text.rfind(
+            USER_TURN_MARKER, search_start, start_line.marker_start
+        )
+        assistant_start = (
+            assistant_index if assistant_index > user_index else start_line.line_start
+        )
+        located = _LocatedMatch(
+            start=start_line.marker_start,
+            end=end_line.marker_end,
+            assistant_start=assistant_start,
+            raw_body=raw_body,
+        )
+        body_starts_with_object = _first_non_empty_content(raw_body).startswith("{")
+        if body_starts_with_object:
+            fallback_matches.append(located)
+            if assistant_index > user_index:
+                assistant_matches.append(located)
+        else:
+            invalid_fallback_matches.append(located)
+            if assistant_index > user_index:
+                invalid_assistant_matches.append(located)
 
     matches = assistant_matches if search_start > 0 else (assistant_matches or fallback_matches)
+    if not matches:
+        matches = (
+            invalid_assistant_matches
+            if search_start > 0
+            else (invalid_assistant_matches or invalid_fallback_matches)
+        )
     if not matches:
         raise IssueCentricContractNotFound(
             "直近の request 以降に issue-centric contract reply を抽出できませんでした。"
@@ -252,8 +338,10 @@ def _extract_single_block(
     required: bool = False,
     normalize_base64: bool = False,
 ) -> str | None:
-    start_count = segment.count(start_marker)
-    end_count = segment.count(end_marker)
+    starts = list(_iter_line_only_marker_positions(segment, start_marker))
+    ends = list(_iter_line_only_marker_positions(segment, end_marker))
+    start_count = len(starts)
+    end_count = len(ends)
     if start_count != end_count:
         raise IssueCentricContractError(f"{name} block marker pairing is broken.")
     if start_count == 0:
@@ -263,14 +351,11 @@ def _extract_single_block(
     if start_count > 1:
         raise IssueCentricContractError(f"{name} block must not appear more than once.")
 
-    pattern = re.compile(
-        rf"{re.escape(start_marker)}(.*?){re.escape(end_marker)}",
-        re.DOTALL,
-    )
-    match = pattern.search(segment)
-    if match is None:
+    start_line = starts[0]
+    end_line = ends[0]
+    if end_line.line_start < start_line.line_end:
         raise IssueCentricContractError(f"{name} block could not be extracted.")
-    raw_body = match.group(1)
+    raw_body = segment[start_line.line_end:end_line.line_start]
     if not raw_body.strip():
         raise IssueCentricContractError(f"{name} block is present but empty.")
     if not normalize_base64:

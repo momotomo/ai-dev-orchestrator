@@ -107,6 +107,23 @@ class IssueCentricContractParserTests(unittest.TestCase):
         self.assertIsNone(decision.codex_body_base64)
         self.assertIsNone(decision.review_base64)
 
+    def test_parser_ignores_inline_marker_description_before_contract(self) -> None:
+        raw = build_raw_reply(
+            {
+                "action": "no_action",
+                "target_issue": "none",
+                "close_current_issue": False,
+                "create_followup_issue": False,
+                "summary": "Inline marker description is ignored.",
+            },
+            extra_before=(
+                "返答は必ず先頭に ===CHATGPT_DECISION_JSON=== と "
+                "===END_DECISION_JSON=== で囲った JSON を置いてください。"
+            ),
+        )
+        decision = issue_centric_contract.parse_issue_centric_reply(raw, after_text="request body")
+        self.assertEqual(decision.summary, "Inline marker description is ignored.")
+
     def test_parses_human_review_needed_with_optional_review_block(self) -> None:
         review_payload = b64("Review notes")
         raw = build_raw_reply(
@@ -4257,6 +4274,129 @@ class RawTextContractFallbackTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertNotIn("next request", result)
+
+
+class RawTextContractMarkerStrictnessTests(unittest.TestCase):
+    """Regression tests for inline contract marker descriptions in raw dumps."""
+
+    _COMPLETE = issue_centric_contract.REPLY_COMPLETE_TAG
+
+    def _valid_contract(self, summary: str = "valid") -> str:
+        return "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            (
+                '{"action":"no_action","target_issue":"none",'
+                '"close_current_issue":false,"create_followup_issue":false,'
+                f'"summary":"{summary}"}}'
+            ),
+            "===END_DECISION_JSON===",
+            self._COMPLETE,
+        ])
+
+    def _invalid_decision_contract(self, body: str) -> str:
+        return "\n".join([
+            "===CHATGPT_DECISION_JSON===",
+            body,
+            "===END_DECISION_JSON===",
+            self._COMPLETE,
+        ])
+
+    def test_inline_contract_description_is_skipped_and_later_valid_is_used(self) -> None:
+        raw = "\n".join([
+            (
+                "返答は必ず先頭に ===CHATGPT_DECISION_JSON=== と "
+                "===END_DECISION_JSON=== で囲った JSON を置いてください。"
+                "返答の最終行に必ず ===CHATGPT_REPLY_COMPLETE=== を置いてください。"
+            ),
+            self._valid_contract("fresh"),
+        ])
+        reasons: list[str] = []
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(
+            raw, skip_reasons=reasons
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIn('"summary":"fresh"', result)
+        self.assertNotIn(" と ", result)
+        self.assertIn("skip_inline_contract_marker", reasons)
+
+    def test_same_line_inline_decision_markers_are_not_candidates(self) -> None:
+        raw = (
+            "prefix ===CHATGPT_DECISION_JSON=== と ===END_DECISION_JSON=== suffix\n"
+            "===CHATGPT_REPLY_COMPLETE===\n"
+        )
+        reasons: list[str] = []
+        result = fetch_next_prompt._find_last_complete_ic_contract_in_raw(
+            raw, skip_reasons=reasons
+        )
+        self.assertIsNone(result)
+        self.assertIn("skip_inline_contract_marker", reasons)
+
+    def test_non_object_decision_body_is_skipped_and_later_valid_is_used(self) -> None:
+        raw = "\n".join([
+            self._invalid_decision_contract("と"),
+            self._valid_contract("after-invalid"),
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+        self.assertIn(
+            "skip_decision_json_not_object",
+            readiness.contract_candidate_skip_reasons,
+        )
+        assert readiness.decision is not None
+        self.assertEqual(readiness.decision.summary, "after-invalid")
+
+    def test_empty_decision_body_is_skipped_and_later_valid_is_used(self) -> None:
+        raw = "\n".join([
+            self._invalid_decision_contract(""),
+            self._valid_contract("after-empty"),
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertIn(
+            "skip_decision_json_not_object",
+            readiness.contract_candidate_skip_reasons,
+        )
+        assert readiness.decision is not None
+        self.assertEqual(readiness.decision.summary, "after-empty")
+
+    def test_line_only_valid_contract_extracts_normally(self) -> None:
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(
+            self._valid_contract("line-only-ok")
+        )
+        self.assertEqual(readiness.status, "reply_complete_valid_contract")
+        self.assertEqual(readiness.reply_source, "raw_text_contract_fallback")
+        assert readiness.decision is not None
+        self.assertEqual(readiness.decision.summary, "line-only-ok")
+
+    def test_raw_text_fallback_does_not_pick_stale_prompt_marker_description(self) -> None:
+        raw = "\n".join([
+            "対象案件: sample",
+            (
+                "返答は必ず先頭に ===CHATGPT_DECISION_JSON=== と "
+                "===END_DECISION_JSON=== で囲った JSON を置いてください。"
+                "返答の最終行に必ず ===CHATGPT_REPLY_COMPLETE=== を置いてください。"
+            ),
+            "思考中",
+        ])
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_not_ready")
+        self.assertFalse(readiness.decision_marker_present)
+        self.assertFalse(readiness.reply_complete_tag_present)
+        self.assertIn(
+            "skip_inline_contract_marker",
+            readiness.contract_candidate_skip_reasons,
+        )
+
+    def test_line_only_non_object_without_later_valid_is_invalid_contract(self) -> None:
+        raw = self._invalid_decision_contract("と")
+        readiness = fetch_next_prompt.classify_issue_centric_reply_readiness(raw)
+        self.assertEqual(readiness.status, "reply_complete_invalid_contract")
+        self.assertIn(
+            "skip_decision_json_not_object",
+            readiness.contract_candidate_skip_reasons,
+        )
 
 
 class StaleContractPickupGuardTests(unittest.TestCase):
