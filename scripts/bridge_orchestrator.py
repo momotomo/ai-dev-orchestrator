@@ -15,7 +15,7 @@ import launch_codex_once
 import launch_github_copilot
 import request_next_prompt
 import request_prompt_from_report
-from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, apply_ci_gate_project_config_state, browser_fetch_timeout_seconds, ci_gate_enabled, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, worker_repo_path
+from _bridge_common import ROOT_DIR, BridgeError, BridgeStop, apply_ci_gate_project_config_state, browser_fetch_timeout_seconds, ci_gate_enabled, clear_error_fields, codex_report_is_ready, detect_ic_stop_path, format_operator_stop_note, guarded_main, has_pending_issue_centric_codex_dispatch, is_blocked_codex_lifecycle_state, load_browser_config, load_project_config, load_state, log_text, prepared_request_action, present_bridge_status, print_project_config_warnings, project_repo_path, promote_pending_request, read_text, recover_pending_handoff_state, recover_prepared_request_state, recover_report_ready_state, repo_relative, resolve_execution_agent, resolve_runtime_dispatch_plan, resolve_unified_next_action, runtime_prompt_path, save_state, send_to_chatgpt, should_prioritize_unarchived_report, should_rotate_before_next_chat_request, stable_text_hash, worker_repo_path
 from issue_centric_ci_gate import (
     CIGateResult,
     apply_ci_gate_state,
@@ -27,7 +27,7 @@ from issue_centric_close_current_issue import execute_close_current_issue
 from issue_centric_parent_update import execute_parent_issue_update_after_close
 from issue_centric_codex_launch import launch_issue_centric_codex_run
 from issue_centric_codex_run import execute_codex_run_action
-from issue_centric_contract import IssueCentricAction, IssueCentricDecision, maybe_parse_issue_centric_reply
+from issue_centric_contract import IssueCentricAction, IssueCentricDecision, build_issue_centric_reply_contract_section, maybe_parse_issue_centric_reply
 from issue_centric_current_issue_project_state import execute_current_issue_project_state_sync
 from issue_centric_execution import dispatch_issue_centric_execution
 from issue_centric_followup_issue import execute_followup_issue_action
@@ -455,6 +455,146 @@ def _print_selected_ready_issue_validation_stop(selected_ref: str, validation: R
         f" reason={validation.reason}"
         " stale / closed issue への ready issue request は送信しません。"
     )
+
+
+# ── Ready issue reselection correction ─────────────────────────────────────────
+
+# Maximum number of automatic ready issue reselection correction requests
+# before falling back to human review.
+_MAX_RESELECTION_CORRECTIONS = 2
+
+_RECENTLY_CLOSED_REASON_FRAGMENT = "current run で直前に close 済み"
+
+
+def _is_recently_closed_validation_failure(validation: ReadyIssueAutoContinueValidation) -> bool:
+    """Return True when validation failed because the selected issue was recently closed in current run."""
+    return not validation.ok and _RECENTLY_CLOSED_REASON_FRAGMENT in validation.reason
+
+
+def _build_reselection_correction_request(closed_ref: str) -> str:
+    """Build a correction request asking ChatGPT to re-select from open ready issues."""
+    contract_section = build_issue_centric_reply_contract_section()
+    body_lines = [
+        "[READY ISSUE RESELECTION REQUIRED]",
+        f"選択した issue {closed_ref} は current run でクローズ済みです。",
+        "close 済み / stale な issue を再選択してはいけません。",
+        "",
+        "open ready issue の中から、close 済みの issue を除いて 1 件だけ選び直してください:",
+        f"- {closed_ref} は除外してください",
+        "- open の ready issue から 1 件だけ選んでください",
+        "- 実装判断や codex_run は今回しないでください",
+        "- `action=no_action`",
+        "- `target_issue` には選び直した issue ref だけを入れてください",
+        "- `close_current_issue=false`",
+        "- `create_followup_issue=false`",
+        "- 選定理由は `summary` に短く書いてください",
+        "- issue-centric contract only で再出力してください",
+    ]
+    body = "\n".join(body_lines)
+    return f"{body}\n\n{contract_section}\n"
+
+
+def _handle_reselection_correction_or_stop(
+    selected_ref: str,
+    state: dict[str, object],
+    validation: ReadyIssueAutoContinueValidation,
+    *,
+    args: argparse.Namespace,
+    prior_pending_state: dict[str, object] | None = None,
+) -> int:
+    """Handle a ready-issue validation failure for initial selection.
+
+    If the issue was recently closed in the current run and the retry limit has
+    not been exceeded, send a correction request to ChatGPT and set state to
+    waiting_prompt_reply so the next bridge cycle can fetch the new selection.
+
+    ``prior_pending_state`` should be the pre-fetch state (Block 2 call site)
+    so that its pending_request_* fields can be preserved in the correction
+    state.  When it is None (Block 1 call site), new pending request fields are
+    created from the correction text itself.
+
+    Falls back to a human-review stop when:
+    - the validation failure is not "recently closed"
+    - the retry limit (_MAX_RESELECTION_CORRECTIONS) is exceeded
+    - ChatGPT re-selected the same closed issue
+
+    Always returns 0.
+    """
+
+    def _human_stop(reason_prefix: str) -> int:
+        print(f"{reason_prefix}: selected={selected_ref}")
+        _print_selected_ready_issue_validation_stop(selected_ref, validation)
+        cleared = clear_error_fields(dict(state))
+        cleared["selected_ready_issue_ref"] = ""
+        save_state(cleared)
+        return 0
+
+    if not _is_recently_closed_validation_failure(validation):
+        return _human_stop("ready_issue_selected_stale_or_closed")
+
+    correction_count = int(state.get("last_issue_centric_reselection_correction_count") or 0)
+    last_closed_ref = str(state.get("last_issue_centric_reselection_correction_closed_ref", "")).strip()
+
+    if correction_count >= _MAX_RESELECTION_CORRECTIONS:
+        return _human_stop("ready_issue_reselection_correction_limit")
+    if correction_count >= 1 and last_closed_ref == selected_ref:
+        return _human_stop("ready_issue_reselected_same_closed_issue")
+
+    correction_text = _build_reselection_correction_request(selected_ref)
+    correction_log = log_text("ready_issue_reselection_correction_request", correction_text, suffix="md")
+
+    try:
+        send_to_chatgpt(correction_text)
+    except BridgeError as exc:
+        print(f"ready_issue_reselection_correction_send_failed: {exc}")
+        return _human_stop("ready_issue_reselection_correction_send_failed")
+
+    correction_state = clear_error_fields(dict(state))
+    correction_state["selected_ready_issue_ref"] = ""
+    correction_state["last_issue_centric_correction_request_text"] = correction_text
+    correction_state["last_issue_centric_reselection_correction_count"] = correction_count + 1
+    correction_state["last_issue_centric_reselection_correction_closed_ref"] = selected_ref
+    correction_state["last_issue_centric_reselection_correction_log"] = repo_relative(correction_log)
+
+    # Restore or create pending_request_* so fetch_next_prompt.run() can proceed.
+    # fetch_next_prompt clears these fields when saving initial_selection_stop state,
+    # so we must re-establish them.
+    _pp = prior_pending_state or {}
+    pending_hash = str(_pp.get("pending_request_hash", "")).strip()
+    pending_source = str(_pp.get("pending_request_source", "")).strip()
+    pending_log_path = str(_pp.get("pending_request_log", "")).strip()
+    if pending_hash and pending_source and pending_log_path:
+        # Block 2: pre-fetch state has the original initial_selection pending request.
+        correction_state["pending_request_hash"] = pending_hash
+        correction_state["pending_request_source"] = pending_source
+        correction_state["pending_request_log"] = pending_log_path
+        correction_state["pending_request_signal"] = str(_pp.get("pending_request_signal", ""))
+        correction_state["mode"] = "waiting_prompt_reply"
+        correction_state["need_chatgpt_prompt"] = False
+        correction_state["need_chatgpt_next"] = False
+        correction_state["need_codex_run"] = False
+    else:
+        # Block 1 (or Block 2 fallback): pending_request_* already cleared.
+        # Create new pending request fields from the correction text so that
+        # fetch_next_prompt.run() can use pending_request_source=initial_selection:* to
+        # detect the next no_action reply as initial_selection_stop.
+        correction_hash = stable_text_hash(correction_text)
+        correction_source = "initial_selection:" + correction_hash
+        promote_pending_request(
+            correction_state,
+            request_hash=correction_hash,
+            request_source=correction_source,
+            request_log=repo_relative(correction_log),
+        )
+
+    save_state(correction_state)
+    print(
+        f"ready_issue_reselection_correction_request:"
+        f" close 済み issue {selected_ref} を再選択しました。"
+        f" ChatGPT に open ready issue からの選び直しを依頼しました（{correction_count + 1} 回目）。"
+        f" correction_log={repo_relative(correction_log)}"
+    )
+    return 0
 
 
 # close_status values that mean the GitHub issue close mutation completed
@@ -1181,13 +1321,9 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                 active_repo_path=args.worker_repo_path,
             )
             if not _validation.ok:
-                _print_selected_ready_issue_validation_stop(_selected_ref, _validation)
-                # Clear the invalidated selection so run_until_stop.py stop summary does not
-                # suggest --ready-issue-ref <closed issue> to the operator.
-                _cleared = dict(state)
-                _cleared["selected_ready_issue_ref"] = ""
-                save_state(_cleared)
-                return 0
+                return _handle_reselection_correction_or_stop(
+                    _selected_ref, state, _validation, args=args
+                )
             # Auto-continue: ChatGPT clearly selected ONE ready issue.
             # Proceed directly to next issue implementation without operator re-run.
             # Clear selected_ready_issue_ref in the forwarded state so it is not
@@ -1250,12 +1386,13 @@ def run(state: dict[str, object], argv: list[str] | None = None) -> int:
                     active_repo_path=args.worker_repo_path,
                 )
                 if not _validation.ok:
-                    _print_selected_ready_issue_validation_stop(_is_ref, _validation)
-                    # Clear the invalidated selection so run_until_stop.py stop summary does not
-                    # suggest --ready-issue-ref <closed issue> to the operator.
-                    _post_fetch_state["selected_ready_issue_ref"] = ""
-                    save_state(_post_fetch_state)
-                    return 0
+                    return _handle_reselection_correction_or_stop(
+                        _is_ref,
+                        _post_fetch_state,
+                        _validation,
+                        args=args,
+                        prior_pending_state=state,
+                    )
                 print(
                     f"{status.label}です。initial selection 完了: ready issue {_is_ref} が選定されました。"
                     " 自動で次 issue の実装へ継続します。"

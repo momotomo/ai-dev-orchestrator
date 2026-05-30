@@ -2940,6 +2940,426 @@ class BridgeOrchestratorFetchInitialSelectionAutoContinueTests(unittest.TestCase
 
 
 # ---------------------------------------------------------------------------
+# Ready issue reselection correction tests
+# ---------------------------------------------------------------------------
+
+
+class ReselectionCorrectionTests(unittest.TestCase):
+    """Tests for _handle_reselection_correction_or_stop and helpers."""
+
+    # ── Helper builders ──────────────────────────────────────────────────────
+
+    def _recently_closed_validation(self, ref: str = "#502") -> bridge_orchestrator.ReadyIssueAutoContinueValidation:
+        return bridge_orchestrator.ReadyIssueAutoContinueValidation(
+            False,
+            f"selected ready issue {ref} は current run で直前に close 済みです。",
+        )
+
+    def _other_validation_failure(self) -> bridge_orchestrator.ReadyIssueAutoContinueValidation:
+        return bridge_orchestrator.ReadyIssueAutoContinueValidation(False, "stale issue: not in ready list")
+
+    def _make_post_fetch_state(self, ref: str = "#502") -> dict:
+        """State as saved by fetch_next_prompt after initial_selection_stop (pending_request_* cleared)."""
+        return {
+            "mode": "awaiting_user",
+            "chatgpt_decision": "issue_centric:no_action",
+            "chatgpt_decision_note": f"initial_selection: ChatGPT が ready issue {ref} を選定しました.",
+            "selected_ready_issue_ref": ref,
+            "last_issue_centric_action": "no_action",
+            "last_issue_centric_target_issue": ref,
+            "last_issue_centric_closed_issue_number": "502",
+            "last_issue_centric_closed_issue_url": "https://github.com/owner/repo/issues/502",
+            "pending_request_hash": "",
+            "pending_request_source": "",
+            "pending_request_log": "",
+            "last_issue_centric_reselection_correction_count": 0,
+            "last_issue_centric_reselection_correction_closed_ref": "",
+        }
+
+    def _make_pre_fetch_state(self) -> dict:
+        """Pre-fetch state that has valid pending_request_* (set by request_next_prompt)."""
+        return {
+            "mode": "waiting_prompt_reply",
+            "chatgpt_decision": "",
+            "pending_request_hash": "abc123hash",
+            "pending_request_source": "initial_selection:abc123hash",
+            "pending_request_log": "logs/sent_initial_selection_request.md",
+            "pending_request_signal": "",
+        }
+
+    # ── _is_recently_closed_validation_failure ───────────────────────────────
+
+    def test_is_recently_closed_validation_failure_true(self) -> None:
+        """Helper returns True for a recently-closed validation failure."""
+        v = self._recently_closed_validation()
+        self.assertTrue(bridge_orchestrator._is_recently_closed_validation_failure(v))
+
+    def test_is_recently_closed_validation_failure_false_on_ok(self) -> None:
+        """Helper returns False when validation passed (ok=True)."""
+        v = bridge_orchestrator.ReadyIssueAutoContinueValidation(True)
+        self.assertFalse(bridge_orchestrator._is_recently_closed_validation_failure(v))
+
+    def test_is_recently_closed_validation_failure_false_on_other_reason(self) -> None:
+        """Helper returns False when failure is not recently-closed."""
+        v = self._other_validation_failure()
+        self.assertFalse(bridge_orchestrator._is_recently_closed_validation_failure(v))
+
+    # ── _build_reselection_correction_request ────────────────────────────────
+
+    def test_build_reselection_correction_request_contains_closed_ref(self) -> None:
+        text = bridge_orchestrator._build_reselection_correction_request("#502")
+        self.assertIn("#502", text)
+
+    def test_build_reselection_correction_request_contains_no_action_instruction(self) -> None:
+        text = bridge_orchestrator._build_reselection_correction_request("#502")
+        self.assertIn("no_action", text)
+        self.assertIn("close_current_issue=false", text)
+        self.assertIn("create_followup_issue=false", text)
+
+    def test_build_reselection_correction_request_includes_contract_markers(self) -> None:
+        text = bridge_orchestrator._build_reselection_correction_request("#502")
+        self.assertIn("CHATGPT_DECISION_JSON", text)
+
+    # ── Recently-closed → correction sent (Block 2 path) ────────────────────
+
+    def test_recently_closed_block2_triggers_correction_not_stop(self) -> None:
+        """Block 2: recently-closed issue → send_to_chatgpt called; request_next_prompt NOT called."""
+        post_state = self._make_post_fetch_state()
+        pre_state = self._make_pre_fetch_state()
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch("bridge_orchestrator.request_next_prompt.run") as mock_rnp,
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None) as mock_send,
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(rc, 0)
+        mock_send.assert_called_once()
+        mock_rnp.assert_not_called()
+
+    def test_correction_block2_sets_state_to_waiting_prompt_reply(self) -> None:
+        """Block 2: correction saves state with mode=waiting_prompt_reply."""
+        post_state = self._make_post_fetch_state()
+        pre_state = self._make_pre_fetch_state()
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None),
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(len(saved_states), 1)
+        self.assertEqual(saved_states[0].get("mode"), "waiting_prompt_reply")
+
+    def test_correction_block2_clears_selected_ready_issue_ref(self) -> None:
+        """Block 2: correction saves state with selected_ready_issue_ref cleared."""
+        post_state = self._make_post_fetch_state()
+        pre_state = self._make_pre_fetch_state()
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None),
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        self.assertEqual(saved_states[0].get("selected_ready_issue_ref"), "")
+
+    def test_correction_block2_tracks_count_and_closed_ref(self) -> None:
+        """Block 2: saved state tracks reselection correction count and closed ref."""
+        post_state = self._make_post_fetch_state()
+        pre_state = self._make_pre_fetch_state()
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None),
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        s = saved_states[0]
+        self.assertEqual(s.get("last_issue_centric_reselection_correction_count"), 1)
+        self.assertEqual(s.get("last_issue_centric_reselection_correction_closed_ref"), "#502")
+
+    def test_correction_block2_sets_correction_request_text_in_state(self) -> None:
+        """Block 2: saved state has last_issue_centric_correction_request_text set."""
+        post_state = self._make_post_fetch_state()
+        pre_state = self._make_pre_fetch_state()
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None),
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        correction_text = saved_states[0].get("last_issue_centric_correction_request_text", "")
+        self.assertIsInstance(correction_text, str)
+        self.assertIn("#502", correction_text)
+        self.assertGreater(len(correction_text), 20)
+
+    def test_correction_block2_preserves_pending_request_from_pre_fetch_state(self) -> None:
+        """Block 2: pending_request_* from pre-fetch state are preserved in correction state."""
+        post_state = self._make_post_fetch_state()
+        pre_state = self._make_pre_fetch_state()
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None),
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            bridge_orchestrator.run(pre_state, [])
+
+        s = saved_states[0]
+        self.assertEqual(s.get("pending_request_hash"), "abc123hash")
+        self.assertEqual(s.get("pending_request_source"), "initial_selection:abc123hash")
+        self.assertEqual(s.get("pending_request_log"), "logs/sent_initial_selection_request.md")
+
+    # ── Retry limit / repeat closed issue → human stop ───────────────────────
+
+    def test_correction_retry_limit_falls_back_to_human_stop(self) -> None:
+        """When count >= _MAX_RESELECTION_CORRECTIONS, correction is NOT sent."""
+        post_state = self._make_post_fetch_state()
+        post_state["last_issue_centric_reselection_correction_count"] = 2  # at limit
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None) as mock_send,
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            rc = bridge_orchestrator.run(post_state, [])
+
+        self.assertEqual(rc, 0)
+        mock_send.assert_not_called()
+        output = buf.getvalue()
+        self.assertIn("送信しません", output)
+
+    def test_same_closed_issue_reselected_falls_back_to_human_stop(self) -> None:
+        """When count >= 1 and same closed ref, correction is NOT sent."""
+        post_state = self._make_post_fetch_state()
+        post_state["last_issue_centric_reselection_correction_count"] = 1
+        post_state["last_issue_centric_reselection_correction_closed_ref"] = "#502"  # same ref
+        config = _make_minimal_project_config("codex")
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None) as mock_send,
+            patch("bridge_orchestrator.save_state"),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            rc = bridge_orchestrator.run(post_state, [])
+
+        self.assertEqual(rc, 0)
+        mock_send.assert_not_called()
+        self.assertIn("送信しません", buf.getvalue())
+
+    def test_non_recently_closed_validation_failure_stops_immediately(self) -> None:
+        """Non-recently-closed validation failure stops without sending correction."""
+        post_state = self._make_post_fetch_state()
+        config = _make_minimal_project_config("codex")
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._other_validation_failure(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None) as mock_send,
+            patch("bridge_orchestrator.save_state"),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            rc = bridge_orchestrator.run(post_state, [])
+
+        self.assertEqual(rc, 0)
+        mock_send.assert_not_called()
+        self.assertIn("送信しません", buf.getvalue())
+
+    # ── Block 1 path (pre-existing initial_selection_stop state) ────────────
+
+    def test_correction_block1_sends_correction_when_no_pending_request(self) -> None:
+        """Block 1: state with cleared pending_request_* → correction sent with new pending fields."""
+        state = self._make_post_fetch_state()
+        state["mode"] = "awaiting_user"
+        config = _make_minimal_project_config("codex")
+        saved_states: list[dict] = []
+        # Patch detect_ic_stop_path to report initial_selection_stop
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.detect_ic_stop_path", return_value="initial_selection_stop"),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch("bridge_orchestrator.send_to_chatgpt", return_value=None) as mock_send,
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state", side_effect=lambda s: saved_states.append(dict(s))),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+        ):
+            rc = bridge_orchestrator.run(state, [])
+
+        self.assertEqual(rc, 0)
+        mock_send.assert_called_once()
+        s = saved_states[0]
+        self.assertEqual(s.get("mode"), "waiting_prompt_reply")
+        self.assertNotEqual(str(s.get("pending_request_hash", "")), "")
+        self.assertTrue(str(s.get("pending_request_source", "")).startswith("initial_selection:"))
+
+    # ── send failure → human stop ────────────────────────────────────────────
+
+    def test_send_failure_falls_back_to_human_stop(self) -> None:
+        """If send_to_chatgpt raises BridgeError, falls back to human stop."""
+        post_state = self._make_post_fetch_state()
+        config = _make_minimal_project_config("codex")
+
+        def fake_fetch_run(s, argv):
+            raise bridge_orchestrator.BridgeStop("initial_selection: ...")
+
+        buf = io.StringIO()
+        with (
+            patch("bridge_orchestrator.load_project_config", return_value=config),
+            patch("bridge_orchestrator.fetch_next_prompt.run", side_effect=fake_fetch_run),
+            patch("bridge_orchestrator.load_state", return_value=post_state),
+            patch(
+                "bridge_orchestrator.validate_selected_ready_issue_for_auto_continue",
+                return_value=self._recently_closed_validation(),
+            ),
+            patch(
+                "bridge_orchestrator.send_to_chatgpt",
+                side_effect=bridge_orchestrator.BridgeError("send failed"),
+            ),
+            patch("bridge_orchestrator.log_text", return_value=Path("logs/correction.md")),
+            patch("bridge_orchestrator.repo_relative", return_value="logs/correction.md"),
+            patch("bridge_orchestrator.save_state"),
+            patch("bridge_orchestrator.print_project_config_warnings"),
+            redirect_stdout(buf),
+        ):
+            rc = bridge_orchestrator.run(post_state, [])
+
+        self.assertEqual(rc, 0)
+        self.assertIn("送信しません", buf.getvalue())
+
+
+# ---------------------------------------------------------------------------
 # github_copilot_provider_stub unit tests
 # ---------------------------------------------------------------------------
 
